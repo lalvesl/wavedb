@@ -1,74 +1,73 @@
 //! Eviction from disk ([RFC 0070] §7, phase 4) — in an object-backed store
 //! the disk is a cache, and a page the object store holds whole may leave it.
 //!
-//! - **What leaves**: the coldest pages whose [`PENDING`] flag is clear —
-//!   the object store has everything in them. Cold is [`Heat`]: a stamp per
-//!   disk page, moved on every page read and every page a settle round
-//!   writes. A resident type's pages never leave (§10): what navigation
-//!   reads stays, so only the record bytes it leads to are ever fetched.
-//! - **What it leaves behind**: the page's entry, flagged [`EVICTED`] — its
-//!   keys still route to it — and a run freed like any superseded one: a
-//!   hole once a batch whose headers name the eviction is durable, so no
-//!   reconstruction ever names a cut run.
-//! - **Coming back**: a read of an evicted page goes to the object store and
-//!   marks the page wanted; a write restores it before it commits, so a
-//!   settle round never meets an evicted page and a page on disk is always
-//!   complete. A restored page is the object store's records within the
-//!   page's coverage (RFC 0078) — exactly what the object store has, so its
-//!   flag is clear.
+//! - **What leaves**: the coldest pages whose flag is clear — the object
+//!   store has everything in them. Cold is [`Heat`]: a stamp per disk bucket,
+//!   moved on every page read and every page a settle round writes. A
+//!   resident type's pages never leave (§10): what navigation reads stays,
+//!   so only the record bytes it leads to are ever fetched.
+//! - **What it leaves behind**: [`BlockDescriptor::EVICTED`], and a run
+//!   freed like any superseded one: a hole once a batch whose headers name
+//!   the eviction is durable, so no reconstruction ever names a cut run.
+//! - **Coming back**: a read of an evicted bucket goes to the object store
+//!   and marks the bucket wanted; a write restores it before it commits, so a
+//!   settle round never meets an evicted bucket and a page on disk is always
+//!   complete. A restored page is the object store's copy filtered to the
+//!   bucket — exactly what the object store has, so its flag is clear.
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
-//! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use futures::future::try_join_all;
 use wavedb_core::{Id, Write};
 
+use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
-use crate::ordered::Found;
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
-use crate::pages::{
-    EVICTED, Located, PENDING, coverage, entries_between, key_of_id, locate,
-    run_of, within,
-};
-use crate::plan::{PlannedPage, SlotPlan, image_of};
+use crate::plan::SlotPlan;
+use crate::upload_plan::sharing;
 
-/// How recently each disk page was used: a stamp per page — by slot and
-/// first block — from a clock that ticks on every use, so eviction takes
-/// the least recently used first. RAM only — after a reopen every page is
-/// equally cold.
+/// How recently each disk bucket was used: a stamp per bucket from a clock
+/// that ticks on every use, so eviction takes the least recently used first.
+/// RAM only — after a reopen every bucket is equally cold.
 #[derive(Debug, Default)]
 pub struct Heat {
     clock: u32,
-    stamps: BTreeMap<(usize, u64), u32>,
+    /// Slot index → bucket → the clock at its last use.
+    stamps: Vec<Vec<u32>>,
 }
 
 impl Heat {
-    /// The page of slot `idx` at block `start` was just used.
-    pub fn touch(&mut self, idx: usize, start: u64) {
+    /// Bucket `bucket` of slot `idx` was just used.
+    pub fn touch(&mut self, idx: usize, bucket: usize) {
         if self.clock == u32::MAX {
             // Halve everything: the order survives, the clock gets room.
-            for stamp in self.stamps.values_mut() {
+            for stamp in self.stamps.iter_mut().flatten() {
                 *stamp /= 2;
             }
             self.clock /= 2;
         }
         self.clock += 1;
-        self.stamps.insert((idx, start), self.clock);
+        if self.stamps.len() <= idx {
+            self.stamps.resize_with(idx + 1, Vec::new);
+        }
+        let slot = &mut self.stamps[idx];
+        if slot.len() <= bucket {
+            slot.resize(bucket + 1, 0);
+        }
+        slot[bucket] = self.clock;
     }
 
-    /// When the page of slot `idx` at block `start` was last used; `0` for
-    /// never.
+    /// When bucket `bucket` of slot `idx` was last used; `0` for never.
     #[must_use]
-    pub fn stamp(&self, idx: usize, start: u64) -> u32 {
-        self.stamps.get(&(idx, start)).copied().unwrap_or(0)
-    }
-
-    /// The page at `start` left its run: its stamp goes with it.
-    pub fn forget(&mut self, idx: usize, start: u64) {
-        self.stamps.remove(&(idx, start));
+    pub fn stamp(&self, idx: usize, bucket: usize) -> u32 {
+        self.stamps
+            .get(idx)
+            .and_then(|s| s.get(bucket))
+            .copied()
+            .unwrap_or(0)
     }
 }
 
