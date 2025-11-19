@@ -82,44 +82,18 @@ impl PageStore {
     /// The header at block `at`, padded to its 32 KiB, and whether it ends
     /// the batch: it does when `end` asks and it left nothing unrecorded.
     /// `plans` and `dicts` are the window's, not yet published: their
-    /// indexes and dictionaries are what it names.
+    /// directories and dictionaries are what it names.
     ///
     /// # Errors
     /// [`StorageError::Corrupt`] when the header outgrew its room
-    /// (unreachable: every entry and record is budgeted).
+    /// (unreachable: every entry and item is budgeted).
     pub(crate) fn header_at(
         &self,
         at: u64,
-        plans: &mut [SlotPlan],
+        plans: &[SlotPlan],
         dicts: &BTreeMap<usize, BlockDescriptor>,
         end: bool,
     ) -> StorageResult<(Vec<u8>, bool)> {
-        let mut header = {
-            let mut chain = self.chain.borrow_mut();
-            if chain.restating && chain.restate_from.is_none() {
-                chain.restate_from = Some(at);
-            }
-            Header {
-                at,
-                prev: chain.tail.unwrap_or(NO_FILE),
-                horizon: 0,
-                shard: self.position,
-                roots: chain.roots.newest.unwrap_or(NO_FILE),
-                end_of_batch: false,
-                types: Vec::new(),
-                remote: Vec::new(),
-                chain: self.object.as_ref().map(|o| o.chain.borrow().record()),
-            }
-        };
-        let mut room = HEADER_BYTES.saturating_sub(header.encoded_len());
-        let dict_of = self.dicts_after(plans, dicts);
-        for idx in 0..self.types.len() {
-            for side in [Side::Disk, Side::Remote] {
-                self.record(idx, side, plans, &dict_of, &mut header, &mut room);
-            }
-        }
-        let unrecorded = self.unrecorded_after(plans);
-        header.end_of_batch = end && !unrecorded;
         let disk: Vec<_> =
             self.types.iter().map(|s| s.directory().borrow()).collect();
         let remote: Vec<_> = self
@@ -127,15 +101,49 @@ impl PageStore {
             .iter()
             .map(|s| s.remote_directory().borrow())
             .collect();
-        let views = self.views_of(&disk, plans, &dict_of);
+        let views = self.views_of(&disk, plans, dicts);
         let remote_views = self.remote_views_of(&remote);
         let mut chain = self.chain.borrow_mut();
-        if !unrecorded
-            && chain.restating
-            && let Some(from) = chain.restate_from.take()
+        if chain.restating && chain.restate_from.is_none() {
+            chain.restate_from = Some(at);
+        }
+        let mut header = Header {
+            at,
+            prev: chain.tail.unwrap_or(NO_FILE),
+            horizon: 0,
+            shard: self.position,
+            roots: chain.roots.newest.unwrap_or(NO_FILE),
+            end_of_batch: false,
+            types: Vec::new(),
+            remote: Vec::new(),
+            chain: self.object.as_ref().map(|o| o.chain.borrow().record()),
+        };
+        let mut room = HEADER_BYTES.saturating_sub(header.encoded_len());
         {
-            chain.restated = Some(from);
-            chain.restating = false;
+            let mut unrecorded = self.unrecorded.borrow_mut();
+            for (&idx, touched) in &mut unrecorded.slots {
+                let lanes = [
+                    (Side::Disk, &views, &mut header.types),
+                    (Side::Remote, &remote_views, &mut header.remote),
+                ];
+                for (side, views, entries) in lanes {
+                    let Some(view) = views.get(idx) else { continue };
+                    let rotations = match side {
+                        Side::Disk => &chain.types,
+                        Side::Remote => &chain.remote,
+                    };
+                    record(touched, side, view, rotations, entries, &mut room);
+                }
+            }
+            unrecorded.slots.retain(|_, t| !t.is_empty());
+            header.end_of_batch = end && unrecorded.slots.is_empty();
+            if unrecorded.slots.is_empty()
+                && chain.restating
+                && let Some(from) = chain.restate_from.take()
+            {
+                chain.restated = Some(from);
+                chain.restating = false;
+            }
         }
         if self.object.is_some() && self.has_disk() {
             let half = room / 2;
