@@ -181,97 +181,77 @@ impl PageStore {
         out.into_iter().collect()
     }
 
-    /// Bring the evicted page of slot `idx` that `key` finds back to disk:
-    /// the object store's records within its coverage. A page some other
-    /// caller restored meanwhile is left as it is.
+    /// Bring evicted bucket `bucket` of slot `idx` back to disk: the object
+    /// store's pages that share records with it, filtered to its own. A
+    /// bucket some other caller restored meanwhile is left as it is.
     ///
     /// # Errors
-    /// An object-store or page fault; the page stays evicted.
+    /// An object-store or page fault; the bucket stays evicted.
     pub(crate) async fn restore(
         &self,
         idx: usize,
-        key: &[u8],
+        bucket: usize,
     ) -> StorageResult<()> {
         let slot = &self.types[idx];
-        let Some((lo, hi, runs)) = self.evicted_cover(idx, key)? else {
-            return Ok(());
+        let shared: Vec<BlockDescriptor> = {
+            let disk = slot.directory().borrow();
+            let Some(disk) = disk.as_ref() else {
+                return Ok(());
+            };
+            if !disk.descriptor(bucket).is_evicted() {
+                return Ok(());
+            }
+            let remote = slot.remote_directory().borrow();
+            let remote = remote.as_ref().ok_or(StorageError::Corrupt(
+                "an evicted bucket with no remote directory",
+            ))?;
+            sharing(disk, bucket, remote)
+                .into_iter()
+                .map(|s| remote.descriptor(s))
+                .filter(|d| d.is_allocated())
+                .collect()
         };
         let images = try_join_all(
-            runs.into_iter()
-                .map(|run| self.with_remote_page(idx, run, SlotPage::clone)),
+            shared
+                .into_iter()
+                .map(|d| self.with_remote_page(idx, d, SlotPage::clone)),
         )
         .await?;
-        // Through the gate from the copy of the index to its publishing: a
-        // settle round waiting for its window would overwrite it.
+        // Through the gate from the copy of the directory to its publishing:
+        // a settle round waiting for its window would overwrite it.
         let _through = self.gate.enter().await;
-        let Some(index) = slot.directory().borrow().clone() else {
+        let Some(disk) = slot.directory().borrow().clone() else {
             return Ok(());
         };
-        let Found::Page { page, .. } = index.find(key) else {
-            return Ok(());
-        };
-        if page.meta & EVICTED == 0 {
+        if !disk.descriptor(bucket).is_evicted() {
             return Ok(());
         }
-        let mut restored = SlotPage::new(slot.struct_hash());
+        let mut page = SlotPage::new(slot.struct_hash());
         for image in images {
             for (id, bytes) in image.iter() {
-                if within(&key_of_id(id), &lo, hi.as_deref()) {
-                    restored.upsert(id, bytes.to_vec());
+                if disk.bucket_of(id.raw()) == bucket {
+                    page.upsert(id, bytes.to_vec());
                 }
             }
         }
-        let image = image_of(&mut restored, &slot.dictionary().borrow())?;
-        let mut plan = SlotPlan::verbatim(idx, index);
-        plan.pages.push(PlannedPage {
-            key: lo,
-            image,
-            decoded: Some(restored),
-            flags: 0,
-        });
+        let image = {
+            let dict = slot.dictionary().borrow();
+            page.to_bytes(dict.dictionary(), dict.enabled())?
+        };
+        let mut plan = SlotPlan::verbatim(idx, disk);
+        plan.pages.insert(bucket, image);
+        plan.decoded.insert(bucket, page);
         self.place_restored(plan).await?;
+        self.touch(idx, bucket);
         if let Some(object) = &self.object {
-            object.wanted.borrow_mut().remove(&(idx, key.to_vec()));
+            object.wanted.borrow_mut().remove(&(idx, bucket));
         }
         Ok(())
     }
 
-    /// The coverage of the evicted page of slot `idx` that `key` finds, and
-    /// the runs of the remote pages meeting it; `None` when the page is not
-    /// evicted (any more).
-    #[allow(clippy::type_complexity)]
-    fn evicted_cover(
-        &self,
-        idx: usize,
-        key: &[u8],
-    ) -> StorageResult<Option<(Vec<u8>, Option<Vec<u8>>, Vec<crate::block::Run>)>>
-    {
-        let slot = &self.types[idx];
-        let disk = slot.directory().borrow();
-        let Some(disk) = disk.as_ref() else {
-            return Ok(None);
-        };
-        let Found::Page { at, page } = disk.find(key) else {
-            return Ok(None);
-        };
-        if page.meta & EVICTED == 0 {
-            return Ok(None);
-        }
-        let (lo, hi) = coverage(disk, at)
-            .ok_or(StorageError::Corrupt("an evicted page without a key"))?;
-        let remote = slot.remote_directory().borrow();
-        let remote = remote.as_ref().ok_or(StorageError::Corrupt(
-            "an evicted page with no remote index",
-        ))?;
-        let runs = entries_between(remote, &lo, hi.as_deref())
-            .into_iter()
-            .filter_map(|(_, page)| page.map(run_of))
-            .collect();
-        Ok(Some((lo, hi, runs)))
-    }
-
-    /// Restore up to `limit` of the wanted pages — evicted ones a read had
-    /// to fetch. Returns how many came back.
+    /// Restore up to `limit` of the wanted buckets — evicted ones a read
+    /// had to fetch, or one holding back its type's next split. Returns how
+    /// many came back.
     ///
     /// # Errors
     /// The first restore's fault; the rest stay wanted.
