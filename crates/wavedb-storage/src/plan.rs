@@ -61,47 +61,73 @@ impl SlotPlan {
     }
 }
 
+/// Blocks a serialised image occupies (an empty image occupies none),
+/// rounded up to a count its descriptor can carry.
+pub const fn blocks_of(bytes: &[u8]) -> u64 {
+    let blocks = bytes.len().div_ceil(BLOCK_SIZE) as u64;
+    match round_count(blocks) {
+        Some(rounded) => rounded,
+        // Past the largest page: refused by `image_of` before it is placed.
+        None => MAX_COUNT,
+    }
+}
+
 impl PageStore {
-    /// Plan slot `idx`'s pages for a round's `records` (`None` bytes
-    /// remove): sample the dictionary, then route, rebuild, cut and
-    /// serialise (`crate::shape`).
+    /// Plan slot `idx`'s pages for a round's `records` — read each bucket
+    /// once, apply every record that routes to it (`None` bytes remove it),
+    /// decide splits, serialise.
     ///
-    /// The index is cloned rather than held: the settle path is the only
-    /// writer of an index and runs one round at a time, so the copy cannot
-    /// go stale under the plan, and readers keep resolving the old — still
-    /// valid, still allocated — pages while the window is written.
+    /// The directory is cloned rather than held: the settle path is the only
+    /// writer of a directory and runs one round at a time (maintenance loop /
+    /// open replay), so the working copy cannot go stale under the plan, and
+    /// readers keep resolving the old — still valid, still allocated — pages
+    /// while the window is written.
     ///
     /// # Errors
-    /// Page read, corruption or compression faults.
+    /// Propagates page read / corruption / compression faults.
     // The dictionary guard spans the whole plan by design: every page this
-    // slot serialises must bind the same (possibly grown) buffer state.
+    // slot serialises must bind the same (possibly grown) buffer state, so
+    // dropping it early — the lint's suggestion — would let two pages of one
+    // round stamp different `dict_len`s.
     #[allow(clippy::significant_drop_tightening)]
     pub(crate) fn plan_slot(
         &self,
         idx: usize,
-        mut records: Records,
+        records: Records,
     ) -> StorageResult<SlotPlan> {
         let slot = &self.types[idx];
-        let mut index =
-            slot.directory().borrow().clone().unwrap_or_else(disk_pages);
-        records.sort_by_key(|(id, _)| id.raw());
+        let mut dir = slot
+            .directory()
+            .borrow_mut()
+            .clone()
+            .unwrap_or_else(|| Directory::new(self.seed));
         let mut dict = slot.dictionary().borrow_mut();
-        let mut grew = false;
-        for bytes in records.iter().filter_map(|(_, b)| b.as_ref()) {
-            grew |= dict.sample(bytes);
+
+        let mut staged: BTreeMap<usize, SlotPage> = BTreeMap::new();
+        let mut dict_grew = false;
+
+        for (id, bytes) in records {
+            let bucket = dir.bucket_of(id.raw());
+            let page =
+                staged_page(self, slot, &dir, &dict, &mut staged, bucket)?;
+            if let Some(bytes) = bytes {
+                dict_grew |= dict.sample(&bytes);
+                page.upsert(id, bytes);
+            } else {
+                page.remove(id);
+            }
         }
-        let dict = &*dict;
-        let rules = Rules {
-            target_blocks: self.target_blocks_per_bucket,
-            keep_holes: self.object.is_some(),
-        };
-        let shaped = shape(
-            &mut index,
-            records,
-            &rules,
-            slot.struct_hash(),
-            |page| take_page(&self.file, run_of(page), dict),
-            |page| image_of(page, dict),
+
+        let mut pages = BTreeMap::new();
+        for (bucket, page) in &mut staged {
+            pages.insert(*bucket, image_of(page, &dict)?);
+        }
+        split_staged(
+            &mut dir,
+            &mut staged,
+            &mut pages,
+            self.target_blocks_per_bucket,
+            |page| image_of(page, &dict),
         )?;
         Ok(SlotPlan {
             idx,
