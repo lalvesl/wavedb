@@ -1,44 +1,41 @@
-//! The spare room of a header ([RFC 0072] §5, [RFC 0078] §6): what is left
-//! of its 32 KiB after the ranges its batch changed restates old ones,
-//! whole — on disk and in the object store alike — and the horizon that
-//! restating moves.
+//! The spare room of a header ([RFC 0072] §5): what is left of its 32 KiB
+//! after the addresses its batch changed restates old ones — on disk and in
+//! the object store alike — and the horizon that restating moves.
 //!
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
-//! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
 use std::collections::BTreeMap;
 
-use crate::header::{ENTRY_BYTES, NO_FILE, Rotation, TypeEntry};
-use crate::pages::Pages;
+use crate::block::BlockDescriptor;
+use crate::directory::is_bucket;
+use crate::header::{
+    ENTRY_BYTES, ITEM_BYTES, NO_FILE, Rotation, TypeEntry, depth_of,
+};
 
-/// A type's index as a header names it, and restates from. Every
-/// registered type has one, a type never written with no index: it is
+/// A type's directory as a header names it, and restates from — every
+/// entry, aliases included; a header names its buckets only. Every
+/// registered type has one, a type never written with no slots: it is
 /// named too, in its turn.
 pub struct TypeView<'a> {
     pub(crate) struct_hash: u64,
-    pub(crate) index: Option<&'a Pages>,
+    pub(crate) slots: &'a [BlockDescriptor],
     /// Its dictionary's descriptor, if it has one.
     pub(crate) dict: Option<u64>,
 }
 
-impl TypeView<'_> {
-    /// Ranges its index holds.
-    pub(crate) fn ranges(&self) -> usize {
-        self.index.map_or(0, Pages::range_count)
-    }
-}
-
-/// Spend `spare` bytes of the header at `at` restating ranges into
+/// Spend `spare` bytes of the header at `at` restating addresses into
 /// `entries`: the type restated longest ago first — one never restated
-/// before any, the smaller index first on a tie, so the empty ones take an
-/// entry and no record and the first header names them all — from its
-/// rotating cursor, a range at a time, whole, until the room runs out or
-/// every type had its turn. Returns the bytes left.
+/// before any, the smaller directory first on a tie, so the empty ones take
+/// an entry and no item and the first header names them all — from its
+/// rotating cursor over the entries, naming each page at its bucket, then
+/// the next, until the room runs out or every type had its turn. Returns
+/// the bytes left.
 ///
-/// By restatement, not by mention: a collection's `Pivot` keeps its id, so
-/// the same few pages of a type change in every batch while the rest hold
-/// still. Ordered by mention, that type would never be restated, and its
-/// quiet ranges would be known only from ever older headers.
+/// By restatement, not by mention: a collection's `Pivot` and its chains'
+/// segments keep their ids, so the same few buckets of a type change in every
+/// batch while the rest hold still. Ordered by mention, that type would
+/// never be restated, and its quiet buckets would be known only from ever
+/// older headers.
 pub fn restate(
     entries: &mut Vec<TypeEntry>,
     mut spare: usize,
@@ -49,33 +46,53 @@ pub fn restate(
     let mut order: Vec<&TypeView<'_>> = views.iter().collect();
     order.sort_by_key(|v| {
         let shifted = rotations.get(&v.struct_hash).and_then(|r| r.shifted);
-        (shifted.map_or(0, |at| at.saturating_add(1)), v.ranges())
+        (shifted.map_or(0, |at| at.saturating_add(1)), v.slots.len())
     });
     for view in order {
+        let len = view.slots.len();
         let present = entries
             .iter()
             .position(|e| e.struct_hash == view.struct_hash);
         let entry = if present.is_some() { 0 } else { ENTRY_BYTES };
-        let rotation = rotations.entry(view.struct_hash).or_default();
-        let (named, used) = view.index.map_or((Vec::new(), 0), |index| {
-            rotate(index, rotation, spare.saturating_sub(entry), at)
-        });
-        let worth =
-            present.is_some() || !named.is_empty() || view.ranges() == 0;
-        if !worth || spare < entry + used {
+        let least = entry + if len > 0 { ITEM_BYTES } else { 0 };
+        if least == 0 || spare < least {
             continue;
         }
+        let room = (spare - entry) / ITEM_BYTES;
+        let rotation = rotations.entry(view.struct_hash).or_default();
         let idx = present.unwrap_or_else(|| {
             entries.push(TypeEntry {
                 struct_hash: view.struct_hash,
-                ranges: view.ranges() as u32,
+                depth: depth_of(view.slots),
                 last: rotation.last,
                 dict: view.dict,
                 changed: Vec::new(),
             });
             entries.len() - 1
         });
-        entries[idx].changed.extend(named);
+        let mut named = 0;
+        if len > 0 {
+            if rotation.began.is_none() {
+                rotation.began = Some(at);
+            }
+            // A whole pass over the entries names every page once.
+            let mut steps = 0;
+            while named < room && steps < len {
+                let entry = (rotation.shift + steps) % len;
+                steps += 1;
+                let desc = view.slots[entry];
+                if is_bucket(entry, desc) {
+                    entries[idx].changed.push((entry as u32, desc.raw()));
+                    named += 1;
+                }
+            }
+            if rotation.shift + steps >= len {
+                // A whole rotation: every bucket named since it began.
+                rotation.covered = rotation.began;
+                rotation.began = Some(at);
+            }
+            rotation.shift = (rotation.shift + steps) % len;
+        }
         rotation.shifted = Some(at);
         spare -= entry + used;
     }
