@@ -6,7 +6,7 @@
 //! when it names none:
 //!
 //! ```text
-//! round shard=0 blocks=28 | page sh=08c7…fc0e page=49 blocks=6 bytes=21794 records=307 heads=08c7…fc0e:307:93182 | … | header blocks=8 | roots blocks=1
+//! round shard=0 blocks=28 | page sh=08c7…fc0e bucket=49 blocks=6 bytes=21794 records=307 heads=08c7…fc0e:307:93182 | … | header blocks=8 | roots blocks=1
 //! ```
 //!
 //! A page's `bytes` is its stored image (compressed), `records` how many it
@@ -53,8 +53,8 @@ pub fn round(
     let mut line = format!("round shard={shard} blocks={total}");
     for (target, &blocks) in targets.iter().zip(sizes) {
         match target {
-            Target::Page { plan, page: at } => {
-                page(&mut line, types, &plans[*plan], *at, blocks);
+            Target::Page { plan, bucket } => {
+                page(&mut line, types, &plans[*plan], *bucket, blocks);
             }
             Target::Dict { .. } => {
                 let _ = write!(line, " | dict blocks={blocks}");
@@ -75,15 +75,14 @@ fn page(
     line: &mut String,
     types: &[TypeSlot],
     plan: &SlotPlan,
-    at: usize,
+    bucket: usize,
     blocks: u64,
 ) {
     let sh = types.get(plan.idx).map_or(0, TypeSlot::struct_hash);
-    let planned = &plan.pages[at];
-    let bytes = planned.image.len();
+    let bytes = plan.pages.get(&bucket).map_or(0, Vec::len);
     let mut heads: BTreeMap<u64, (usize, usize)> = BTreeMap::new();
     let mut records = 0;
-    if let Some(page) = &planned.decoded {
+    if let Some(page) = plan.decoded.get(&bucket) {
         for (_, value) in page.iter() {
             records += 1;
             let head = value
@@ -96,7 +95,7 @@ fn page(
     }
     let _ = write!(
         line,
-        " | page sh={sh:016x} page={at} blocks={blocks} \
+        " | page sh={sh:016x} bucket={bucket} blocks={blocks} \
          bytes={bytes} records={records} heads="
     );
     for (i, (head, (count, size))) in heads.iter().enumerate() {

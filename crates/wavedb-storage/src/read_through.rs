@@ -14,29 +14,28 @@
 
 use wavedb_core::Id;
 
-use crate::block::Run;
+use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
 use crate::page::SlotPage;
 use crate::page_cache::Lane;
 use crate::page_store::PageStore;
-use crate::pages::{EVICTED, Located, key_of_id, locate, with_page};
 use crate::record_cache::Lookup;
 
 /// What the synchronous half of a read found.
 pub enum Settled {
     /// The answer: the bytes, or absent.
     Found(Option<Vec<u8>>),
-    /// The id's disk page (of slot `idx`) was evicted: the object store
+    /// The id's disk bucket (of slot `idx`) was evicted: the object store
     /// holds the answer.
-    Evicted { idx: usize, key: Vec<u8> },
+    Evicted { idx: usize, bucket: usize },
 }
 
 /// What the synchronous half of an untyped read found.
 pub enum SettledAny {
     /// The answer: the bytes, or absent from every type.
     Found(Option<Vec<u8>>),
-    /// Absent from every page on disk; these `(slot, key)`s were evicted.
-    Evicted(Vec<(usize, Vec<u8>)>),
+    /// Absent from every page on disk; these `(slot, bucket)`s were evicted.
+    Evicted(Vec<(usize, usize)>),
 }
 
 impl PageStore {
@@ -51,22 +50,18 @@ impl PageStore {
         id: Id,
     ) -> StorageResult<Settled> {
         let slot = &self.types[idx];
-        let index = slot.directory().borrow();
-        let Some(index) = index.as_ref() else {
+        let dir = slot.directory().borrow();
+        let Some(dir) = dir.as_ref() else {
             return Ok(Settled::Found(None));
         };
-        let Located::Page { run, flags, .. } = locate(index, id) else {
-            return Ok(Settled::Found(None));
-        };
-        if flags & EVICTED != 0 {
-            let key = key_of_id(id).to_vec();
-            return Ok(Settled::Evicted { idx, key });
+        let bucket = dir.bucket_of(id.raw());
+        if dir.descriptor(bucket).is_evicted() {
+            return Ok(Settled::Evicted { idx, bucket });
         }
-        self.touch(idx, run.start);
+        self.touch(idx, bucket);
         let dict = slot.dictionary().borrow();
-        let bytes = with_page(&self.file, run, &dict, |p| {
-            p.get(id).map(<[u8]>::to_vec)
-        })?;
+        let bytes =
+            dir.get_record(slot.struct_hash(), &self.file, id, &dict)?;
         Ok(Settled::Found(bytes))
     }
 
@@ -132,8 +127,8 @@ impl PageStore {
     ) -> StorageResult<Option<Vec<u8>>> {
         match now? {
             Settled::Found(bytes) => Ok(bytes),
-            Settled::Evicted { idx, key } => {
-                self.read_evicted(idx, key, id).await
+            Settled::Evicted { idx, bucket } => {
+                self.read_evicted(idx, bucket, id).await
             }
         }
     }
@@ -176,7 +171,7 @@ impl PageStore {
                     return Ok(SettledAny::Found(Some(bytes)));
                 }
                 Settled::Found(None) => {}
-                Settled::Evicted { idx, key } => evicted.push((idx, key)),
+                Settled::Evicted { idx, bucket } => evicted.push((idx, bucket)),
             }
         }
         Ok(if evicted.is_empty() {
@@ -196,8 +191,8 @@ impl PageStore {
             SettledAny::Found(bytes) => return Ok(bytes),
             SettledAny::Evicted(evicted) => evicted,
         };
-        for (idx, key) in evicted {
-            if let Some(bytes) = self.read_evicted(idx, key, id).await? {
+        for (idx, bucket) in evicted {
+            if let Some(bytes) = self.read_evicted(idx, bucket, id).await? {
                 return Ok(Some(bytes));
             }
         }
@@ -239,26 +234,26 @@ impl PageStore {
         idx: usize,
         id: Id,
     ) -> StorageResult<Option<Vec<u8>>> {
-        let mut run = self.remote_run(idx, id);
+        let mut desc = self.remote_descriptor(idx, id);
         loop {
-            let Some(at) = run else {
+            if !desc.is_allocated() {
                 return Ok(None);
-            };
+            }
             let read = |page: &SlotPage| page.get(id).map(<[u8]>::to_vec);
-            match self.with_remote_page(idx, at, read).await {
+            match self.with_remote_page(idx, desc, read).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(e) => {
-                    let now = self.remote_run(idx, id);
-                    if now == run {
+                    let now = self.remote_descriptor(idx, id);
+                    if now == desc {
                         return Err(e);
                     }
-                    run = now;
+                    desc = now;
                 }
             }
         }
     }
 
-    /// Lend the uploaded page of slot `idx` at `run` to `read` —
+    /// Lend the uploaded page of slot `idx` that `desc` names to `read` —
     /// held by the page cache in the object store's lane, or fetched,
     /// decoded and then held, decoded (RFC 0044). Nothing is borrowed across
     /// the request.
@@ -268,28 +263,26 @@ impl PageStore {
     pub(crate) async fn with_remote_page<R>(
         &self,
         idx: usize,
-        run: Run,
+        desc: BlockDescriptor,
         read: impl FnOnce(&SlotPage) -> R,
     ) -> StorageResult<R> {
         let cache = self.file.page_cache();
-        let read = match cache.with(Lane::Remote, run, read) {
+        let read = match cache.with(Lane::Remote, desc.run(), read) {
             Ok(done) => return Ok(done),
             Err(read) => read,
         };
-        let image = self.fetch_image(run).await?;
+        let image = self.fetch_image(desc).await?;
         let page = self.decode_remote(idx, &image)?;
         let done = read(&page);
-        cache.insert(Lane::Remote, run, page);
+        cache.insert(Lane::Remote, desc.run(), page);
         Ok(done)
     }
 
-    /// The run of the uploaded page of slot `idx` covering `id`, if one
-    /// does.
-    fn remote_run(&self, idx: usize, id: Id) -> Option<Run> {
+    /// The remote descriptor of the page of slot `idx` covering `id`.
+    fn remote_descriptor(&self, idx: usize, id: Id) -> BlockDescriptor {
         let remote = self.types[idx].remote_directory().borrow();
-        match locate(remote.as_ref()?, id) {
-            Located::Page { run, .. } => Some(run),
-            Located::Absent => None,
-        }
+        remote.as_ref().map_or(BlockDescriptor::EMPTY, |dir| {
+            dir.descriptor(dir.bucket_of(id.raw()))
+        })
     }
 }
