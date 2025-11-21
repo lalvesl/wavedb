@@ -94,61 +94,16 @@ pub fn restate(
             rotation.shift = (rotation.shift + steps) % len;
         }
         rotation.shifted = Some(at);
-        spare -= entry + used;
+        spare -= entry + named * ITEM_BYTES;
     }
     spare
 }
 
-/// Restate `index`'s ranges from `rotation`'s cursor, whole, as many as
-/// `room` bytes hold — at most one pass. A pass coming round marks the
-/// type covered from where it began.
-fn rotate(
-    index: &Pages,
-    rotation: &mut Rotation,
-    room: usize,
-    at: u64,
-) -> (Vec<crate::ordered::RangeRecord>, usize) {
-    let (mut named, mut used) = (Vec::new(), 0);
-    let len = index.range_count();
-    if len == 0 {
-        return (named, used);
-    }
-    if rotation.began.is_none() {
-        rotation.began = Some(at);
-    }
-    let mut steps = 0;
-    while steps < len {
-        let Some(range) = index.range_after(rotation.cursor.as_deref()) else {
-            // A whole rotation: every range named since it began.
-            rotation.covered = rotation.began;
-            rotation.began = Some(at);
-            rotation.cursor = None;
-            continue;
-        };
-        let (start, record) = index.whole_record(range);
-        let cost = record.wire_len();
-        if used + cost > room {
-            break;
-        }
-        used += cost;
-        named.push(record);
-        rotation.cursor = Some(start);
-        steps += 1;
-    }
-    if index.range_after(rotation.cursor.as_deref()).is_none() {
-        // The last range named: the pass has come round.
-        rotation.covered = rotation.began;
-        rotation.began = Some(at);
-        rotation.cursor = None;
-    }
-    (named, used)
-}
-
 /// The lowest header a reconstruction from the newest one may still read
-/// for these types: for a type with ranges, where its last whole rotation
-/// began — every range is named at or after it — and for an empty type the
-/// newest header naming it. A type with no whole rotation since the store
-/// opened holds it at `floor`, the lowest header the open read.
+/// for these types: for a type with addresses, where its last whole
+/// rotation began — every bucket is named at or after it — and for an empty
+/// type the newest header naming it. A type with no whole rotation since
+/// the store opened holds it at `floor`, the lowest header the open read.
 pub fn horizon(
     views: &[TypeView<'_>],
     rotations: &BTreeMap<u64, Rotation>,
@@ -158,7 +113,7 @@ pub fn horizon(
         .iter()
         .map(|v| {
             let rotation = rotations.get(&v.struct_hash);
-            if v.ranges() == 0 {
+            if v.slots.is_empty() {
                 rotation
                     .map(|r| r.last)
                     .filter(|&last| last != NO_FILE)
@@ -176,37 +131,16 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{TypeView, horizon, restate};
+    use crate::block::BlockDescriptor;
+    use crate::directory::Directory;
     use crate::header::{Rotation, TypeEntry};
-    use crate::ordered::{Cut, CutOutcome, Found, Placed, RangeRecord};
-    use crate::pages::{Pages, disk_pages};
 
-    /// An index of `n` ranges, one page each: every page cut off the one
-    /// before, at an address no range of it reaches.
-    fn index(n: u64) -> Pages {
-        let key = |i: u64| (i << 56).to_be_bytes();
-        let page = |address| Placed {
-            address,
-            blocks: 1,
-            meta: 0,
-        };
-        let mut pages = disk_pages();
-        pages.place(&key(0), page(0)).unwrap();
-        for i in 1..n {
-            let Found::Page { at, .. } = pages.find(&key(i - 1)) else {
-                panic!("the page before");
-            };
-            let (left, right) = (key(i - 1), key(i));
-            let cut = Cut {
-                first: &left,
-                left_last: &left,
-                right_first: &right,
-                last: &right,
-            };
-            let outcome = pages.cut(at, &cut, page(i * 100_000));
-            assert!(matches!(outcome, CutOutcome::Cut(_)));
-        }
-        assert_eq!(pages.range_count() as u64, n);
-        pages
+    /// A directory of `n` pages (`n` a power of two), every one placed.
+    fn dir(n: usize) -> Vec<BlockDescriptor> {
+        let depth = n.trailing_zeros() as u8;
+        (0..n)
+            .map(|b| BlockDescriptor::new(b as u64 + 1, 1).with_depth(depth))
+            .collect()
     }
 
     fn view(hash: u64, index: &Pages) -> TypeView<'_> {
