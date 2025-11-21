@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use crate::compact::Space;
+use crate::directory::Directory;
 use crate::page_store::PageStore;
 use crate::remote::{FILE_BLOCKS, file_of};
 use crate::remote_link::RemoteLink;
@@ -42,14 +43,13 @@ impl PageStore {
         let mut live = BTreeMap::new();
         for slot in &self.types {
             let remote = slot.remote_directory().borrow();
-            let pages = remote.iter().flat_map(|index| {
-                index.pages().map(|(_, p)| (p.address, p.blocks))
-            });
+            let pages = remote.iter().flat_map(Directory::buckets);
             let dict = slot.remote_dict().get();
-            let dict =
-                dict.is_allocated().then(|| (dict.start(), dict.count()));
-            for (start, count) in pages.chain(dict) {
-                *live.entry(file_of(start)).or_insert(0) += count;
+            for desc in pages.map(|(_, d)| d).chain(std::iter::once(dict)) {
+                if desc.is_allocated() {
+                    *live.entry(file_of(desc.start())).or_insert(0) +=
+                        desc.count();
+                }
             }
         }
         live
