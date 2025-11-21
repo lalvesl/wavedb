@@ -24,11 +24,10 @@ use futures::FutureExt;
 use crate::block::{BlockAllocator, BlockDescriptor, Run};
 use crate::block_file::BlockFile;
 use crate::dictionary::Dictionary;
+use crate::directory::{Directory, is_bucket};
 use crate::disk_chain::DiskChain;
 use crate::error::{StorageError, StorageResult};
 use crate::header::{ChainRecord, Header, Rotation};
-use crate::ordered::Shape;
-use crate::pages::{EVICTED, run_of};
 use crate::remote::HEADER_BLOCKS;
 use crate::roots::ROOTS_BLOCKS;
 use crate::roots_find::find_roots;
@@ -147,16 +146,9 @@ pub fn rebuild(
     headers.lowest = headers.lowest.min(root.at);
     let registered: Vec<u64> =
         types.iter().map(TypeSlot::struct_hash).collect();
-    let disk =
-        on_disk(walk(headers, &root, &registered, Lane::Types, Shape::DISK))?;
+    let disk = on_disk(walk(headers, &root, &registered, Lane::Types))?;
     let remote = if object_backed {
-        on_disk(walk(
-            headers,
-            &root,
-            &registered,
-            Lane::Remote,
-            Shape::REMOTE,
-        ))?
+        on_disk(walk(headers, &root, &registered, Lane::Remote))?
     } else {
         Vec::new()
     };
@@ -170,16 +162,18 @@ pub fn rebuild(
     for w in disk {
         let slot = slot_of(types, w.struct_hash)?;
         chain.types.insert(w.struct_hash, rotation(w.newest));
-        if let Some(index) = &w.index {
-            // An evicted page's run went back to the files.
-            used.extend(
-                index
-                    .pages()
-                    .filter(|(_, p)| p.meta & EVICTED == 0)
-                    .map(|(_, p)| run_of(p)),
-            );
+        // Once a page, not once an entry: aliases share its run.
+        used.extend(
+            w.slots
+                .iter()
+                .enumerate()
+                .filter(|&(j, &d)| is_bucket(j, d) && d.is_allocated())
+                .map(|(_, d)| d.run()),
+        );
+        if !w.slots.is_empty() {
+            *slot.directory().borrow_mut() =
+                Some(Directory::from_slots(w.slots, file.seed()));
         }
-        *slot.directory().borrow_mut() = w.index;
         if let Some(desc) = w.dict.filter(|d| d.is_allocated()) {
             used.push(desc.run());
             let dict = Dictionary::from_bytes(&file.read_run(desc.run())?)?;
@@ -189,7 +183,10 @@ pub fn rebuild(
     for w in remote {
         let slot = slot_of(types, w.struct_hash)?;
         chain.remote.insert(w.struct_hash, rotation(w.newest));
-        *slot.remote_directory().borrow_mut() = w.index;
+        if !w.slots.is_empty() {
+            *slot.remote_directory().borrow_mut() =
+                Some(Directory::from_slots(w.slots, file.seed()));
+        }
         slot.remote_dict()
             .set(w.dict.unwrap_or(BlockDescriptor::EMPTY));
     }
