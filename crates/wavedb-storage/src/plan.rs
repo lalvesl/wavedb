@@ -129,26 +129,54 @@ impl PageStore {
             self.target_blocks_per_bucket,
             |page| image_of(page, &dict),
         )?;
+
         Ok(SlotPlan {
             idx,
-            index,
-            pages: shaped.pages,
-            dict: grew.then(|| dict.image()),
-            retired: shaped.retired,
-            unpended: shaped.unpended,
-            punched: shaped.punched,
+            dir,
+            pages,
+            dict: dict_grew.then(|| dict.image()),
+            decoded: staged,
         })
     }
 }
 
-/// `page` serialised against `dict`.
-///
-/// # Errors
-/// A compression fault, or a page whose records pass what its body can
-/// index.
+/// `page` serialised — refused, typed, past the largest page a descriptor
+/// can size ([`MAX_PAGE_BYTES`]), never truncated.
 pub fn image_of(
     page: &mut SlotPage,
     dict: &DictState,
 ) -> StorageResult<Vec<u8>> {
-    page.to_bytes(dict.dictionary(), dict.enabled())
+    let bytes = page.to_bytes(dict.dictionary(), dict.enabled())?;
+    if bytes.len() as u64 > MAX_PAGE_BYTES {
+        return Err(StorageError::PageTooLarge(bytes.len() as u64));
+    }
+    Ok(bytes)
+}
+
+/// The staged page for `bucket`, read from its settled run on first touch.
+fn staged_page<'a>(
+    store: &PageStore,
+    slot: &TypeSlot,
+    dir: &Directory,
+    dict: &DictState,
+    staged: &'a mut BTreeMap<usize, SlotPage>,
+    bucket: usize,
+) -> StorageResult<&'a mut SlotPage> {
+    match staged.entry(bucket) {
+        Entry::Occupied(e) => Ok(e.into_mut()),
+        Entry::Vacant(v) => {
+            // Every write restores its bucket before it commits (RFC 0070
+            // §7), so an evicted one here would lose its records.
+            if dir.descriptor(bucket).is_evicted() {
+                return Err(StorageError::Corrupt(
+                    "a settle reached an evicted bucket",
+                ));
+            }
+            // Out of the page cache: this round places the page in a new
+            // run, and holds it there once written (`crate::checkpoint`).
+            let page =
+                dir.take_page(slot.struct_hash(), &store.file, bucket, dict)?;
+            Ok(v.insert(page))
+        }
+    }
 }
