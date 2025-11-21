@@ -24,7 +24,6 @@ use crate::block_file::BlockFile;
 use crate::dictionary::Dictionary;
 use crate::error::StorageResult;
 use crate::header::{Header, NO_FILE};
-use crate::ordered::RangeRecord;
 use crate::page::SlotPage;
 use crate::remote::HEADER_BLOCKS;
 use crate::reopen::DiskHeaders;
@@ -132,25 +131,21 @@ fn whole(
         }
     };
     // What the batch wrote lies between the header before it and its end.
-    let placed = |start: u64, count: u64| {
-        (count > 0 && (base..end.at).contains(&start))
-            .then(|| Run::new(start, count))
-    };
-    let dict_run = |raw: u64| {
+    let placed = |raw: u64| {
         let desc = BlockDescriptor::from_raw(raw);
-        placed(desc.start(), desc.count())
+        (desc.is_allocated() && (base..end.at).contains(&desc.start()))
+            .then(|| desc.run())
     };
     for header in &batch {
         for entry in &header.types {
-            let pages = entry.changed.iter().flat_map(RangeRecord::pages);
-            for (start, count) in pages {
-                if let Some(run) = placed(start, count)
+            for &(_, raw) in &entry.changed {
+                if let Some(run) = placed(raw)
                     && !SlotPage::intact(&headers.file.read_run(run)?)
                 {
                     return Ok(Err(base));
                 }
             }
-            if let Some(run) = entry.dict.and_then(dict_run)
+            if let Some(run) = entry.dict.and_then(placed)
                 && Dictionary::from_bytes(&headers.file.read_run(run)?).is_err()
             {
                 return Ok(Err(base));
