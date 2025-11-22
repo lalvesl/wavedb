@@ -22,12 +22,11 @@ use std::cell::RefCell;
 
 use crate::block::BlockDescriptor;
 use crate::dictionary::DictState;
-use crate::ordered::Journal;
-use crate::pages::Pages;
+use crate::directory::Directory;
 
-/// One type's page index (RFC 0078). `None` until the store settles the
-/// type's first page.
-pub(crate) type StructDirectory = RefCell<Option<Pages>>;
+/// One type's page-directory slot. `None` until the store settles the type's
+/// first page (the [`Directory`] needs the per-database seed).
+pub(crate) type StructDirectory = RefCell<Option<Directory>>;
 
 /// One type's compression slot: its zstd policy + dictionary + persisted run.
 /// Per-type by nature — a page holds one type, so it compresses against that
@@ -110,8 +109,8 @@ pub(crate) struct TypeSlot {
     /// Never evicted ([`StructStorage::resident`]).
     resident: bool,
     dir: StructDirectory,
-    /// The object store's index for this type (RFC 0070 §2): 128 KiB
-    /// pages, ordered by the same keys. `None` until the first upload.
+    /// The object store's directory for this type (RFC 0070 §2): 128 KiB
+    /// pages, an extendible hash of its own. `None` until the first upload.
     remote: StructDirectory,
     /// Where the object store's copy of the dictionary is — the remote
     /// descriptor a header names.
@@ -119,9 +118,6 @@ pub(crate) struct TypeSlot {
     /// Bytes of the dictionary the object store holds a copy of — an upload
     /// carries the dictionary again once it has grown past them.
     uploaded_dict: std::cell::Cell<usize>,
-    /// What of the object store's index the disk's headers have not named
-    /// yet: its own journal is the object store's headers' (RFC 0078 §6).
-    remote_journal: RefCell<Journal>,
     dict: StructDictionary,
 }
 
@@ -135,7 +131,6 @@ impl TypeSlot {
             remote: RefCell::new(None),
             remote_dict: std::cell::Cell::new(BlockDescriptor::EMPTY),
             uploaded_dict: std::cell::Cell::new(0),
-            remote_journal: RefCell::new(Journal::new()),
             dict: RefCell::new(DictState::new(declared.compress)),
         }
     }
@@ -170,11 +165,6 @@ impl TypeSlot {
     /// Bytes of the dictionary already uploaded.
     pub(crate) const fn uploaded_dict(&self) -> &std::cell::Cell<usize> {
         &self.uploaded_dict
-    }
-
-    /// What of the object store's index the disk's headers still owe.
-    pub(crate) const fn remote_journal(&self) -> &RefCell<Journal> {
-        &self.remote_journal
     }
 
     /// This type's compression slot — its own cell: the zstd policy, the raw-content dictionary, and the block run
@@ -216,7 +206,7 @@ pub(crate) fn slots_of(types: &[&'static StructStorage]) -> Vec<TypeSlot> {
 #[cfg(test)]
 mod tests {
     use super::{StructStorage, TypeSlot};
-    use crate::pages::disk_pages;
+    use crate::directory::Directory;
 
     static DECLARED: StructStorage = StructStorage::new(0xABCD);
 
@@ -228,7 +218,7 @@ mod tests {
         assert_eq!(a.struct_hash(), 0xABCD);
         assert!(a.dictionary().borrow_mut().enabled());
 
-        *a.directory().borrow_mut() = Some(disk_pages());
+        *a.directory().borrow_mut() = Some(Directory::new([1, 2, 3, 4]));
         assert!(a.directory().borrow_mut().is_some());
         assert!(
             b.directory().borrow_mut().is_none(),
