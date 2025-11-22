@@ -1,7 +1,6 @@
 //! An upload's files ([RFC 0070] §3–§5, [RFC 0073] §8): the encoded remote
 //! pages laid out in files of `[roots block][32 KiB header][page][page]…`,
-//! each page at block boundaries — the header and its pages a file's
-//! **section**.
+//! each page block-aligned — the header and its pages a file's **section**.
 //!
 //! - A page is placed while the cursor is below the file's 8 MiB mark; the
 //!   first page ending past it closes the file. Nothing checks whether a
@@ -9,11 +8,12 @@
 //!   starts inside its file's window and is read from that one object.
 //! - The next file starts at the first file boundary at or after the cursor
 //!   — the numbers a large page ran over are never used.
-//! - The header is always [`HEADER_BYTES`]. [`finish`] writes it
-//!   ([`Header`]) once the pages are placed and the object store's indexes
-//!   point at them: each names what of the indexes changed as far as its
-//!   room goes (RFC 0078 §6), linked to the header before, its spare room
-//!   restating the ranges of the types restated longest ago ([RFC 0072] §5).
+//! - The header is always [`HEADER_BYTES`]. [`layout`] budgets it for the
+//!   entries of the types the file holds pages of and their items, and
+//!   closes a file that would outgrow it; [`finish`] then writes it
+//!   ([`Header`]): at its block, linked to the header before, and its spare
+//!   room restating the addresses of the types restated longest ago
+//!   ([RFC 0072] §5).
 //! - **The roots block** heads every file ([`Roots`]): the newest header
 //!   ending a batch, and where the chain of files stands — what a recovery
 //!   roots in.
@@ -24,14 +24,17 @@
 
 use std::collections::BTreeMap;
 
-use crate::block::{BLOCK_SIZE, BlockDescriptor, Run};
+use crate::block::{BLOCK_SIZE, BlockDescriptor};
 use crate::error::{StorageError, StorageResult};
-use crate::header::{Chain, ENTRY_BYTES, Header, NO_FILE, TypeEntry};
-use crate::pages::Pages;
+use crate::header::{
+    BARE_BYTES, Chain, ENTRY_BYTES, Header, ITEM_BYTES, NO_FILE, TypeEntry,
+    depth_of,
+};
+use crate::plan::blocks_of;
 use crate::remote::{FILE_BLOCKS, HEADER_BLOCKS, HEADER_BYTES};
-use crate::restate::{TypeView, horizon, restate};
+pub use crate::restate::TypeView;
+use crate::restate::{horizon, restate};
 use crate::roots::{ROOTS_BLOCKS, Roots};
-use crate::shape::blocks_for;
 
 /// Where a file's section — its header — starts, past the roots block.
 pub const SECTION: u64 = ROOTS_BLOCKS;
@@ -41,8 +44,9 @@ pub const FIRST_PAGE: u64 = ROOTS_BLOCKS + HEADER_BLOCKS;
 
 /// One type's images for an upload.
 pub struct SlotImages {
-    /// Encoded pages, each with the blocks its entry names.
-    pub(crate) pages: Vec<(Vec<u8>, u64)>,
+    pub(crate) struct_hash: u64,
+    /// Bucket → encoded page; empty bytes leave the bucket vacant.
+    pub(crate) pages: BTreeMap<usize, Vec<u8>>,
     /// The dictionary, when the object store's copy is behind.
     pub(crate) dict: Option<Vec<u8>>,
 }
@@ -50,8 +54,15 @@ pub struct SlotImages {
 /// Where an image landed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placed {
-    Page { slot: usize, page: usize, run: Run },
-    Dict { slot: usize, desc: BlockDescriptor },
+    Page {
+        slot: usize,
+        bucket: usize,
+        desc: BlockDescriptor,
+    },
+    Dict {
+        slot: usize,
+        desc: BlockDescriptor,
+    },
 }
 
 /// One file: its pages laid out, its roots block and header written by
@@ -63,6 +74,11 @@ pub struct File {
     /// Whether the bytes open with room for the roots block: a file of its
     /// own, not a section a storage shard places among others.
     pub(crate) roots: bool,
+    /// Struct hash → the `(bucket, descriptor)` items of the pages it holds;
+    /// a type whose dictionary it holds has an entry, items or not.
+    items: BTreeMap<u64, Vec<(u32, u64)>>,
+    /// The header's encoded length, budgeted as items are added.
+    len: usize,
     /// The object: room for the roots block and the header, then the
     /// pages.
     pub(crate) bytes: Vec<u8>,
@@ -78,16 +94,6 @@ pub struct Packed {
     pub(crate) cut: bool,
 }
 
-/// One type as an upload's headers name it: its index in the object store,
-/// as the upload leaves it, and its dictionary there.
-pub struct Named<'a> {
-    pub(crate) struct_hash: u64,
-    pub(crate) index: Option<&'a mut Pages>,
-    pub(crate) dict: Option<u64>,
-    /// The dictionary moved in this upload: a header must name it.
-    pub(crate) dict_moved: bool,
-}
-
 /// Lay `slots` out in files from remote block `end` on.
 pub fn layout(end: u64, slots: &[SlotImages]) -> Packed {
     let mut packed = Packed {
@@ -97,16 +103,33 @@ pub fn layout(end: u64, slots: &[SlotImages]) -> Packed {
         cut: true,
     };
     for (slot, images) in slots.iter().enumerate() {
-        if let Some(dict) = &images.dict {
-            let run = place(&mut packed, dict, blocks_for(dict.len()));
-            packed.placed.push(Placed::Dict {
-                slot,
-                desc: BlockDescriptor::from_run(run),
-            });
-        }
-        for (page, (bytes, blocks)) in images.pages.iter().enumerate() {
-            let run = place(&mut packed, bytes, *blocks);
-            packed.placed.push(Placed::Page { slot, page, run });
+        let hash = images.struct_hash;
+        let dict = images.dict.iter().map(|bytes| (None, bytes));
+        let pages = images.pages.iter().map(|(&b, bytes)| (Some(b), bytes));
+        for (bucket, bytes) in dict.chain(pages) {
+            let item = if bucket.is_some() { ITEM_BYTES } else { 0 };
+            open_room(&mut packed, hash, item);
+            // An emptied bucket takes an item and no bytes.
+            let desc = if bytes.is_empty() {
+                BlockDescriptor::EMPTY
+            } else {
+                BlockDescriptor::new(packed.end, blocks_of(bytes))
+            };
+            packed.end += desc.count();
+            let Some(file) = packed.files.last_mut() else {
+                continue;
+            };
+            file.len += cost(file, hash, item);
+            let items = file.items.entry(hash).or_default();
+            if let Some(bucket) = bucket {
+                items.push((bucket as u32, desc.raw()));
+                packed.placed.push(Placed::Page { slot, bucket, desc });
+            } else {
+                packed.placed.push(Placed::Dict { slot, desc });
+            }
+            file.bytes.extend_from_slice(bytes);
+            let aligned = file.bytes.len().next_multiple_of(BLOCK_SIZE);
+            file.bytes.resize(aligned, 0);
         }
     }
     packed
