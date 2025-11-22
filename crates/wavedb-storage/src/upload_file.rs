@@ -218,35 +218,11 @@ pub fn finish(
             remote: Vec::new(),
             chain: None,
         };
-        let mut room = HEADER_BYTES.saturating_sub(header.encoded_len());
-        for t in named.iter_mut() {
-            name(t, chain, &mut header.types, &mut room);
-        }
-        all = named.iter().all(|t| {
-            !t.dict_moved
-                && t.index.as_ref().is_none_or(|i| !i.has_unrecorded())
-        });
-        header.end_of_batch = packed.cut && all && i + 1 == files;
-        let views: Vec<TypeView<'_>> = named
-            .iter()
-            .map(|t| TypeView {
-                struct_hash: t.struct_hash,
-                index: t.index.as_deref(),
-                dict: t.dict,
-            })
-            .collect();
-        let spare = HEADER_BYTES.saturating_sub(header.encoded_len());
-        restate(
-            &mut header.types,
-            spare,
-            &views,
-            &mut chain.types,
-            header.at,
-        );
+        refresh(&mut header, views, chain);
         for entry in &header.types {
             chain.types.entry(entry.struct_hash).or_default().last = header.at;
         }
-        header.horizon = horizon(&views, &chain.types, chain.floor);
+        header.horizon = horizon(views, &chain.types, chain.floor);
         chain.floor = header.horizon;
         let encoded = header.encode();
         if encoded.len() > HEADER_BYTES {
@@ -276,44 +252,24 @@ pub fn finish(
         chain.roots = Some(base);
         chain.end = packed.end;
     }
-    Ok(all)
-}
-
-/// Name as much of `t` as `room` holds in an entry of `entries`.
-fn name(
-    t: &mut Named<'_>,
-    chain: &Chain,
-    entries: &mut Vec<TypeEntry>,
-    room: &mut usize,
-) {
-    let journaled = t.index.as_ref().is_some_and(|i| i.has_unrecorded());
-    if (!journaled && !t.dict_moved) || *room < ENTRY_BYTES {
-        return;
-    }
-    *room -= ENTRY_BYTES;
-    let (changed, ranges) = t.index.as_mut().map_or((Vec::new(), 0), |index| {
-        let (records, used) = index.drain(*room);
-        *room -= used;
-        (records, index.range_count() as u32)
-    });
-    t.dict_moved = false;
-    entries.push(TypeEntry {
-        struct_hash: t.struct_hash,
-        ranges,
-        last: chain.last(t.struct_hash),
-        dict: t.dict,
-        changed,
-    });
+    Ok(())
 }
 
 /// Move the files laid out from block 0 to the sections a storage shard
-/// reserved for them, at `bases` (RFC 0073 §8): every run shifted with its
-/// section, and no room for a roots block — the storage shard heads each
-/// file it assembles.
+/// reserved for them, at `bases` (RFC 0073 §8): every descriptor shifted
+/// with its section, and no room for a roots block — the storage shard
+/// heads each file it assembles.
 pub fn rebase(packed: &mut Packed, bases: &[u64]) {
     let mut shifts = BTreeMap::new();
     for (file, &base) in packed.files.iter_mut().zip(bases) {
-        shifts.insert(file.number, (file.base, base));
+        let from = file.base;
+        shifts.insert(file.number, (from, base));
+        let moved = |raw: u64| shift(raw, from, base);
+        for items in file.items.values_mut() {
+            for item in items.iter_mut() {
+                item.1 = moved(item.1);
+            }
+        }
         file.number = crate::remote::file_of(base);
         file.base = base;
         file.roots = false;
