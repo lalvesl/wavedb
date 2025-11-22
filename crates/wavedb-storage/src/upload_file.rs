@@ -275,45 +275,91 @@ pub fn rebase(packed: &mut Packed, bases: &[u64]) {
         file.roots = false;
         file.bytes.drain(..BLOCK_SIZE);
     }
-    let moved = |start: u64| {
-        shifts
-            .get(&crate::remote::file_of(start))
-            .map_or(start, |&(from, to)| start - from + to)
-    };
     for placed in &mut packed.placed {
-        match placed {
-            Placed::Page { run, .. } => run.start = moved(run.start),
-            Placed::Dict { desc, .. } => {
-                *desc = desc.moved_to(moved(desc.start()));
-            }
+        let (Placed::Page { desc, .. } | Placed::Dict { desc, .. }) = placed;
+        let file = crate::remote::file_of(desc.start());
+        if let (true, Some(&(from, base))) =
+            (desc.is_allocated(), shifts.get(&file))
+        {
+            *desc = BlockDescriptor::from_raw(shift(desc.raw(), from, base));
         }
     }
 }
 
+/// `raw`'s descriptor moved with its section, from `from` to `to`.
+fn shift(raw: u64, from: u64, to: u64) -> u64 {
+    let desc = BlockDescriptor::from_raw(raw);
+    if !desc.is_allocated() {
+        return raw;
+    }
+    desc.moved_to(desc.start() - from + to).raw()
+}
+
+/// `raw` at the depth `view`'s directory gives `bucket`.
+fn deepened(view: Option<&TypeView<'_>>, bucket: u32, raw: u64) -> u64 {
+    let depth = view
+        .and_then(|v| v.slots.get(bucket as usize))
+        .map_or(0, |d| d.depth());
+    BlockDescriptor::from_raw(raw).with_depth(depth).raw()
+}
+
+/// Spend `header`'s spare room restating old addresses (`crate::restate`).
+fn refresh(header: &mut Header, views: &[TypeView<'_>], chain: &mut Chain) {
+    let spare = HEADER_BYTES.saturating_sub(header.encoded_len());
+    restate(&mut header.types, spare, views, &mut chain.types, header.at);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FIRST_PAGE, Placed, SECTION, SlotImages, layout};
-    use crate::block::{BLOCK_SIZE, Run};
-    use crate::remote::FILE_BLOCKS;
+    use super::{
+        FIRST_PAGE, Packed, Placed, SECTION, SlotImages, TypeView, finish,
+        layout,
+    };
+    use crate::block::{BLOCK_SIZE, BlockDescriptor};
+    use crate::header::{Chain, Header, NO_FILE, Rotation};
+    use crate::remote::{FILE_BLOCKS, HEADER_BLOCKS, HEADER_BYTES};
+    use crate::roots::Roots;
 
-    fn images(pages: &[u64]) -> SlotImages {
+    /// Bytes ahead of a file's first page.
+    const HEAD: usize = FIRST_PAGE as usize * BLOCK_SIZE;
+
+    fn images(hash: u64, pages: &[(usize, usize)]) -> SlotImages {
         SlotImages {
+            struct_hash: hash,
             pages: pages
                 .iter()
-                .map(|&blocks| (vec![7u8; 10], blocks))
+                .map(|&(bucket, blocks)| {
+                    (bucket, vec![7u8; blocks * BLOCK_SIZE])
+                })
                 .collect(),
             dict: None,
         }
     }
 
-    /// Pages follow the header, each at the blocks its entry names.
-    #[test]
-    fn pages_follow_the_header_at_the_blocks_they_are_given() {
-        let packed = layout(0, &[images(&[2, 1])]);
-        assert_eq!(packed.files.len(), 1);
-        assert_eq!(packed.files[0].base, SECTION);
-        let runs: Vec<Run> = packed
-            .placed
+    /// A remote directory of `n` pages (`n` a power of two), every one
+    /// placed somewhere.
+    fn dir(n: usize) -> Vec<BlockDescriptor> {
+        let depth = n.trailing_zeros() as u8;
+        (0..n)
+            .map(|b| BlockDescriptor::new(b as u64 + 1, 1).with_depth(depth))
+            .collect()
+    }
+
+    fn view(hash: u64, slots: &[BlockDescriptor]) -> TypeView<'_> {
+        TypeView {
+            struct_hash: hash,
+            slots,
+            dict: None,
+        }
+    }
+
+    fn header(packed: &Packed, i: usize) -> Header {
+        Header::decode(&packed.files[i].bytes[SECTION as usize * BLOCK_SIZE..])
+            .unwrap()
+    }
+
+    fn page_desc(placed: &[Placed], want: usize) -> BlockDescriptor {
+        placed
             .iter()
             .filter_map(|p| match p {
                 Placed::Page { run, .. } => Some(*run),
