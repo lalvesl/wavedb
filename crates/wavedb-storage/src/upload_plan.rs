@@ -179,29 +179,29 @@ mod tests {
             if dir.can_split(bucket) {
                 dir.split(bucket);
             }
-            let mut page = fetched
-                .get(run)
-                .cloned()
-                .ok_or(StorageError::Corrupt("a moved page was not fetched"))?;
-            shaped.pages.push(PlannedPage {
-                key: key.clone(),
-                image: image_of(&mut page, &dict)?,
-                decoded: Some(page),
-                flags: 0,
-            });
-            shaped.retired.push(*run);
         }
-        work.shaped = shaped;
-        Ok(())
+        dir
     }
 
-    /// Decode an uploaded image of slot `idx`.
-    pub(crate) fn decode_remote(
-        &self,
-        idx: usize,
-        image: &[u8],
-    ) -> StorageResult<SlotPage> {
-        let dict = self.types[idx].dictionary().borrow();
-        SlotPage::from_bytes(image, dict.dictionary())
+    /// The congruence names exactly the remote buckets that hold some id
+    /// of the disk bucket — checked against routing ids for real.
+    #[test]
+    fn sharing_is_exactly_where_the_ids_go() {
+        for (disk_splits, remote_splits) in [(0, 0), (9, 2), (2, 9), (40, 13)] {
+            let disk = grown(disk_splits, 11 + disk_splits);
+            let remote = grown(remote_splits, 29 + remote_splits);
+            let mut truth: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+            for id in 0u128..20_000 {
+                truth
+                    .entry(disk.bucket_of(id))
+                    .or_default()
+                    .insert(remote.bucket_of(id));
+            }
+            for (bucket, _) in disk.buckets() {
+                let got = sharing(&disk, bucket, &remote);
+                let want = truth.remove(&bucket).unwrap_or_default();
+                assert_eq!(got, want, "disk bucket {bucket}");
+            }
+        }
     }
 }
