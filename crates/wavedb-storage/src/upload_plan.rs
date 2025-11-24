@@ -115,91 +115,23 @@ impl PageStore {
     /// no bytes at all — its bucket becomes vacant.
     pub(crate) fn encode_remote(
         &self,
-    ) -> StorageResult<(Vec<SlotUpload>, bool)> {
-        let (mut taken, mut cut) = (0, true);
-        let mut moving = crate::remote_compact::MOVE_BLOCKS;
-        let mut work = Vec::new();
-        for (idx, slot) in self.types.iter().enumerate() {
-            let (moved, move_dict) = self.moves_of(idx, &mut moving);
-            let mut flagged = Vec::new();
-            if let Some(disk) = slot.directory().borrow().as_ref() {
-                let dict = slot.dictionary().borrow();
-                for (at, page) in disk.entries_all() {
-                    let flags = page.map_or_else(
-                        || disk.meta_at(at).unwrap_or(0),
-                        |p| p.meta,
-                    );
-                    if flags & PENDING == 0 {
-                        continue;
-                    }
-                    if taken >= UPLOAD_INPUT_BLOCKS {
-                        cut = false;
-                        continue;
-                    }
-                    let (lo, hi) = coverage(disk, at).ok_or(
-                        StorageError::Corrupt("a flagged entry without a key"),
-                    )?;
-                    let records = match page {
-                        Some(page) => {
-                            read_page(&self.file, run_of(page), &dict)?
-                        }
-                        None => SlotPage::new(slot.struct_hash()),
-                    };
-                    taken += weight(flags, page.map_or(0, |p| p.blocks));
-                    flagged.push(Flagged {
-                        lo,
-                        hi,
-                        taken: page,
-                        flags,
-                        page: records,
-                    });
-                }
-            }
-            if flagged.is_empty() && moved.is_empty() && !move_dict {
-                continue;
-            }
-            let remote = slot.remote_directory().borrow().clone();
-            work.push(SlotUpload {
-                idx,
-                flagged,
-                remote: remote.unwrap_or_else(remote_pages),
-                fetched: BTreeMap::new(),
-                moved,
-                move_dict,
-                shaped: Shaped::default(),
-                changes: Journal::new(),
-            });
+        idx: usize,
+        page: &mut SlotPage,
+    ) -> StorageResult<Vec<u8>> {
+        if page.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok((work, cut))
+        image_of(page, &self.types[idx].dictionary().borrow())
     }
 
-    /// Step 2: fetch every remote page the flagged entries meet,
-    /// [`IN_FLIGHT`] at a time.
-    pub(crate) async fn fetch_shared(
+    /// Decode an uploaded image of slot `idx`.
+    pub(crate) fn decode_remote(
         &self,
-        work: &mut [SlotUpload],
-    ) -> StorageResult<()> {
-        let mut wanted = Vec::new();
-        for (w, slot) in work.iter().enumerate() {
-            for run in slot.affected() {
-                wanted.push((w, slot.idx, run));
-            }
-        }
-        let fetched: Vec<(usize, crate::block::Run, SlotPage)> =
-            stream::iter(wanted)
-                .map(|(w, idx, run)| async move {
-                    let page = self
-                        .with_remote_page(idx, run, SlotPage::clone)
-                        .await?;
-                    StorageResult::Ok((w, run, page))
-                })
-                .buffer_unordered(IN_FLIGHT)
-                .try_collect()
-                .await?;
-        for (w, run, page) in fetched {
-            work[w].fetched.insert(run, page);
-        }
-        Ok(())
+        idx: usize,
+        image: &[u8],
+    ) -> StorageResult<SlotPage> {
+        let dict = self.types[idx].dictionary().borrow();
+        SlotPage::from_bytes(image, dict.dictionary())
     }
     /// Rebuild `work`'s remote pages (see the module docs), and carry the
     /// moved ones forward re-encoded. The pages to write land in
