@@ -361,27 +361,70 @@ mod tests {
     fn page_desc(placed: &[Placed], want: usize) -> BlockDescriptor {
         placed
             .iter()
-            .filter_map(|p| match p {
-                Placed::Page { run, .. } => Some(*run),
-                Placed::Dict { .. } => None,
+            .find_map(|p| match *p {
+                Placed::Page { bucket, desc, .. } if bucket == want => {
+                    Some(desc)
+                }
+                _ => None,
             })
-            .collect();
-        assert_eq!(
-            runs,
-            [Run::new(FIRST_PAGE, 2), Run::new(FIRST_PAGE + 2, 1)]
-        );
-        let len = packed.files[0].bytes.len();
-        assert_eq!(len, (FIRST_PAGE as usize + 3) * BLOCK_SIZE);
+            .unwrap()
     }
 
-    /// A page starting before the 8 MiB mark runs past it; the next starts
-    /// a file on the next boundary.
+    /// Pages follow the header, block-aligned, and the header names each
+    /// with its final descriptor; a type the upload did not touch is named
+    /// only to restate it.
+    #[test]
+    fn pages_follow_the_header_and_the_header_names_them() {
+        let mut packed = layout(0, &[images(9, &[(0, 2), (3, 1)])]);
+        assert_eq!(packed.files.len(), 1);
+        assert_eq!(packed.files[0].bytes.len(), HEAD + 3 * BLOCK_SIZE);
+        let first = page_desc(&packed.placed, 0);
+        assert_eq!(first, BlockDescriptor::new(FIRST_PAGE, 2));
+        let second = page_desc(&packed.placed, 3);
+        assert_eq!(second, BlockDescriptor::new(FIRST_PAGE + 2, 1));
+        assert_eq!(packed.end, FIRST_PAGE + 3);
+
+        let (nine, other) = (dir(4), dir(1));
+        let views = [view(5, &other), view(9, &nine)];
+        let mut chain = Chain::default();
+        finish(&mut packed, &views, &mut chain, 0).unwrap();
+        let h = header(&packed, 0);
+        assert_eq!((h.at, h.prev, h.end_of_batch), (SECTION, NO_FILE, true));
+        let roots = Roots::decode(&packed.files[0].bytes).unwrap();
+        assert_eq!((roots.at, roots.end), (0, packed.end));
+        assert_eq!(roots.root(0), Some(SECTION), "the batch it ends");
+        assert_eq!(h.types[0].struct_hash, 9, "the changed type first");
+        assert_eq!(h.types[0].depth, Some(2));
+        assert!(
+            h.types[0].changed.starts_with(&[
+                (0, first.with_depth(2).raw()),
+                (3, second.with_depth(2).raw())
+            ]),
+            "named at the depth the directory gives them"
+        );
+        assert_eq!(h.types[1].struct_hash, 5, "then the restated one");
+        assert_eq!(chain.tail, Some(SECTION));
+        assert_eq!(chain.last(9), SECTION);
+    }
+
+    /// The bound is on where a page starts: the one starting before 8 MiB
+    /// runs past it in the same file, and the next file starts at the first
+    /// boundary after it — the numbers it ran over are skipped.
     #[test]
     fn a_page_starting_before_the_mark_runs_past_it() {
-        let first = FILE_BLOCKS - FIRST_PAGE - 1;
-        let packed = layout(0, &[images(&[first, 4, 1])]);
+        let big = (FILE_BLOCKS * 3) as usize; // 24 MiB
+        let packed = layout(0, &[images(9, &[(0, 1), (1, big), (2, 1)])]);
         assert_eq!(packed.files.len(), 2);
-        assert_eq!(packed.files[1].number, 2, "file 1's numbers were run over");
+        let first = page_desc(&packed.placed, 1);
+        assert_eq!(first.start(), FIRST_PAGE + 1);
+        assert_eq!(
+            packed.files[0].bytes.len(),
+            HEAD + (1 + big) * BLOCK_SIZE,
+            "one object holds the whole large page"
+        );
+        assert_eq!(packed.files[1].number, 4, "files 1 to 3 are never used");
+        let next = page_desc(&packed.placed, 2).start();
+        assert_eq!(next, 4 * FILE_BLOCKS + FIRST_PAGE);
     }
 
     /// An upload starts on the first file boundary at or after the end.
