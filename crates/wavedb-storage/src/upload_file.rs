@@ -427,10 +427,121 @@ mod tests {
         assert_eq!(next, 4 * FILE_BLOCKS + FIRST_PAGE);
     }
 
-    /// An upload starts on the first file boundary at or after the end.
     #[test]
     fn an_upload_starts_on_the_next_file_boundary() {
-        let packed = layout(FILE_BLOCKS + 5, &[images(&[1])]);
-        assert_eq!(packed.files[0].number, 2);
+        let packed = layout(HEADER_BLOCKS + 5, &[images(9, &[(0, 1)])]);
+        assert_eq!(packed.files[0].number, 1);
+        let start = page_desc(&packed.placed, 0).start();
+        assert_eq!(start, FILE_BLOCKS + FIRST_PAGE);
+    }
+
+    /// Nine hundred types with a page each outgrow one header long before
+    /// 8 MiB of pages: the file closes on its header, and no header passes
+    /// its room.
+    #[test]
+    fn a_full_header_closes_the_file() {
+        let slots: Vec<SlotImages> =
+            (0..900).map(|h| images(h, &[(0, 1)])).collect();
+        let mut packed = layout(0, &slots);
+        assert!(packed.files.len() > 1, "{} files", packed.files.len());
+        let one = dir(1);
+        let views: Vec<TypeView<'_>> =
+            (0..900).map(|h| view(h, &one)).collect();
+        finish(&mut packed, &views, &mut Chain::default(), 0).unwrap();
+        for i in 0..packed.files.len() {
+            assert!(header(&packed, i).encode().len() <= HEADER_BYTES);
+        }
+    }
+
+    /// An upload's files link each to the one before, across uploads too,
+    /// and only the last file of a cut ends the batch.
+    #[test]
+    fn headers_link_back_and_only_the_last_ends_the_batch() {
+        let one = dir(1);
+        let views = [view(9, &one)];
+        let mut chain = Chain::default();
+        let big = FILE_BLOCKS as usize;
+        let mut first = layout(0, &[images(9, &[(0, big), (1, 1)])]);
+        finish(&mut first, &views, &mut chain, 0).unwrap();
+        assert_eq!(first.files.len(), 2);
+        let (a, b) = (header(&first, 0), header(&first, 1));
+        assert_eq!((a.end_of_batch, b.end_of_batch), (false, true));
+        assert_eq!(b.prev, a.at);
+
+        let mut second = layout(chain.end, &[images(9, &[(0, 1)])]);
+        second.cut = false;
+        finish(&mut second, &views, &mut chain, 0).unwrap();
+        let c = header(&second, 0);
+        assert_eq!(c.prev, b.at);
+        assert!(!c.end_of_batch, "a part of a backlog ends nothing");
+        assert_eq!(c.types[0].last, b.at, "the newest earlier entries");
+    }
+
+    /// Spare room restates addresses from a rotating cursor, the type
+    /// restated longest ago first — so a type nobody writes still shows up
+    /// near the head of the chain.
+    #[test]
+    fn spare_room_restates_on_from_the_cursor() {
+        let (busy, idle) = (dir(4), dir(4_096));
+        let views = [view(1, &busy), view(2, &idle)];
+        let mut chain = Chain::default();
+        for (hash, shifted) in [(1, 50), (2, 10)] {
+            let rotation = Rotation {
+                last: shifted,
+                shifted: Some(shifted),
+                ..Rotation::default()
+            };
+            chain.types.insert(hash, rotation);
+        }
+        chain.end = 60 * FILE_BLOCKS;
+        let mut packed = layout(chain.end, &[images(1, &[(0, 1)])]);
+        finish(&mut packed, &views, &mut chain, 0).unwrap();
+        let h = header(&packed, 0);
+        let idle_entry = &h.types[1];
+        assert_eq!((idle_entry.struct_hash, idle_entry.last), (2, 10));
+        let restated = idle_entry.changed.len();
+        assert!(
+            restated > 2_000,
+            "the idle type filled the room: {restated}"
+        );
+        assert_eq!(idle_entry.changed[0], (0, idle[0].raw()));
+        let rotation = chain.types[&2];
+        assert_eq!(rotation.last, h.at);
+        assert_eq!((rotation.shift, rotation.shifted), (restated, Some(h.at)));
+
+        // The next file continues where the cursor stopped — the busy type,
+        // restated in file 50, ahead of the one restated just now.
+        let mut next = layout(chain.end, &[images(1, &[(0, 1)])]);
+        finish(&mut next, &views, &mut chain, 0).unwrap();
+        let h = header(&next, 0);
+        let idle_entry = h.types.iter().find(|e| e.struct_hash == 2);
+        let first = idle_entry.and_then(|e| e.changed.first().copied());
+        assert_eq!(first, Some((restated as u32, idle[restated].raw())));
+    }
+
+    /// A type changed in every upload is named in every header, yet its
+    /// quiet buckets are restated only in its turn — ordered by mention it
+    /// would never get one. Ordered by restatement, every type comes round,
+    /// and a type never written is named in the very first header.
+    #[test]
+    fn every_type_comes_round_a_busy_one_and_an_empty_one_too() {
+        let (a, b, busy) = (dir(4_096), dir(4_096), dir(4_096));
+        let empty: [BlockDescriptor; 0] = [];
+        let views = [view(1, &a), view(2, &b), view(3, &busy), view(4, &empty)];
+        let mut chain = Chain::default();
+        let mut packed = layout(chain.end, &[images(3, &[(0, 1)])]);
+        finish(&mut packed, &views, &mut chain, 0).unwrap();
+        let first = header(&packed, 0);
+        let named = first.types.iter().find(|e| e.struct_hash == 4);
+        assert_eq!(named.map(|e| e.depth), Some(None), "the empty type");
+        for _ in 0..12 {
+            let mut packed = layout(chain.end, &[images(3, &[(0, 1)])]);
+            finish(&mut packed, &views, &mut chain, 0).unwrap();
+        }
+        for hash in [1, 2, 3, 4] {
+            let shifted = chain.types.get(&hash).and_then(|r| r.shifted);
+            assert!(shifted.is_some(), "type {hash} never came round");
+        }
+        assert!(chain.types[&3].shift > 0, "the busy type was restated");
     }
 }
