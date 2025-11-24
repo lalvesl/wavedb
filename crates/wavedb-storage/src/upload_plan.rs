@@ -1,66 +1,66 @@
-//! An upload's middle ([RFC 0070] §5, [RFC 0078]): which remote pages meet
-//! the flagged disk pages, and those pages rebuilt — every record within a
-//! flagged page's coverage replaced by the flagged page's own — then cut
-//! where they run over target.
+//! An upload's middle ([RFC 0070] §5): which remote pages share records with
+//! the flagged disk pages, and those pages rebuilt — the old one, minus every
+//! record of a flagged disk bucket, plus the flagged pages' records — then
+//! split while over target ([RFC 0074]).
 //!
-//! The disk and the object store each have an ordered index of their own,
-//! over the same keys. A flagged disk entry is the whole truth about the
-//! keys it covers, `[lo, hi)`: the remote pages meeting that span are
-//! exactly the ones that can hold a record of it, so a record the disk no
-//! longer has is dropped from them, and every one it has goes in.
+//! The disk and the object store each have an extendible hash of their
+//! own. A page's **depth** is how many low hash bits its records share, so
+//! disk bucket `d` and a remote page can hold the same record exactly when
+//! the remote page has an entry `j ≡ d (mod 2^min(depth(d), D))`, `D` the
+//! remote directory's depth — arithmetic, no lookup.
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
-//! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
+//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing.md
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use wavedb_core::Id;
 
-use crate::block::Run;
+use crate::block::BlockDescriptor;
+use crate::directory::Directory;
 use crate::error::{StorageError, StorageResult};
-use crate::ordered::{Journal, Placed};
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
-use futures::stream::{self, StreamExt, TryStreamExt};
-
-use crate::pages::{
-    PENDING, Pages, coverage, entries_between, key_of_id, read_page,
-    remote_pages, run_of, within,
-};
-use crate::plan::{PlannedPage, image_of};
-use crate::shape::weight;
-use crate::shape::{Rules, Shaped, shape};
-use crate::upload::{IN_FLIGHT, UPLOAD_INPUT_BLOCKS};
+use crate::plan::image_of;
+use crate::split::split_staged;
 
 /// Blocks a remote page should hold (128 KiB): a target, as on disk — a
-/// page over it is cut in the upload that rewrites it.
+/// page over it splits in the upload that rewrites it.
 pub const REMOTE_TARGET_BLOCKS: u64 = 32;
 
-/// One flagged disk entry an upload carries.
-pub struct Flagged {
-    /// The keys it covers, `[lo, hi)`; `lo` finds it again.
-    pub(crate) lo: Vec<u8>,
-    pub(crate) hi: Option<Vec<u8>>,
-    /// The entry as taken: its page (`None` for a hole) and its flags — its
-    /// flag is cleared only if it is still so once the files are up.
-    pub(crate) taken: Option<Placed<u8>>,
-    pub(crate) flags: u8,
-    /// Its records; none for a hole.
-    pub(crate) page: SlotPage,
+/// The buckets of `remote` that can share records with bucket `bucket` of
+/// `disk`: those with an entry agreeing with it on every bit both depths
+/// route by.
+pub fn sharing(
+    disk: &Directory,
+    bucket: usize,
+    remote: &Directory,
+) -> BTreeSet<usize> {
+    let bits = disk.descriptor(bucket).depth().min(remote.depth());
+    let step = 1usize << bits;
+    (bucket & (step - 1)..remote.len())
+        .step_by(step)
+        .map(|entry| remote.bucket_at(entry))
+        .collect()
 }
 
 /// One type's share of an upload, from the snapshot to the encoded pages.
 pub struct SlotUpload {
     /// Index into [`PageStore::types`].
     pub(crate) idx: usize,
-    pub(crate) flagged: Vec<Flagged>,
-    /// The remote index being rebuilt — the upload's own copy.
-    pub(crate) remote: Pages,
-    /// Remote pages fetched, by their run.
-    pub(crate) fetched: BTreeMap<Run, SlotPage>,
-    /// Remote pages carried forward as they are, out of files a compaction
-    /// empties (`crate::remote_compact`): a key finding each, and its run.
-    pub(crate) moved: Vec<(Vec<u8>, Run)>,
+    /// The disk directory as it stood when the upload began.
+    pub(crate) disk: Directory,
+    /// Every flagged disk bucket taken, with its descriptor then.
+    pub(crate) flagged: Vec<(usize, BlockDescriptor)>,
+    /// Those buckets' pages, in the same order.
+    pub(crate) pages: Vec<SlotPage>,
+    /// The remote directory being rebuilt — the upload's own copy.
+    pub(crate) remote: Directory,
+    /// Remote bucket → its rebuilt page.
+    pub(crate) staged: BTreeMap<usize, SlotPage>,
+    /// Remote buckets carried forward as they are, out of files a
+    /// compaction empties (`crate::remote_compact`).
+    pub(crate) moved: BTreeSet<usize>,
     /// Whether the dictionary is carried forward too.
     pub(crate) move_dict: bool,
     /// The pages it writes, once rebuilt.
