@@ -63,60 +63,57 @@ pub struct SlotUpload {
     pub(crate) moved: BTreeSet<usize>,
     /// Whether the dictionary is carried forward too.
     pub(crate) move_dict: bool,
-    /// The pages it writes, once rebuilt.
-    pub(crate) shaped: Shaped,
-    /// What of the remote index it changed, for the disk's headers.
-    pub(crate) changes: Journal,
 }
 
 impl SlotUpload {
-    /// The remote runs this upload reads: those meeting a flagged coverage,
-    /// and those carried forward.
-    pub(crate) fn affected(&self) -> BTreeSet<Run> {
-        let meeting = self.flagged.iter().flat_map(|f| {
-            entries_between(&self.remote, &f.lo, f.hi.as_deref())
-                .into_iter()
-                .filter_map(|(_, page)| page.map(run_of))
-        });
-        meeting
-            .chain(self.moved.iter().map(|&(_, run)| run))
+    /// The remote buckets this upload rewrites: those sharing records with a
+    /// flagged disk page, and those carried forward.
+    pub(crate) fn affected(&self) -> BTreeSet<usize> {
+        self.flagged
+            .iter()
+            .flat_map(|&(d, _)| sharing(&self.disk, d, &self.remote))
+            .chain(self.moved.iter().copied())
             .collect()
     }
 
-    /// The records the remote pages take: every one a flagged page holds,
-    /// and the removal of every one the fetched pages hold within a flagged
-    /// coverage that the page does not — in key order.
-    fn records(&self) -> Vec<(Id, Option<Vec<u8>>)> {
-        let mut out: BTreeMap<u128, Option<Vec<u8>>> = BTreeMap::new();
-        for page in self.fetched.values() {
-            for (id, _) in page.iter() {
-                let key = key_of_id(id);
-                let covered = self
-                    .flagged
-                    .iter()
-                    .any(|f| within(&key, &f.lo, f.hi.as_deref()));
-                if covered {
-                    out.insert(id.raw(), None);
-                }
+    /// Rebuild the staged pages: each holds its old records (fetched into
+    /// `staged` beforehand) minus those of a flagged disk bucket, plus the
+    /// flagged pages' records that route to it.
+    ///
+    /// # Errors
+    /// [`StorageError::Corrupt`] if a record routes to a remote page the
+    /// congruence did not name — the arithmetic above is wrong, and writing
+    /// on would drop that page's other records.
+    pub(crate) fn rebuild(&mut self) -> StorageResult<()> {
+        let flagged: BTreeSet<usize> =
+            self.flagged.iter().map(|&(d, _)| d).collect();
+        for page in self.staged.values_mut() {
+            let stale: Vec<Id> = page
+                .iter()
+                .map(|(id, _)| id)
+                .filter(|id| flagged.contains(&self.disk.bucket_of(id.raw())))
+                .collect();
+            for id in stale {
+                page.remove(id);
             }
         }
-        for f in &self.flagged {
-            for (id, bytes) in f.page.iter() {
-                out.insert(id.raw(), Some(bytes.to_vec()));
+        for page in std::mem::take(&mut self.pages) {
+            for (id, bytes) in page.iter() {
+                let bucket = self.remote.bucket_of(id.raw());
+                self.staged
+                    .get_mut(&bucket)
+                    .ok_or(StorageError::Corrupt("upload congruence"))?
+                    .upsert(id, bytes.to_vec());
             }
         }
-        out.into_iter()
-            .map(|(raw, bytes)| (Id::from_raw(raw), bytes))
-            .collect()
+        Ok(())
     }
 }
 
 impl PageStore {
-    /// Step 1: every type's flagged disk entries, up to the input bound, and
-    /// a copy of each type's remote index — and whether that took every
-    /// flagged entry, the bound leaving none behind (a cut). The remote
-    /// pages a compaction carries forward come along, up to their own bound.
-    pub(crate) fn take_flagged(
+    /// Encode one remote page with its type's dictionary; an empty page is
+    /// no bytes at all — its bucket becomes vacant.
+    pub(crate) fn encode_remote(
         &self,
     ) -> StorageResult<(Vec<SlotUpload>, bool)> {
         let (mut taken, mut cut) = (0, true);
