@@ -37,6 +37,7 @@ mod header;
 mod link;
 pub mod manifest;
 mod object_mode;
+pub mod ordered;
 pub mod page;
 pub mod page_cache;
 pub mod page_store;
