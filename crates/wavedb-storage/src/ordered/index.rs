@@ -12,6 +12,7 @@
 use std::cmp::Ordering;
 
 use super::head::{QUANTA, Shape, SubHeader, q_of, with_q};
+use super::journal::Journal;
 use super::key::{prefix, shared_prefix, slice};
 
 /// The entries under one sub-header, ascending by quantum.
@@ -114,8 +115,10 @@ pub enum Found<M> {
 #[derive(Debug, Clone)]
 pub struct PageIndex<M> {
     /// The shape a range starts with when nothing before it suggests one.
-    seed: Shape,
+    pub(super) seed: Shape,
     pub(super) ranges: Vec<Range<M>>,
+    /// What changed since a header last named it.
+    pub(super) journal: Journal,
 }
 
 impl<M: Copy + Default> PageIndex<M> {
@@ -125,6 +128,7 @@ impl<M: Copy + Default> PageIndex<M> {
         Self {
             seed,
             ranges: Vec::new(),
+            journal: Journal::new(),
         }
     }
 
@@ -242,6 +246,7 @@ impl<M: Copy + Default> PageIndex<M> {
                 entries: Entries::one(entry, page.meta),
             },
         );
+        self.note_whole(range);
         Some(Slot { range, entry: 0 })
     }
 
@@ -256,6 +261,7 @@ impl<M: Copy + Default> PageIndex<M> {
             Some(encoded) => {
                 r.entries.pages[at.entry] = encoded;
                 r.entries.meta[at.entry] = page.meta;
+                self.note_entry(at);
                 Some(at)
             }
             None => self.isolate(at, page),
@@ -271,6 +277,7 @@ impl<M: Copy + Default> PageIndex<M> {
             .meta
             .get_mut(at.entry)?;
         *slot = meta;
+        self.note_entry(at);
         Some(())
     }
 
@@ -281,6 +288,9 @@ impl<M: Copy + Default> PageIndex<M> {
         if at.entry >= r.entries.len() {
             return None;
         }
+        // Named before it may go: a range gone is named by where it started.
+        self.note_whole(at.range);
+        let r = &mut self.ranges[at.range];
         r.entries.remove(at.entry);
         match r.entries.pages.first_mut() {
             Some(first) => *first = with_q(*first, 0),
