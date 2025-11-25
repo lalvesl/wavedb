@@ -92,6 +92,7 @@ impl<M: Copy + Default> PageIndex<M> {
         };
         if let Some(entry) = r.head.encode(q, page.address, page.blocks) {
             r.entries.insert(slot.entry, entry, page.meta);
+            self.note_whole(at.range);
             return Some(slot);
         }
         let hole = r.head.hole(q);
@@ -227,7 +228,11 @@ impl<M: Copy + Default> PageIndex<M> {
         let range = i + pieces.len();
         pieces.push(middle);
         pieces.extend(right);
+        let made = pieces.len();
         self.ranges.splice(i..=i, pieces);
+        for piece in i..i + made {
+            self.note_whole(piece);
+        }
         Slot { range, entry: 0 }
     }
 }
