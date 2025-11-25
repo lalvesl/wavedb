@@ -10,18 +10,20 @@ use std::collections::BTreeMap;
 use crate::block::Run;
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::PageStore;
-use crate::plan::{SlotPlan, blocks_of};
+use crate::pages::{EVICTED, run_of};
+use crate::plan::{PlannedPage, SlotPlan, blocks_for};
+use crate::shape::weight;
 
-/// Images one round moves at most, so its header names them all (a moved
-/// page costs it 12 bytes).
+/// Images one round moves at most, so its header has room for them.
 const ROUND_IMAGES: usize = 128;
 
 /// A run to carry forward.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Movable {
     slot: usize,
-    /// The page's bucket; `None` for the type's dictionary.
-    bucket: Option<usize>,
+    /// A key that finds the page, and its flags; `None` for the type's
+    /// dictionary.
+    page: Option<(Vec<u8>, u8)>,
     run: Run,
 }
 
@@ -66,8 +68,8 @@ impl PageStore {
                 if blocks > 0 && blocks + m.run.count > budget {
                     break;
                 }
-                let bytes = self.image_of(m)?;
-                blocks += blocks_of(&bytes);
+                let bytes = self.image_of(&m)?;
+                blocks += blocks_for(bytes.len());
                 loaded.push((m, bytes));
             }
             if loaded.is_empty() {
@@ -88,16 +90,25 @@ impl PageStore {
     ) -> StorageResult<()> {
         let mut plans: BTreeMap<usize, SlotPlan> = BTreeMap::new();
         for (m, bytes) in loaded {
-            let Some(dir) = self.types[m.slot].directory().borrow().clone()
+            let Some(index) = self.types[m.slot].directory().borrow().clone()
             else {
                 continue;
             };
             let plan = plans
                 .entry(m.slot)
-                .or_insert_with(|| SlotPlan::verbatim(m.slot, dir));
-            match m.bucket {
-                Some(bucket) => {
-                    plan.pages.insert(bucket, bytes);
+                .or_insert_with(|| SlotPlan::verbatim(m.slot, index));
+            match m.page {
+                Some((key, flags)) => {
+                    plan.pages.push(PlannedPage {
+                        key,
+                        image: bytes,
+                        decoded: None,
+                        flags,
+                    });
+                    plan.retired.push(m.run);
+                    // The copy carries the flag; the original takes its
+                    // weight with it.
+                    plan.unpended += weight(flags, m.run.count);
                 }
                 None => plan.dict = Some(bytes),
             }
@@ -201,13 +212,15 @@ impl PageStore {
     fn movable_runs(&self) -> impl Iterator<Item = Movable> + '_ {
         self.types.iter().enumerate().flat_map(|(slot, ts)| {
             let mut out = Vec::new();
-            if let Some(dir) = ts.directory().borrow().as_ref() {
-                for (bucket, desc) in dir.buckets() {
-                    if desc.is_allocated() {
+            if let Some(index) = ts.directory().borrow().as_ref() {
+                for (at, page) in index.pages() {
+                    if page.meta & EVICTED == 0
+                        && let Some(key) = index.key_of(at)
+                    {
                         out.push(Movable {
                             slot,
-                            bucket: Some(bucket),
-                            run: desc.run(),
+                            page: Some((key, page.meta)),
+                            run: run_of(page),
                         });
                     }
                 }
@@ -216,7 +229,7 @@ impl PageStore {
             if dict.is_allocated() {
                 out.push(Movable {
                     slot,
-                    bucket: None,
+                    page: None,
                     run: dict.run(),
                 });
             }
@@ -227,8 +240,8 @@ impl PageStore {
     /// The bytes a move writes: a page as stored, trimmed to its own length
     /// prefix; a dictionary as it stands (its newest image — growth is
     /// append-only, so every page's prefix of it is unchanged).
-    fn image_of(&self, m: Movable) -> StorageResult<Vec<u8>> {
-        if m.bucket.is_none() {
+    fn image_of(&self, m: &Movable) -> StorageResult<Vec<u8>> {
+        if m.page.is_none() {
             return Ok(self.types[m.slot].dictionary().borrow().image());
         }
         let mut buf = self.file.read_run(m.run)?;
