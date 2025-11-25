@@ -1,32 +1,33 @@
 //! The header that ends every settle window on disk ([RFC 0072] §3–§5,
-//! §8): the addresses the window changed, the spare room restating old
-//! ones, and which headers a reconstruction can no longer reach.
+//! §8): the ranges the window changed ([RFC 0078] §6), the spare room
+//! restating old ones, and which headers a reconstruction can no longer
+//! reach.
 //!
-//! What a window changes is **unrecorded** until a header names it: the
-//! pages it placed, a dictionary it grew — and, in disk + object mode, what
-//! uploads and evictions changed between windows. A header names as much of
-//! it as its 32 KiB hold; what does not fit waits for the next header, and
-//! only a header that leaves nothing unrecorded may end a batch.
+//! What a window changes is **unrecorded** until a header names it: every
+//! index journals its own changes — the pages a window placed, emptied,
+//! evicted, or whose flag an upload cleared — and a dictionary moved is
+//! noted beside them. A header names as much of it as its 32 KiB hold; what
+//! does not fit waits for the next header, and only a header that leaves
+//! nothing unrecorded may end a batch.
 //!
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
+//! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
 use std::cell::Ref;
 use std::collections::BTreeMap;
 
 use crate::block::{BlockDescriptor, Run};
-use crate::directory::Directory;
-use crate::disk_chain::{DiskChain, Touched};
+use crate::disk_chain::DiskChain;
 use crate::error::{StorageError, StorageResult};
-use crate::header::{
-    ENTRY_BYTES, Header, ITEM_BYTES, NO_FILE, Rotation, TypeEntry, depth_of,
-};
+use crate::header::{ENTRY_BYTES, Header, NO_FILE, TypeEntry};
 use crate::page_store::PageStore;
+use crate::pages::Pages;
 use crate::plan::SlotPlan;
 use crate::remote::{HEADER_BLOCKS, HEADER_BYTES};
 use crate::restate::{TypeView, horizon, restate};
 use crate::roots::{ROOTS_BLOCKS, Roots};
 
-/// Which directories a view is of.
+/// Which indexes a header entry is of.
 #[derive(Clone, Copy)]
 enum Side {
     Disk,
@@ -34,51 +35,6 @@ enum Side {
 }
 
 impl PageStore {
-    /// Whether anything is waiting for a header to name it.
-    pub(crate) fn has_unrecorded(&self) -> bool {
-        !self.unrecorded.borrow().slots.is_empty()
-    }
-
-    /// Mark everything unrecorded: every bucket of every directory and every
-    /// dictionary, so the batch that ends next names the whole addressing —
-    /// what a conversion and an adoption need, their flags and evictions
-    /// changing every bucket at once.
-    pub(crate) fn record_all(&self) {
-        if self.has_disk() {
-            let mut chain = self.chain.borrow_mut();
-            chain.restating = true;
-            chain.restate_from = None;
-        }
-        let mut unrecorded = self.unrecorded.borrow_mut();
-        for (idx, slot) in self.types.iter().enumerate() {
-            let touched = unrecorded.slots.entry(idx).or_default();
-            if let Some(dir) = slot.directory().borrow().as_ref() {
-                touched.disk.extend(dir.buckets().map(|(c, _)| c));
-            }
-            if let Some(dir) = slot.remote_directory().borrow().as_ref() {
-                touched.remote.extend(dir.buckets().map(|(c, _)| c));
-            }
-            touched.dict = true;
-            touched.remote_dict = self.object.is_some();
-        }
-    }
-
-    /// Note what a window changes: the buckets it places, the dictionaries
-    /// it grows.
-    pub(crate) fn note_placed(
-        &self,
-        pages: impl Iterator<Item = (usize, usize)>,
-        dicts: impl Iterator<Item = usize>,
-    ) {
-        let mut unrecorded = self.unrecorded.borrow_mut();
-        for (idx, bucket) in pages {
-            unrecorded.slots.entry(idx).or_default().disk.insert(bucket);
-        }
-        for idx in dicts {
-            unrecorded.slots.entry(idx).or_default().dict = true;
-        }
-    }
-
     /// The header at block `at`, padded to its 32 KiB, and whether it ends
     /// the batch: it does when `end` asks and it left nothing unrecorded.
     /// `plans` and `dicts` are the window's, not yet published: their
