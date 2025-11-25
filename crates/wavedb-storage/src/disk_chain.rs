@@ -6,7 +6,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::block::BlockDescriptor;
+
 use crate::header::Rotation;
+use crate::page_store::PageStore;
+use crate::pages::Pages;
+use crate::plan::SlotPlan;
 
 /// Changes no header names yet, per slot index.
 #[derive(Debug, Default)]
@@ -14,13 +19,10 @@ pub struct Unrecorded {
     pub(crate) slots: BTreeMap<usize, Touched>,
 }
 
-/// One slot's unrecorded changes.
+/// One slot's unrecorded changes besides its indexes', which each index
+/// journals itself (RFC 0078 §6).
 #[derive(Debug, Default)]
 pub struct Touched {
-    /// Disk buckets: a page placed, emptied, evicted, or its flag cleared.
-    pub(crate) disk: BTreeSet<usize>,
-    /// Remote buckets an upload placed or emptied.
-    pub(crate) remote: BTreeSet<usize>,
     /// The dictionary moved.
     pub(crate) dict: bool,
     /// The object store's copy of the dictionary moved.
@@ -28,11 +30,8 @@ pub struct Touched {
 }
 
 impl Touched {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.disk.is_empty()
-            && self.remote.is_empty()
-            && !self.dict
-            && !self.remote_dict
+    pub(crate) const fn is_empty(&self) -> bool {
+        !self.dict && !self.remote_dict
     }
 }
 
@@ -43,9 +42,9 @@ pub struct DiskChain {
     pub(crate) tail: Option<u64>,
     /// The header ending the batch before the newest one ended.
     pub(crate) last_end: Option<u64>,
-    /// Per type, the disk directories' rotation.
+    /// Per type, the disk indexes' rotation.
     pub(crate) types: BTreeMap<u64, Rotation>,
-    /// Per type, the object store's directories' rotation.
+    /// Per type, the object store indexes' rotation.
     pub(crate) remote: BTreeMap<u64, Rotation>,
     /// The lowest header the open read: the horizon stays there until the
     /// rotations pass it.
@@ -80,5 +79,90 @@ impl DiskChain {
     pub(crate) fn outlived(&self) -> bool {
         self.restated
             .is_some_and(|from| self.live.range(..from).next().is_some())
+    }
+}
+
+impl PageStore {
+    /// Every type's dictionary as the window leaves it, as a header names
+    /// it.
+    pub(crate) fn dicts_after(
+        &self,
+        plans: &[SlotPlan],
+        dicts: &BTreeMap<usize, BlockDescriptor>,
+    ) -> Vec<Option<u64>> {
+        self.types
+            .iter()
+            .enumerate()
+            .map(|(idx, slot)| {
+                let plan = plans.iter().position(|p| p.idx == idx);
+                let desc = plan
+                    .and_then(|p| dicts.get(&p).copied())
+                    .unwrap_or_else(|| slot.dictionary().borrow().descriptor());
+                desc.is_allocated().then_some(desc.raw())
+            })
+            .collect()
+    }
+
+    /// Whether anything is waiting for a header to name it.
+    pub(crate) fn has_unrecorded(&self) -> bool {
+        !self.unrecorded.borrow().slots.is_empty()
+            || self.types.iter().any(|s| {
+                s.directory()
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(Pages::has_unrecorded)
+                    || !s.remote_journal().borrow().is_empty()
+            })
+    }
+
+    /// Mark everything unrecorded: every range of every index whole, and
+    /// every dictionary, so the batch that ends next names the whole
+    /// addressing — what a conversion and an adoption need, their flags and
+    /// evictions changing every page at once.
+    pub(crate) fn record_all(&self) {
+        if self.has_disk() {
+            let mut chain = self.chain.borrow_mut();
+            chain.restating = true;
+            chain.restate_from = None;
+        }
+        let mut unrecorded = self.unrecorded.borrow_mut();
+        for (idx, slot) in self.types.iter().enumerate() {
+            if let Some(index) = slot.directory().borrow_mut().as_mut() {
+                index.record_all();
+            }
+            if let Some(index) = slot.remote_directory().borrow().as_ref() {
+                slot.remote_journal().borrow_mut().whole_all(index);
+            }
+            let touched = unrecorded.slots.entry(idx).or_default();
+            touched.dict = true;
+            touched.remote_dict = self.object.is_some();
+        }
+    }
+
+    /// Note the dictionaries a window grows.
+    pub(crate) fn note_dicts(&self, dicts: impl Iterator<Item = usize>) {
+        let mut unrecorded = self.unrecorded.borrow_mut();
+        for idx in dicts {
+            unrecorded.slots.entry(idx).or_default().dict = true;
+        }
+    }
+
+    /// Whether anything is still unrecorded once the window's plans are
+    /// counted in.
+    pub(crate) fn unrecorded_after(&self, plans: &[SlotPlan]) -> bool {
+        let planned = |idx: usize| plans.iter().find(|p| p.idx == idx);
+        !self.unrecorded.borrow().slots.is_empty()
+            || self.types.iter().enumerate().any(|(idx, slot)| {
+                let disk = planned(idx).map_or_else(
+                    || {
+                        slot.directory()
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(Pages::has_unrecorded)
+                    },
+                    |p| p.index.has_unrecorded(),
+                );
+                disk || !slot.remote_journal().borrow().is_empty()
+            })
     }
 }
