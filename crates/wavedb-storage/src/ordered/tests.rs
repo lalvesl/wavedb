@@ -60,7 +60,7 @@ impl Rng {
 
 /// A lane over the index: its pages' keys by address.
 struct Lane {
-    ix: PageIndex<()>,
+    ix: PageIndex<u8>,
     pages: BTreeMap<u64, Vec<Vec<u8>>>,
     next: u64,
     cap: usize,
@@ -81,8 +81,8 @@ impl Lane {
     }
 
     /// A fresh address, now and then far from the last one.
-    fn alloc(&mut self) -> Placed<()> {
-        let blocks = 1 + self.rng.below(self.max_blocks);
+    fn alloc(&mut self) -> Placed<u8> {
+        let blocks = self.ix.canonical(1 + self.rng.below(self.max_blocks));
         if self.rng.below(10) == 0 {
             self.next += 100_000;
         }
@@ -91,7 +91,7 @@ impl Lane {
         Placed {
             address,
             blocks,
-            meta: (),
+            meta: (address % 251) as u8,
         }
     }
 
@@ -123,7 +123,7 @@ impl Lane {
         }
     }
 
-    fn split(&mut self, at: Slot, left: Placed<()>, keys: &[Vec<u8>]) {
+    fn split(&mut self, at: Slot, left: Placed<u8>, keys: &[Vec<u8>]) {
         let right = self.alloc();
         let cut = |i: usize| Cut {
             first: &keys[0],
@@ -362,4 +362,138 @@ fn removing_the_first_page_hands_its_quanta_on() {
         }
     ));
     check(&ix);
+}
+
+/// A range as the tests compare it: start, base, shape, entries, meta.
+type Seen = (Vec<u8>, u64, [u8; 4], Vec<u32>, Vec<u8>);
+
+/// The ranges of `ix`, comparable.
+fn ranges_of(ix: &PageIndex<u8>) -> Vec<Seen> {
+    ix.ranges
+        .iter()
+        .map(|r| {
+            (
+                r.head.start(),
+                r.head.base_block,
+                r.head.shape.to_bytes(),
+                r.entries.pages.clone(),
+                r.entries.meta.clone(),
+            )
+        })
+        .collect()
+}
+
+/// Rebuild from `headers`, newest first, as a reopen would.
+fn rebuilt(
+    headers: &[(usize, Vec<RangeRecord>)],
+    seed: Shape,
+) -> PageIndex<u8> {
+    let (live, _) = headers.last().unwrap();
+    let mut rebuild = Rebuild::new(*live as u32);
+    for (_, records) in headers.iter().rev() {
+        if rebuild.is_done() {
+            break;
+        }
+        rebuild.take(records).unwrap();
+    }
+    rebuild.finish(seed).unwrap()
+}
+
+/// A lane whose changes go into a header every `every` inserts, `room`
+/// bytes a header; what does not fit waits for the next.
+fn persisted_lane(keys: &[Vec<u8>], seed: Shape, every: usize, room: usize) {
+    let mut lane = Lane::new(seed, 16, 3);
+    let mut headers = Vec::new();
+    for (n, key) in keys.iter().enumerate() {
+        lane.insert(key.clone());
+        if n % every == 0 {
+            lane.ix.split_long();
+            let (records, _) = lane.ix.drain(room);
+            headers.push((lane.ix.range_count(), records));
+        }
+    }
+    for key in keys.iter().step_by(3) {
+        lane.remove(key);
+    }
+    lane.ix.split_long();
+    while lane.ix.has_unrecorded() {
+        let (records, _) = lane.ix.drain(room);
+        headers.push((lane.ix.range_count(), records));
+    }
+    let again = rebuilt(&headers, seed);
+    assert_eq!(ranges_of(&again), ranges_of(&lane.ix));
+}
+
+#[test]
+fn a_rebuild_from_every_header_is_the_index() {
+    let mut rng = Rng(23);
+    let keys = time_keys(&mut rng, 3000);
+    persisted_lane(&keys, shape(21, 6, 1, 1), 7, usize::MAX);
+    let keys: Vec<_> = (0..3000).map(|_| rng.bytes(16)).collect();
+    persisted_lane(&keys, shape(48, 12, 1, 1), 5, usize::MAX);
+}
+
+#[test]
+fn what_a_header_has_no_room_for_waits_for_the_next() {
+    let mut rng = Rng(29);
+    let keys: Vec<_> = (0..2000).map(|_| rng.bytes(16)).collect();
+    // A room of about two whole ranges: most changes wait.
+    persisted_lane(&keys, shape(48, 12, 1, 1), 3, 600);
+}
+
+#[test]
+fn a_rewrite_in_place_is_recorded_as_its_entry() {
+    let mut ix: PageIndex<u8> = PageIndex::new(shape(0, 12, 1, 1));
+    let page = |address, meta| Placed {
+        address,
+        blocks: 1,
+        meta,
+    };
+    let at = ix.place(&[0, 0, 0, 0, 0, 0, 0, 1], page(10, 0)).unwrap();
+    let (first, _) = ix.drain(usize::MAX);
+    assert!(matches!(first[..], [RangeRecord::Whole(_)]));
+    ix.retarget(at, page(11, 7)).unwrap();
+    let (second, _) = ix.drain(usize::MAX);
+    assert!(
+        matches!(&second[..], [RangeRecord::Entries { entries, .. }] if entries.len() == 1)
+    );
+    assert!(!ix.has_unrecorded());
+    let again = rebuilt(&[(1, first), (1, second)], ix.seed());
+    assert_eq!(ranges_of(&again), ranges_of(&ix));
+}
+
+#[test]
+fn a_range_gone_is_recorded_gone() {
+    let mut ix: PageIndex<u8> = PageIndex::new(shape(0, 12, 1, 1));
+    let page = Placed {
+        address: 10,
+        blocks: 1,
+        meta: 0,
+    };
+    let at = ix.place(&[0, 0, 0, 0, 0, 0, 0, 1], page).unwrap();
+    let (first, _) = ix.drain(usize::MAX);
+    ix.remove(at).unwrap();
+    let (second, _) = ix.drain(usize::MAX);
+    assert!(matches!(second[..], [RangeRecord::Gone { .. }]));
+    let again = rebuilt(&[(1, first), (0, second)], ix.seed());
+    assert_eq!(again.range_count(), 0);
+}
+
+#[test]
+fn a_long_range_splits_and_every_key_stays_findable() {
+    let mut rng = Rng(31);
+    let keys = time_keys(&mut rng, 6000);
+    // Pages of four keys: well past a range's entries.
+    let mut lane = Lane::new(shape(30, 12, 1, 1), 4, 1);
+    for key in &keys {
+        lane.insert(key.clone());
+    }
+    lane.ix.split_long();
+    assert!(
+        lane.ix
+            .ranges
+            .iter()
+            .all(|r| r.entries.len() <= MAX_RANGE_ENTRIES)
+    );
+    lane.verify();
 }
