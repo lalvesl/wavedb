@@ -198,7 +198,7 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
 - **wavedb-storage** — the node engine behind `Store`: per shard, **data files**
   of 4 KiB blocks named by the block each starts at (16 hex digits, found by
   listing the directory; writing only appends, a file closes at
-  `StoreOptions::file_bytes`, 10 GiB — RFC 0071), per-STRUCT_HASH extendible-hashed page directories (a page over target splits in the round that rewrites it; RFC 0074), `SlotPage`
+  `StoreOptions::file_bytes`, 10 GiB — RFC 0071), per-STRUCT_HASH ordered page indexes (RFC 0078: pages hold contiguous ranges of the `Id`'s big-endian bytes, found through sorted sub-headers over one `u32` entry per page — a quantized first key, address and size — plus a flag byte; a page over target is cut on a quantum boundary in the round that rewrites it; the extendible directories of RFC 0074 are gone), `SlotPage`
   (checked-wire envelope, per-type zstd dictionaries with version = prefix length;
   the body three columns — ids, ends, records — held as read, one buffer, with
   the writes since beside it until an encode seals them, RFC 0076),
@@ -235,14 +235,14 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   A database created with `StoreOptions::remote` (`Server::object_store` on a
   node) keeps its pages in an S3-compatible object store, the disk caching
   them (RFC 0070 phase 3): settle rounds flag the pages they write, `upload`
-  reassembles the flagged ones into the object store's own extendible hash
-  (128 KiB pages, files of `[roots block][32 KiB header][pages]` under
-  `storage/<n>/`), and the remote
-  directories ride the disk's headers; the mode is fixed in the
+  rebuilds the object store's pages meeting each flagged page's key range
+  (its own ordered index over the same keys, 128 KiB pages, files of
+  `[roots block][32 KiB header][pages]` under `storage/<n>/`), and the
+  remote indexes ride the disk's headers; the mode is fixed in the
   `MANIFEST`. Past the compaction ceiling the least recently used uploaded
   pages leave the disk (phase 4): a read of one goes to the object store, a
-  write brings its bucket back before it commits, so a settle never meets
-  an evicted bucket. A database whose disk is gone opens from its files
+  write brings its page back before it commits, so a settle never meets
+  an evicted page. A database whose disk is gone opens from its files
   alone (phase 5): the same headers and walk, so no snapshot object is
   needed; only a **cut** (an upload that
   left nothing waiting) is recovered, so no batch comes back in part.

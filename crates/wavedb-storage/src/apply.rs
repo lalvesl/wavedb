@@ -234,7 +234,7 @@ impl Store for PageStore {
 }
 
 impl PageStore {
-    /// Restore every evicted bucket `batch` writes to, then commit it —
+    /// Restore every evicted page `batch` writes to, then commit it —
     /// checking again after the awaits, since an eviction may have run
     /// meanwhile; the commit itself is synchronous, so nothing can evict
     /// between that check and it.
@@ -244,8 +244,8 @@ impl PageStore {
             if evicted.is_empty() {
                 return self.apply_inner(batch);
             }
-            for (idx, bucket) in evicted {
-                self.restore(idx, bucket).await?;
+            for (idx, key) in evicted {
+                self.restore(idx, &key).await?;
             }
         }
     }

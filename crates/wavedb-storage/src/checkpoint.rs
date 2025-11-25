@@ -24,11 +24,12 @@ use crate::block::{BlockDescriptor, Run};
 use crate::error::StorageResult;
 use crate::page_cache::Lane;
 use crate::page_store::PageStore;
+use crate::pages::PENDING;
 use crate::plan::SlotPlan;
 use crate::record_cache::Records;
 use crate::window::{
     Target, assemble, carve, dict_descriptors, install, mark_run, size_of,
-    superseded, targets_of,
+    targets_of,
 };
 
 /// What a window writes — which decides the "not uploaded yet" flag of the
@@ -215,27 +216,25 @@ impl PageStore {
             .map_or_else(|| vec![None; targets.len()], |w| carve(w, sizes));
         // A settle writes what the object store has not seen; a move does
         // not change what it moves.
-        let pending = match placement {
-            Placement::Settle => Some(self.object.is_some()),
-            Placement::Restore => Some(false),
+        let flags = match placement {
+            Placement::Settle if self.object.is_some() => Some(PENDING),
+            Placement::Settle | Placement::Restore => Some(0),
             Placement::Move => None,
         };
-        let changed = install(&mut plans, &targets, &runs, pending);
+        let added = install(&mut plans, &targets, &runs, flags)?;
+        if let Some(object) = &self.object {
+            let punched: u64 = plans.iter().map(|p| p.punched).sum();
+            let unpended: u64 = plans.iter().map(|p| p.unpended).sum();
+            object.adjust_pending(added + punched, unpended);
+        }
         let dicts = dict_descriptors(&plans, &targets, &runs);
         let mut ended = false;
         let (mut header, mut roots) = (Vec::new(), Vec::new());
         if logged {
-            let pages = targets.iter().filter_map(|t| match t {
-                Target::Page { plan, bucket } => {
-                    Some((plans[*plan].idx, *bucket))
-                }
-                _ => None,
-            });
-            let grown = dicts.keys().map(|&p| plans[p].idx);
-            self.note_placed(pages, grown);
+            self.note_dicts(dicts.keys().map(|&p| plans[p].idx));
             if let Some(at) = mark_run(&targets, &runs, false) {
                 (header, ended) =
-                    self.header_at(at.start, &plans, &dicts, end)?;
+                    self.header_at(at.start, &mut plans, &dicts, end)?;
                 if let Some(block) = mark_run(&targets, &runs, true) {
                     roots = self.roots_at(block.start, at.start, ended)?;
                 }
@@ -254,23 +253,26 @@ impl PageStore {
         // their new runs (RFC 0044) — after the write, which forgot the
         // window.
         for (target, run) in targets.iter().zip(&runs) {
-            if let (Target::Page { plan, bucket }, Some(run)) = (target, run)
-                && let Some(page) = plans[*plan].decoded.remove(bucket)
+            if let (Target::Page { plan, page }, Some(run)) = (target, run)
+                && let Some(decoded) = plans[*plan].pages[*page].decoded.take()
             {
-                self.file.page_cache().insert(Lane::Disk, *run, page);
+                self.file.page_cache().insert(Lane::Disk, *run, decoded);
             }
         }
-        for run in superseded(&changed, self.object.as_ref()) {
-            // No directory names it any more, so no read will ask for it:
-            // its image goes now rather than when the budget pushes it out.
+        for run in plans
+            .iter_mut()
+            .flat_map(|p| std::mem::take(&mut p.retired))
+        {
+            // No index names it any more, so no read will ask for it: its
+            // image goes now rather than when the budget pushes it out.
             self.file.page_cache().invalidate(run);
             self.retire_run(run);
         }
-        if pending.is_some() {
+        if flags.is_some() {
             // A page written for use — settled or brought back — is hot.
-            for target in &targets {
-                if let Target::Page { plan, bucket } = target {
-                    self.touch(plans[*plan].idx, *bucket);
+            for (target, run) in targets.iter().zip(&runs) {
+                if let (Target::Page { plan, .. }, Some(run)) = (target, run) {
+                    self.touch(plans[*plan].idx, run.start);
                 }
             }
         }
@@ -278,7 +280,7 @@ impl PageStore {
         Ok(ended)
     }
 
-    /// Adopt the working directories and the new dictionary runs.
+    /// Adopt the working indexes and the new dictionary runs.
     fn publish(
         &self,
         plans: Vec<SlotPlan>,
@@ -295,7 +297,7 @@ impl PageStore {
             }
         }
         for work in plans {
-            *self.types[work.idx].directory().borrow_mut() = Some(work.dir);
+            *self.types[work.idx].directory().borrow_mut() = Some(work.index);
         }
     }
 }
