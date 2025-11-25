@@ -18,7 +18,7 @@
 //!
 //! The dictionary is stored in the data files like a page: a block run handed out
 //! by the allocator, holding `[len (u32 LE)][to_wire_checked(buf)]`, repointed
-//! by its [`Directory`](crate::directory::Directory) whenever the buffer
+//! by its type's state ([`DictState`]) whenever the buffer
 //! grows (which stops at the cap). On open the run the newest header names is
 //! read back, so every `dict_len` a page stamps resolves against it.
 
