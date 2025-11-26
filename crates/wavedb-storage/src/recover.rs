@@ -33,10 +33,11 @@ use futures::future::try_join_all;
 
 use crate::block::BlockDescriptor;
 use crate::dictionary::Dictionary;
-use crate::directory::Directory;
 use crate::error::{StorageError, StorageResult};
 use crate::header::{Chain, Header, Rotation};
+use crate::ordered::Shape;
 use crate::page_store::{PageStore, StoreOptions};
+use crate::pages::{EVICTED, Pages};
 use crate::plan::SlotPlan;
 use crate::recover_headers::Headers;
 use crate::remote::{FILE_BLOCKS, Remote};
@@ -49,10 +50,10 @@ pub struct Found {
     pub types: Vec<FoundType>,
 }
 
-/// One type's remote directory, and its dictionary image if it has one.
+/// One type's remote index, and its dictionary image if it has one.
 pub struct FoundType {
     pub struct_hash: u64,
-    pub remote: Vec<BlockDescriptor>,
+    pub remote: Option<Pages>,
     pub dict: Option<(BlockDescriptor, Vec<u8>)>,
 }
 
@@ -116,7 +117,9 @@ pub async fn recover(
         floor: top.horizon,
         ..Chain::default()
     };
-    let walked = walk(&mut headers, &top, registered, Lane::Types).await?;
+    let walked =
+        walk(&mut headers, &top, registered, Lane::Types, Shape::REMOTE)
+            .await?;
     for w in &walked {
         let rotation = Rotation {
             last: w.newest,
@@ -126,12 +129,12 @@ pub async fn recover(
     }
     let types = try_join_all(walked.into_iter().map(|w| async move {
         let dict = match w.dict {
-            Some(desc) => Some((desc, remote.fetch(desc).await?)),
+            Some(desc) => Some((desc, remote.fetch(desc.run()).await?)),
             None => None,
         };
         StorageResult::Ok(FoundType {
             struct_hash: w.struct_hash,
-            remote: w.slots,
+            remote: w.index,
             dict,
         })
     }))
@@ -180,8 +183,9 @@ impl PageStore {
             .collect()
     }
 
-    /// Take what a recovery found: the remote directories and the chain as
-    /// they are, every disk bucket evicted, the dictionaries written to disk,
+    /// Take what a recovery found: the remote indexes and the chain as they
+    /// are, the disk's index the object store's shape with every page
+    /// evicted, the dictionaries written to disk,
     /// then a durable batch naming all of it, so the disk is a root of its
     /// own.
     ///
@@ -195,19 +199,17 @@ impl PageStore {
                 .slot_index(t.struct_hash)
                 .ok_or(StorageError::UnregisteredStructHash(t.struct_hash))?;
             let slot = &self.types[idx];
-            if t.remote.is_empty() {
+            let Some(remote) = t.remote else {
                 continue;
+            };
+            // The disk's index takes the object store's shape, every page
+            // evicted: a read goes there, a write brings its page back.
+            let mut disk = remote.clone();
+            let slots: Vec<_> = remote.pages().map(|(at, _)| at).collect();
+            for at in slots {
+                disk.set_meta(at, EVICTED);
             }
-            // The disk's directory takes the object store's shape: every
-            // page evicted, at the depth it has there.
-            let evicted = t
-                .remote
-                .iter()
-                .map(|d| BlockDescriptor::EVICTED.with_depth(d.depth()))
-                .collect();
-            let disk = Directory::from_slots(evicted, self.seed);
-            *slot.remote_directory().borrow_mut() =
-                Some(Directory::from_slots(t.remote, self.seed));
+            *slot.remote_directory().borrow_mut() = Some(remote);
             *slot.directory().borrow_mut() = Some(disk.clone());
             if let Some((desc, image)) = t.dict {
                 let dict = Dictionary::from_bytes(&image)?;
@@ -272,9 +274,9 @@ mod tests {
     use wavedb_platform::s3::When;
     use wavedb_platform::s3::test_server::TestServer;
 
-    use super::recover;
-    use crate::block::BlockDescriptor;
+    use super::{FoundType, recover};
     use crate::header::{Header, NO_FILE, TypeEntry};
+    use crate::ordered::{RangeRecord, Shape, WholeRange};
     use crate::recover_headers::file_bytes;
     use crate::remote::{FILE_BLOCKS, Remote, file_of};
     use crate::upload_file::{FIRST_PAGE, SECTION};
@@ -288,17 +290,30 @@ mod tests {
         file * FILE_BLOCKS + SECTION
     }
 
-    /// A descriptor of a one-block page at the head of file `file`.
-    /// A page of one block at the head of file `file`, one of the two
-    /// buckets of a depth-1 directory.
-    fn page(file: u64) -> u64 {
-        BlockDescriptor::new(file * FILE_BLOCKS + FIRST_PAGE, 1)
-            .with_depth(1)
-            .raw()
+    /// Where a one-block page at the head of file `file` starts.
+    const fn page(file: u64) -> u64 {
+        file * FILE_BLOCKS + FIRST_PAGE
     }
 
-    /// A header for file `file`, following file `prev`'s, naming bucket 0 of
-    /// a two-bucket type in itself — the type's previous entries in `prev`.
+    /// A one-range index, whole: its one page at the head of file `file`.
+    fn whole(file: u64) -> RangeRecord {
+        RangeRecord::Whole(WholeRange {
+            prefix: Vec::new(),
+            first_key: 0,
+            base_block: page(file),
+            shape: u32::from_le_bytes(Shape::REMOTE.to_bytes()),
+            pages: vec![0],
+            meta: vec![0],
+        })
+    }
+
+    /// Where a found type's first page starts.
+    fn first(t: &FoundType) -> Option<u64> {
+        Some(t.remote.as_ref()?.pages().next()?.1.address)
+    }
+
+    /// A header for file `file`, following file `prev`'s, naming a
+    /// one-range type whole in itself — its previous entries in `prev`.
     fn header(file: u64, prev: Option<u64>, end_of_batch: bool) -> Header {
         let prev = prev.map_or(NO_FILE, at);
         Header {
@@ -310,10 +325,10 @@ mod tests {
             end_of_batch,
             types: vec![TypeEntry {
                 struct_hash: SH,
-                depth: Some(1),
+                ranges: 1,
                 last: prev,
                 dict: None,
-                changed: vec![(0, page(file))],
+                changed: vec![whole(file)],
             }],
             remote: Vec::new(),
             chain: None,
@@ -352,8 +367,7 @@ mod tests {
         assert_eq!(found.chain.tail, Some(at(2)));
         assert_eq!(found.chain.last(SH), at(2));
         let t = &found.types[0];
-        assert_eq!(t.remote[0].raw(), page(2), "the newest entry wins");
-        assert_eq!(t.remote[1], BlockDescriptor::EMPTY, "never written");
+        assert_eq!(first(t), Some(page(2)), "the newest entry wins");
         assert!(found.chain.end >= 3 * FILE_BLOCKS, "past every file");
     }
 
@@ -364,7 +378,7 @@ mod tests {
         block_on(remote.bucket().delete(&remote.file_key(1))).unwrap();
         let found = block_on(recover(&remote, &[SH], 0)).unwrap().unwrap();
         assert_eq!(found.chain.tail, Some(at(0)));
-        assert_eq!(found.types[0].remote[0].raw(), page(0));
+        assert_eq!(first(&found.types[0]), Some(page(0)));
         assert!(found.chain.end >= 3 * FILE_BLOCKS, "past the leftover too");
     }
 
@@ -396,10 +410,10 @@ mod tests {
         let mut named = header(3, Some(2), true);
         named.types.push(TypeEntry {
             struct_hash: LATE,
-            depth: Some(1),
+            ranges: 1,
             last: NO_FILE,
             dict: None,
-            changed: vec![(0, page(3))],
+            changed: vec![whole(3)],
         });
         put(&remote, &named, 3);
         put(&remote, &header(4, Some(3), true), 4);
@@ -407,7 +421,7 @@ mod tests {
         let found = block_on(recover(&remote, &[SH, LATE, 9], 0)).unwrap();
         let found = found.unwrap();
         let late = found.types.iter().find(|t| t.struct_hash == LATE);
-        assert_eq!(late.map(|t| t.remote[0].raw()), Some(page(3)));
+        assert_eq!(late.and_then(first), Some(page(3)));
         assert_eq!(found.chain.last(LATE), at(3), "its newest header");
         assert!(found.types.iter().all(|t| t.struct_hash != 9), "unnamed");
     }

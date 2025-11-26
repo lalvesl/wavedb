@@ -29,8 +29,17 @@
 
 use std::mem::size_of;
 
+use seahash::hash_seeded;
+
 pub use crate::record_segment::Loc;
 use crate::record_segment::Segment;
+
+/// A SeaHash of a 128-bit `Id` under a per-store seed: portable across
+/// machines, and keyed so collisions cannot be precomputed.
+#[must_use]
+pub const fn hash_of(id: u128, seed: [u64; 4]) -> u64 {
+    hash_seeded(&id.to_le_bytes(), seed[0], seed[1], seed[2], seed[3])
+}
 
 /// How many times larger than its segment count the directory may grow: a
 /// split that would double it past that spills to the overflow list instead.
@@ -78,7 +87,7 @@ impl RecordIndex {
 
     /// The hash `id` is indexed under.
     pub const fn hash(&self, id: u128) -> u64 {
-        crate::directory::hash_of(id, self.seed)
+        hash_of(id, self.seed)
     }
 
     /// The seed [`hash`](Self::hash) uses — for a caller that must hash
