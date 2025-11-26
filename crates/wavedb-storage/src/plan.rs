@@ -1,62 +1,57 @@
-//! Phase 1 of a settle round ([RFC 0041]) — turning a round of touched ids into
-//! page **images**, grouped per bucket, writing nothing.
+//! Phase 1 of a settle round ([RFC 0041], [RFC 0078] §5) — a round's
+//! records into page **images**, writing nothing.
 //!
-//! The pre-0041 settle walked a round **per `Id`**, and every id did a whole
-//! read-modify-write of its bucket page: a hundred ids landing in one bucket
-//! cost a hundred read/alloc/write/free cycles of the same page. Here the ids
-//! are grouped by bucket first, so a page is read once, receives every id that
-//! routes to it, and is serialised once. The images go to
-//! [`crate::checkpoint`], which places all of them in one contiguous window.
-//!
-//! Splits are planned here too, **after** the ids are applied: a split only
-//! ever moves keys out of the page being split, so a record placed against
-//! the pre-split directory keeps its address (or is repartitioned by the
-//! split itself, [RFC 0074]). Nothing is written until the whole shape is decided, so
-//! no page is ever written twice in one round.
+//! The records are routed to the pages their keys fall in, each page read
+//! once, receiving every record that routes to it, and serialised once
+//! (`crate::shape`); the images go to [`crate::checkpoint`], which places
+//! all of them in one contiguous window and then points their entries at
+//! the runs they got. Nothing is written until the whole shape is decided,
+//! so no page is ever written twice in one round.
 //!
 //! [RFC 0041]: ../../../rfcs/0041-single-barrier-checkpoint.md
-//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing.md
+//! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
-use std::collections::BTreeMap;
-use std::collections::btree_map::Entry;
-
-use crate::block::{BLOCK_SIZE, MAX_COUNT, MAX_PAGE_BYTES, round_count};
+use crate::block::Run;
 use crate::dictionary::DictState;
-use crate::directory::Directory;
-use crate::error::{StorageError, StorageResult};
+use crate::error::StorageResult;
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
+use crate::pages::{Pages, disk_pages, run_of, take_page};
 use crate::record_cache::Records;
-use crate::split::split_staged;
-use crate::struct_storage::TypeSlot;
+pub use crate::shape::{PlannedPage, blocks_for};
+use crate::shape::{Rules, shape};
 
-/// One slot's planned contribution to a settle round.
+/// One slot's planned contribution to a round.
 pub struct SlotPlan {
     /// Index into [`PageStore::types`].
     pub(crate) idx: usize,
-    /// The directory after the plan: final bucket count, with every rewritten
-    /// bucket still holding its **old** descriptor (freed at install time).
-    pub(crate) dir: Directory,
-    /// Bucket → serialised page. An empty image means the bucket becomes
-    /// [`BlockDescriptor::EMPTY`] and consumes no window space.
-    pub(crate) pages: BTreeMap<usize, Vec<u8>>,
+    /// The index after the plan: its new pages' entries at stand-ins until
+    /// the window is placed.
+    pub(crate) index: Pages,
+    /// The pages to write.
+    pub(crate) pages: Vec<PlannedPage>,
     /// The grown dictionary buffer, when sampling extended it this round.
     pub(crate) dict: Option<Vec<u8>>,
-    /// Bucket → the page its image encodes, where the plan has it decoded:
-    /// held in the page cache under its new run once the window is written.
-    pub(crate) decoded: BTreeMap<usize, SlotPage>,
+    /// Runs the plan stops naming, freed once the window is written.
+    pub(crate) retired: Vec<Run>,
+    /// Pending blocks the retired pages took with them.
+    pub(crate) unpended: u64,
+    /// Holes left pending — removals the object store must learn.
+    pub(crate) punched: u64,
 }
 
 impl SlotPlan {
-    /// A plan carrying pages that are already serialised — the
-    /// defragmenter, which moves stored bytes verbatim.
-    pub(crate) const fn verbatim(idx: usize, dir: Directory) -> Self {
+    /// A plan carrying pages that are already serialised — a move, which
+    /// carries stored bytes verbatim, or a page brought back.
+    pub(crate) const fn verbatim(idx: usize, index: Pages) -> Self {
         Self {
             idx,
-            dir,
-            pages: BTreeMap::new(),
+            index,
+            pages: Vec::new(),
             dict: None,
-            decoded: BTreeMap::new(),
+            retired: Vec::new(),
+            unpended: 0,
+            punched: 0,
         }
     }
 }
