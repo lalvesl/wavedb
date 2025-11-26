@@ -73,17 +73,19 @@ impl Heat {
 }
 
 impl PageStore {
-    /// Note a use of a disk bucket — nothing for a disk-only store.
-    pub(crate) fn touch(&self, idx: usize, bucket: usize) {
+    /// Note a use of the disk page of slot `idx` at block `start` — nothing
+    /// for a disk-only store.
+    pub(crate) fn touch(&self, idx: usize, start: u64) {
         if let Some(object) = &self.object {
-            object.heat.borrow_mut().touch(idx, bucket);
+            object.heat.borrow_mut().touch(idx, start);
         }
     }
 
-    /// Note an evicted bucket worth having on disk again.
-    pub(crate) fn want(&self, idx: usize, bucket: usize) {
+    /// Note an evicted page — named by a key of its — worth having on disk
+    /// again.
+    pub(crate) fn want(&self, idx: usize, key: Vec<u8>) {
         if let Some(object) = &self.object {
-            object.wanted.borrow_mut().insert((idx, bucket));
+            object.wanted.borrow_mut().insert((idx, key));
         }
     }
 
@@ -92,7 +94,7 @@ impl PageStore {
     /// Returns the blocks evicted; `0` for a disk-only store.
     ///
     /// Everything committed is settled first, so no unsettled record routes
-    /// to a bucket about to leave the disk.
+    /// to a page about to leave the disk.
     ///
     /// # Errors
     /// The settle's faults; nothing is evicted then.
@@ -115,34 +117,48 @@ impl PageStore {
                 .enumerate()
                 .filter(|(_, s)| !s.is_resident());
             for (idx, slot) in evictable {
-                let dir = slot.directory().borrow();
-                let Some(dir) = dir.as_ref() else { continue };
-                for (bucket, desc) in dir.buckets() {
-                    if desc.is_allocated() && !desc.pending_upload() {
-                        cold.push((heat.stamp(idx, bucket), idx, bucket));
+                let index = slot.directory().borrow();
+                let Some(index) = index.as_ref() else {
+                    continue;
+                };
+                for (at, page) in index.pages() {
+                    if page.meta & (PENDING | EVICTED) == 0
+                        && let Some(key) = index.key_of(at)
+                    {
+                        let stamp = heat.stamp(idx, page.address);
+                        cold.push((stamp, idx, key));
                     }
                 }
             }
         }
         cold.sort_unstable();
         let mut evicted = 0;
-        let mut unrecorded = self.unrecorded.borrow_mut();
-        for (_, idx, bucket) in cold {
+        for (_, idx, key) in cold {
             if live <= target_blocks {
                 break;
             }
-            let mut dir = self.types[idx].directory().borrow_mut();
-            let Some(dir) = dir.as_mut() else { continue };
-            let run = dir.descriptor(bucket).run();
-            dir.set_descriptor(bucket, BlockDescriptor::EVICTED);
+            let mut index = self.types[idx].directory().borrow_mut();
+            let Some(index) = index.as_mut() else {
+                continue;
+            };
+            let Found::Page { at, page } = index.find(&key) else {
+                continue;
+            };
+            let run = run_of(page);
+            index.set_meta(at, page.meta | EVICTED);
             self.file.page_cache().invalidate(run);
+            object.heat.borrow_mut().forget(idx, run.start);
             self.retire_run(run);
-            unrecorded.slots.entry(idx).or_default().disk.insert(bucket);
             live = live.saturating_sub(run.count);
             evicted += run.count;
         }
         if !self.has_disk() {
-            unrecorded.slots.clear(); // no header to record it in
+            // No header to record it in.
+            for slot in &self.types {
+                if let Some(index) = slot.directory().borrow_mut().as_mut() {
+                    let _ = index.drain(usize::MAX);
+                }
+            }
         }
         Ok(evicted)
     }
@@ -153,8 +169,9 @@ impl PageStore {
         space.file_blocks - space.free_blocks - space.deferred_blocks
     }
 
-    /// The evicted buckets `batch` writes to, by slot index.
-    pub(crate) fn evicted_in(&self, batch: &[Write]) -> Vec<(usize, usize)> {
+    /// The evicted pages `batch` writes to, by slot index and a key of
+    /// theirs.
+    pub(crate) fn evicted_in(&self, batch: &[Write]) -> Vec<(usize, Vec<u8>)> {
         let mut out = BTreeSet::new();
         if self.object.is_none() {
             return Vec::new();
@@ -172,11 +189,15 @@ impl PageStore {
             let Some(idx) = self.slot_index(hash) else {
                 continue;
             };
-            let dir = self.types[idx].directory().borrow();
-            let Some(dir) = dir.as_ref() else { continue };
-            let bucket = dir.bucket_of(id.raw());
-            if dir.descriptor(bucket).is_evicted() {
-                out.insert((idx, bucket));
+            let index = self.types[idx].directory().borrow();
+            let Some(index) = index.as_ref() else {
+                continue;
+            };
+            if let Located::Page { at, flags, .. } = locate(index, id)
+                && flags & EVICTED != 0
+                && let Some(key) = index.key_of(at)
+            {
+                out.insert((idx, key));
             }
         }
         out.into_iter().collect()
