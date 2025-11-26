@@ -240,7 +240,8 @@ impl PageStore {
             .iter()
             .map(|s| s.remote_directory().borrow())
             .collect();
-        let views = self.views_of(&disk, &[], &BTreeMap::new());
+        let dict_of = self.dicts_after(&[], &BTreeMap::new());
+        let views = self.views_of(&disk, &[], &dict_of);
         let remote_views = self.remote_views_of(&remote);
         let mut chain = self.chain.borrow_mut();
         let mut line =
@@ -268,38 +269,33 @@ impl PageStore {
         }
     }
 
-    /// Every type's disk directory as the window leaves it.
+    /// Every type's disk index as the window leaves it.
     fn views_of<'a>(
         &self,
-        disk: &'a [Ref<'_, Option<Directory>>],
+        disk: &'a [Ref<'_, Option<Pages>>],
         plans: &'a [SlotPlan],
-        dicts: &BTreeMap<usize, BlockDescriptor>,
+        dict_of: &[Option<u64>],
     ) -> Vec<TypeView<'a>> {
         self.types
             .iter()
             .enumerate()
             .map(|(idx, slot)| {
-                let plan = plans.iter().position(|p| p.idx == idx);
-                let slots = plan.map_or_else(
-                    || disk[idx].as_ref().map_or(&[][..], Directory::slots),
-                    |p| plans[p].dir.slots(),
-                );
-                let dict = plan
-                    .and_then(|p| dicts.get(&p).copied())
-                    .unwrap_or_else(|| slot.dictionary().borrow().descriptor());
+                let plan = plans.iter().find(|p| p.idx == idx);
+                let index =
+                    plan.map_or_else(|| disk[idx].as_ref(), |p| Some(&p.index));
                 TypeView {
                     struct_hash: slot.struct_hash(),
-                    slots,
-                    dict: dict.is_allocated().then_some(dict.raw()),
+                    index,
+                    dict: dict_of[idx],
                 }
             })
             .collect()
     }
 
-    /// Every type's remote directory, empty in a disk-only store.
+    /// Every type's remote index, none in a disk-only store.
     fn remote_views_of<'a>(
         &self,
-        remote: &'a [Ref<'_, Option<Directory>>],
+        remote: &'a [Ref<'_, Option<Pages>>],
     ) -> Vec<TypeView<'a>> {
         if self.object.is_none() {
             return Vec::new();
@@ -311,9 +307,7 @@ impl PageStore {
                 let dict = slot.remote_dict().get();
                 TypeView {
                     struct_hash: slot.struct_hash(),
-                    slots: remote[idx]
-                        .as_ref()
-                        .map_or(&[][..], Directory::slots),
+                    index: remote[idx].as_ref(),
                     dict: dict.is_allocated().then_some(dict.raw()),
                 }
             })
@@ -322,9 +316,9 @@ impl PageStore {
 }
 
 /// The lowest header a reconstruction from the newest one reads
-/// ([`Header::horizon`]): where the rotations of the disk's directories —
-/// and in disk + object mode the object store's — last came round, or the
-/// last full restatement, whichever is higher.
+/// ([`Header::horizon`]): where the rotations of the disk's indexes — and
+/// in disk + object mode the object store's — last came round, or the last
+/// full restatement, whichever is higher.
 fn coverage(
     views: &[TypeView<'_>],
     remote_views: &[TypeView<'_>],
@@ -336,42 +330,4 @@ fn coverage(
         line = line.min(horizon(remote_views, &chain.remote, chain.floor));
     }
     line.max(chain.restated.unwrap_or(0))
-}
-
-/// Name as much of `touched`'s `side` as `room` holds in an entry of
-/// `entries`, spending the room and forgetting what was named.
-fn record(
-    touched: &mut Touched,
-    side: Side,
-    view: &TypeView<'_>,
-    rotations: &BTreeMap<u64, Rotation>,
-    entries: &mut Vec<TypeEntry>,
-    room: &mut usize,
-) {
-    let (buckets, dict) = match side {
-        Side::Disk => (&mut touched.disk, &mut touched.dict),
-        Side::Remote => (&mut touched.remote, &mut touched.remote_dict),
-    };
-    if (buckets.is_empty() && !*dict) || *room < ENTRY_BYTES {
-        return;
-    }
-    *room -= ENTRY_BYTES;
-    let mut changed = Vec::new();
-    while *room >= ITEM_BYTES {
-        let Some(bucket) = buckets.pop_first() else {
-            break;
-        };
-        if let Some(desc) = view.slots.get(bucket) {
-            changed.push((bucket as u32, desc.raw()));
-            *room -= ITEM_BYTES;
-        }
-    }
-    *dict = false;
-    entries.push(TypeEntry {
-        struct_hash: view.struct_hash,
-        depth: depth_of(view.slots),
-        last: rotations.get(&view.struct_hash).map_or(NO_FILE, |r| r.last),
-        dict: view.dict,
-        changed,
-    });
 }
