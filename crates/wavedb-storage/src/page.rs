@@ -18,7 +18,7 @@
 //! checked decoder needs the exact payload slice.
 //!
 //! **Not every page compresses.** The caller picks per write
-//! ([`Directory`](crate::directory::Directory) carries the per-type policy —
+//! (the type's [`DictState`](crate::dictionary::DictState) carries the policy —
 //! e.g. a `#[wavedb(compress = false)]` type skips zstd), and even
 //! with compression on, a body zstd cannot shrink is stored `Raw` — a page
 //! never grows for having been "compressed". `dict_len` pins a `Zstd` page to
