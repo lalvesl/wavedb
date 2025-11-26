@@ -301,33 +301,36 @@ impl PageStore {
         let Some(object) = &self.object else {
             return Ok(0);
         };
-        let wanted: Vec<(usize, usize)> =
-            object.wanted.borrow().iter().take(limit).copied().collect();
-        for &(idx, bucket) in &wanted {
-            self.restore(idx, bucket).await?;
-            object.wanted.borrow_mut().remove(&(idx, bucket));
+        let wanted: Vec<(usize, Vec<u8>)> =
+            object.wanted.borrow().iter().take(limit).cloned().collect();
+        for (idx, key) in &wanted {
+            self.restore(*idx, key).await?;
+            object.wanted.borrow_mut().remove(&(*idx, key.clone()));
         }
         Ok(wanted.len())
     }
 
-    /// `id`'s bytes from the object store, for a read whose disk bucket was
-    /// evicted — which marks the bucket wanted back.
+    /// `id`'s bytes from the object store, for a read whose disk page was
+    /// evicted — which marks the page wanted back.
     pub(crate) async fn read_evicted(
         &self,
         idx: usize,
-        bucket: usize,
+        key: Vec<u8>,
         id: Id,
     ) -> StorageResult<Option<Vec<u8>>> {
-        self.want(idx, bucket);
+        self.want(idx, key);
         self.read_remote(idx, id).await
     }
 
-    /// Whether `id`'s disk bucket is on disk (not evicted) — a diagnostic.
+    /// Whether `id`'s disk page is on disk (not evicted) — a diagnostic.
     #[must_use]
     pub fn is_resident(&self, struct_hash: u64, id: Id) -> bool {
         self.slot_of(struct_hash).is_none_or(|slot| {
-            slot.directory().borrow().as_ref().is_none_or(|dir| {
-                !dir.descriptor(dir.bucket_of(id.raw())).is_evicted()
+            slot.directory().borrow().as_ref().is_none_or(|index| {
+                !matches!(
+                    locate(index, id),
+                    Located::Page { flags, .. } if flags & EVICTED != 0
+                )
             })
         })
     }
@@ -338,7 +341,7 @@ mod tests {
     use super::Heat;
 
     #[test]
-    fn the_least_recently_used_bucket_has_the_lowest_stamp() {
+    fn the_least_recently_used_page_has_the_lowest_stamp() {
         let mut heat = Heat::default();
         heat.touch(0, 3);
         heat.touch(1, 0);
@@ -347,6 +350,8 @@ mod tests {
         assert!(heat.stamp(1, 0) < heat.stamp(0, 1));
         assert_eq!(heat.stamp(0, 2), 0, "never used");
         assert_eq!(heat.stamp(5, 9), 0);
+        heat.forget(0, 1);
+        assert_eq!(heat.stamp(0, 1), 0, "its run went");
     }
 
     /// The clock running out halves every stamp: the order survives, though
@@ -355,7 +360,7 @@ mod tests {
     fn a_full_clock_halves_and_keeps_the_order() {
         let mut heat = Heat {
             clock: u32::MAX - 1,
-            stamps: vec![vec![10, u32::MAX - 1]],
+            stamps: [((0, 0), 10), ((0, 1), u32::MAX - 1)].into(),
         };
         heat.touch(0, 2);
         heat.touch(0, 0);
