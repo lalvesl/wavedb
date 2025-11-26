@@ -32,6 +32,25 @@ pub struct Shape {
 }
 
 impl Shape {
+    /// A disk lane's seed: the coarsest quantization, refined where pages
+    /// crowd; 12 address bits, a 16 MiB window of 4 KiB blocks; 4 size
+    /// bits, a page of up to 16 blocks to a unit.
+    pub const DISK: Self = Self {
+        key_shift: MAX_SHIFT,
+        address_bits: 12,
+        address_factor: 1,
+        size_factor: 1,
+    };
+
+    /// The object store's seed: pages around 128 KiB, so 6 size bits —
+    /// up to 64 blocks to a unit — and a 4 MiB window.
+    pub const REMOTE: Self = Self {
+        key_shift: MAX_SHIFT,
+        address_bits: 10,
+        address_factor: 1,
+        size_factor: 1,
+    };
+
     /// A shape, if it is one: `key_shift ≤ 48`, `address_bits` in `1..=15`
     /// (the size field takes the rest of 16), both factors at least 1.
     #[must_use]

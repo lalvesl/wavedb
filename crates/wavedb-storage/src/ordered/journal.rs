@@ -33,6 +33,27 @@ impl Journal {
         self.ranges.is_empty()
     }
 
+    /// Everything `other` names, named here too.
+    pub fn merge(&mut self, other: &Self) {
+        for (start, qs) in &other.ranges {
+            match (self.ranges.get_mut(start), qs) {
+                (Some(Some(mine)), Some(theirs)) => mine.extend(theirs),
+                (Some(mine), None) => *mine = None,
+                (Some(None), Some(_)) => {}
+                (None, _) => {
+                    self.ranges.insert(start.clone(), qs.clone());
+                }
+            }
+        }
+    }
+
+    /// Every range of `pages` named whole.
+    pub fn whole_all<M: Copy + Default>(&mut self, pages: &PageIndex<M>) {
+        for range in 0..pages.ranges.len() {
+            self.whole(pages.start_of(range));
+        }
+    }
+
     fn whole(&mut self, start: Vec<u8>) {
         self.ranges.insert(start, None);
     }
@@ -122,32 +143,51 @@ impl PageIndex<u8> {
     /// does not fit stays for the next header. Returns the records and the
     /// bytes they take.
     pub fn drain(&mut self, room: usize) -> (Vec<RangeRecord>, usize) {
+        let mut journal = std::mem::take(&mut self.journal);
+        let drained = self.drain_from(&mut journal, room);
+        self.journal = journal;
+        drained
+    }
+
+    /// [`drain`](Self::drain), from a journal kept outside the index — a
+    /// second reader of its changes.
+    pub fn drain_from(
+        &self,
+        journal: &mut Journal,
+        room: usize,
+    ) -> (Vec<RangeRecord>, usize) {
         let mut records = Vec::new();
         let mut used = 0;
-        let starts: Vec<Vec<u8>> =
-            self.journal.ranges.keys().cloned().collect();
+        let starts: Vec<Vec<u8>> = journal.ranges.keys().cloned().collect();
         for start in starts {
-            let record = self.record_for(&start);
+            let record = self.record_for(journal, &start);
             let len = record.wire_len();
             if used + len > room {
                 break;
             }
             used += len;
             records.push(record);
-            self.journal.ranges.remove(&start);
+            journal.ranges.remove(&start);
         }
         (records, used)
     }
 
+    /// What changed since a header last named it — for a second reader to
+    /// take a copy of.
+    #[must_use]
+    pub const fn journal(&self) -> &Journal {
+        &self.journal
+    }
+
     /// The record naming what changed of the range at `start` now.
-    fn record_for(&self, start: &[u8]) -> RangeRecord {
+    fn record_for(&self, journal: &Journal, start: &[u8]) -> RangeRecord {
         let Some(range) = self.range_at(start) else {
             return RangeRecord::Gone {
                 start: start.to_vec(),
             };
         };
         let r = &self.ranges[range];
-        match self.journal.ranges.get(start) {
+        match journal.ranges.get(start) {
             Some(Some(qs)) => {
                 let entries = r
                     .entries
@@ -159,6 +199,8 @@ impl PageIndex<u8> {
                     .collect();
                 RangeRecord::Entries {
                     start: start.to_vec(),
+                    base_block: r.head.base_block,
+                    shape: u32::from_le_bytes(r.head.shape.to_bytes()),
                     entries,
                 }
             }
