@@ -10,9 +10,12 @@ use wavedb_platform::s3::{Put, When};
 use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
 use crate::header::Chain;
+use crate::ordered::Found;
 use crate::page_store::PageStore;
+use crate::pages::PENDING;
+use crate::shape::weight;
 use crate::upload::{IN_FLIGHT, Uploaded};
-use crate::upload_file::{Packed, SlotImages};
+use crate::upload_file::Packed;
 use crate::upload_plan::SlotUpload;
 
 impl PageStore {
@@ -46,14 +49,13 @@ impl PageStore {
             })
     }
 
-    /// Step 4, after every PUT: adopt the remote directories and clear the
-    /// flag of each page still at the descriptor it was taken at — one a
-    /// settle round rewrote meanwhile is newer than what went up, and keeps
-    /// its flag. What changed waits, unrecorded, for the next header.
+    /// Step 4, after every PUT: adopt the remote indexes — what they changed
+    /// noted for the disk's headers — and clear the flag of each disk entry
+    /// still as it was taken; one a settle round rewrote meanwhile is newer
+    /// than what went up, and keeps its flag.
     pub(crate) fn publish_upload(
         &self,
         work: Vec<SlotUpload>,
-        slots: &[SlotImages],
         carried: &Carried,
         packed: &Packed,
         chain: Chain,
@@ -70,31 +72,45 @@ impl PageStore {
         let mut unrecorded = self.unrecorded.borrow_mut();
         for (w, upload) in work.into_iter().enumerate() {
             let slot = &self.types[upload.idx];
-            let touched = unrecorded.slots.entry(upload.idx).or_default();
-            touched.remote.extend(slots[w].pages.keys());
+            if self.has_disk() {
+                slot.remote_journal().borrow_mut().merge(&upload.changes);
+            }
             *slot.remote_directory().borrow_mut() = Some(upload.remote);
             if let (Some(len), Some(desc)) = (carried.lens[w], carried.descs[w])
             {
                 slot.uploaded_dict().set(len);
                 slot.remote_dict().set(desc);
-                touched.remote_dict = true;
+                unrecorded.slots.entry(upload.idx).or_default().remote_dict =
+                    true;
             }
             let mut live = slot.directory().borrow_mut();
-            let Some(dir) = live.as_mut() else { continue };
-            for (bucket, desc) in upload.flagged {
-                if dir.descriptor(bucket) != desc {
+            let Some(disk) = live.as_mut() else { continue };
+            for f in upload.flagged {
+                let now = match disk.find(&f.lo) {
+                    Found::Page { at, page } => (at, Some(page)),
+                    Found::Hole(at) => (at, None),
+                    Found::Uncovered => continue,
+                };
+                let (at, page) = now;
+                let flags = page
+                    .map_or_else(|| disk.meta_at(at).unwrap_or(0), |p| p.meta);
+                if page != f.taken || flags != f.flags {
                     continue;
                 }
-                let sent = desc.with_pending_upload(false);
-                dir.set_descriptor(bucket, sent);
-                object.retally(desc, sent);
-                touched.disk.insert(bucket);
+                let blocks = page.map_or(0, |p| p.blocks);
+                disk.set_meta(at, flags & !PENDING);
+                object.adjust_pending(0, weight(flags, blocks));
                 done.pages += 1;
             }
         }
         if !self.has_disk() {
             // Object mode keeps no header to record it in.
             unrecorded.slots.clear();
+            for slot in &self.types {
+                if let Some(disk) = slot.directory().borrow_mut().as_mut() {
+                    let _ = disk.drain(usize::MAX);
+                }
+            }
         }
         *object.chain.borrow_mut() = chain;
         done
