@@ -32,24 +32,18 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
-use futures::stream::{self, StreamExt, TryStreamExt};
-
-use crate::block::BLOCK_SIZE;
-use crate::block::BlockDescriptor;
-use crate::directory::Directory;
+use crate::block::{BLOCK_SIZE, BlockDescriptor};
 use crate::error::{StorageError, StorageResult};
-use crate::header::Chain;
-use crate::header::NO_FILE;
-use crate::page::SlotPage;
+use crate::header::{Chain, NO_FILE};
+use crate::ordered::{Found, Placed as Entry};
 use crate::page_store::PageStore;
-use crate::remote::weight;
 use crate::roots::ROOTS_BLOCKS;
+use crate::shape::blocks_for;
 use crate::upload_file::{
-    Packed, Placed, SlotImages, TypeView, finish, layout, rebase,
+    Named, Packed, Placed, SlotImages, finish, layout, rebase,
 };
 use crate::upload_plan::SlotUpload;
 use crate::upload_publish::Carried;
-
 /// Blocks of flagged disk pages one upload takes (8 MiB) — a pacing bound,
 /// so the files it builds stay a few, and a backlog drains over several.
 pub const UPLOAD_INPUT_BLOCKS: u64 = 2048;
@@ -116,7 +110,7 @@ impl PageStore {
         self.drain()?;
         let (work, cut) = self.take_flagged()?;
         // Taken at a cut: the oldest write waiting is carried — back if the
-        // upload fails.
+        // upload fails, or its headers could not name all of it.
         let carried = if cut {
             object.oldest_write.take()
         } else {
@@ -124,39 +118,46 @@ impl PageStore {
         };
         let moved = work.iter().map(|w| w.moved.len()).sum();
         let shipped = self.ship(work, cut).await;
-        if shipped.is_err()
-            && let Some(at) = carried
-        {
+        let whole = matches!(shipped, Ok((_, true)));
+        if !whole && let Some(at) = carried {
             object.oldest_write.set(Some(at));
         }
-        shipped.map(|done| Uploaded { moved, ..done })
+        shipped.map(|(done, _)| Uploaded { moved, ..done })
     }
 
-    /// Everything after the take: fetch, rebuild, pack, PUT, publish.
+    /// Everything after the take: fetch, rebuild, pack, PUT, publish —
+    /// and whether it ended a batch.
     async fn ship(
         &self,
         mut work: Vec<SlotUpload>,
         cut: bool,
-    ) -> StorageResult<Uploaded> {
+    ) -> StorageResult<(Uploaded, bool)> {
         let object = self.object()?;
         if work.is_empty() {
-            return Ok(Uploaded::default());
+            return Ok((Uploaded::default(), false));
         }
         self.fetch_shared(&mut work).await?;
         let mut slots = Vec::with_capacity(work.len());
         // The dictionary length each carried copy holds.
         let mut dicts = Vec::with_capacity(work.len());
         for w in &mut work {
-            w.rebuild()?;
-            let pages = self.split_remote(w)?;
+            self.rebuild_remote(w)?;
             let slot = &self.types[w.idx];
             let dict = slot.dictionary().borrow();
             let len = dict.dictionary().len();
             let carried = dict.enabled()
                 && (len > slot.uploaded_dict().get() || w.move_dict);
             dicts.push(carried.then_some(len));
+            let pages = w
+                .shaped
+                .pages
+                .iter()
+                .map(|p| {
+                    let blocks = w.remote.canonical(blocks_for(p.image.len()));
+                    (p.image.clone(), blocks)
+                })
+                .collect();
             slots.push(SlotImages {
-                struct_hash: slot.struct_hash(),
                 pages,
                 dict: carried.then(|| dict.image()),
             });
@@ -182,30 +183,27 @@ impl PageStore {
             chain.start = chain.start.max(reserved.start);
             chain.end = reserved.end;
         }
-        let mut placed_dicts = vec![None; work.len()];
-        for placed in &packed.placed {
-            match *placed {
-                Placed::Page { slot, bucket, desc } => {
-                    work[slot].remote.set_descriptor(bucket, desc);
-                }
-                Placed::Dict { slot, desc } => placed_dicts[slot] = Some(desc),
-            }
-        }
-        let headers =
-            self.write_headers(&mut packed, &work, &placed_dicts, &mut chain);
+        let placed_dicts = install_remote(&mut work, &packed)?;
+        let headers = self.write_headers(
+            &mut packed,
+            &mut work,
+            &placed_dicts,
+            &mut chain,
+        );
+        let ended = headers.as_ref().is_ok_and(|&named| named && cut);
         let delivered = match (headers, link) {
             (Err(e), Some(link)) => {
                 link.abandon(packed.files.iter().map(|f| f.base).collect());
                 Err(e)
             }
             (Err(e), None) => Err(e),
-            (Ok(()), None) => self.put_files(&packed).await.inspect_err(|_| {
+            (Ok(_), None) => self.put_files(&packed).await.inspect_err(|_| {
                 // Any of the files may have landed: their numbers are never
                 // written again (`crate::recover`), so the next upload starts
                 // past them.
                 object.chain.borrow_mut().end = packed.end;
             }),
-            (Ok(()), Some(link)) => {
+            (Ok(_), Some(link)) => {
                 let sections = packed
                     .files
                     .iter()
@@ -220,7 +218,8 @@ impl PageStore {
             lens: dicts,
             descs: placed_dicts,
         };
-        Ok(self.publish_upload(work, &slots, &carried, &packed, chain))
+        let done = self.publish_upload(work, &carried, &packed, chain);
+        Ok((done, ended))
     }
 
     /// Write every file's header ([`finish`]) over a view of every
