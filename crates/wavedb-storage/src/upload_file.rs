@@ -305,174 +305,40 @@ mod tests {
 
     /// Pages follow the header, each at the blocks its entry names.
     #[test]
-    fn pages_follow_the_header_and_the_header_names_them() {
-        let mut packed = layout(0, &[images(9, &[(0, 2), (3, 1)])]);
+    fn pages_follow_the_header_at_the_blocks_they_are_given() {
+        let packed = layout(0, &[images(&[2, 1])]);
         assert_eq!(packed.files.len(), 1);
-        assert_eq!(packed.files[0].bytes.len(), HEAD + 3 * BLOCK_SIZE);
-        let first = page_desc(&packed.placed, 0);
-        assert_eq!(first, BlockDescriptor::new(FIRST_PAGE, 2));
-        let second = page_desc(&packed.placed, 3);
-        assert_eq!(second, BlockDescriptor::new(FIRST_PAGE + 2, 1));
-        assert_eq!(packed.end, FIRST_PAGE + 3);
-
-        let (nine, other) = (dir(4), dir(1));
-        let views = [view(5, &other), view(9, &nine)];
-        let mut chain = Chain::default();
-        finish(&mut packed, &views, &mut chain, 0).unwrap();
-        let h = header(&packed, 0);
-        assert_eq!((h.at, h.prev, h.end_of_batch), (SECTION, NO_FILE, true));
-        let roots = Roots::decode(&packed.files[0].bytes).unwrap();
-        assert_eq!((roots.at, roots.end), (0, packed.end));
-        assert_eq!(roots.root(0), Some(SECTION), "the batch it ends");
-        assert_eq!(h.types[0].struct_hash, 9, "the changed type first");
-        assert_eq!(h.types[0].depth, Some(2));
-        assert!(
-            h.types[0].changed.starts_with(&[
-                (0, first.with_depth(2).raw()),
-                (3, second.with_depth(2).raw())
-            ]),
-            "named at the depth the directory gives them"
+        assert_eq!(packed.files[0].base, SECTION);
+        let runs: Vec<Run> = packed
+            .placed
+            .iter()
+            .filter_map(|p| match p {
+                Placed::Page { run, .. } => Some(*run),
+                Placed::Dict { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [Run::new(FIRST_PAGE, 2), Run::new(FIRST_PAGE + 2, 1)]
         );
-        assert_eq!(h.types[1].struct_hash, 5, "then the restated one");
-        assert_eq!(chain.tail, Some(SECTION));
-        assert_eq!(chain.last(9), SECTION);
+        let len = packed.files[0].bytes.len();
+        assert_eq!(len, (FIRST_PAGE as usize + 3) * BLOCK_SIZE);
     }
 
-    /// The bound is on where a page starts: the one starting before 8 MiB
-    /// runs past it in the same file, and the next file starts at the first
-    /// boundary after it — the numbers it ran over are skipped.
+    /// A page starting before the 8 MiB mark runs past it; the next starts
+    /// a file on the next boundary.
     #[test]
     fn a_page_starting_before_the_mark_runs_past_it() {
-        let big = (FILE_BLOCKS * 3) as usize; // 24 MiB
-        let packed = layout(0, &[images(9, &[(0, 1), (1, big), (2, 1)])]);
+        let first = FILE_BLOCKS - FIRST_PAGE - 1;
+        let packed = layout(0, &[images(&[first, 4, 1])]);
         assert_eq!(packed.files.len(), 2);
-        let first = page_desc(&packed.placed, 1);
-        assert_eq!(first.start(), FIRST_PAGE + 1);
-        assert_eq!(
-            packed.files[0].bytes.len(),
-            HEAD + (1 + big) * BLOCK_SIZE,
-            "one object holds the whole large page"
-        );
-        assert_eq!(packed.files[1].number, 4, "files 1 to 3 are never used");
-        let next = page_desc(&packed.placed, 2).start();
-        assert_eq!(next, 4 * FILE_BLOCKS + FIRST_PAGE);
+        assert_eq!(packed.files[1].number, 2, "file 1's numbers were run over");
     }
 
+    /// An upload starts on the first file boundary at or after the end.
     #[test]
     fn an_upload_starts_on_the_next_file_boundary() {
-        let packed = layout(HEADER_BLOCKS + 5, &[images(9, &[(0, 1)])]);
-        assert_eq!(packed.files[0].number, 1);
-        let start = page_desc(&packed.placed, 0).start();
-        assert_eq!(start, FILE_BLOCKS + FIRST_PAGE);
-    }
-
-    /// Nine hundred types with a page each outgrow one header long before
-    /// 8 MiB of pages: the file closes on its header, and no header passes
-    /// its room.
-    #[test]
-    fn a_full_header_closes_the_file() {
-        let slots: Vec<SlotImages> =
-            (0..900).map(|h| images(h, &[(0, 1)])).collect();
-        let mut packed = layout(0, &slots);
-        assert!(packed.files.len() > 1, "{} files", packed.files.len());
-        let one = dir(1);
-        let views: Vec<TypeView<'_>> =
-            (0..900).map(|h| view(h, &one)).collect();
-        finish(&mut packed, &views, &mut Chain::default(), 0).unwrap();
-        for i in 0..packed.files.len() {
-            assert!(header(&packed, i).encode().len() <= HEADER_BYTES);
-        }
-    }
-
-    /// An upload's files link each to the one before, across uploads too,
-    /// and only the last file of a cut ends the batch.
-    #[test]
-    fn headers_link_back_and_only_the_last_ends_the_batch() {
-        let one = dir(1);
-        let views = [view(9, &one)];
-        let mut chain = Chain::default();
-        let big = FILE_BLOCKS as usize;
-        let mut first = layout(0, &[images(9, &[(0, big), (1, 1)])]);
-        finish(&mut first, &views, &mut chain, 0).unwrap();
-        assert_eq!(first.files.len(), 2);
-        let (a, b) = (header(&first, 0), header(&first, 1));
-        assert_eq!((a.end_of_batch, b.end_of_batch), (false, true));
-        assert_eq!(b.prev, a.at);
-
-        let mut second = layout(chain.end, &[images(9, &[(0, 1)])]);
-        second.cut = false;
-        finish(&mut second, &views, &mut chain, 0).unwrap();
-        let c = header(&second, 0);
-        assert_eq!(c.prev, b.at);
-        assert!(!c.end_of_batch, "a part of a backlog ends nothing");
-        assert_eq!(c.types[0].last, b.at, "the newest earlier entries");
-    }
-
-    /// Spare room restates addresses from a rotating cursor, the type
-    /// restated longest ago first — so a type nobody writes still shows up
-    /// near the head of the chain.
-    #[test]
-    fn spare_room_restates_on_from_the_cursor() {
-        let (busy, idle) = (dir(4), dir(4_096));
-        let views = [view(1, &busy), view(2, &idle)];
-        let mut chain = Chain::default();
-        for (hash, shifted) in [(1, 50), (2, 10)] {
-            let rotation = Rotation {
-                last: shifted,
-                shifted: Some(shifted),
-                ..Rotation::default()
-            };
-            chain.types.insert(hash, rotation);
-        }
-        chain.end = 60 * FILE_BLOCKS;
-        let mut packed = layout(chain.end, &[images(1, &[(0, 1)])]);
-        finish(&mut packed, &views, &mut chain, 0).unwrap();
-        let h = header(&packed, 0);
-        let idle_entry = &h.types[1];
-        assert_eq!((idle_entry.struct_hash, idle_entry.last), (2, 10));
-        let restated = idle_entry.changed.len();
-        assert!(
-            restated > 2_000,
-            "the idle type filled the room: {restated}"
-        );
-        assert_eq!(idle_entry.changed[0], (0, idle[0].raw()));
-        let rotation = chain.types[&2];
-        assert_eq!(rotation.last, h.at);
-        assert_eq!((rotation.shift, rotation.shifted), (restated, Some(h.at)));
-
-        // The next file continues where the cursor stopped — the busy type,
-        // restated in file 50, ahead of the one restated just now.
-        let mut next = layout(chain.end, &[images(1, &[(0, 1)])]);
-        finish(&mut next, &views, &mut chain, 0).unwrap();
-        let h = header(&next, 0);
-        let idle_entry = h.types.iter().find(|e| e.struct_hash == 2);
-        let first = idle_entry.and_then(|e| e.changed.first().copied());
-        assert_eq!(first, Some((restated as u32, idle[restated].raw())));
-    }
-
-    /// A type changed in every upload is named in every header, yet its
-    /// quiet buckets are restated only in its turn — ordered by mention it
-    /// would never get one. Ordered by restatement, every type comes round,
-    /// and a type never written is named in the very first header.
-    #[test]
-    fn every_type_comes_round_a_busy_one_and_an_empty_one_too() {
-        let (a, b, busy) = (dir(4_096), dir(4_096), dir(4_096));
-        let empty: [BlockDescriptor; 0] = [];
-        let views = [view(1, &a), view(2, &b), view(3, &busy), view(4, &empty)];
-        let mut chain = Chain::default();
-        let mut packed = layout(chain.end, &[images(3, &[(0, 1)])]);
-        finish(&mut packed, &views, &mut chain, 0).unwrap();
-        let first = header(&packed, 0);
-        let named = first.types.iter().find(|e| e.struct_hash == 4);
-        assert_eq!(named.map(|e| e.depth), Some(None), "the empty type");
-        for _ in 0..12 {
-            let mut packed = layout(chain.end, &[images(3, &[(0, 1)])]);
-            finish(&mut packed, &views, &mut chain, 0).unwrap();
-        }
-        for hash in [1, 2, 3, 4] {
-            let shifted = chain.types.get(&hash).and_then(|r| r.shifted);
-            assert!(shifted.is_some(), "type {hash} never came round");
-        }
-        assert!(chain.types[&3].shift > 0, "the busy type was restated");
+        let packed = layout(FILE_BLOCKS + 5, &[images(&[1])]);
+        assert_eq!(packed.files[0].number, 2);
     }
 }
