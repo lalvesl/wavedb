@@ -112,25 +112,13 @@ pub fn layout(end: u64, slots: &[SlotImages]) -> Packed {
     packed
 }
 
-/// What adding `item` bytes of `hash` costs `file`'s header: the item, and
-/// the type's entry if the file has none yet.
-fn cost(file: &File, hash: u64, item: usize) -> usize {
-    let entry = if file.items.contains_key(&hash) {
-        0
-    } else {
-        ENTRY_BYTES
-    };
-    entry + item
-}
-
-/// Make sure the last file can take the next image of `hash`, opening a new
-/// one when the cursor has passed its 8 MiB mark or the image would outgrow
-/// its header.
-fn open_room(packed: &mut Packed, hash: u64, item: usize) {
-    let fits = packed.files.last().is_some_and(|file| {
-        packed.end < (file.number + 1) * FILE_BLOCKS
-            && file.len + cost(file, hash, item) <= HEADER_BYTES
-    });
+/// Place `bytes` in `blocks` at the cursor, opening a file when the cursor
+/// has passed the last one's 8 MiB mark.
+fn place(packed: &mut Packed, bytes: &[u8], blocks: u64) -> Run {
+    let fits = packed
+        .files
+        .last()
+        .is_some_and(|file| packed.end < (file.number + 1) * FILE_BLOCKS);
     if !fits {
         let number = packed.end.div_ceil(FILE_BLOCKS);
         packed.end = number * FILE_BLOCKS + FIRST_PAGE;
@@ -138,30 +126,38 @@ fn open_room(packed: &mut Packed, hash: u64, item: usize) {
             number,
             base: number * FILE_BLOCKS + SECTION,
             roots: true,
-            items: BTreeMap::new(),
-            len: BARE_BYTES,
             bytes: vec![0; FIRST_PAGE as usize * BLOCK_SIZE],
         });
     }
+    let run = Run::new(packed.end, blocks);
+    packed.end += blocks;
+    if let Some(file) = packed.files.last_mut() {
+        let at = file.bytes.len();
+        file.bytes.extend_from_slice(bytes);
+        file.bytes.resize(at + blocks as usize * BLOCK_SIZE, 0);
+    }
+    run
 }
 
 /// Write every file's roots block and header, in order, advancing `chain`
-/// as it goes: each header links to the one before, names the types it
-/// holds pages of, spends its spare room restating old addresses, and
-/// records the horizon those restatements leave; the last ends the batch if
-/// the upload is a cut, and becomes the root its roots block names. `chain`
-/// ends at the last file.
+/// as it goes: each header links to the one before, names what of
+/// `named`'s indexes changed as far as its room goes, spends its spare room
+/// restating old ranges, and records the horizon those restatements leave;
+/// the last ends the batch if the upload is a cut and nothing is left to
+/// name, and becomes the root its roots block names. `chain` ends at the
+/// last file. Returns whether the headers named everything.
 ///
 /// # Errors
 /// [`StorageError::Corrupt`] when a header outgrew [`HEADER_BYTES`]
-/// (unreachable: the layout budgeted every entry and item).
+/// (unreachable: every entry and record is budgeted).
 pub fn finish(
     packed: &mut Packed,
-    views: &[TypeView<'_>],
+    named: &mut [Named<'_>],
     chain: &mut Chain,
     position: u32,
-) -> StorageResult<()> {
+) -> StorageResult<bool> {
     let files = packed.files.len();
+    let mut all = true;
     for (i, file) in packed.files.iter_mut().enumerate() {
         let base = file.number * FILE_BLOCKS;
         let mut header = Header {
@@ -170,28 +166,8 @@ pub fn finish(
             horizon: 0,
             shard: position,
             roots: chain.roots.unwrap_or(NO_FILE),
-            end_of_batch: packed.cut && i + 1 == files,
-            types: std::mem::take(&mut file.items)
-                .into_iter()
-                .map(|(hash, changed)| {
-                    let view = views.iter().find(|v| v.struct_hash == hash);
-                    // The layout placed each page at depth 0: its bucket's
-                    // depth is the directory's to say.
-                    let changed = changed
-                        .into_iter()
-                        .map(|(bucket, raw)| {
-                            (bucket, deepened(view, bucket, raw))
-                        })
-                        .collect();
-                    TypeEntry {
-                        struct_hash: hash,
-                        depth: view.and_then(|v| depth_of(v.slots)),
-                        last: chain.last(hash),
-                        dict: view.and_then(|v| v.dict),
-                        changed,
-                    }
-                })
-                .collect(),
+            end_of_batch: false,
+            types: Vec::new(),
             remote: Vec::new(),
             chain: None,
         };
