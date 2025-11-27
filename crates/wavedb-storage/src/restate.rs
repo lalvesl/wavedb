@@ -192,10 +192,10 @@ mod tests {
         pages
     }
 
-    fn view(hash: u64, slots: &[BlockDescriptor]) -> TypeView<'_> {
+    fn view(hash: u64, index: &Pages) -> TypeView<'_> {
         TypeView {
             struct_hash: hash,
-            slots,
+            index: Some(index),
             dict: None,
         }
     }
@@ -204,10 +204,10 @@ mod tests {
     /// is then where that rotation began, and rises with the next one.
     #[test]
     fn the_horizon_rises_as_rotations_complete() {
-        let (a, b) = (dir(128), dir(8));
+        let (a, b) = (index(60), index(4));
         let views = [view(1, &a), view(2, &b)];
         let mut rotations: BTreeMap<u64, Rotation> = BTreeMap::new();
-        let room = 12 * 40; // forty items a header, about
+        let room = 400; // a few ranges a header
         for at in 0..3 {
             restate(
                 &mut Vec::<TypeEntry>::new(),
@@ -218,7 +218,7 @@ mod tests {
             );
         }
         assert_eq!(horizon(&views, &rotations, 0), 0, "type 1 not round yet");
-        for at in 3..12 {
+        for at in 3..80 {
             restate(&mut Vec::new(), room, &views, &mut rotations, at);
         }
         let h = horizon(&views, &rotations, 0);
@@ -226,21 +226,23 @@ mod tests {
         assert!(rotations[&2].covered.is_some());
     }
 
-    /// A rotation names every page once, at its bucket, and no alias.
+    /// One header with room for all names every range once, whole, and
+    /// comes round.
     #[test]
-    fn a_rotation_names_buckets_not_aliases() {
-        let mut d = Directory::new([1, 2, 3, 4]);
-        for bucket in [0, 0, 0, 1] {
-            d.split(bucket);
-        }
-        let views = [view(1, d.slots())];
+    fn a_rotation_names_every_range_whole() {
+        let pages = index(5);
+        let views = [view(1, &pages)];
         let mut rotations = BTreeMap::new();
         let mut entries = Vec::new();
         restate(&mut entries, 32 * 1024, &views, &mut rotations, 0);
-        let named: Vec<u32> = entries[0].changed.iter().map(|c| c.0).collect();
-        let buckets: Vec<u32> = d.buckets().map(|(c, _)| c as u32).collect();
-        assert_eq!(named, buckets);
-        assert_eq!(entries[0].depth, Some(d.depth()));
+        assert_eq!(entries[0].changed.len(), 5);
+        assert!(
+            entries[0]
+                .changed
+                .iter()
+                .all(|r| matches!(r, RangeRecord::Whole(_)))
+        );
+        assert_eq!(entries[0].ranges, 5);
         assert!(rotations[&1].covered.is_some(), "one header, whole round");
     }
 }
