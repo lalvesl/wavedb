@@ -7,15 +7,18 @@
 use std::collections::BTreeMap;
 
 use crate::block::{BLOCK_SIZE, BlockDescriptor, Run};
-use crate::plan::{SlotPlan, blocks_of};
-use crate::remote::{HEADER_BLOCKS, ObjectState};
+use crate::error::{StorageError, StorageResult};
+use crate::ordered::{Found, Placed};
+use crate::plan::{SlotPlan, blocks_for};
+use crate::remote::HEADER_BLOCKS;
 use crate::roots::ROOTS_BLOCKS;
+use crate::shape::weight;
 
-/// Where a placed image's descriptor is installed once the window is written.
+/// What a placed image becomes once the window is written.
 pub enum Target {
     Page {
         plan: usize,
-        bucket: usize,
+        page: usize,
     },
     Dict {
         plan: usize,
@@ -32,11 +35,8 @@ pub enum Target {
 pub fn targets_of(plans: &[SlotPlan]) -> Vec<Target> {
     let mut targets = Vec::new();
     for (plan, work) in plans.iter().enumerate() {
-        for bucket in work.pages.keys() {
-            targets.push(Target::Page {
-                plan,
-                bucket: *bucket,
-            });
+        for page in 0..work.pages.len() {
+            targets.push(Target::Page { plan, page });
         }
         if work.dict.is_some() {
             targets.push(Target::Dict { plan });
@@ -45,16 +45,19 @@ pub fn targets_of(plans: &[SlotPlan]) -> Vec<Target> {
     targets
 }
 
-/// Blocks a target occupies. An emptied page occupies none — its bucket
-/// simply becomes vacant.
+/// Blocks a target occupies: a page exactly what its entry can name
+/// ([`canonical`](crate::ordered::PageIndex::canonical)).
 pub fn size_of(plans: &[SlotPlan], target: &Target) -> u64 {
     match target {
-        Target::Page { plan, bucket } => {
-            plans[*plan].pages.get(bucket).map_or(0, |b| blocks_of(b))
+        Target::Page { plan, page } => {
+            let work = &plans[*plan];
+            work.index
+                .canonical(blocks_for(work.pages[*page].image.len()))
         }
-        Target::Dict { plan } => {
-            plans[*plan].dict.as_deref().map_or(0, blocks_of)
-        }
+        Target::Dict { plan } => plans[*plan]
+            .dict
+            .as_deref()
+            .map_or(0, |d| blocks_for(d.len())),
         Target::Header => HEADER_BLOCKS,
         Target::Roots => ROOTS_BLOCKS,
     }
@@ -75,52 +78,49 @@ pub fn carve(window: Run, sizes: &[u64]) -> Vec<Option<Run>> {
         .collect()
 }
 
-/// Point every planned bucket at the run it was just given, returning each
-/// bucket's `(old, new)` descriptor.
+/// Point every planned page's entry at the run it was just given, flagged
+/// `flags` — or, for `None` (a move, which does not change what it moves),
+/// as the page was. Returns the pending blocks the pages add.
 ///
-/// `pending` is the new pages' "not uploaded yet" flag (RFC 0070 §1): `Some`
-/// sets it — a settle round, which writes what the object store has not
-/// seen — and `None` keeps the old page's — compaction, which moves bytes
-/// without changing them.
+/// # Errors
+/// [`StorageError::Corrupt`] for a page whose entry the plan lost, or a run
+/// no range can name.
 pub fn install(
     plans: &mut [SlotPlan],
     targets: &[Target],
     runs: &[Option<Run>],
-    pending: Option<bool>,
-) -> Vec<(BlockDescriptor, BlockDescriptor)> {
-    let mut changed = Vec::new();
+    flags: Option<u8>,
+) -> StorageResult<u64> {
+    let mut pending = 0;
     for (target, run) in targets.iter().zip(runs) {
-        let Target::Page { plan, bucket } = target else {
+        let (Target::Page { plan, page }, Some(run)) = (target, run) else {
             continue;
         };
-        let old = plans[*plan].dir.descriptor(*bucket);
-        let desc = run
-            .map_or(BlockDescriptor::EMPTY, BlockDescriptor::from_run)
-            .with_pending_upload(
-                pending.unwrap_or_else(|| old.pending_upload()),
-            );
-        plans[*plan].dir.set_descriptor(*bucket, desc);
-        changed.push((old, desc));
+        let work = &mut plans[*plan];
+        let planned = &work.pages[*page];
+        let meta = flags.unwrap_or(planned.flags);
+        let at = match work.index.find(&planned.key) {
+            Found::Page { at, .. } | Found::Hole(at) => at,
+            Found::Uncovered => {
+                return Err(StorageError::Corrupt(
+                    "a planned page lost its entry",
+                ));
+            }
+        };
+        let placed = Placed {
+            address: run.start,
+            blocks: run.count,
+            meta,
+        };
+        work.index
+            .retarget(at, placed)
+            .ok_or(StorageError::Corrupt("a run no range can name"))?;
+        pending += weight(meta, run.count);
     }
-    changed
-}
-
-/// Account for the descriptors a written window replaced: the runs no
-/// directory names any more, and the pending-upload tally.
-pub fn superseded(
-    changed: &[(BlockDescriptor, BlockDescriptor)],
-    object: Option<&ObjectState>,
-) -> Vec<Run> {
-    if let Some(object) = object {
-        for &(old, new) in changed {
-            object.retally(old, new);
-        }
+    for work in plans.iter_mut() {
+        work.index.split_long();
     }
-    changed
-        .iter()
-        .filter(|(old, _)| old.is_allocated())
-        .map(|(old, _)| old.run())
-        .collect()
+    Ok(pending)
 }
 
 /// The dictionary descriptor each plan whose dictionary grew was just given.
@@ -170,9 +170,7 @@ pub fn assemble(
     for (target, run) in targets.iter().zip(runs) {
         let Some(run) = run else { continue };
         let bytes: &[u8] = match target {
-            Target::Page { plan, bucket } => {
-                plans[*plan].pages[bucket].as_ref()
-            }
+            Target::Page { plan, page } => &plans[*plan].pages[*page].image,
             Target::Dict { plan } => {
                 plans[*plan].dict.as_deref().unwrap_or(&[])
             }
