@@ -27,9 +27,10 @@ use std::time::Instant;
 
 use wavedb_platform::s3::Bucket;
 
-use crate::block::{BLOCK_SIZE, BlockDescriptor};
+use crate::block::{BLOCK_SIZE, Run};
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::PageStore;
+use crate::shape::weight;
 
 /// Blocks of address space a file starts pages in (8 MiB).
 pub const FILE_BLOCKS: u64 = 2048;
@@ -95,11 +96,11 @@ pub const fn file_of(start: u64) -> u64 {
     start / FILE_BLOCKS
 }
 
-/// The bytes of its file a remote descriptor names.
+/// The bytes of its file a remote run names.
 #[must_use]
-pub const fn byte_range(desc: BlockDescriptor) -> Range<u64> {
-    let offset = (desc.start() % FILE_BLOCKS) * BLOCK_SIZE as u64;
-    offset..offset + desc.count() * BLOCK_SIZE as u64
+pub const fn byte_range(run: Run) -> Range<u64> {
+    let offset = (run.start % FILE_BLOCKS) * BLOCK_SIZE as u64;
+    offset..offset + run.count * BLOCK_SIZE as u64
 }
 
 /// What an object-backed store carries beside its disk.
@@ -110,17 +111,17 @@ pub(crate) struct ObjectState {
     /// always there), the newest file and its header's hash, and per type
     /// the newest file with entries for it (RFC 0070 §6).
     pub(crate) chain: RefCell<crate::header::Chain>,
-    /// Blocks of disk pages the object store has not received yet (an
-    /// emptied bucket counts one) — what the upload trigger reads.
+    /// Blocks of disk pages the object store has not received yet (a
+    /// pending hole counts one) — what the upload trigger reads.
     pub(crate) pending_blocks: Cell<u64>,
     /// One upload at a time.
     pub(crate) uploading: Cell<bool>,
-    /// How recently each disk bucket was read or written — what eviction
+    /// How recently each disk page was read or written — what eviction
     /// orders by (RFC 0070 §7).
     pub(crate) heat: RefCell<crate::evict::Heat>,
-    /// Evicted buckets worth having on disk again: read from the object
-    /// store, or holding back a split (`restore_wanted`).
-    pub(crate) wanted: RefCell<BTreeSet<(usize, usize)>>,
+    /// Evicted pages worth having on disk again, by slot and a key of
+    /// theirs: read from the object store (`restore_wanted`).
+    pub(crate) wanted: RefCell<BTreeSet<(usize, Vec<u8>)>>,
     /// When the oldest write no cut upload carries was committed — what
     /// the upload interval is measured against (RFC 0070 §9).
     pub(crate) oldest_write: Cell<Option<Instant>>,
@@ -167,19 +168,11 @@ impl ObjectState {
         }
     }
 
-    /// Account for a disk bucket going from `old` to `new`.
-    pub(crate) fn retally(&self, old: BlockDescriptor, new: BlockDescriptor) {
-        let n = self.pending_blocks.get() + weight(new);
-        self.pending_blocks.set(n.saturating_sub(weight(old)));
-    }
-}
-
-/// Blocks a disk descriptor adds to the pending upload.
-pub(crate) const fn weight(desc: BlockDescriptor) -> u64 {
-    if desc.pending_upload() {
-        if desc.count() == 0 { 1 } else { desc.count() }
-    } else {
-        0
+    /// Account for pending blocks added and taken away
+    /// ([`weight`](crate::shape::weight)).
+    pub(crate) fn adjust_pending(&self, added: u64, taken: u64) {
+        let n = self.pending_blocks.get() + added;
+        self.pending_blocks.set(n.saturating_sub(taken));
     }
 }
 
@@ -229,8 +222,17 @@ impl PageStore {
         let Some(object) = &self.object else { return };
         let mut blocks = 0;
         for slot in &self.types {
-            if let Some(dir) = slot.directory().borrow().as_ref() {
-                blocks += dir.buckets().map(|(_, d)| weight(d)).sum::<u64>();
+            if let Some(index) = slot.directory().borrow().as_ref() {
+                blocks += index
+                    .entries_all()
+                    .map(|(at, page)| {
+                        let meta = page
+                            .map(|p| p.meta)
+                            .or_else(|| index.meta_at(at))
+                            .unwrap_or(0);
+                        weight(meta, page.map_or(0, |p| p.blocks))
+                    })
+                    .sum::<u64>();
             }
         }
         object.pending_blocks.set(blocks);
@@ -240,36 +242,30 @@ impl PageStore {
         }
     }
 
-    /// One uploaded page's image, fetched by its remote descriptor.
+    /// One uploaded image, fetched by its remote run.
     ///
     /// # Errors
     /// [`StorageError::Remote`] when the request fails;
     /// [`StorageError::Corrupt`] when the object or the range is missing —
     /// a descriptor names bytes an upload put there.
-    pub(crate) async fn fetch_image(
-        &self,
-        desc: BlockDescriptor,
-    ) -> StorageResult<Vec<u8>> {
-        self.object()?.remote.fetch(desc).await
+    pub(crate) async fn fetch_image(&self, run: Run) -> StorageResult<Vec<u8>> {
+        self.object()?.remote.fetch(run).await
     }
 }
 
 impl Remote {
-    /// The image a remote descriptor names — what
+    /// The image a remote run names — what
     /// [`PageStore::fetch_image`] reads, usable before there is a store.
     ///
     /// # Errors
     /// As [`PageStore::fetch_image`].
-    pub(crate) async fn fetch(
-        &self,
-        desc: BlockDescriptor,
-    ) -> StorageResult<Vec<u8>> {
+    pub(crate) async fn fetch(&self, run: Run) -> StorageResult<Vec<u8>> {
         let remote = self;
-        let range = byte_range(desc);
+        let range = byte_range(run);
         let want = range.end - range.start;
         let image = remote
             .bucket()
-            .get(&remote.file_key(file_of(desc.start())), Some(range))
+            .get(&remote.file_key(file_of(run.start)), Some(range))
             .await?
             .ok_or(StorageError::Corrupt("an uploaded file is missing"))?;
         if image.len() as u64 != want {
@@ -281,29 +277,30 @@ impl Remote {
 
 #[cfg(test)]
 mod tests {
-    use super::{FILE_BLOCKS, HEADER_BLOCKS, byte_range, file_of, weight};
-    use crate::block::BlockDescriptor;
+    use super::{FILE_BLOCKS, HEADER_BLOCKS, byte_range, file_of};
+    use crate::block::Run;
+    use crate::pages::PENDING;
+    use crate::shape::weight;
 
     /// A page names its file by its start and its bytes by arithmetic — a
     /// page running past the file's 8 MiB still reads from that one file.
     #[test]
     fn a_descriptor_is_a_file_and_a_range() {
-        let first = BlockDescriptor::new(HEADER_BLOCKS, 3);
-        assert_eq!(file_of(first.start()), 0);
+        let first = Run::new(HEADER_BLOCKS, 3);
+        assert_eq!(file_of(first.start), 0);
         assert_eq!(byte_range(first), 32_768..32_768 + 3 * 4096);
 
-        let late = BlockDescriptor::new(5 * FILE_BLOCKS + 2047, 4096);
-        assert_eq!(file_of(late.start()), 5);
+        let late = Run::new(5 * FILE_BLOCKS + 2047, 4096);
+        assert_eq!(file_of(late.start), 5);
         let range = byte_range(late);
         assert_eq!(range.start, 2047 * 4096);
         assert_eq!(range.end - range.start, 4096 * 4096, "16 MiB, one object");
     }
 
     #[test]
-    fn a_pending_emptied_bucket_still_weighs() {
-        let page = BlockDescriptor::new(10, 8);
-        assert_eq!(weight(page), 0, "uploaded");
-        assert_eq!(weight(page.with_pending_upload(true)), 8);
-        assert_eq!(weight(BlockDescriptor::EMPTY.with_pending_upload(true)), 1);
+    fn a_pending_hole_still_weighs() {
+        assert_eq!(weight(0, 8), 0, "uploaded");
+        assert_eq!(weight(PENDING, 8), 8);
+        assert_eq!(weight(PENDING, 0), 1);
     }
 }
