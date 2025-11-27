@@ -204,51 +204,40 @@ impl PageStore {
         }
         Ok(())
     }
-
-    /// Split every staged remote page over [`REMOTE_TARGET_BLOCKS`], as the
-    /// disk's settle does (`crate::split`). Returns every staged bucket's
-    /// encoded image.
-    pub(crate) fn split_remote(
+    /// Rebuild `work`'s remote pages (see the module docs), and carry the
+    /// moved ones forward re-encoded. The pages to write land in
+    /// `work.shaped`.
+    ///
+    /// # Errors
+    /// A page this upload needs that was not fetched, or an encoding fault.
+    pub(crate) fn rebuild_remote(
         &self,
         work: &mut SlotUpload,
-    ) -> StorageResult<BTreeMap<usize, Vec<u8>>> {
-        let mut images = BTreeMap::new();
-        for (&bucket, page) in &mut work.staged {
-            images.insert(bucket, self.encode_remote(work.idx, page)?);
-        }
-        let idx = work.idx;
-        split_staged(
+    ) -> StorageResult<()> {
+        let records = work.records();
+        let slot = &self.types[work.idx];
+        let dict = slot.dictionary().borrow();
+        let rules = Rules {
+            target_blocks: REMOTE_TARGET_BLOCKS,
+            keep_holes: false,
+        };
+        let fetched = &work.fetched;
+        let mut shaped = shape(
             &mut work.remote,
-            &mut work.staged,
-            &mut images,
-            REMOTE_TARGET_BLOCKS,
-            |page| self.encode_remote(idx, page),
+            records,
+            &rules,
+            slot.struct_hash(),
+            |page| {
+                fetched.get(&run_of(page)).cloned().ok_or(
+                    StorageError::Corrupt("an upload met an unfetched page"),
+                )
+            },
+            |page| image_of(page, &dict),
         )?;
-        Ok(images)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
-
-    use super::sharing;
-    use crate::directory::Directory;
-
-    const SEED: [u64; 4] = [5, 6, 7, 8];
-
-    /// A directory grown by `splits` splits of pseudo-random buckets, so
-    /// its pages sit at uneven depths.
-    fn grown(splits: u64, salt: u64) -> Directory {
-        let mut dir = Directory::new(SEED);
-        let mut x = salt | 1;
-        for _ in 0..splits {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            let bucket = dir.bucket_at((x as usize) % dir.len());
-            if dir.can_split(bucket) {
-                dir.split(bucket);
+        let rewritten: BTreeSet<Run> = shaped.retired.iter().copied().collect();
+        for (key, run) in &work.moved {
+            if rewritten.contains(run) {
+                continue;
             }
         }
         dir
