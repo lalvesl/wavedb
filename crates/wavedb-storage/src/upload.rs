@@ -222,74 +222,82 @@ impl PageStore {
         Ok((done, ended))
     }
 
-    /// Write every file's header ([`finish`]) over a view of every
-    /// registered type as the object store holds it once this upload is in
-    /// — the work's new directories, the others as they stand, a type never
-    /// uploaded with none.
+    /// Write every file's header ([`finish`]) over every registered type's
+    /// index in the object store as this upload leaves it — the work's, the
+    /// others as they stand, a type never uploaded with none. Whether the
+    /// headers named everything.
     fn write_headers(
         &self,
         packed: &mut Packed,
-        work: &[SlotUpload],
+        work: &mut [SlotUpload],
         placed_dicts: &[Option<BlockDescriptor>],
         chain: &mut Chain,
-    ) -> StorageResult<()> {
-        let guards: Vec<_> = self
+    ) -> StorageResult<bool> {
+        let mut guards: Vec<_> = self
             .types
             .iter()
-            .map(|slot| slot.remote_directory().borrow())
+            .map(|slot| slot.remote_directory().borrow_mut())
             .collect();
-        let mut views = Vec::new();
-        for (idx, slot) in self.types.iter().enumerate() {
-            let at = work.iter().position(|w| w.idx == idx);
-            let slots = match (at, guards[idx].as_ref()) {
-                (Some(w), _) => work[w].remote.slots(),
-                (None, Some(dir)) => dir.slots(),
-                (None, None) => &[],
+        let mut by_idx: BTreeMap<
+            usize,
+            (&mut SlotUpload, Option<BlockDescriptor>),
+        > = work
+            .iter_mut()
+            .zip(placed_dicts)
+            .map(|(w, &d)| (w.idx, (w, d)))
+            .collect();
+        let mut named = Vec::with_capacity(self.types.len());
+        for ((idx, slot), guard) in
+            self.types.iter().enumerate().zip(&mut guards)
+        {
+            let (index, desc, moved) = match by_idx.remove(&idx) {
+                Some((w, placed)) => (
+                    Some(&mut w.remote),
+                    placed.unwrap_or_else(|| slot.remote_dict().get()),
+                    placed.is_some(),
+                ),
+                None => (guard.as_mut(), slot.remote_dict().get(), false),
             };
-            let dict = at
-                .and_then(|w| placed_dicts[w])
-                .unwrap_or_else(|| slot.remote_dict().get());
-            views.push(TypeView {
+            named.push(Named {
                 struct_hash: slot.struct_hash(),
-                slots,
-                dict: dict.is_allocated().then_some(dict.raw()),
+                index,
+                dict: desc.is_allocated().then_some(desc.raw()),
+                dict_moved: moved,
             });
         }
-        finish(packed, &views, chain, self.position)
+        finish(packed, &mut named, chain, self.position)
     }
+}
 
-    /// Step 1: every type's flagged disk pages, up to the input bound, and a
-    /// copy of each type's remote directory — and whether that took every
-    /// flagged page, the bound leaving none behind (a cut). The remote pages
-    /// a compaction carries forward come along, up to their own bound.
-    fn take_flagged(&self) -> StorageResult<(Vec<SlotUpload>, bool)> {
-        let (mut taken, mut cut) = (0, true);
-        let mut moving = crate::remote_compact::MOVE_BLOCKS;
-        let mut work = Vec::new();
-        for (idx, slot) in self.types.iter().enumerate() {
-            let (moved, move_dict) = self.moves_of(idx, &mut moving);
-            let disk = match slot.directory().borrow().clone() {
-                Some(disk) => disk,
-                None if moved.is_empty() && !move_dict => continue,
-                None => Directory::new(self.seed),
-            };
-            let (mut flagged, mut pages) = (Vec::new(), Vec::new());
-            let dict = slot.dictionary().borrow();
-            for (bucket, desc) in disk.buckets() {
-                if !desc.pending_upload() {
-                    continue;
-                }
-                if taken >= UPLOAD_INPUT_BLOCKS {
-                    cut = false;
-                    continue;
-                }
-                let hash = slot.struct_hash();
-                pages.push(disk.read_page(hash, &self.file, bucket, &dict)?);
-                flagged.push((bucket, desc));
-                taken += weight(desc);
-            }
-            if flagged.is_empty() && moved.is_empty() && !move_dict {
-                continue;
+/// Point every placed page's entry in the work's remote index at its run,
+/// and keep each copy of what changed for the disk's headers. The
+/// dictionary each work item's upload placed, if it placed one.
+fn install_remote(
+    work: &mut [SlotUpload],
+    packed: &Packed,
+) -> StorageResult<Vec<Option<BlockDescriptor>>> {
+    let mut dicts = vec![None; work.len()];
+    for placed in &packed.placed {
+        match *placed {
+            Placed::Page { slot, page, run } => {
+                let w = &mut work[slot];
+                let key = &w.shaped.pages[page].key;
+                let at = match w.remote.find(key) {
+                    Found::Page { at, .. } | Found::Hole(at) => at,
+                    Found::Uncovered => {
+                        return Err(StorageError::Corrupt(
+                            "an uploaded page lost its entry",
+                        ));
+                    }
+                };
+                let entry = Entry {
+                    address: run.start,
+                    blocks: run.count,
+                    meta: 0,
+                };
+                w.remote
+                    .retarget(at, entry)
+                    .ok_or(StorageError::Corrupt("a run no range can name"))?;
             }
             let remote = slot.remote_directory().borrow().clone();
             work.push(SlotUpload {
