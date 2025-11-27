@@ -299,48 +299,12 @@ fn install_remote(
                     .retarget(at, entry)
                     .ok_or(StorageError::Corrupt("a run no range can name"))?;
             }
-            let remote = slot.remote_directory().borrow().clone();
-            work.push(SlotUpload {
-                idx,
-                disk,
-                flagged,
-                pages,
-                remote: remote.unwrap_or_else(|| Directory::new(self.seed)),
-                staged: BTreeMap::new(),
-                moved,
-                move_dict,
-            });
+            Placed::Dict { slot, desc } => dicts[slot] = Some(desc),
         }
-        Ok((work, cut))
     }
-
-    /// Step 2: stage every remote page the flagged ones share records with —
-    /// fetched, [`IN_FLIGHT`] at a time, or empty where the bucket is vacant.
-    async fn fetch_shared(&self, work: &mut [SlotUpload]) -> StorageResult<()> {
-        let mut wanted = Vec::new();
-        for (w, slot) in work.iter_mut().enumerate() {
-            let hash = self.types[slot.idx].struct_hash();
-            for bucket in slot.affected() {
-                let desc = slot.remote.descriptor(bucket);
-                if desc.is_allocated() {
-                    wanted.push((w, slot.idx, bucket, desc));
-                } else {
-                    slot.staged.insert(bucket, SlotPage::new(hash));
-                }
-            }
-        }
-        let fetched: Vec<(usize, usize, SlotPage)> = stream::iter(wanted)
-            .map(|(w, idx, bucket, desc)| async move {
-                let page =
-                    self.with_remote_page(idx, desc, SlotPage::clone).await?;
-                StorageResult::Ok((w, bucket, page))
-            })
-            .buffer_unordered(IN_FLIGHT)
-            .try_collect()
-            .await?;
-        for (w, bucket, page) in fetched {
-            work[w].staged.insert(bucket, page);
-        }
-        Ok(())
+    for w in work.iter_mut() {
+        w.remote.split_long();
+        w.changes = w.remote.journal().clone();
     }
+    Ok(dicts)
 }
