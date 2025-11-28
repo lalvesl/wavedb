@@ -1,8 +1,10 @@
 # RFC 0078 — Ordered lanes over a quantized page index
 
-- **Status:** In progress. Opened 2026-10-30. Phase 1, the index alone
-  (`wavedb-storage::ordered`), landed 2026-10-30; phase 2, an ordered lane
-  in `PageStore`, is next.
+- **Status:** In progress. Opened 2026-10-30. Phases 1–3 and 6 landed
+  2026-10-30: the index (`wavedb-storage::ordered`), every stored value in
+  ordered pages keyed by its `Id`, the header and reconstruction, and the
+  object store on the same index (see "As built"). Phase 4, chains on
+  ordered lanes, is next.
 - **Revises:**
   - [RFC 0074](0074-extendible-hashing.md): the hashed page directories go,
     anchors included.
@@ -544,6 +546,59 @@ Each phase leaves the suite green.
    - bytes written per durable and relaxed insert, on micro and shop;
    - RAM per page;
    - read latency, hot and cold.
+
+## As built (phases 1–3 and 6)
+
+The extendible directories are gone (`directory.rs`, `directory_pages.rs`,
+`split.rs`). Every type's pages — records, Pivots, and, until phase 4, the
+chains' segments and sparse-index nodes, which are values under ids too —
+live in one `PageIndex<u8>` per type (`crate::pages`): the key is the
+`Id`'s raw `u128` big-endian, the `u8` beside each page its flags,
+`PENDING` (not uploaded) and `EVICTED` (gone from disk).
+
+- **Seeds.** A disk range starts at the coarsest quantization (`MAX_SHIFT`),
+  12 address bits (a 16 MiB window) and 4 size bits; the object store's, 10
+  and 6. Refinement does the rest.
+- **Exact sizes.** An entry names its run exactly: a page is given
+  `canonical(blocks)` — whole units of the size unit the index's rule picks
+  for it — so freeing a page frees what was allocated. A page past 255
+  units is `PageTooLarge`.
+- **A round** (`crate::shape`, shared by the settle and the upload) routes
+  its records in key order to the pages they fall in; a key with no page
+  gets a new one whose entry points at a stand-in its range can always
+  address (`placeholder_at`). Pages are then shaped from the last back: a
+  page emptied goes — or, in an object-backed store, becomes a `PENDING`
+  hole (`punch`), so the object store learns its keys are gone — and one
+  over target is cut at its middle or the quantum boundary nearest it.
+  Every page comes out with its first record's key; once the window is
+  placed, `install` points that key's entry at the run (`retarget`, which
+  isolates a page its range cannot address) and cuts any range past 1024
+  entries (`split_long`).
+- **Headers.** `TypeEntry` carries the type's range count and
+  `Vec<RangeRecord>`: `Whole`, `Entries` — which restates the range's base
+  and shape, so the last batch's pages decode for the crash check — and
+  `Gone`. The spare room restates whole ranges from a cursor by start key.
+  The walk rebuilds each index with `Rebuild`, a type done once it knows as
+  many ranges as its newest entry counts.
+- **Two readers of the remote index.** Its own journal is drained by the
+  object store's file headers; a copy of every upload's changes, kept on the
+  type (`remote_journal`), is drained by the disk's headers.
+- **Uploads** take every `PENDING` entry, page or hole, with its coverage
+  `[lo, hi)`: the remote pages meeting it are fetched, every record within
+  it is replaced by the disk entry's own, and the remote pages are shaped
+  like a settle's. The files are laid out first, the remote index pointed
+  at the runs, and the headers written over it; an upload whose headers
+  could not name everything is not a cut.
+- **Eviction** flags an entry `EVICTED` and frees its run; its keys still
+  route to it. A restore rebuilds the page from the remote pages meeting
+  its coverage. An adoption from the object store takes the remote index
+  as the disk's, every page evicted.
+
+**Known cost.** Data files only append, so a page rewritten long after its
+neighbours lands far from its range's base, and its range isolates it: a
+workload of scattered rewrites drifts toward one range per page. Merging
+adjacent ranges whose pages fit one window, and the regroup (§12), are
+what would bound it.
 
 ## Alternatives
 
