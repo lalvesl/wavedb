@@ -1,17 +1,22 @@
 //! `Store` — the backend seam.
 //!
-//! Key→value over [`Id`] + wire bytes, with an atomic batch. This is the only
-//! thing that differs native vs web; the index layer above (`Pivot`/`Chain`) is
-//! written once against this contract.
+//! Key→value over [`Id`] + wire bytes, and **ordered lanes** — sorted
+//! `key → value` entries a chain is a range of ([RFC 0078] §7) — with an
+//! atomic batch over both. This is the only thing that differs native vs
+//! web; the index layer above (`Pivot`/`Chain`) is written once against this
+//! contract.
 //!
 //! Async, **no concrete I/O** — the page engine ([`wavedb-storage`]), the native
 //! client file store, and the browser IndexedDB store each supply their own impl.
 //!
 //! [`wavedb-storage`]: https://docs.rs/wavedb-storage
+//! [RFC 0078]: https://github.com/wavedb/wavedb/blob/main/rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
 use crate::error::Result;
 use crate::id::Id;
 use crate::wire::WaveWire;
+
+pub use crate::store_span::{Entry, Span, read_count, read_span, successor};
 
 /// One write inside an atomic [`Store::apply`] batch.
 ///
@@ -27,7 +32,8 @@ use crate::wire::WaveWire;
 ///
 /// `Put` needs no such field: its bytes are STRUCT_HASH-headed, so the head
 /// already answers the question and a second copy could only disagree with
-/// it.
+/// it. An ordered lane's entry names its lane: its value carries no head
+/// (a recency entry has no value at all).
 #[derive(Debug, Clone, PartialEq, Eq, WaveWire)]
 pub enum Write {
     /// Insert or overwrite `Id`'s wire bytes. The type is the STRUCT_HASH at
@@ -44,27 +50,35 @@ pub enum Write {
     /// written. A guard is not state — a durable backend validates it but
     /// never persists it.
     Expect(u64, Id, Option<Vec<u8>>),
+    /// Set `key` in the ordered lane `lane` to `value`.
+    Set(u64, Vec<u8>, Vec<u8>),
+    /// Delete `key` from the ordered lane `lane`.
+    Unset(u64, Vec<u8>),
 }
 
 impl Write {
-    /// The `Id` this write targets.
+    /// The `Id` this write targets; `None` for an ordered lane's entry.
     #[must_use]
-    pub const fn id(&self) -> Id {
+    pub const fn id(&self) -> Option<Id> {
         match self {
             Self::Put(id, _) | Self::Remove(_, id) | Self::Expect(_, id, _) => {
-                *id
+                Some(*id)
             }
+            Self::Set(..) | Self::Unset(..) => None,
         }
     }
 
-    /// The STRUCT_HASH this write routes to, when the variant carries it.
-    /// `Put` returns `None` — its type lives in the bytes' head, and reading
-    /// it is the decoding layer's job, not this accessor's.
+    /// The STRUCT_HASH — or lane — this write routes to, when the variant
+    /// carries it. `Put` returns `None` — its type lives in the bytes' head,
+    /// and reading it is the decoding layer's job, not this accessor's.
     #[must_use]
     pub const fn struct_hash(&self) -> Option<u64> {
         match self {
             Self::Put(..) => None,
-            Self::Remove(hash, _) | Self::Expect(hash, _, _) => Some(*hash),
+            Self::Remove(hash, _)
+            | Self::Expect(hash, _, _)
+            | Self::Set(hash, _, _)
+            | Self::Unset(hash, _) => Some(*hash),
         }
     }
 }
@@ -97,6 +111,21 @@ pub trait Store {
         let _ = struct_hash;
         self.get(id).await
     }
+
+    /// The entries of the ordered lane `lane` that `span` reads, in its
+    /// order — the read a chain is ([RFC 0078] §7).
+    ///
+    /// [RFC 0078]: https://github.com/wavedb/wavedb/blob/main/rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
+    async fn scan(&self, lane: u64, span: &Span) -> Result<Vec<Entry>>;
+
+    /// How many entries the ordered lane `lane` holds in `[lo, hi)` — `hi`
+    /// `None` to the lane's end.
+    async fn count(
+        &self,
+        lane: u64,
+        lo: &[u8],
+        hi: Option<&[u8]>,
+    ) -> Result<u64>;
 
     /// Apply a batch of writes atomically (all-or-nothing).
     async fn apply(&self, batch: &[Write]) -> Result<()>;
@@ -150,6 +179,19 @@ impl<S: Store + ?Sized> Store for std::rc::Rc<S> {
         (**self).get_of(struct_hash, id).await
     }
 
+    async fn scan(&self, lane: u64, span: &Span) -> Result<Vec<Entry>> {
+        (**self).scan(lane, span).await
+    }
+
+    async fn count(
+        &self,
+        lane: u64,
+        lo: &[u8],
+        hi: Option<&[u8]>,
+    ) -> Result<u64> {
+        (**self).count(lane, lo, hi).await
+    }
+
     async fn apply(&self, batch: &[Write]) -> Result<()> {
         (**self).apply(batch).await
     }
@@ -184,6 +226,19 @@ impl<S: Store + ?Sized> Store for &S {
         (**self).get_of(struct_hash, id).await
     }
 
+    async fn scan(&self, lane: u64, span: &Span) -> Result<Vec<Entry>> {
+        (**self).scan(lane, span).await
+    }
+
+    async fn count(
+        &self,
+        lane: u64,
+        lo: &[u8],
+        hi: Option<&[u8]>,
+    ) -> Result<u64> {
+        (**self).count(lane, lo, hi).await
+    }
+
     async fn apply(&self, batch: &[Write]) -> Result<()> {
         (**self).apply(batch).await
     }
@@ -205,7 +260,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
-    use super::{Store, Write};
+    use super::{Entry, Span, Store, Write};
     use crate::error::Result;
     use crate::id::Id;
     use crate::u48::U48;
@@ -214,11 +269,26 @@ mod tests {
     #[derive(Default)]
     struct MemStore(Mutex<BTreeMap<u128, Vec<u8>>>);
 
+    // Its batches touch no ordered lane, so there are none to read.
+
     // A test double, written in the trait's own (async) shape.
     #[allow(clippy::unused_async_trait_impl)]
     impl Store for MemStore {
         async fn get(&self, id: Id) -> Result<Option<Vec<u8>>> {
             Ok(self.0.lock().unwrap().get(&id.raw()).cloned())
+        }
+
+        async fn scan(&self, _: u64, _: &Span) -> Result<Vec<Entry>> {
+            Ok(Vec::new())
+        }
+
+        async fn count(
+            &self,
+            _: u64,
+            _: &[u8],
+            _: Option<&[u8]>,
+        ) -> Result<u64> {
+            Ok(0)
         }
 
         async fn apply(&self, batch: &[Write]) -> Result<()> {
@@ -242,7 +312,9 @@ mod tests {
                         Write::Remove(_, id) => {
                             map.remove(&id.raw());
                         }
-                        Write::Expect(..) => {}
+                        Write::Expect(..)
+                        | Write::Set(..)
+                        | Write::Unset(..) => {}
                     }
                 }
             }
@@ -284,9 +356,10 @@ mod tests {
 
     #[test]
     fn write_id_accessor() {
-        assert_eq!(Write::Put(id(7), vec![]).id(), id(7));
-        assert_eq!(Write::Remove(SH, id(7)).id(), id(7));
-        assert_eq!(Write::Expect(SH, id(7), None).id(), id(7));
+        assert_eq!(Write::Put(id(7), vec![]).id(), Some(id(7)));
+        assert_eq!(Write::Remove(SH, id(7)).id(), Some(id(7)));
+        assert_eq!(Write::Expect(SH, id(7), None).id(), Some(id(7)));
+        assert_eq!(Write::Unset(SH, vec![1]).id(), None);
     }
 
     #[test]
