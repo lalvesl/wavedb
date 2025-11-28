@@ -16,7 +16,7 @@
 
 use crate::error::Result;
 use crate::id::Id;
-use crate::store::{Store, Write};
+use crate::store::{Entry, Span, Store, Write};
 
 /// `store`, its batches applied durably when `durable` is set and plainly
 /// otherwise. Reads and mutation notices pass straight through.
@@ -53,6 +53,19 @@ impl<S: Store> Store for Durability<S> {
         self.store.get_of(struct_hash, id).await
     }
 
+    async fn scan(&self, lane: u64, span: &Span) -> Result<Vec<Entry>> {
+        self.store.scan(lane, span).await
+    }
+
+    async fn count(
+        &self,
+        lane: u64,
+        lo: &[u8],
+        hi: Option<&[u8]>,
+    ) -> Result<u64> {
+        self.store.count(lane, lo, hi).await
+    }
+
     async fn apply(&self, batch: &[Write]) -> Result<()> {
         if self.durable {
             self.store.apply_durable(batch).await
@@ -80,7 +93,7 @@ mod tests {
     use super::Durability;
     use crate::error::Result;
     use crate::id::Id;
-    use crate::store::{Store, Write};
+    use crate::store::{Entry, Span, Store, Write};
     use crate::u48::U48;
 
     /// Records which of the two applies each batch reached.
@@ -92,6 +105,19 @@ mod tests {
     impl Store for Recording {
         async fn get(&self, _: Id) -> Result<Option<Vec<u8>>> {
             Ok(None)
+        }
+
+        async fn scan(&self, _: u64, _: &Span) -> Result<Vec<Entry>> {
+            Ok(Vec::new())
+        }
+
+        async fn count(
+            &self,
+            _: u64,
+            _: &[u8],
+            _: Option<&[u8]>,
+        ) -> Result<u64> {
+            Ok(0)
         }
 
         async fn apply(&self, _: &[Write]) -> Result<()> {

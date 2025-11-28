@@ -51,8 +51,12 @@ wasm-bindgen = { workspace = true }
 js-sys = { workspace = true }
 web-sys = { workspace = true, features = [
   "DomException",
+  "IdbCursor",
+  "IdbCursorDirection",
+  "IdbCursorWithValue",
   "IdbDatabase",
   "IdbFactory",
+  "IdbKeyRange",
   "IdbObjectStore",
   "IdbOpenDbRequest",
   "IdbRequest",

@@ -343,6 +343,23 @@ mod tests {
             self.inner.get(id).await
         }
 
+        async fn scan(
+            &self,
+            lane: u64,
+            span: &crate::store::Span,
+        ) -> Result<Vec<crate::store::Entry>> {
+            self.inner.scan(lane, span).await
+        }
+
+        async fn count(
+            &self,
+            lane: u64,
+            lo: &[u8],
+            hi: Option<&[u8]>,
+        ) -> Result<u64> {
+            self.inner.count(lane, lo, hi).await
+        }
+
         async fn apply(&self, batch: &[crate::store::Write]) -> Result<()> {
             self.inner.apply(batch).await
         }
