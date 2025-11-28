@@ -8,13 +8,15 @@
 //! and the accessors) the same way the read fallback lives in
 //! `read_through`.
 
+use wavedb_core::store::{Entry, Span};
 use wavedb_core::{Id, Result as CoreResult, Store, Write};
 
 use crate::barrier::Barrier;
 use crate::block::{BLOCK_SIZE, MAX_PAGE_BYTES};
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::PageStore;
-use crate::record_log::MAX_RECORD;
+use crate::pages::key_of_id;
+use crate::record_log::{MAX_KEY, MAX_RECORD};
 use crate::struct_storage::TypeSlot;
 
 /// The largest record a batch may commit: one the record cache can hold that
@@ -105,7 +107,7 @@ impl PageStore {
             // `Expect(id, None)`, the guard on every first save, matched
             // nothing and paid a page read plus a zstd decode per type.
             if let Write::Expect(hash, id, expected) = w
-                && self.read_of(*hash, *id)? != *expected
+                && self.read_of(*hash, &key_of_id(*id))? != *expected
             {
                 return Err(StorageError::Core(wavedb_core::Error::Conflict(
                     *id,
@@ -120,8 +122,9 @@ impl PageStore {
     }
 
     /// Verify every write in `batch` routes to a registered slot — `Put` by
-    /// the STRUCT_HASH at its bytes' head, `Remove` and `Expect` by the one
-    /// they carry.
+    /// the STRUCT_HASH at its bytes' head, the rest by the hash or lane they
+    /// carry — and fits the record cache: a lane entry's key and value
+    /// together within a record's bound, its key within a key's.
     ///
     /// Checked before anything is committed; it is what lets the commit path
     /// treat a routing miss as unreachable rather than handling it twice.
@@ -132,7 +135,21 @@ impl PageStore {
                     return Err(StorageError::RecordTooLarge(bytes.len()));
                 }
                 Write::Put(_, bytes) => struct_hash_of(bytes)?,
-                Write::Remove(hash, _) | Write::Expect(hash, _, _) => *hash,
+                Write::Set(_, key, value)
+                    if key.len() > MAX_KEY
+                        || key.len() + value.len() > MAX_COMMIT =>
+                {
+                    return Err(StorageError::RecordTooLarge(
+                        key.len() + value.len(),
+                    ));
+                }
+                Write::Unset(_, key) if key.len() > MAX_KEY => {
+                    return Err(StorageError::RecordTooLarge(key.len()));
+                }
+                Write::Remove(hash, _)
+                | Write::Expect(hash, _, _)
+                | Write::Set(hash, _, _)
+                | Write::Unset(hash, _) => *hash,
             };
             if self.slot_of(sh).is_none() {
                 return Err(StorageError::UnregisteredStructHash(sh));
@@ -157,14 +174,24 @@ impl PageStore {
                         .ok()
                         .and_then(|sh| self.slot_index(sh));
                     if let Some(idx) = idx {
-                        cache.put(idx, *id, Some(bytes));
+                        cache.put(idx, &key_of_id(*id), Some(bytes));
                     }
                 }
                 // The page still holds the bytes until the settle lands —
                 // the tombstone keeps reads from resurrecting them.
                 Write::Remove(hash, id) => {
                     if let Some(idx) = self.slot_index(*hash) {
-                        cache.put(idx, *id, None);
+                        cache.put(idx, &key_of_id(*id), None);
+                    }
+                }
+                Write::Set(lane, key, value) => {
+                    if let Some(idx) = self.slot_index(*lane) {
+                        cache.put_ordered(idx, key, Some(value));
+                    }
+                }
+                Write::Unset(lane, key) => {
+                    if let Some(idx) = self.slot_index(*lane) {
+                        cache.put_ordered(idx, key, None);
                     }
                 }
                 // Validated and stripped in `apply_inner`.
@@ -194,8 +221,9 @@ impl Store for PageStore {
         // Untyped fallback: the id alone names no type, so probe every slot —
         // caches first (cheap), then settled pages. Typed callers use
         // `get_of` and skip this scan entirely.
-        let now = self.read_any_now(id);
-        async move { self.read_any_rest(now, id).await.map_err(Into::into) }
+        let key = key_of_id(id);
+        let now = self.read_any_now(&key);
+        async move { self.read_any_rest(now, &key).await.map_err(Into::into) }
     }
 
     fn get_of(
@@ -206,8 +234,33 @@ impl Store for PageStore {
         // One binary search on the route table, then this type's own log in
         // the record cache. A miss reads through to the settled page, and an
         // evicted page to the object store.
-        let now = self.read_now(struct_hash, id);
-        async move { self.read_rest(now, id).await.map_err(Into::into) }
+        let key = key_of_id(id);
+        let now = self.read_now(struct_hash, &key);
+        async move { self.read_rest(now, &key).await.map_err(Into::into) }
+    }
+
+    fn scan(
+        &self,
+        lane: u64,
+        span: &Span,
+    ) -> impl Future<Output = CoreResult<Vec<Entry>>> {
+        let now = self.scan_now(lane, span);
+        let span = span.clone();
+        async move { self.scan_rest(lane, &span, now).await.map_err(Into::into) }
+    }
+
+    fn count(
+        &self,
+        lane: u64,
+        lo: &[u8],
+        hi: Option<&[u8]>,
+    ) -> impl Future<Output = CoreResult<u64>> {
+        let span = Self::counted(lo, hi);
+        let now = self.scan_now(lane, &span);
+        async move {
+            let all = self.scan_rest(lane, &span, now).await?;
+            Ok(all.len() as u64)
+        }
     }
 
     fn apply(&self, batch: &[Write]) -> impl Future<Output = CoreResult<()>> {

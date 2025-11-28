@@ -29,6 +29,8 @@
 #[cfg(target_arch = "wasm32")]
 mod idb;
 #[cfg(target_arch = "wasm32")]
+mod idb_lanes;
+#[cfg(target_arch = "wasm32")]
 mod idb_store;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

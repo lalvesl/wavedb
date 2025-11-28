@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use async_channel::{Receiver, Sender};
 use embassy_futures::select::{Either, select};
 use futures::channel::oneshot;
+use wavedb_core::store::{Entry, Span};
 use wavedb_core::{Error, Id, Result, Store, Write};
 use wavedb_platform::carrier::{self, Here};
 use wavedb_platform::time::sleep;
@@ -43,6 +44,17 @@ enum Ask {
         struct_hash: Option<u64>,
         id: Id,
         answer: oneshot::Sender<Result<Option<Vec<u8>>>>,
+    },
+    Scan {
+        lane: u64,
+        span: Span,
+        answer: oneshot::Sender<Result<Vec<Entry>>>,
+    },
+    Count {
+        lane: u64,
+        lo: Vec<u8>,
+        hi: Option<Vec<u8>>,
+        answer: oneshot::Sender<Result<u64>>,
     },
     Apply {
         batch: Vec<Write>,
@@ -131,6 +143,30 @@ impl Store for CacheStore {
         .await
     }
 
+    async fn scan(&self, lane: u64, span: &Span) -> Result<Vec<Entry>> {
+        self.ask(|answer| Ask::Scan {
+            lane,
+            span: span.clone(),
+            answer,
+        })
+        .await
+    }
+
+    async fn count(
+        &self,
+        lane: u64,
+        lo: &[u8],
+        hi: Option<&[u8]>,
+    ) -> Result<u64> {
+        self.ask(|answer| Ask::Count {
+            lane,
+            lo: lo.to_vec(),
+            hi: hi.map(<[u8]>::to_vec),
+            answer,
+        })
+        .await
+    }
+
     async fn apply(&self, batch: &[Write]) -> Result<()> {
         self.ask(|answer| Ask::Apply {
             batch: batch.to_vec(),
@@ -198,6 +234,17 @@ async fn answer(store: &PageStore, ask: Ask) {
                 None => store.get(id).await,
             };
             let _ = answer.send(got);
+        }
+        Ask::Scan { lane, span, answer } => {
+            let _ = answer.send(store.scan(lane, &span).await);
+        }
+        Ask::Count {
+            lane,
+            lo,
+            hi,
+            answer,
+        } => {
+            let _ = answer.send(store.count(lane, &lo, hi.as_deref()).await);
         }
         Ask::Apply {
             batch,

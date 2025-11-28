@@ -73,7 +73,7 @@ fn page(compress: bool) -> (Dictionary, Vec<u8>) {
     for n in 0..RECORDS {
         let bytes = record(n);
         dict.sample(&bytes);
-        page.upsert(id(n), bytes);
+        page.upsert(&id(n).raw().to_be_bytes(), bytes);
     }
     let bytes = page.to_bytes(&dict, compress).expect("page encodes");
     (dict, bytes)
@@ -91,7 +91,9 @@ fn reads(c: &mut Criterion) {
         group.bench_function(format!("{name}/get_all"), |b| {
             b.iter(|| {
                 (0..RECORDS)
-                    .filter_map(|n| page.get(black_box(id(n))))
+                    .filter_map(|n| {
+                        page.get(black_box(&id(n).raw().to_be_bytes()))
+                    })
                     .map(<[u8]>::len)
                     .sum::<usize>()
             });
