@@ -66,6 +66,7 @@ pub mod route;
 pub mod route_handle;
 mod route_reply;
 pub mod store;
+mod store_span;
 pub mod traits;
 pub mod u48;
 pub mod wire;

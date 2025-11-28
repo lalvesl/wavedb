@@ -92,6 +92,24 @@ mod tests {
         async fn get(&self, id: Id) -> Result<Option<Vec<u8>>> {
             self.inner.get(id).await
         }
+
+        async fn scan(
+            &self,
+            lane: u64,
+            span: &crate::store::Span,
+        ) -> Result<Vec<crate::store::Entry>> {
+            self.inner.scan(lane, span).await
+        }
+
+        async fn count(
+            &self,
+            lane: u64,
+            lo: &[u8],
+            hi: Option<&[u8]>,
+        ) -> Result<u64> {
+            self.inner.count(lane, lo, hi).await
+        }
+
         async fn apply(&self, batch: &[Write]) -> Result<()> {
             self.inner.apply(batch).await
         }
@@ -248,6 +266,22 @@ mod tests {
                 ) -> impl Future<Output = Result<Option<Vec<u8>>>>
                 {
                     std::future::ready(Ok(None))
+                }
+                fn scan(
+                    &self,
+                    _: u64,
+                    _: &crate::store::Span,
+                ) -> impl Future<Output = Result<Vec<crate::store::Entry>>>
+                {
+                    std::future::ready(Ok(Vec::new()))
+                }
+                fn count(
+                    &self,
+                    _: u64,
+                    _: &[u8],
+                    _: Option<&[u8]>,
+                ) -> impl Future<Output = Result<u64>> {
+                    std::future::ready(Ok(0))
                 }
                 fn apply(
                     &self,
