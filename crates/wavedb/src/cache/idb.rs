@@ -20,13 +20,19 @@ use web_sys::{IdbDatabase, IdbRequest, IdbTransaction};
 
 use wavedb_core::Error;
 
-/// The one object store every WaveDB database holds: `Id` (16 B
-/// big-endian) → wire bytes.
+/// The object store of records: `Id` (16 B big-endian) → wire bytes.
 pub const STORE_NAME: &str = "kv";
 
-/// Schema version — one object store, created at first open. Bumping it
-/// is never needed pre-release (the KV shape is layout-free).
-const DB_VERSION: u32 = 1;
+/// The object store of every ordered lane's entries ([RFC 0078] §7):
+/// `[lane hash BE][key]` → value, so a lane is a key range of it.
+///
+/// [RFC 0078]: https://github.com/wavedb/wavedb/blob/main/rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
+pub const LANES_NAME: &str = "lanes";
+
+/// Schema version — the two object stores, created at first open. Neither
+/// shape is a layout, so nothing migrates: a database of version 1 gains
+/// the lanes' store, and an older layout is unsupported pre-release.
+const DB_VERSION: u32 = 2;
 
 /// Wrap a thrown `JsValue` as the backend fault it is.
 pub fn backend(context: &'static str, value: &JsValue) -> Error {
@@ -94,8 +100,8 @@ pub async fn committed(tx: &IdbTransaction) -> Result<(), JsValue> {
     outcome?
 }
 
-/// Open (creating on first use) the named database with its one `kv`
-/// object store.
+/// Open (creating on first use) the named database with its `kv` and
+/// `lanes` object stores.
 pub async fn open_database(name: &str) -> wavedb_core::Result<IdbDatabase> {
     let factory = web_sys::window()
         .ok_or_else(|| Error::Backend(String::from("indexeddb: no window")))?
@@ -105,16 +111,20 @@ pub async fn open_database(name: &str) -> wavedb_core::Result<IdbDatabase> {
     let open = factory
         .open_with_u32(name, DB_VERSION)
         .map_err(|e| backend("open", &e))?;
-    // First open of this name: create the store. A failure in here can't
+    // An open below this version: create the stores it lacks (creating one
+    // that exists throws, and is let be). A failure in here can't
     // propagate out of the DOM callback; it surfaces as a missing store on
     // the first transaction instead.
     let request = open.clone();
     let on_upgrade = Closure::<dyn FnMut()>::new(move || {
-        let _ = request
+        if let Some(db) = request
             .result()
             .ok()
             .and_then(|db| db.dyn_into::<IdbDatabase>().ok())
-            .map(|db| db.create_object_store(STORE_NAME));
+        {
+            let _ = db.create_object_store(STORE_NAME);
+            let _ = db.create_object_store(LANES_NAME);
+        }
     });
     open.set_onupgradeneeded(Some(on_upgrade.as_ref().unchecked_ref()));
     let result = settled(&open).await.map_err(|e| backend("open", &e));
