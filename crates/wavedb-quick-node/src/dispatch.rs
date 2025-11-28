@@ -203,15 +203,50 @@ mod tests {
 
     const SECRET: [u8; 32] = [9; 32];
 
-    /// The records, and per batch applied whether it was asked durable.
+    /// Every ordered lane, by lane hash.
+    type Lanes = BTreeMap<u64, BTreeMap<Vec<u8>, Vec<u8>>>;
+
+    /// The records, per batch applied whether it was asked durable, and
+    /// the ordered lanes.
     #[derive(Default)]
-    struct MemStore(Mutex<BTreeMap<u128, Vec<u8>>>, Mutex<Vec<bool>>);
+    struct MemStore(
+        Mutex<BTreeMap<u128, Vec<u8>>>,
+        Mutex<Vec<bool>>,
+        Mutex<Lanes>,
+    );
 
     // A test double, written in the trait's own (async) shape.
     #[allow(clippy::unused_async_trait_impl)]
     impl Store for MemStore {
         async fn get(&self, id: Id) -> Result<Option<Vec<u8>>> {
             Ok(self.0.lock().unwrap().get(&id.raw()).cloned())
+        }
+        async fn scan(
+            &self,
+            lane: u64,
+            span: &wavedb_core::store::Span,
+        ) -> Result<Vec<wavedb_core::store::Entry>> {
+            Ok(self
+                .2
+                .lock()
+                .unwrap()
+                .get(&lane)
+                .map_or_else(Vec::new, |l| {
+                    wavedb_core::store::read_span(l, span)
+                }))
+        }
+        async fn count(
+            &self,
+            lane: u64,
+            lo: &[u8],
+            hi: Option<&[u8]>,
+        ) -> Result<u64> {
+            Ok(self
+                .2
+                .lock()
+                .unwrap()
+                .get(&lane)
+                .map_or(0, |l| wavedb_core::store::read_count(l, lo, hi)))
         }
         async fn apply(&self, batch: &[Write]) -> Result<()> {
             self.write(batch, false)
@@ -225,6 +260,7 @@ mod tests {
         fn write(&self, batch: &[Write], durable: bool) -> Result<()> {
             self.1.lock().unwrap().push(durable);
             let mut m = self.0.lock().unwrap();
+            let mut lanes = self.2.lock().unwrap();
             for w in batch {
                 if let Write::Expect(_, id, expected) = w
                     && m.get(&id.raw()) != expected.as_ref()
@@ -240,10 +276,22 @@ mod tests {
                     Write::Remove(_, id) => {
                         m.remove(&id.raw());
                     }
+                    Write::Set(lane, key, value) => {
+                        lanes
+                            .entry(*lane)
+                            .or_default()
+                            .insert(key.clone(), value.clone());
+                    }
+                    Write::Unset(lane, key) => {
+                        if let Some(l) = lanes.get_mut(lane) {
+                            l.remove(key);
+                        }
+                    }
                     Write::Expect(..) => {}
                 }
             }
             drop(m);
+            drop(lanes);
             Ok(())
         }
     }

@@ -69,6 +69,19 @@ impl<const YIELDS: bool> Store for Backend<YIELDS> {
         Ok(value)
     }
 
+    // The chains here keep their segments as records: no lane is read.
+    async fn scan(
+        &self,
+        _: u64,
+        _: &wavedb_core::store::Span,
+    ) -> Result<Vec<wavedb_core::store::Entry>> {
+        Ok(Vec::new())
+    }
+
+    async fn count(&self, _: u64, _: &[u8], _: Option<&[u8]>) -> Result<u64> {
+        Ok(0)
+    }
+
     async fn apply(&self, batch: &[Write]) -> Result<()> {
         let mut m = self.0.lock().unwrap();
         for w in batch {
@@ -86,7 +99,7 @@ impl<const YIELDS: bool> Store for Backend<YIELDS> {
                 Write::Remove(_, id) => {
                     m.remove(&id.raw());
                 }
-                Write::Expect(..) => {}
+                Write::Expect(..) | Write::Set(..) | Write::Unset(..) => {}
             }
         }
         Ok(())

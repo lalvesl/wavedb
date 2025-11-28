@@ -28,6 +28,7 @@ use std::collections::HashMap;
 
 use async_channel::{Sender, TrySendError};
 use wavedb_core::notify::{Mutation, MutationKind};
+use wavedb_core::store::{Entry, Span};
 use wavedb_core::{Id, Store, U48, Write};
 use wavedb_net::ws::{EventKind, RecordEvent, ServerMsg, Topic};
 
@@ -154,6 +155,23 @@ impl<S: Store> Store for NotifyStore<'_, S> {
         self.inner.get_of(struct_hash, id).await
     }
 
+    async fn scan(
+        &self,
+        lane: u64,
+        span: &Span,
+    ) -> wavedb_core::Result<Vec<Entry>> {
+        self.inner.scan(lane, span).await
+    }
+
+    async fn count(
+        &self,
+        lane: u64,
+        lo: &[u8],
+        hi: Option<&[u8]>,
+    ) -> wavedb_core::Result<u64> {
+        self.inner.count(lane, lo, hi).await
+    }
+
     async fn apply(&self, batch: &[Write]) -> wavedb_core::Result<()> {
         self.inner.apply(batch).await
     }
@@ -202,6 +220,21 @@ mod tests {
     impl Store for NullStore {
         async fn get(&self, _: Id) -> wavedb_core::Result<Option<Vec<u8>>> {
             Ok(None)
+        }
+        async fn scan(
+            &self,
+            _: u64,
+            _: &wavedb_core::store::Span,
+        ) -> wavedb_core::Result<Vec<wavedb_core::store::Entry>> {
+            Ok(Vec::new())
+        }
+        async fn count(
+            &self,
+            _: u64,
+            _: &[u8],
+            _: Option<&[u8]>,
+        ) -> wavedb_core::Result<u64> {
+            Ok(0)
         }
         async fn apply(&self, _: &[Write]) -> wavedb_core::Result<()> {
             Ok(())
