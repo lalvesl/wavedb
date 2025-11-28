@@ -370,7 +370,7 @@ mod tests {
     #[allow(clippy::unnecessary_wraps)]
     fn as_page(bytes: &[u8]) -> crate::error::StorageResult<SlotPage> {
         let mut page = SlotPage::new(1);
-        page.upsert(id(), bytes.to_vec());
+        page.upsert(&id().raw().to_be_bytes(), bytes.to_vec());
         Ok(page)
     }
 
@@ -419,8 +419,9 @@ mod tests {
         let run = Run::new(1, 2);
         let payload = vec![0xA5; run.byte_len() as usize];
         bf.write_run(0, run, &payload).unwrap();
-        let read =
-            bf.with_page(run, as_page, |p| p.get(id()).map(<[u8]>::to_vec));
+        let read = bf.with_page(run, as_page, |p| {
+            p.get(&id().raw().to_be_bytes()).map(<[u8]>::to_vec)
+        });
         assert_eq!(read.unwrap(), Some(payload));
         assert!(bf.page_cache().is_empty(), "zero must hold nothing");
     }

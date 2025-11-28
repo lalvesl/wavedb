@@ -177,13 +177,16 @@ impl PageStore {
             return Vec::new();
         }
         for w in batch {
-            let (hash, id) = match w {
+            let (hash, key) = match w {
                 Write::Put(id, bytes) => match crate::apply::head_of(bytes) {
-                    Some(hash) => (hash, *id),
+                    Some(hash) => (hash, key_of_id(*id).to_vec()),
                     None => continue,
                 },
                 Write::Remove(hash, id) | Write::Expect(hash, id, _) => {
-                    (*hash, *id)
+                    (*hash, key_of_id(*id).to_vec())
+                }
+                Write::Set(lane, key, _) | Write::Unset(lane, key) => {
+                    (*lane, key.clone())
                 }
             };
             let Some(idx) = self.slot_index(hash) else {
@@ -193,7 +196,7 @@ impl PageStore {
             let Some(index) = index.as_ref() else {
                 continue;
             };
-            if let Located::Page { at, flags, .. } = locate(index, id)
+            if let Located::Page { at, flags, .. } = locate(index, &key)
                 && flags & EVICTED != 0
                 && let Some(key) = index.key_of(at)
             {
@@ -237,9 +240,9 @@ impl PageStore {
         }
         let mut restored = SlotPage::new(slot.struct_hash());
         for image in images {
-            for (id, bytes) in image.iter() {
-                if within(&key_of_id(id), &lo, hi.as_deref()) {
-                    restored.upsert(id, bytes.to_vec());
+            for (key, bytes) in image.iter() {
+                if within(key, &lo, hi.as_deref()) {
+                    restored.upsert(key, bytes.to_vec());
                 }
             }
         }
@@ -310,16 +313,16 @@ impl PageStore {
         Ok(wanted.len())
     }
 
-    /// `id`'s bytes from the object store, for a read whose disk page was
-    /// evicted — which marks the page wanted back.
+    /// `key`'s bytes from the object store, for a read whose disk page
+    /// (found by `page`) was evicted — which marks the page wanted back.
     pub(crate) async fn read_evicted(
         &self,
         idx: usize,
-        key: Vec<u8>,
-        id: Id,
+        page: Vec<u8>,
+        key: &[u8],
     ) -> StorageResult<Option<Vec<u8>>> {
-        self.want(idx, key);
-        self.read_remote(idx, id).await
+        self.want(idx, page);
+        self.read_remote(idx, key).await
     }
 
     /// Whether `id`'s disk page is on disk (not evicted) — a diagnostic.
@@ -328,7 +331,7 @@ impl PageStore {
         self.slot_of(struct_hash).is_none_or(|slot| {
             slot.directory().borrow().as_ref().is_none_or(|index| {
                 !matches!(
-                    locate(index, id),
+                    locate(index, &key_of_id(id)),
                     Located::Page { flags, .. } if flags & EVICTED != 0
                 )
             })
