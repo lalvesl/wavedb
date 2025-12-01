@@ -170,7 +170,8 @@ fn envelope_bytes(buf: &[u8]) -> StorageResult<&[u8]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PageBody, PageEnvelope, PagePayload, SlotPage};
+    use super::super::body::PageBody;
+    use super::{PageEnvelope, PagePayload, SlotPage};
     use crate::dictionary::Dictionary;
     use crate::error::StorageError;
     use wavedb_core::wire::{to_wire, to_wire_checked};
@@ -194,8 +195,11 @@ mod tests {
     /// it later can land out of range or out of order.
     #[test]
     fn columns_that_disagree_are_a_corrupt_body() {
+        // Ids as 16-byte keys, every one as long: the width form.
         let body = |ids: Vec<u128>, ends: Vec<u32>, data: Vec<u8>| PageBody {
-            ids,
+            keys: ids.iter().flat_map(|i| i.to_be_bytes()).collect(),
+            key_width: 16,
+            key_ends: Vec::new(),
             ends,
             data,
         };
@@ -215,5 +219,33 @@ mod tests {
         }
         let good = opened(&body(vec![1, 5], vec![1, 1], vec![9])).unwrap();
         assert_eq!(good.len(), 2);
+    }
+
+    /// Keys of their own lengths are cut by their ends, which must cover
+    /// the key bytes exactly and keep the keys ascending.
+    #[test]
+    fn keys_of_many_lengths_are_cut_by_their_ends() {
+        let body = |keys: &[u8], key_ends: Vec<u32>| PageBody {
+            keys: keys.to_vec(),
+            key_width: 0,
+            key_ends,
+            ends: vec![0, 0],
+            data: Vec::new(),
+        };
+        let good = opened(&body(b"aab", vec![1, 3])).unwrap();
+        assert_eq!(
+            good.iter().map(|(k, _)| k.to_vec()).collect::<Vec<_>>(),
+            [b"a".to_vec(), b"ab".to_vec()]
+        );
+        for bad in [
+            body(b"aab", vec![1, 2]), // a key byte left over
+            body(b"aba", vec![2, 3]), // "ab" before "a"
+            body(b"aab", vec![2, 1]), // an end going back
+        ] {
+            assert!(
+                matches!(opened(&bad), Err(StorageError::Corrupt("page body"))),
+                "{bad:?}"
+            );
+        }
     }
 }
