@@ -359,7 +359,8 @@ mod tests {
     /// A page of one record of `len` bytes of `fill`.
     fn page(len: usize, fill: u8) -> SlotPage {
         let mut page = SlotPage::new(7);
-        page.upsert(Id::new(1, U48::from(1u32), false, 1), vec![fill; len]);
+        let key = Id::new(1, U48::from(1u32), false, 1).raw().to_be_bytes();
+        page.upsert(&key, vec![fill; len]);
         page
     }
 
