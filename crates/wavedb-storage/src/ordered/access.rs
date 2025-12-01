@@ -155,6 +155,31 @@ impl<M: Copy + Default> PageIndex<M> {
         }
     }
 
+    /// The entry before `at`, in key order.
+    #[must_use]
+    pub fn prev(&self, at: Slot) -> Option<Slot> {
+        if at.entry > 0 {
+            return Some(Slot {
+                range: at.range,
+                entry: at.entry - 1,
+            });
+        }
+        let range = at.range.checked_sub(1)?;
+        let entries = self.ranges.get(range)?.entries.len();
+        Some(Slot {
+            range,
+            entry: entries.checked_sub(1)?,
+        })
+    }
+
+    /// The last entry, in key order.
+    #[must_use]
+    pub fn last(&self) -> Option<Slot> {
+        let range = self.ranges.len().checked_sub(1)?;
+        let entry = self.ranges[range].entries.len().checked_sub(1)?;
+        Some(Slot { range, entry })
+    }
+
     /// The page at `at`, if a page is there.
     #[must_use]
     pub fn page_at(&self, at: Slot) -> Option<Placed<M>> {
