@@ -268,8 +268,8 @@ impl RecordCache {
                 let seed = self.index.seed();
                 let index = &mut self.index;
                 if let Some(log) = self.logs.get_mut(slot) {
-                    log.compact(n, |id, from, to| {
-                        index.repoint(hash_of(id, seed), from, to)
+                    log.compact(n, |key, from, to| {
+                        index.repoint(hash_of(key, seed), from, to)
                     });
                 }
                 continue;
@@ -287,9 +287,12 @@ impl RecordCache {
             };
             let seed = self.index.seed();
             let index = &mut self.index;
+            let ordered = &mut self.ordered;
             if let Some(log) = self.logs.get_mut(slot) {
-                log.drop_oldest(|at, id| {
-                    index.remove(hash_of(id, seed), |l| l == at);
+                log.drop_oldest(|at, key| {
+                    if index.remove(hash_of(key, seed), |l| l == at).is_some() {
+                        Self::forget(ordered, slot, key);
+                    }
                 });
             }
         }
@@ -302,8 +305,11 @@ mod tests {
 
     use super::{Lookup, RecordCache};
 
-    fn id(key: u64) -> Id {
+    fn id(key: u64) -> Vec<u8> {
         Id::new(key, U48::from(1u32), false, 0)
+            .raw()
+            .to_be_bytes()
+            .to_vec()
     }
 
     fn cache() -> RecordCache {
@@ -317,23 +323,23 @@ mod tests {
     #[test]
     fn the_newest_write_answers_and_a_remove_is_remembered() {
         let mut c = cache();
-        c.put(0, id(1), Some(b"v1"));
-        c.put(0, id(1), Some(b"v2"));
-        assert_eq!(c.get(0, id(1)), hit(b"v2"));
+        c.put(0, &id(1), Some(b"v1"));
+        c.put(0, &id(1), Some(b"v2"));
+        assert_eq!(c.get(0, &id(1)), hit(b"v2"));
         assert_eq!(c.len(), 1, "a rewrite repoints, it does not add");
-        c.put(0, id(1), None);
-        assert_eq!(c.get(0, id(1)), Lookup::Removed);
-        assert_eq!(c.get(0, id(2)), Lookup::Miss);
+        c.put(0, &id(1), None);
+        assert_eq!(c.get(0, &id(1)), Lookup::Removed);
+        assert_eq!(c.get(0, &id(2)), Lookup::Miss);
     }
 
-    /// The key is `(Id, type)`: the same id in two types is two records.
+    /// The key is `(key, type)`: the same id in two types is two records.
     #[test]
     fn one_id_in_two_types_is_two_records() {
         let mut c = cache();
-        c.put(0, id(1), Some(b"zero"));
-        c.put(1, id(1), Some(b"one"));
-        assert_eq!(c.get(0, id(1)), hit(b"zero"));
-        assert_eq!(c.get(1, id(1)), hit(b"one"));
+        c.put(0, &id(1), Some(b"zero"));
+        c.put(1, &id(1), Some(b"one"));
+        assert_eq!(c.get(0, &id(1)), hit(b"zero"));
+        assert_eq!(c.get(1, &id(1)), hit(b"one"));
         assert_eq!(c.len(), 2);
     }
 
@@ -343,13 +349,13 @@ mod tests {
     fn a_round_takes_each_record_once_at_its_newest() {
         let mut c = cache();
         for v in 0..5u8 {
-            c.put(0, id(1), Some(&[v]));
+            c.put(0, &id(1), Some(&[v]));
         }
-        c.put(1, id(2), Some(b"other type"));
+        c.put(1, &id(2), Some(b"other type"));
         let round = c.round(usize::MAX);
         assert_eq!(round.work.len(), 2, "one batch of records per type");
         assert_eq!(round.work[0].1, vec![(id(1), Some(vec![4]))]);
-        c.put(0, id(1), Some(b"during"));
+        c.put(0, &id(1), Some(b"during"));
         c.advance(&round);
         assert!(c.has_pending(), "the write during the round is pending");
         let next = c.round(usize::MAX);
@@ -364,21 +370,21 @@ mod tests {
     #[test]
     fn a_settled_tombstone_leaves_the_index() {
         let mut c = cache();
-        c.put(0, id(1), Some(b"v"));
-        c.put(0, id(1), None);
+        c.put(0, &id(1), Some(b"v"));
+        c.put(0, &id(1), None);
         let round = c.round(usize::MAX);
         assert_eq!(round.work, vec![(0, vec![(id(1), None)])]);
         c.advance(&round);
-        assert_eq!(c.get(0, id(1)), Lookup::Miss, "the page agrees now");
+        assert_eq!(c.get(0, &id(1)), Lookup::Miss, "the page agrees now");
         assert_eq!(c.len(), 0);
     }
 
     #[test]
     fn a_rotation_bounds_the_rounds_until_it_is_settled() {
         let mut c = cache();
-        c.put(0, id(1), Some(b"owed"));
+        c.put(0, &id(1), Some(b"owed"));
         c.rotate();
-        c.put(0, id(2), Some(b"fresh"));
+        c.put(0, &id(2), Some(b"fresh"));
         assert!(c.owes());
         let round = c.round(usize::MAX);
         assert_eq!(
@@ -398,17 +404,17 @@ mod tests {
         let mut c = cache();
         let segment = vec![5u8; 8_000];
         for k in 0..400 {
-            c.put(0, id(k), Some(&[k as u8; 300]));
-            c.put(0, id(1_000_000), Some(&segment));
+            c.put(0, &id(k), Some(&[k as u8; 300]));
+            c.put(0, &id(1_000_000), Some(&segment));
         }
         let round = c.round(usize::MAX);
         c.advance(&round);
-        let live = 400 * (300 + 20) + 8_020;
+        let live = 400 * (300 + 22) + 8_022;
         c.evict(live * 2 + (64 << 10) + c.index.footprint());
         for k in 0..400 {
-            assert_eq!(c.get(0, id(k)), hit(&[k as u8; 300]), "record {k}");
+            assert_eq!(c.get(0, &id(k)), hit(&[k as u8; 300]), "record {k}");
         }
-        assert_eq!(c.get(0, id(1_000_000)), hit(&segment));
+        assert_eq!(c.get(0, &id(1_000_000)), hit(&segment));
         assert_eq!(c.len(), 401);
     }
 
@@ -417,10 +423,10 @@ mod tests {
     #[test]
     fn superseded_copies_count_as_dead() {
         let mut c = cache();
-        c.put(0, id(1), Some(&[1u8; 100]));
-        c.put(0, id(1), Some(&[2u8; 100]));
-        c.put(0, id(2), Some(b"x"));
-        c.put(0, id(2), None);
+        c.put(0, &id(1), Some(&[1u8; 100]));
+        c.put(0, &id(1), Some(&[2u8; 100]));
+        c.put(0, &id(2), Some(b"x"));
+        c.put(0, &id(2), None);
         let round = c.round(usize::MAX);
         c.advance(&round);
         let log = &c.logs[0];
