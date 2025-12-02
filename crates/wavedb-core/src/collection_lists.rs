@@ -7,9 +7,9 @@
 //! collection that declares nothing stores each record exactly once. A list buys
 //! a dense bulk read in its order, and pays a full copy for it.
 //!
-//! The mechanism is RFC 0050's, unchanged: the write half threads each list
-//! through the same `plan_insert`/`plan_remove` the built-in chain uses, and the
-//! read half is the same segment walk.
+//! The mechanism is the built-in chain's: each list is a key range of the
+//! type's record lane (RFC 0078 §7), written by the same entry writes and read
+//! by the same scans.
 //!
 //! Two differences from the built-in chain are load-bearing:
 //!
@@ -36,33 +36,24 @@ use crate::error::{Error, Result};
 use crate::id::Id;
 use crate::index::{Bound, Chain, SecKey};
 use crate::local_id::LocalId;
-use crate::record::{Overlay, wire_record};
+use crate::record::wire_record;
 use crate::store::{Store, Write};
 use crate::traits::NonUniqueStruct;
 use crate::wire::Wire;
 
 impl<T: NonUniqueStruct> Collection<T> {
     /// File a freshly inserted record into every declared list.
-    ///
-    /// Each list is an independent chain with its own segment ids, so they need
-    /// no shared overlay between them — only within one chain, which
-    /// `plan_insert` already arranges.
-    pub(crate) async fn plan_list_inserts<S: Store>(
+    pub(crate) fn plan_list_inserts(
         &self,
-        store: &S,
         batch: &mut Vec<Write>,
-        lists: &mut [Chain<Vec<u8>>],
         id: Id,
         envelope: &[u8],
         value: &T,
-    ) -> Result<()> {
-        for (i, chain) in lists.iter_mut().enumerate() {
+    ) {
+        for (i, chain) in self.list_chains().iter().enumerate() {
             let key = Self::list_key(value, i, id);
-            batch.extend(
-                chain.plan_insert(store, key, envelope.to_vec()).await?,
-            );
+            batch.push(chain.insert(&key, &envelope.to_vec()));
         }
-        Ok(())
     }
 
     /// Re-file a saved record in every declared list.
@@ -71,8 +62,7 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// rewritten whether or not its property changed — that is the cost RFC 0051
     /// states plainly (a save carries K× the record's bytes). What the
     /// comparison saves is the *removal*: an unchanged property means the entry
-    /// stays where it is and `plan_insert` replaces its payload in place, one
-    /// segment write instead of two.
+    /// stays where it is and the write replaces its value in place.
     ///
     /// **Skipping the list entirely when the key is unchanged is not available**,
     /// and the reason is worth stating because the shortcut looks free: the
@@ -83,59 +73,36 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// comparison that is wrong the moment any non-ordering field moves. An
     /// unconditional rewrite is the only coherent rule, and
     /// `a_save_refreshes_a_list_whose_order_it_did_not_change` is what keeps it.
-    pub(crate) async fn plan_list_moves<S: Store>(
-        &self,
-        view: &mut Overlay<'_, S>,
+    pub(crate) fn plan_list_moves(
         batch: &mut Vec<Write>,
-        lists: &mut [Chain<Vec<u8>>],
+        lists: &[Chain<Vec<u8>>],
         id: Id,
         envelope: &[u8],
         values: (&T, &T),
-    ) -> Result<()> {
+    ) {
         let (old_value, value) = values;
-        for (i, chain) in lists.iter_mut().enumerate() {
+        for (i, chain) in lists.iter().enumerate() {
             let old_key = Self::list_key(old_value, i, id);
             let new_key = Self::list_key(value, i, id);
-            if old_key != new_key
-                && let Some(writes) =
-                    chain.plan_remove(&*view, &old_key).await?
-            {
-                view.stage(&writes);
-                batch.extend(writes);
+            if old_key != new_key {
+                batch.push(chain.remove(&old_key));
             }
-            let writes = chain
-                .plan_insert(&*view, new_key, envelope.to_vec())
-                .await?;
-            // Staging after the *last* plan on a chain is defensive rather than
-            // load-bearing — chains never share ids, so nothing later in this
-            // batch reads back what was just written, and a mutation deleting
-            // this line survives the suite. It stays because the discipline is
-            // "stage after every plan" (the secondaries loop in
-            // `collection_write` does the same), and a chain that skipped it
-            // would be quietly wrong the day an operation is added after it.
-            view.stage(&writes);
-            batch.extend(writes);
+            batch.push(chain.insert(&new_key, &envelope.to_vec()));
         }
-        Ok(())
     }
 
     /// Take a removed record out of every declared list.
     ///
     /// A list holds only living records — the anchor keeps the bytes, and the
     /// removal log keeps the event.
-    pub(crate) async fn plan_list_removes<S: Store>(
+    pub(crate) fn plan_list_removes(
         &self,
-        store: &S,
         batch: &mut Vec<Write>,
-        lists: &mut [Chain<Vec<u8>>],
         id: Id,
         value: &T,
-    ) -> Result<()> {
-        for (i, chain) in lists.iter_mut().enumerate() {
-            let key = Self::list_key(value, i, id);
-            if let Some(writes) = chain.plan_remove(store, &key).await? {
-                batch.extend(writes);
-            }
+    ) {
+        for (i, chain) in self.list_chains().iter().enumerate() {
+            batch.push(chain.remove(&Self::list_key(value, i, id)));
         }
         Ok(())
     }
