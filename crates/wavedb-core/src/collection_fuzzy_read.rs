@@ -63,9 +63,9 @@ impl<T: NonUniqueStruct> Collection<T> {
         mode: Fuzzy,
         limit: usize,
     ) -> Result<Vec<Scored<(Id, Wire<T>)>>> {
-        let pivot = self.load_pivot(store).await?;
+        self.check_pivot(store).await?;
         let chain = self
-            .fuzzy_chains(&pivot)
+            .fuzzy_chains()
             .into_iter()
             .nth(index)
             .ok_or(Error::FuzzyOutOfRange(index))?;
@@ -75,8 +75,8 @@ impl<T: NonUniqueStruct> Collection<T> {
         let grams = gram_prefixes(&text, n);
         let threshold = mode.threshold(grams.len(), n);
 
-        // Steps 1–2: one descent per gram, then the chain while the gram
-        // holds (RFC 0075), merged into a share count.
+        // Steps 1–2: one read per gram, then the chain while the gram holds
+        // (RFC 0075), merged into a share count.
         let mut seen: HashMap<LocalId, Candidate> = HashMap::new();
         for prefix in &grams {
             let from = SecKey {
@@ -84,7 +84,7 @@ impl<T: NonUniqueStruct> Collection<T> {
                 rec: LocalId::default(),
             };
             let keys = chain
-                .scan_from(store, from)
+                .scan_from(store, &from)
                 .try_take_while(|(key, ())| {
                     futures::future::ready(Ok(key.field.starts_with(prefix)))
                 })

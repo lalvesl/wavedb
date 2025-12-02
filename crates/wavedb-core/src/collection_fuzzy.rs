@@ -19,23 +19,21 @@
 //! ## The cost, stated plainly
 //!
 //! Inserting a record writes `L + n - 1` keys scattered across the key space,
-//! so it touches roughly that many posting segments — a 20-character name is
-//! ~22 inserts, each into a segment of pointers rather than a whole tree leaf
-//! (RFC 0075). Removal is symmetric. It is one barrier, because it rides the
-//! collection's single batch, but it is not one page. That is the honest
+//! so it touches up to that many pages of the posting lane — a 20-character
+//! name is ~22 entries (RFC 0075, RFC 0078 §7). Removal is symmetric. It is
+//! one barrier, because it rides the collection's single batch, but it is
+//! not one page. That is the honest
 //! headline of this feature the way "one full copy of every record per
 //! declaration" is RFC 0051's.
 //!
 //! [RFC 0056]: https://github.com/wavedb/wavedb/blob/main/rfcs/0056-fuzzy-string-search-WIP.md
 
 use crate::collection::Collection;
-use crate::error::Result;
 use crate::fuzzy::{field_key, gram_prefixes, normalize};
 use crate::id::Id;
 use crate::index::{Chain, SecKey};
 use crate::local_id::LocalId;
-use crate::overlay::Overlay;
-use crate::store::{Store, Write};
+use crate::store::Write;
 use crate::traits::NonUniqueStruct;
 
 impl<T: NonUniqueStruct> Collection<T> {
@@ -58,81 +56,55 @@ impl<T: NonUniqueStruct> Collection<T> {
     }
 
     /// File a freshly inserted record in every fuzzy index.
-    pub(crate) async fn plan_fuzzy_inserts<S: Store>(
+    pub(crate) fn plan_fuzzy_inserts(
         &self,
-        view: &mut Overlay<'_, S>,
         batch: &mut Vec<Write>,
-        chains: &mut [Chain<()>],
         id: Id,
         value: &T,
-    ) -> Result<()> {
-        for (i, chain) in chains.iter_mut().enumerate() {
+    ) {
+        for (i, chain) in self.fuzzy_chains().iter().enumerate() {
             for key in Self::fuzzy_keys(value, i, id) {
-                let writes = chain.plan_insert(&*view, key, ()).await?;
-                // One record contributes many keys to the *same* chain, so
-                // unlike a secondary index these plans genuinely read each
-                // other back — the overlay is load-bearing here, not
-                // defensive.
-                view.stage(&writes);
-                batch.extend(writes);
+                batch.push(chain.insert(&key, &()));
             }
         }
-        Ok(())
     }
 
     /// Re-file a saved record: only the grams that actually moved.
     ///
     /// An unchanged indexed field yields two identical sets and therefore an
-    /// empty difference both ways — no reads planned, no writes emitted. That
-    /// is the whole reason a posting holds no record bytes.
-    pub(crate) async fn plan_fuzzy_moves<S: Store>(
-        &self,
-        view: &mut Overlay<'_, S>,
+    /// empty difference both ways — no writes emitted. That is the whole
+    /// reason a posting holds no record bytes.
+    pub(crate) fn plan_fuzzy_moves(
         batch: &mut Vec<Write>,
-        chains: &mut [Chain<()>],
+        chains: &[Chain<()>],
         id: Id,
         values: (&T, &T),
-    ) -> Result<()> {
+    ) {
         let (old_value, value) = values;
-        for (i, chain) in chains.iter_mut().enumerate() {
+        for (i, chain) in chains.iter().enumerate() {
             let old: Vec<SecKey> = Self::fuzzy_keys(old_value, i, id);
             let new: Vec<SecKey> = Self::fuzzy_keys(value, i, id);
-            if old == new {
-                continue;
-            }
             for key in old.iter().filter(|k| !new.contains(k)) {
-                if let Some(writes) = chain.plan_remove(&*view, key).await? {
-                    view.stage(&writes);
-                    batch.extend(writes);
-                }
+                batch.push(chain.remove(key));
             }
             for key in new.iter().filter(|k| !old.contains(k)) {
-                let writes = chain.plan_insert(&*view, key.clone(), ()).await?;
-                view.stage(&writes);
-                batch.extend(writes);
+                batch.push(chain.insert(key, &()));
             }
         }
-        Ok(())
     }
 
     /// Take a removed record out of every fuzzy index.
-    pub(crate) async fn plan_fuzzy_removes<S: Store>(
+    pub(crate) fn plan_fuzzy_removes(
         &self,
-        view: &mut Overlay<'_, S>,
         batch: &mut Vec<Write>,
-        chains: &mut [Chain<()>],
         id: Id,
         value: &T,
-    ) -> Result<()> {
-        for (i, chain) in chains.iter_mut().enumerate() {
+    ) {
+        for (i, chain) in self.fuzzy_chains().iter().enumerate() {
             for key in Self::fuzzy_keys(value, i, id) {
-                if let Some(writes) = chain.plan_remove(&*view, &key).await? {
-                    view.stage(&writes);
-                    batch.extend(writes);
-                }
+                batch.push(chain.remove(&key));
             }
         }
-        Ok(())
     }
 }
 
@@ -143,9 +115,8 @@ mod tests {
     use crate::collection::Collection;
     use crate::fuzzy::{Fold, gram_prefixes, normalize};
     use crate::index::mem_store::MemStore;
-    use crate::index::{Chain, ChainRoots, LogRoots, Pivot, Roots, SecKey};
+    use crate::index::{Chain, Pivot, SecKey};
     use crate::local_id::LocalId;
-    use crate::overlay::Overlay;
     use crate::permission::PermissionRef;
     use crate::traits::{NonUniqueStruct, Shape, WaveDbStruct};
     use crate::u48::U48;
@@ -167,38 +138,13 @@ mod tests {
 
     #[derive(Debug, Clone, Default, PartialEq, Eq, WaveWire)]
     struct MemberPivot {
-        recency: ChainRoots,
-        removals: LogRoots,
-        fuzzy: [ChainRoots; 1],
         permission: Option<PermissionRef>,
     }
 
     impl Pivot for MemberPivot {
         const STRUCT_HASH: u64 = 0x0F0_0002;
-        fn secondaries(&self) -> &[ChainRoots] {
-            &[]
-        }
-        fn recency(&self) -> ChainRoots {
-            self.recency
-        }
-        fn removals(&self) -> LogRoots {
-            self.removals
-        }
-        fn fuzzy(&self) -> &[ChainRoots] {
-            &self.fuzzy
-        }
         fn permission(&self) -> Option<&PermissionRef> {
             self.permission.as_ref()
-        }
-        fn replace_roots(&self, roots: Roots<'_>) -> Self {
-            let mut fuzzy = self.fuzzy;
-            fuzzy.copy_from_slice(roots.fuzzy);
-            Self {
-                recency: roots.recency,
-                removals: roots.removals,
-                fuzzy,
-                permission: self.permission.clone(),
-            }
         }
     }
 
@@ -236,7 +182,7 @@ mod tests {
             rec: LocalId::default(),
         };
         chain
-            .scan_from(store, from)
+            .scan_from(store, &from)
             .try_take_while(|(k, ())| {
                 futures::future::ready(Ok(k.field.starts_with(prefix)))
             })
@@ -254,7 +200,7 @@ mod tests {
             rec: LocalId::default(),
         };
         chain
-            .scan_from(store, from)
+            .scan_from(store, &from)
             .map_ok(|(k, ())| k)
             .try_collect()
             .await
@@ -267,8 +213,7 @@ mod tests {
         col: &Collection<Member>,
         query: &str,
     ) -> Vec<LocalId> {
-        let pivot = col.load_pivot(store).await.unwrap();
-        let chain = col.fuzzy_chains(&pivot).pop().unwrap();
+        let chain = col.fuzzy_chains().pop().unwrap();
         let (n, fold) = Member::fuzzy_profile(0);
         let mut out = Vec::new();
         for prefix in gram_prefixes(&normalize(query, fold), n) {
@@ -281,8 +226,7 @@ mod tests {
 
     /// How many postings the chain holds in total.
     async fn postings(store: &MemStore, col: &Collection<Member>) -> usize {
-        let pivot = col.load_pivot(store).await.unwrap();
-        let chain = col.fuzzy_chains(&pivot).pop().unwrap();
+        let chain = col.fuzzy_chains().pop().unwrap();
         under(store, chain, &[]).await.len()
     }
 
@@ -325,23 +269,18 @@ mod tests {
             // Asked of the planner directly, because that is exactly the
             // claim: not "the postings end up the same" (they would either
             // way) but "no write was planned at all".
-            let pivot_rec = col.load_pivot(&store).await.unwrap();
-            let mut chains = col.fuzzy_chains(&pivot_rec);
-            let mut view = Overlay::new(&store);
+            let chains = col.fuzzy_chains();
             let mut batch = Vec::new();
             let same_name = Member {
                 name: "John Smith".into(),
                 city: "porto".into(),
             };
-            col.plan_fuzzy_moves(
-                &mut view,
+            Collection::<Member>::plan_fuzzy_moves(
                 &mut batch,
-                &mut chains,
+                &chains,
                 id,
                 (&member("John Smith"), &same_name),
-            )
-            .await
-            .unwrap();
+            );
             assert!(
                 batch.is_empty(),
                 "a save that changed no gram planned {} writes",
@@ -373,20 +312,15 @@ mod tests {
             let col = Collection::<Member>::at(pivot, tenant());
             let id = col.insert(&store, &member("John Smith")).await.unwrap();
 
-            let pivot_rec = col.load_pivot(&store).await.unwrap();
-            let mut chains = col.fuzzy_chains(&pivot_rec);
+            let chains = col.fuzzy_chains();
             let before = all_keys(&store, chains[0]).await;
-            let mut view = Overlay::new(&store);
             let mut batch = Vec::new();
-            col.plan_fuzzy_moves(
-                &mut view,
+            Collection::<Member>::plan_fuzzy_moves(
                 &mut batch,
-                &mut chains,
+                &chains,
                 id,
                 (&member("John Smith"), &member("John Smyth")),
-            )
-            .await
-            .unwrap();
+            );
 
             crate::store::Store::apply(&store, &batch).await.unwrap();
             let after = all_keys(&store, chains[0]).await;
@@ -428,8 +362,7 @@ mod tests {
             // and the verify step are what reject them. What must be gone is
             // the record's posting under a gram unique to the old name.
             let dropped = gram_prefixes(&normalize("smi", Fold::Latin), 3);
-            let pivot_rec = col.load_pivot(&store).await.unwrap();
-            let chain = col.fuzzy_chains(&pivot_rec).pop().unwrap();
+            let chain = col.fuzzy_chains().pop().unwrap();
             for prefix in dropped {
                 let hits = under(&store, chain, &prefix).await;
                 assert!(

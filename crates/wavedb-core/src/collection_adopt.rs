@@ -27,7 +27,7 @@ use crate::wire::to_wire;
 
 impl<T: NonUniqueStruct> Collection<T> {
     /// Bootstrap this collection **at the given `pivot`** (a node-minted
-    /// `PivotId`) if no pivot record exists there yet: empty trees + the
+    /// `PivotId`) if no pivot record exists there yet: the
     /// `Pivot` record, one atomic batch — [`create`](Self::create) with the
     /// identity supplied instead of minted. Idempotent.
     ///
@@ -45,7 +45,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         if exists {
             return Ok(());
         }
-        Self::create_rooted(store, tenant, pivot.to_id(tenant)).await
+        Self::create_rooted(store, pivot.to_id(tenant)).await
     }
 
     /// Mirror the **living** record `(id, value)` into this (local) collection
@@ -66,7 +66,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         id: Id,
         value: &T,
     ) -> Result<()> {
-        let pivot = self.load_pivot(store).await?;
+        self.check_pivot(store).await?;
         // One read decides all three cases and hands back the bytes the
         // living branch compares — where a `current` descent, a "is it merely
         // dead?" fetch and a re-read of the same record used to sit.
@@ -84,9 +84,9 @@ impl<T: NonUniqueStruct> Collection<T> {
             // as a chained version so the dead copy archives instead of
             // being overwritten.
             Anchor::Dead => {
-                self.chain_into_living(store, &pivot, id, None, value).await
+                self.chain_into_living(store, id, None, value).await
             }
-            Anchor::Vacant => self.insert_at(store, &pivot, id, value).await,
+            Anchor::Vacant => self.insert_at(store, id, value).await,
         }
     }
 
@@ -107,7 +107,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         meta: crate::metadata::Metadata,
         value: &T,
     ) -> Result<()> {
-        let pivot = self.load_pivot(store).await?;
+        self.check_pivot(store).await?;
         match self.anchor(store, id).await? {
             Anchor::Living(existing, body)
                 if existing == meta && to_wire(&body) == to_wire(value) =>
@@ -120,11 +120,10 @@ impl<T: NonUniqueStruct> Collection<T> {
             // A revived keyed anchor: chain the node's version onto the
             // locally-dead copy, archiving it at the node's derived slot.
             Anchor::Dead => {
-                self.chain_into_living(store, &pivot, id, Some(meta), value)
-                    .await
+                self.chain_into_living(store, id, Some(meta), value).await
             }
             Anchor::Vacant => {
-                self.insert_with_meta(store, &pivot, id, meta, value).await
+                self.insert_with_meta(store, id, meta, value).await
             }
         }
     }
@@ -139,7 +138,7 @@ mod tests {
     use crate::error::Error;
     use crate::id::Id;
     use crate::index::mem_store::MemStore;
-    use crate::index::{ChainRoots, IndexKey, LogRoots, Pivot, Roots};
+    use crate::index::{IndexKey, Pivot};
     use crate::local_id::LocalId;
     use crate::permission::PermissionRef;
     use crate::traits::{NonUniqueStruct, Shape, WaveDbStruct};
@@ -172,34 +171,12 @@ mod tests {
 
     #[derive(Debug, Clone, Default, PartialEq, Eq, WaveWire)]
     struct ItemPivot {
-        recency: ChainRoots,
-        removals: LogRoots,
-        secondaries: [ChainRoots; 1],
         permission: Option<PermissionRef>,
     }
     impl Pivot for ItemPivot {
         const STRUCT_HASH: u64 = 0xADD_0002;
-        fn secondaries(&self) -> &[ChainRoots] {
-            &self.secondaries
-        }
-        fn recency(&self) -> ChainRoots {
-            self.recency
-        }
-        fn removals(&self) -> LogRoots {
-            self.removals
-        }
         fn permission(&self) -> Option<&PermissionRef> {
             self.permission.as_ref()
-        }
-        fn replace_roots(&self, roots: Roots<'_>) -> Self {
-            let mut s = self.secondaries;
-            s.copy_from_slice(roots.secondaries);
-            Self {
-                recency: roots.recency,
-                removals: roots.removals,
-                secondaries: s,
-                permission: self.permission.clone(),
-            }
         }
     }
 
