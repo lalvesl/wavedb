@@ -174,8 +174,8 @@ impl SlotPage {
         true
     }
 
-    /// Iterate `(Id, bytes)` in `Id` order.
-    pub fn iter(&self) -> impl Iterator<Item = (Id, &[u8])> {
+    /// Iterate `(key, bytes)` in key order.
+    pub fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
         Entries {
             body: Body {
                 cols: self.columns(),
@@ -197,12 +197,8 @@ impl SlotPage {
         }
         let bytes = self.body.len()
             + self.changes.values().flatten().map(Vec::len).sum::<usize>();
-        let body = codec::body_of(
-            self.iter().map(|(id, b)| (id.raw(), b)),
-            self.len,
-            bytes,
-        )?;
-        self.cuts = codec::cuts_of(&body)?;
+        let body = body::body_of(self.iter(), self.len, bytes)?;
+        self.cuts = body::cuts_of(&body)?;
         self.body = body.into_boxed_slice();
         self.changes.clear();
         Ok(())
@@ -238,57 +234,52 @@ struct Body<'p> {
     at: usize,
 }
 
-impl Body<'_> {
-    /// The next record's id, the record left where it is.
-    fn peek_id(&self) -> Option<u128> {
-        self.cols.as_ref()?.id(self.at)
+impl<'p> Body<'p> {
+    /// The next record's key, the record left where it is.
+    fn peek_key(&self) -> Option<&'p [u8]> {
+        self.cols.as_ref()?.key(self.at)
     }
 }
 
 impl<'p> Iterator for Body<'p> {
-    type Item = (u128, &'p [u8]);
+    type Item = (&'p [u8], &'p [u8]);
     fn next(&mut self) -> Option<Self::Item> {
         let cols = self.cols.as_ref()?;
-        let id = cols.id(self.at)?;
+        let key = cols.key(self.at)?;
         let record = cols.record(self.at)?;
         self.at += 1;
-        Some((id, record))
+        Some((key, record))
     }
 }
 
-/// The body's records and the changes, merged in id order: a change wins
-/// over the body's record at its id, and a removal drops it.
+/// The body's records and the changes, merged in key order: a change wins
+/// over the body's record at its key, and a removal drops it.
 ///
-/// The body is peeked by id alone: a `Peekable` over it carried each record
+/// The body is peeked by key alone: a `Peekable` over it carried each record
 /// ahead of its turn, which cost the merge five times the walk.
 struct Entries<'p> {
     body: Body<'p>,
-    changes: Peekable<btree_map::Iter<'p, u128, Option<Vec<u8>>>>,
+    changes: Peekable<btree_map::Iter<'p, Vec<u8>, Option<Vec<u8>>>>,
 }
 
 impl<'p> Iterator for Entries<'p> {
-    type Item = (Id, &'p [u8]);
+    type Item = (&'p [u8], &'p [u8]);
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             // No change left (a page as read has none): the body alone.
-            let change = self.changes.peek().map(|&(&raw, _)| raw);
-            let body = change.and_then(|_| self.body.peek_id());
+            let change = self.changes.peek().map(|&(key, _)| key.as_slice());
+            let body = change.and_then(|_| self.body.peek_key());
             match change {
                 Some(c) if body.is_none_or(|b| c <= b) => {
                     if body == Some(c) {
                         self.body.at += 1;
                     }
                     // A change at `c`: its record, or a removal to skip.
-                    if let Some((_, Some(record))) = self.changes.next() {
-                        return Some((Id::from_raw(c), record.as_slice()));
+                    if let Some((key, Some(record))) = self.changes.next() {
+                        return Some((key.as_slice(), record.as_slice()));
                     }
                 }
-                _ => {
-                    return self
-                        .body
-                        .next()
-                        .map(|(raw, record)| (Id::from_raw(raw), record));
-                }
+                _ => return self.body.next(),
             }
         }
     }
@@ -302,24 +293,32 @@ mod tests {
     use crate::error::StorageError;
     use wavedb_core::{Id, U48};
 
-    fn id(key: u64) -> Id {
+    fn id(key: u64) -> Vec<u8> {
         Id::new(key, U48::from(1u32), false, key as u16)
+            .raw()
+            .to_be_bytes()
+            .to_vec()
+    }
+
+    /// The `KEY` of an `Id`'s key bytes.
+    fn key_of(bytes: &[u8]) -> u64 {
+        u64::from_be_bytes(bytes[..8].try_into().unwrap())
     }
 
     #[test]
     fn upsert_get_remove() {
         let mut p = SlotPage::new(0xABCD);
         assert!(p.is_empty());
-        p.upsert(id(1), vec![1, 2, 3]);
-        p.upsert(id(2), vec![4, 5]);
+        p.upsert(&id(1), vec![1, 2, 3]);
+        p.upsert(&id(2), vec![4, 5]);
         assert_eq!(p.len(), 2);
-        assert_eq!(p.get(id(1)), Some(&[1, 2, 3][..]));
+        assert_eq!(p.get(&id(1)), Some(&[1, 2, 3][..]));
         // Overwrite.
-        p.upsert(id(1), vec![9]);
-        assert_eq!(p.get(id(1)), Some(&[9][..]));
-        assert!(p.remove(id(2)));
-        assert!(!p.remove(id(2)), "a second removal finds nothing");
-        assert_eq!(p.get(id(2)), None);
+        p.upsert(&id(1), vec![9]);
+        assert_eq!(p.get(&id(1)), Some(&[9][..]));
+        assert!(p.remove(&id(2)));
+        assert!(!p.remove(&id(2)), "a second removal finds nothing");
+        assert_eq!(p.get(&id(2)), None);
         assert_eq!(p.len(), 1);
     }
 
