@@ -10,8 +10,8 @@
 //!   re-keys);
 //! - a **dead** anchor (the key was removed, then written again) is
 //!   **revived**: the new version chains onto the record's whole prior
-//!   history and re-enters `current`, the recency log, and every
-//!   secondary. The dead log keeps the historical removal entry — it is a
+//!   history and re-enters the recency chain, every declared list and
+//!   every secondary. The dead log keeps the historical removal entry — it is a
 //!   removal *log*, not a membership set, and catch-up navigation merges
 //!   both log tails by instant, so a cursor from before the removal
 //!   replays `Removed` then `Saved` and converges on the living record.
@@ -23,10 +23,8 @@
 
 use crate::collection::Collection;
 use crate::collection_read::Anchor;
-use crate::collection_write::MovedRoots;
 use crate::error::Result;
 use crate::id::Id;
-use crate::index::Pivot;
 use crate::local_id::LocalId;
 use crate::metadata::{Metadata, Succession};
 use crate::notify::{Mutation, MutationKind};
@@ -50,22 +48,19 @@ impl<T: NonUniqueStruct> Collection<T> {
     pub(crate) async fn upsert_keyed<S: Store>(
         &self,
         store: &S,
-        pivot: &T::Pivot,
         id: Id,
         value: &T,
     ) -> Result<()> {
-        // Liveness reads off the anchor, not off `current` (RFC 0050): one
-        // record read where a tree descent plus a "is it merely dead?" fetch
-        // used to sit.
+        // Liveness reads off the anchor (RFC 0050): one record read.
         if matches!(self.anchor(store, id).await?, Anchor::Living(..)) {
             return self.save_planned(store, id, value, None).await;
         }
-        self.chain_into_living(store, pivot, id, None, value).await
+        self.chain_into_living(store, id, None, value).await
     }
 
     /// Write `value` at a **non-living** anchor (vacant or dead) as a
-    /// chained live version and (re-)index it in `current`, the recency
-    /// log, and every secondary — one atomic batch. The shared tail of the
+    /// chained live version and (re-)index it in the recency chain, every
+    /// declared list and every secondary — one atomic batch. The shared tail of the
     /// keyed upsert and a mirror's revival:
     /// [`adopt_with`](Collection::adopt_with) passes the node's
     /// [`Metadata`] as `imposed`, so a revived mirror archives its dead
@@ -73,12 +68,11 @@ impl<T: NonUniqueStruct> Collection<T> {
     pub(crate) async fn chain_into_living<S: Store>(
         &self,
         store: &S,
-        pivot: &T::Pivot,
         id: Id,
         imposed: Option<Metadata>,
         value: &T,
     ) -> Result<()> {
-        let floor = self.instant_floor(store, pivot).await?;
+        let floor = self.instant_floor(store).await?;
         let plan = SavePlan {
             hash: T::STRUCT_HASH,
             shape: T::SHAPE,
@@ -95,11 +89,6 @@ impl<T: NonUniqueStruct> Collection<T> {
         let Succession::CreatedAt(instant) = live_meta.succession else {
             return Err(crate::Error::ChainCorrupt(id));
         };
-        // Distinct structures, so their plans don't overlap (the writes
-        // already in `batch` are record slots, never nodes) — no overlay.
-        let mut records = self.recency_chain(pivot);
-        let mut secs = self.sec_chains(pivot);
-        let mut lists = self.list_chains(pivot);
         let key = Self::instant_key(instant, LocalId::from_id(id));
         let envelope =
             crate::record::encode_record(T::STRUCT_HASH, &live_meta, value);
@@ -107,30 +96,12 @@ impl<T: NonUniqueStruct> Collection<T> {
         // record's prior copy left it when the key was removed, so there is
         // nothing to relocate — only to insert, at the new live instant. Every
         // declared list re-enters the same way.
-        batch.extend(records.plan_insert(store, key, ()).await?);
-        self.plan_list_inserts(
-            store, &mut batch, &mut lists, id, &envelope, value,
-        )
-        .await?;
-        for (i, chain) in secs.iter_mut().enumerate() {
-            let key = Self::sec_key(value, i, id);
-            batch.extend(chain.plan_insert(store, key, ()).await?);
+        batch.push(self.recency_chain().insert(&key, &()));
+        self.plan_list_inserts(&mut batch, id, &envelope, value);
+        for (i, chain) in self.sec_chains().iter().enumerate() {
+            batch.push(chain.insert(&Self::sec_key(value, i, id), &()));
         }
-        let mut fuzzy = self.fuzzy_chains(pivot);
-        let mut view = crate::overlay::Overlay::new(store);
-        self.plan_fuzzy_inserts(&mut view, &mut batch, &mut fuzzy, id, value)
-            .await?;
-        self.push_root_moves(
-            &mut batch,
-            pivot,
-            &MovedRoots {
-                secondaries: &secs,
-                recency: records.roots(),
-                removals: pivot.removals(),
-                lists: &lists,
-                fuzzy: &fuzzy,
-            },
-        );
+        self.plan_fuzzy_inserts(&mut batch, id, value);
         store.apply(&batch).await?;
         store.note_mutation(|| Mutation {
             struct_hash: T::STRUCT_HASH,
@@ -156,7 +127,7 @@ mod tests {
     use crate::expose::collection_changes;
     use crate::id::Id;
     use crate::index::mem_store::MemStore;
-    use crate::index::{Bound, ChainRoots, IndexKey, LogRoots, Pivot, Roots};
+    use crate::index::{Bound, IndexKey, Pivot};
     use crate::metadata::Metadata;
     use crate::permission::PermissionRef;
     use crate::traits::{NonUniqueStruct, Shape, WaveDbStruct};
@@ -195,34 +166,12 @@ mod tests {
 
     #[derive(Debug, Clone, Default, PartialEq, Eq, WaveWire)]
     struct CredPivot {
-        recency: ChainRoots,
-        removals: LogRoots,
-        secondaries: [ChainRoots; 1],
         permission: Option<PermissionRef>,
     }
     impl Pivot for CredPivot {
         const STRUCT_HASH: u64 = 0x5EA_0002;
-        fn secondaries(&self) -> &[ChainRoots] {
-            &self.secondaries
-        }
-        fn recency(&self) -> ChainRoots {
-            self.recency
-        }
-        fn removals(&self) -> LogRoots {
-            self.removals
-        }
         fn permission(&self) -> Option<&PermissionRef> {
             self.permission.as_ref()
-        }
-        fn replace_roots(&self, roots: Roots<'_>) -> Self {
-            let mut s = self.secondaries;
-            s.copy_from_slice(roots.secondaries);
-            Self {
-                recency: roots.recency,
-                removals: roots.removals,
-                secondaries: s,
-                permission: self.permission.clone(),
-            }
         }
     }
 
