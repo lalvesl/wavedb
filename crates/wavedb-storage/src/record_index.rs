@@ -11,10 +11,10 @@
 //! transient copy of it.
 //!
 //! A slot holds only a [`Loc`] — which type's log, which chunk, which offset —
-//! and a one-byte fingerprint. The `Id` is not repeated here: it is at the
+//! and a one-byte fingerprint. The key is not repeated here: it is at the
 //! head of the entry the slot names, so a probe that matches a fingerprint
 //! confirms the candidate by asking the caller (`is`), which reads the log.
-//! The type is the `Loc`'s `slot`, so `(Id, type)` is the key at no extra
+//! The type is the `Loc`'s `slot`, so `(key, type)` is the key at no extra
 //! cost. Every operation that needs a stored key's hash — a split — asks the
 //! caller too (`rehash`). The index knows nothing about logs.
 //!
@@ -34,11 +34,11 @@ use seahash::hash_seeded;
 pub use crate::record_segment::Loc;
 use crate::record_segment::Segment;
 
-/// A SeaHash of a 128-bit `Id` under a per-store seed: portable across
+/// A SeaHash of a record's key under a per-store seed: portable across
 /// machines, and keyed so collisions cannot be precomputed.
 #[must_use]
-pub const fn hash_of(id: u128, seed: [u64; 4]) -> u64 {
-    hash_seeded(&id.to_le_bytes(), seed[0], seed[1], seed[2], seed[3])
+pub const fn hash_of(key: &[u8], seed: [u64; 4]) -> u64 {
+    hash_seeded(key, seed[0], seed[1], seed[2], seed[3])
 }
 
 /// How many times larger than its segment count the directory may grow: a
@@ -85,9 +85,9 @@ impl RecordIndex {
         }
     }
 
-    /// The hash `id` is indexed under.
-    pub const fn hash(&self, id: u128) -> u64 {
-        hash_of(id, self.seed)
+    /// The hash `key` is indexed under.
+    pub const fn hash(&self, key: &[u8]) -> u64 {
+        hash_of(key, self.seed)
     }
 
     /// The seed [`hash`](Self::hash) uses — for a caller that must hash
@@ -306,7 +306,7 @@ mod tests {
         let mut index = seeded();
         let mut keys = Keys(Vec::new());
         for id in 0..20_000u128 {
-            let hash = index.hash(id);
+            let hash = index.hash(&id.to_be_bytes());
             keys.insert(&mut index, hash);
         }
         assert_eq!(index.len(), 20_000);
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn an_upsert_repoints_and_a_remove_forgets() {
         let mut index = seeded();
-        let h = index.hash(7);
+        let h = index.hash(&7u128.to_be_bytes());
         let (a, b) = (Keys::loc(1), Keys::loc(2));
         let same_key = |l: Loc| l == a || l == b;
         assert_eq!(index.upsert(h, a, same_key, |_| h), None);

@@ -1,8 +1,9 @@
 //! One type's record log ([RFC 0068]) — the bytes of its cached records, in
 //! commit order, in chunks.
 //!
-//! An entry is `[Id u128 LE][len u32 LE][bytes]`; a remove is a **tombstone**,
-//! `len = u32::MAX` and no bytes. A rewritten record is appended again and its
+//! An entry is `[key_len u16 LE][key][len u32 LE][bytes]` — the key is the
+//! record's place in its lane's order ([RFC 0078]), an anchor's the `Id`'s 16
+//! bytes; a remove is a **tombstone**, `len = u32::MAX` and no bytes. A rewritten record is appended again and its
 //! old copy stays where it was, **dead**, until its chunk goes or is
 //! compacted ([`crate::record_compact`]); each chunk counts its dead bytes.
 //!
@@ -32,14 +33,17 @@
 //! positions after it never move.
 //!
 //! [RFC 0068]: ../../../rfcs/0068-record-cache-as-a-log-WIP.md
+//! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
 use std::collections::VecDeque;
 use std::mem::size_of;
 
 use crate::record_index::Loc;
 
-/// An entry's head: the id and the length.
-pub const HEAD: usize = 20;
+/// An entry's head but for its key: the key's length and the record's.
+pub const HEAD: usize = 6;
+/// The longest key a log can hold.
+pub const MAX_KEY: usize = u16::MAX as usize;
 /// The first capacity of a chunk being filled.
 const MIN_CHUNK: usize = 512;
 /// A chunk is sealed once the next entry would take it past this.
@@ -52,7 +56,7 @@ pub const MAX_RECORD: usize = (TOMBSTONE - 1) as usize;
 /// One entry, borrowed from its chunk. `bytes` is `None` for a tombstone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Entry<'a> {
-    pub id: u128,
+    pub key: &'a [u8],
     pub bytes: Option<&'a [u8]>,
 }
 
@@ -72,20 +76,22 @@ pub struct Chunk {
 
 /// The entry at `at` in `bytes`, and its length.
 pub fn parse(bytes: &[u8], at: usize) -> Option<(Entry<'_>, usize)> {
-    let head = bytes.get(at..at + HEAD)?;
-    let id = u128::from_le_bytes(head[..16].try_into().ok()?);
-    let len = u32::from_le_bytes(head[16..].try_into().ok()?);
+    let key_len = u16::from_le_bytes(*bytes.get(at..)?.first_chunk()?) as usize;
+    let key = bytes.get(at + 2..at + 2 + key_len)?;
+    let head = at + 2 + key_len;
+    let len = u32::from_le_bytes(*bytes.get(head..)?.first_chunk()?);
+    let used = HEAD + key_len;
     if len == TOMBSTONE {
-        return Some((Entry { id, bytes: None }, HEAD));
+        return Some((Entry { key, bytes: None }, used));
     }
     let len = len as usize;
-    let body = bytes.get(at + HEAD..at + HEAD + len)?;
+    let body = bytes.get(head + 4..head + 4 + len)?;
     Some((
         Entry {
-            id,
+            key,
             bytes: Some(body),
         },
-        HEAD + len,
+        used + len,
     ))
 }
 
@@ -153,18 +159,18 @@ impl TypeLog {
         self.order.back().copied()
     }
 
-    /// Append `id`'s bytes — `None` for a tombstone — and say where they
+    /// Append `key`'s bytes — `None` for a tombstone — and say where they
     /// went. `clock` stamps a chunk started for it, and ticks.
     ///
-    /// `bytes` must not exceed [`MAX_RECORD`]; the commit path refuses such a
-    /// record before anything is committed.
+    /// `key` must not exceed [`MAX_KEY`], nor `bytes` [`MAX_RECORD`]; the
+    /// commit path refuses either before anything is committed.
     pub fn append(
         &mut self,
-        id: u128,
+        key: &[u8],
         bytes: Option<&[u8]>,
         clock: &mut u64,
     ) -> Loc {
-        let len = HEAD + bytes.map_or(0, <[u8]>::len);
+        let len = HEAD + key.len() + bytes.map_or(0, <[u8]>::len);
         let open = self.back().filter(|&n| {
             self.chunk(n).is_some_and(|c| c.bytes.len() + len <= CHUNK)
         });
@@ -196,7 +202,10 @@ impl TypeLog {
             let want = (offset + len).next_power_of_two().min(CHUNK);
             chunk.bytes.reserve_exact(want - offset);
         }
-        chunk.bytes.extend_from_slice(&id.to_le_bytes());
+        chunk
+            .bytes
+            .extend_from_slice(&(key.len() as u16).to_le_bytes());
+        chunk.bytes.extend_from_slice(key);
         match bytes {
             Some(body) => {
                 chunk
@@ -274,8 +283,8 @@ impl TypeLog {
     }
 
     /// Drop the oldest chunk if it is wholly settled, telling `each` the
-    /// location and id of every entry it held.
-    pub fn drop_oldest(&mut self, mut each: impl FnMut(Loc, u128)) -> bool {
+    /// location and key of every entry it held.
+    pub fn drop_oldest(&mut self, mut each: impl FnMut(Loc, &[u8])) -> bool {
         if self.oldest_settled().is_none() {
             return false;
         }
@@ -292,7 +301,7 @@ impl TypeLog {
                 offset: at as u16,
                 chunk: n,
             };
-            each(loc, entry.id);
+            each(loc, entry.key);
             at += len;
         }
         true
@@ -315,11 +324,15 @@ impl TypeLog {
 mod tests {
     use super::{CHUNK, HEAD, MIN_CHUNK, TypeLog};
 
+    fn key(i: usize) -> Vec<u8> {
+        (i as u128).to_be_bytes().to_vec()
+    }
+
     fn filled(n: usize, size: usize) -> (TypeLog, u64) {
         let mut log = TypeLog::new(3);
         let mut clock = 0;
         for i in 0..n {
-            log.append(i as u128, Some(&vec![i as u8; size]), &mut clock);
+            log.append(&key(i), Some(&vec![i as u8; size]), &mut clock);
         }
         (log, clock)
     }
@@ -328,13 +341,13 @@ mod tests {
     fn an_entry_and_a_tombstone_read_back_where_they_were_put() {
         let mut log = TypeLog::new(3);
         let mut clock = 0;
-        let put = log.append(7, Some(b"seven"), &mut clock);
-        let gone = log.append(7, None, &mut clock);
+        let put = log.append(b"k7", Some(b"seven"), &mut clock);
+        let gone = log.append(b"k7", None, &mut clock);
         assert_eq!(put.slot, 3);
         let entry = log.entry(put).unwrap();
-        assert_eq!((entry.id, entry.bytes), (7, Some(&b"seven"[..])));
+        assert_eq!((entry.key, entry.bytes), (&b"k7"[..], Some(&b"seven"[..])));
         assert_eq!(log.entry(gone).unwrap().bytes, None);
-        assert_eq!(log.written(), (HEAD * 2 + 5) as u64);
+        assert_eq!(log.written(), ((HEAD + 2) * 2 + 5) as u64);
         assert!(log.pending());
     }
 
@@ -362,10 +375,10 @@ mod tests {
     fn a_record_larger_than_a_chunk_gets_its_own() {
         let mut log = TypeLog::new(0);
         let mut clock = 0;
-        log.append(1, Some(b"small"), &mut clock);
+        log.append(&key(1), Some(b"small"), &mut clock);
         let big = vec![9u8; CHUNK * 2];
-        let at = log.append(2, Some(&big), &mut clock);
-        let next = log.append(3, Some(b"after"), &mut clock);
+        let at = log.append(&key(2), Some(&big), &mut clock);
+        let next = log.append(&key(3), Some(b"after"), &mut clock);
         assert_eq!((at.offset, at.chunk), (0, 1));
         assert_eq!(next.chunk, 2, "nothing shares the oversized chunk");
         assert_eq!(
@@ -381,14 +394,16 @@ mod tests {
         let (mut log, _) = filled(2_000, 100);
         let all: Vec<_> = log
             .scan(log.written())
-            .map(|(loc, e, next)| (loc, e.id, next))
+            .map(|(loc, e, next)| (loc, e.key.to_vec(), next))
             .collect();
         assert_eq!(all.len(), 2_000);
         let (_, _, mid) = all[1_000];
         log.advance(mid);
-        let rest: Vec<u128> =
-            log.scan(log.written()).map(|(_, e, _)| e.id).collect();
-        assert_eq!(rest, (1_001..2_000).collect::<Vec<u128>>());
+        let rest: Vec<Vec<u8>> = log
+            .scan(log.written())
+            .map(|(_, e, _)| e.key.to_vec())
+            .collect();
+        assert_eq!(rest, (1_001..2_000).map(key).collect::<Vec<_>>());
         let (_, _, limit) = all[1_010];
         assert_eq!(log.scan(limit).count(), 10);
         for (loc, entry, _) in log.scan(limit) {
@@ -404,16 +419,16 @@ mod tests {
         assert!(!log.drop_oldest(|_, _| {}), "nothing is settled yet");
         let all: Vec<_> = log
             .scan(log.written())
-            .map(|(loc, e, next)| (loc, e.id, next))
+            .map(|(loc, e, next)| (loc, e.key.to_vec(), next))
             .collect();
         let (_, _, mid) = all[1_000];
         log.advance(mid);
         let mut dropped = Vec::new();
-        while log.drop_oldest(|loc, id| dropped.push((loc, id))) {}
+        while log.drop_oldest(|loc, k| dropped.push((loc, k.to_vec()))) {}
         assert_ne!(dropped.len(), 0);
         assert!(dropped.len() <= 1_001, "never past s");
         for (i, (loc, id)) in dropped.iter().enumerate() {
-            assert_eq!((*id, *loc), (i as u128, all[i].0));
+            assert_eq!((id, *loc), (&key(i), all[i].0));
             assert_eq!(log.entry(*loc), None, "its chunk is gone");
         }
         let (survivor, _, _) = all[dropped.len()];

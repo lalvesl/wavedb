@@ -27,7 +27,7 @@ use crate::record_log::{CHUNK, TypeLog, parse};
 const DEAD_SHARE: usize = 4;
 
 /// Append to `into` (chunk `n` of slot `slot`) every entry of `from` that
-/// `relocate(id, from, to)` confirms — it repoints the index and answers
+/// `relocate(key, from, to)` confirms — it repoints the index and answers
 /// whether it named that entry. An entry it does not name is dead and is
 /// left behind.
 fn carry(
@@ -36,7 +36,7 @@ fn carry(
     into: &mut Vec<u8>,
     slot: u16,
     n: u32,
-    relocate: &mut impl FnMut(u128, Loc, Loc) -> bool,
+    relocate: &mut impl FnMut(&[u8], Loc, Loc) -> bool,
 ) {
     let mut at = 0;
     while let Some((entry, len)) = parse(from, at) {
@@ -52,7 +52,7 @@ fn carry(
         };
         let mark = into.len();
         into.extend_from_slice(&from[at..at + len]);
-        if !relocate(entry.id, old, new) {
+        if !relocate(entry.key, old, new) {
             into.truncate(mark);
         }
         at += len;
@@ -87,7 +87,7 @@ impl TypeLog {
     pub fn compact(
         &mut self,
         n: u32,
-        mut relocate: impl FnMut(u128, Loc, Loc) -> bool,
+        mut relocate: impl FnMut(&[u8], Loc, Loc) -> bool,
     ) {
         let slot = self.slot;
         let Some(chunk) = self.chunk_mut(n) else {
@@ -115,7 +115,7 @@ impl TypeLog {
     fn fold(
         &mut self,
         n: u32,
-        relocate: &mut impl FnMut(u128, Loc, Loc) -> bool,
+        relocate: &mut impl FnMut(&[u8], Loc, Loc) -> bool,
     ) {
         let Some(at) = self.order.iter().position(|&m| m == n) else {
             return;
@@ -163,14 +163,18 @@ mod tests {
             bytes: &[u8],
             clock: &mut u64,
         ) {
-            let loc = log.append(id, Some(bytes), clock);
+            let loc = log.append(&id.to_be_bytes(), Some(bytes), clock);
             if let Some(old) = self.0.insert(id, loc) {
                 log.mark_dead(old);
             }
         }
 
-        fn relocate(&mut self) -> impl FnMut(u128, Loc, Loc) -> bool + '_ {
-            |id, from, to| match self.0.get_mut(&id) {
+        fn relocate(&mut self) -> impl FnMut(&[u8], Loc, Loc) -> bool + '_ {
+            |key, from, to| match key
+                .try_into()
+                .ok()
+                .and_then(|k| self.0.get_mut(&u128::from_be_bytes(k)))
+            {
                 Some(at) if *at == from => {
                     *at = to;
                     true
@@ -208,11 +212,11 @@ mod tests {
             .filter(|&&n| Some(n) != back)
             .map(|&n| log.chunk(n).unwrap().bytes.len())
             .sum();
-        assert!(held <= 30 * (300 + 20) + 6_000 + 20, "{held}");
+        assert!(held <= 30 * (300 + 22) + 6_000 + 22, "{held}");
         for (&id, &loc) in &names.0 {
             assert_eq!(
-                log.entry(loc).unwrap().id,
-                id,
+                log.entry(loc).unwrap().key,
+                id.to_be_bytes(),
                 "{id} moved with its name"
             );
         }
@@ -248,7 +252,7 @@ mod tests {
             log.order.len()
         );
         for (&id, &loc) in &names.0 {
-            assert_eq!(log.entry(loc).unwrap().id, id);
+            assert_eq!(log.entry(loc).unwrap().key, id.to_be_bytes());
         }
     }
 
