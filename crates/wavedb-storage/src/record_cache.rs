@@ -432,9 +432,9 @@ mod tests {
         let log = &c.logs[0];
         let dead: usize =
             log.order.iter().map(|&n| log.chunk(n).unwrap().dead).sum();
-        // The first copy of 1 (20 + 100), the bytes of 2 (20 + 1) and its
-        // settled tombstone (20).
-        assert_eq!(dead, 120 + 21 + 20);
+        // The first copy of 1 (22 + 100), the bytes of 2 (22 + 1) and its
+        // settled tombstone (22).
+        assert_eq!(dead, 122 + 23 + 22);
     }
 
     /// Eviction never drops what is unsettled, drops what is, and the
@@ -444,15 +444,15 @@ mod tests {
         let mut c = cache();
         let body = vec![7u8; 1_000];
         for k in 0..300 {
-            c.put(0, id(k), Some(&body));
+            c.put(0, &id(k), Some(&body));
         }
         c.evict(0);
         assert_eq!(c.len(), 300, "nothing is settled yet");
         let mut round = c.round(150);
         c.advance(&round);
         c.evict(0);
-        assert_eq!(c.get(0, id(299)), hit(&body), "unsettled stays");
-        assert_eq!(c.get(0, id(0)), Lookup::Miss, "settled leaves");
+        assert_eq!(c.get(0, &id(299)), hit(&body), "unsettled stays");
+        assert_eq!(c.get(0, &id(0)), Lookup::Miss, "settled leaves");
         round = c.round(usize::MAX);
         c.advance(&round);
         c.evict(0);
