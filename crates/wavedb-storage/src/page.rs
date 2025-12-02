@@ -325,9 +325,9 @@ mod tests {
     #[test]
     fn roundtrip_with_empty_and_warm_dictionary() {
         let mut p = SlotPage::new(0x1122_3344_5566_7788);
-        p.upsert(id(10), vec![0xAA; 5]);
-        p.upsert(id(20), b"hello world".to_vec());
-        p.upsert(id(30), vec![]); // empty record is legal
+        p.upsert(&id(10), vec![0xAA; 5]);
+        p.upsert(&id(20), b"hello world".to_vec());
+        p.upsert(&id(30), vec![]); // empty record is legal
 
         // Cold: no dictionary content yet.
         let cold = Dictionary::new();
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn old_page_survives_dictionary_growth() {
         let mut p = SlotPage::new(9);
-        p.upsert(id(1), b"record one".to_vec());
+        p.upsert(&id(1), b"record one".to_vec());
 
         let mut dict = Dictionary::new();
         dict.sample(b"record one");
@@ -371,7 +371,7 @@ mod tests {
     fn unknown_dictionary_state_detected() {
         let mut p = SlotPage::new(9);
         for i in 0..20u64 {
-            p.upsert(id(i + 1), vec![0xEE; 200]);
+            p.upsert(&id(i + 1), vec![0xEE; 200]);
         }
         let mut big = Dictionary::new();
         big.sample(&[7u8; 500]);
@@ -385,12 +385,12 @@ mod tests {
     }
 
     #[test]
-    fn iteration_is_in_id_order() {
+    fn iteration_is_in_key_order() {
         let mut p = SlotPage::new(1);
-        p.upsert(id(30), vec![3]);
-        p.upsert(id(10), vec![1]);
-        p.upsert(id(20), vec![2]);
-        let keys: Vec<u64> = p.iter().map(|(i, _)| i.key()).collect();
+        p.upsert(&id(30), vec![3]);
+        p.upsert(&id(10), vec![1]);
+        p.upsert(&id(20), vec![2]);
+        let keys: Vec<u64> = p.iter().map(|(k, _)| key_of(k)).collect();
         assert_eq!(keys, vec![10, 20, 30]);
     }
 
@@ -408,7 +408,7 @@ mod tests {
     fn crc_mismatch_detected() {
         let d = Dictionary::new();
         let mut p = SlotPage::new(1);
-        p.upsert(id(1), vec![1, 2, 3]);
+        p.upsert(&id(1), vec![1, 2, 3]);
         let mut bytes = p.to_bytes(&d, true).unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF; // corrupt the envelope
@@ -428,7 +428,7 @@ mod tests {
         ));
         // A length that reaches past the buffer.
         let mut p = SlotPage::new(1);
-        p.upsert(id(1), vec![1, 2, 3]);
+        p.upsert(&id(1), vec![1, 2, 3]);
         let bytes = p.to_bytes(&d, true).unwrap();
         assert!(matches!(
             SlotPage::from_bytes(&bytes[..bytes.len() - 1], &d),
@@ -442,8 +442,8 @@ mod tests {
         // zero padding. from_bytes must ignore it and still verify the crc.
         let d = Dictionary::new();
         let mut p = SlotPage::new(5);
-        p.upsert(id(1), vec![1, 2, 3]);
-        p.upsert(id(2), b"abc".to_vec());
+        p.upsert(&id(1), vec![1, 2, 3]);
+        p.upsert(&id(2), b"abc".to_vec());
         let mut bytes = p.to_bytes(&d, true).unwrap();
         bytes.resize(BLOCK_SIZE * 2, 0);
         let back = SlotPage::from_bytes(&bytes, &d).unwrap();
@@ -457,23 +457,23 @@ mod tests {
         let d = Dictionary::new();
         let mut p = SlotPage::new(3);
         for k in [10, 20, 30, 40] {
-            p.upsert(id(k), vec![k as u8; 3]);
+            p.upsert(&id(k), vec![k as u8; 3]);
         }
         let mut back =
             SlotPage::from_bytes(&p.to_bytes(&d, true).unwrap(), &d).unwrap();
-        back.upsert(id(20), b"new".to_vec()); // over a body record
-        back.upsert(id(25), b"mid".to_vec()); // between two
-        back.upsert(id(50), b"end".to_vec()); // past the last
-        assert!(back.remove(id(30))); // a body record
-        assert!(back.remove(id(50))); // a change
-        assert!(!back.remove(id(99)));
+        back.upsert(&id(20), b"new".to_vec()); // over a body record
+        back.upsert(&id(25), b"mid".to_vec()); // between two
+        back.upsert(&id(50), b"end".to_vec()); // past the last
+        assert!(back.remove(&id(30))); // a body record
+        assert!(back.remove(&id(50))); // a change
+        assert!(!back.remove(&id(99)));
         assert_eq!(back.len(), 4);
-        assert_eq!(back.get(id(10)), Some(&[10u8; 3][..]));
-        assert_eq!(back.get(id(20)), Some(&b"new"[..]));
-        assert_eq!(back.get(id(30)), None);
-        assert_eq!(back.get(id(50)), None);
+        assert_eq!(back.get(&id(10)), Some(&[10u8; 3][..]));
+        assert_eq!(back.get(&id(20)), Some(&b"new"[..]));
+        assert_eq!(back.get(&id(30)), None);
+        assert_eq!(back.get(&id(50)), None);
         let seen: Vec<(u64, Vec<u8>)> =
-            back.iter().map(|(i, b)| (i.key(), b.to_vec())).collect();
+            back.iter().map(|(k, b)| (key_of(k), b.to_vec())).collect();
         assert_eq!(
             seen,
             [
@@ -496,12 +496,12 @@ mod tests {
         let d = Dictionary::new();
         let mut p = SlotPage::new(4);
         for k in 1..=500 {
-            p.upsert(id(k), vec![7; 40]);
+            p.upsert(&id(k), vec![7; 40]);
         }
         let bytes = p.to_bytes(&d, false).unwrap();
-        // The body alone: three column lengths, then per record its id, its
-        // end and its 40 bytes.
-        let body = 3 * 4 + 500 * (16 + 4 + 40);
+        // The body alone: four column lengths and the key width, then per
+        // record its key, its end and its 40 bytes.
+        let body = 5 * 4 + 500 * (16 + 4 + 40);
         assert_eq!(p.footprint(), size_of::<SlotPage>() + body);
         assert_eq!(
             p.to_bytes(&d, false).unwrap(),
@@ -529,7 +529,7 @@ mod tests {
         for i in 0..200u64 {
             let r = record(i);
             raw_total += r.len();
-            p.upsert(id(i + 1), r);
+            p.upsert(&id(i + 1), r);
         }
         let stored = p.to_bytes(&dict, true).unwrap();
         assert!(
