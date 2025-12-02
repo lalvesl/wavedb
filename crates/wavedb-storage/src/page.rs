@@ -1,14 +1,16 @@
 //! [`SlotPage`] — the on-disk page format for a homogeneous run of records.
 //!
-//! A page holds records of **exactly one `STRUCT_HASH`** (Unique anchors, NonUnique
-//! records, Pivots, chain segments and index nodes — their encoding lives in `wavedb_core`'s
-//! index layer and is stored here as ordinary bytes).
+//! A page holds records of **exactly one lane** — one `STRUCT_HASH`'s anchors
+//! (Unique records, NonUnique records, Pivots) or one of its chains' entries
+//! ([RFC 0078] §7) — each under its **key**: an anchor's is its `Id`'s 16
+//! bytes, a chain entry's `[pivot][declaration][key]`. Their encoding lives
+//! in `wavedb_core` and is stored here as ordinary bytes.
 //!
 //! ## Stored — checked wire outside, optionally dictionary-zstd inside
 //!
 //! The layout is in `page/codec.rs`: a checked envelope (`struct_hash`, then the
 //! body plain or zstd'd against the type's dictionary), the body itself
-//! three columns — ids, ends, the records back to back. The envelopes are
+//! three columns — keys, ends, the records back to back. The envelopes are
 //! plain `WaveWire` structs/enums — no page-private byte format. The order
 //! is deliberate: the crc covers the **stored** bytes, so corruption is
 //! caught by the codec before zstd ever runs; `struct_hash` and the payload
@@ -29,25 +31,26 @@
 //! ## In RAM — the body as read, and the changes on it (RFC 0076)
 //!
 //! A page read from disk is **its decompressed body**, one buffer kept as it
-//! is: a record is a range of it, found by a binary search over the id
+//! is: a record is a range of it, found by a binary search over the key
 //! column, so opening a page allocates once whatever it holds. Writes land
 //! in a map of **changes** beside it — a record put, or one of the body's
 //! removed — which a read consults first and an encode
 //! ([`to_bytes`](SlotPage::to_bytes)) seals into a new body, which the page
-//! then keeps. Iteration is in `Id` order (which, `KEY`-first, is type/time
-//! order), so serialisation is deterministic.
+//! then keeps. Iteration is in key order, so serialisation is
+//! deterministic.
+//!
+//! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
 use std::collections::BTreeMap;
 use std::collections::btree_map;
 use std::iter::Peekable;
 
-use wavedb_core::Id;
-
 use crate::error::StorageResult;
 
+mod body;
 mod codec;
 
-use codec::{Columns, Cuts};
+use body::{Columns, Cuts};
 
 /// Per-page prefix: `payload_len (u32)`.
 const LEN_PREFIX: usize = 4;
@@ -56,7 +59,7 @@ const LEN_PREFIX: usize = 4;
 /// here — no join processing competes for it).
 const LEVEL: i32 = 3;
 
-/// A homogeneous in-memory page of records, all of one `STRUCT_HASH`.
+/// A homogeneous in-memory page of records, all of one lane.
 #[derive(Clone)]
 pub struct SlotPage {
     struct_hash: u64,
@@ -66,8 +69,8 @@ pub struct SlotPage {
     /// Where the body's columns sit in it.
     cuts: Cuts,
     /// The writes since: `Some` a record put, `None` one of the body's
-    /// removed. Ordered by `Id.raw()`.
-    changes: BTreeMap<u128, Option<Vec<u8>>>,
+    /// removed. Ordered by key.
+    changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     /// Records held, the changes counted in.
     len: usize,
 }
@@ -124,47 +127,49 @@ impl SlotPage {
     /// nodes.
     #[must_use]
     pub fn footprint(&self) -> usize {
-        /// The id, the `Vec` and a share of a B-tree node, about.
-        const PER_CHANGE: usize = 64;
+        /// The two `Vec`s and a share of a B-tree node, about.
+        const PER_CHANGE: usize = 72;
         size_of::<Self>()
             + self.body.len()
             + self
                 .changes
-                .values()
-                .map(|v| v.as_ref().map_or(0, Vec::capacity) + PER_CHANGE)
+                .iter()
+                .map(|(k, v)| {
+                    k.capacity()
+                        + v.as_ref().map_or(0, Vec::capacity)
+                        + PER_CHANGE
+                })
                 .sum::<usize>()
     }
 
-    /// Insert or overwrite the record stored at `id`.
-    pub fn upsert(&mut self, id: Id, bytes: Vec<u8>) {
-        if self.get(id).is_none() {
+    /// Insert or overwrite the record stored at `key`.
+    pub fn upsert(&mut self, key: &[u8], bytes: Vec<u8>) {
+        if self.get(key).is_none() {
             self.len += 1;
         }
-        self.changes.insert(id.raw(), Some(bytes));
+        self.changes.insert(key.to_vec(), Some(bytes));
     }
 
-    /// The record bytes stored at `id`, if present.
+    /// The record bytes stored at `key`, if present.
     #[must_use]
-    pub fn get(&self, id: Id) -> Option<&[u8]> {
-        let raw = id.raw();
-        if let Some(change) = self.changes.get(&raw) {
+    pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
+        if let Some(change) = self.changes.get(key) {
             return change.as_deref();
         }
         let cols = self.columns()?;
-        cols.record(cols.find(raw).ok()?)
+        cols.record(cols.find(key).ok()?)
     }
 
-    /// Remove the record at `id`; whether it was there.
-    pub fn remove(&mut self, id: Id) -> bool {
-        if self.get(id).is_none() {
+    /// Remove the record at `key`; whether it was there.
+    pub fn remove(&mut self, key: &[u8]) -> bool {
+        if self.get(key).is_none() {
             return false;
         }
         self.len -= 1;
-        let raw = id.raw();
-        if self.columns().is_some_and(|c| c.find(raw).is_ok()) {
-            self.changes.insert(raw, None);
+        if self.columns().is_some_and(|c| c.find(key).is_ok()) {
+            self.changes.insert(key.to_vec(), None);
         } else {
-            self.changes.remove(&raw);
+            self.changes.remove(key);
         }
         true
     }
