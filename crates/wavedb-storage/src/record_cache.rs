@@ -124,16 +124,36 @@ impl RecordCache {
             .map(move |key| (key.as_slice(), self.get(slot, key)))
     }
 
-    /// What the cache knows about `id`, in whichever type holds it.
-    pub fn get_any(&self, id: Id) -> Lookup {
-        self.lookup(id, |_| true)
+    /// The index forgot `key` in `slot`: so does its ordered set.
+    pub(crate) fn forget(
+        ordered: &mut [BTreeSet<Vec<u8>>],
+        slot: usize,
+        key: &[u8],
+    ) {
+        if let Some(keys) = ordered.get_mut(slot) {
+            keys.remove(key);
+        }
     }
 
-    fn lookup(&self, id: Id, mut slot_ok: impl FnMut(Loc) -> bool) -> Lookup {
-        let hash = self.index.hash(id.raw());
+    /// What the cache knows about `key` in `slot`.
+    pub fn get(&self, slot: usize, key: &[u8]) -> Lookup {
+        self.lookup(key, |at| at.slot as usize == slot)
+    }
+
+    /// What the cache knows about `key`, in whichever type holds it.
+    pub fn get_any(&self, key: &[u8]) -> Lookup {
+        self.lookup(key, |_| true)
+    }
+
+    fn lookup(
+        &self,
+        key: &[u8],
+        mut slot_ok: impl FnMut(Loc) -> bool,
+    ) -> Lookup {
+        let hash = self.index.hash(key);
         let found = self
             .index
-            .get(hash, |at| slot_ok(at) && holds(&self.logs, at, id.raw()));
+            .get(hash, |at| slot_ok(at) && holds(&self.logs, at, key));
         let entry = found.and_then(|at| {
             self.logs.get(at.slot as usize).and_then(|l| l.entry(at))
         });
@@ -151,8 +171,16 @@ impl RecordCache {
 
     /// Bytes the cache holds: the index and every log.
     pub fn footprint(&self) -> usize {
+        /// A key's `Vec` and its share of a B-tree node, about.
+        const PER_KEY: usize = 40;
         self.index.footprint()
             + self.logs.iter().map(TypeLog::footprint).sum::<usize>()
+            + self
+                .ordered
+                .iter()
+                .flatten()
+                .map(|k| k.capacity() + PER_KEY)
+                .sum::<usize>()
     }
 
     /// The probe's census: footprint, records indexed, and per head (the
@@ -167,13 +195,13 @@ impl RecordCache {
         let mut heads: BTreeMap<u64, [u64; 4]> = BTreeMap::new();
         for log in &self.logs {
             log.each(|at, entry| {
-                let hash = self.index.hash(entry.id);
+                let hash = self.index.hash(entry.key);
                 let live = self.index.get(hash, |l| l == at) == Some(at);
                 let (head, len) = entry.bytes.map_or((0, 0), |b| {
                     let head = b
                         .first_chunk::<8>()
                         .map_or(0, |h| u64::from_le_bytes(*h));
-                    (head, b.len() as u64 + 20)
+                    (head, (b.len() + entry.key.len()) as u64 + 6)
                 });
                 let row = heads.entry(head).or_default();
                 let i = if live { 0 } else { 2 };
@@ -217,72 +245,6 @@ impl RecordCache {
     /// A batch opened: everything written is owed to it.
     pub fn rotate(&mut self) {
         self.logs.iter_mut().for_each(TypeLog::rotate);
-    }
-
-    /// Copy out a round of at most `budget` entries: what the open batch
-    /// owes while it owes anything, else whatever is pending. Entries the
-    /// index no longer names are dead — a newer copy follows — and are
-    /// skipped, though they count against the budget and the cursor passes
-    /// them.
-    pub fn round(&self, budget: usize) -> Round {
-        let owed = self.owes();
-        let mut left = budget;
-        let mut round = Round {
-            complete: true,
-            ..Round::default()
-        };
-        for (slot, log) in self.logs.iter().enumerate() {
-            let until = if owed { log.rotated() } else { log.written() };
-            let mut records = Records::new();
-            let mut mark = None;
-            for (at, entry, next) in log.scan(until) {
-                if left == 0 {
-                    round.complete = false;
-                    break;
-                }
-                left -= 1;
-                let mark = mark.get_or_insert_with(|| Mark {
-                    slot,
-                    end: next,
-                    tombstones: Vec::new(),
-                });
-                mark.end = next;
-                let hash = self.index.hash(entry.id);
-                if self.index.get(hash, |l| l == at) != Some(at) {
-                    continue;
-                }
-                let id = Id::from_raw(entry.id);
-                if entry.bytes.is_none() {
-                    mark.tombstones.push((hash, at));
-                }
-                records.push((id, entry.bytes.map(<[u8]>::to_vec)));
-            }
-            if let Some(mark) = mark {
-                round.marks.push(mark);
-                if !records.is_empty() {
-                    round.work.push((slot, records));
-                }
-            }
-        }
-        round
-    }
-
-    /// `round`'s pages are written: move the settle cursors past it, and
-    /// forget the tombstones it settled — their pages agree now — unless a
-    /// newer write has taken their place.
-    pub fn advance(&mut self, round: &Round) {
-        for mark in &round.marks {
-            if let Some(log) = self.logs.get_mut(mark.slot) {
-                log.advance(mark.end);
-            }
-            for &(hash, at) in &mark.tombstones {
-                if self.index.remove(hash, |l| l == at).is_some()
-                    && let Some(log) = self.logs.get_mut(at.slot as usize)
-                {
-                    log.mark_dead(at);
-                }
-            }
-        }
     }
 
     /// Bring the cache to at most `budget` bytes, or as near as what is
