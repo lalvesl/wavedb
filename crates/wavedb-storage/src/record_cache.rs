@@ -7,12 +7,17 @@
 //! its slot already names the type, and one index per type would be one
 //! mostly empty segment per type per shard.
 //!
+//! An ordered lane's slot ([RFC 0078] §7) also keeps the keys its log
+//! holds, sorted: a scan of the lane merges them with its pages, and the
+//! index, a hash table, cannot list them in order.
+//!
 //! Everything here is memory work, never borrowed across a page read or
 //! write.
 //!
 //! [RFC 0068]: ../../../rfcs/0068-record-cache-as-a-log-WIP.md
+//! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
-use wavedb_core::Id;
+use std::collections::BTreeSet;
 
 use crate::record_index::{Loc, RecordIndex, hash_of};
 use crate::record_log::TypeLog;
@@ -28,49 +33,27 @@ pub enum Lookup {
     Miss,
 }
 
-/// One type's records a round settles: `None` bytes remove the id.
-pub type Records = Vec<(Id, Option<Vec<u8>>)>;
-
-/// One settle round, copied out of the logs: the records to write per slot,
-/// and how far each log's settle cursor moves once they are written.
-#[derive(Debug, Default)]
-pub struct Round {
-    pub work: Vec<(usize, Records)>,
-    marks: Vec<Mark>,
-    /// Whether it reached every log's limit — the budget cut it nowhere.
-    pub complete: bool,
-}
-
-impl Round {
-    /// Nothing scanned: there was nothing to settle.
-    pub const fn is_empty(&self) -> bool {
-        self.marks.is_empty()
-    }
-}
-
-#[derive(Debug)]
-struct Mark {
-    slot: usize,
-    end: u64,
-    /// Tombstones the round settled — `(hash, location)`.
-    tombstones: Vec<(u64, Loc)>,
-}
+/// One type's records a round settles, by key: `None` bytes remove it.
+pub type Records = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
 /// The cache (see the module docs).
 #[derive(Debug)]
 pub struct RecordCache {
-    index: RecordIndex,
-    logs: Vec<TypeLog>,
+    pub(crate) index: RecordIndex,
+    pub(crate) logs: Vec<TypeLog>,
+    /// Per slot, the keys of an ordered lane the index names; empty for a
+    /// slot of anchors.
+    pub(crate) ordered: Vec<BTreeSet<Vec<u8>>>,
     /// Stamps chunks with their age, across every log.
     clock: u64,
 }
 
-/// Whether `loc` holds `id`'s entry — the slot check is free, the id is read
-/// from the log.
-fn holds(logs: &[TypeLog], loc: Loc, id: u128) -> bool {
+/// Whether `loc` holds `key`'s entry — the slot check is free, the key is
+/// read from the log.
+fn holds(logs: &[TypeLog], loc: Loc, key: &[u8]) -> bool {
     logs.get(loc.slot as usize)
         .and_then(|log| log.entry(loc))
-        .is_some_and(|entry| entry.id == id)
+        .is_some_and(|entry| entry.key == key)
 }
 
 impl RecordCache {
@@ -80,25 +63,26 @@ impl RecordCache {
         Self {
             index: RecordIndex::new(seed),
             logs: (0..types).map(|slot| TypeLog::new(slot as u16)).collect(),
+            ordered: vec![BTreeSet::new(); types],
             clock: 0,
         }
     }
 
-    /// Commit `id`'s newest bytes in `slot` — `None` removes it.
-    pub fn put(&mut self, slot: usize, id: Id, bytes: Option<&[u8]>) {
+    /// Commit `key`'s newest bytes in `slot` — `None` removes it.
+    pub fn put(&mut self, slot: usize, key: &[u8], bytes: Option<&[u8]>) {
         let Some(log) = self.logs.get_mut(slot) else {
             return;
         };
-        let loc = log.append(id.raw(), bytes, &mut self.clock);
+        let loc = log.append(key, bytes, &mut self.clock);
         let seed = self.index.seed();
         let logs = &self.logs;
         let replaced = self.index.upsert(
-            hash_of(id.raw(), seed),
+            hash_of(key, seed),
             loc,
-            |at| at.slot == loc.slot && holds(logs, at, id.raw()),
+            |at| at.slot == loc.slot && holds(logs, at, key),
             |at| {
                 let held = logs.get(at.slot as usize).and_then(|l| l.entry(at));
-                held.map_or(0, |entry| hash_of(entry.id, seed))
+                held.map_or(0, |entry| hash_of(entry.key, seed))
             },
         );
         // The copy it replaced is dead now; its chunk counts it, which is
@@ -110,9 +94,34 @@ impl RecordCache {
         }
     }
 
-    /// What the cache knows about `id` in `slot`.
-    pub fn get(&self, slot: usize, id: Id) -> Lookup {
-        self.lookup(id, |at| at.slot as usize == slot)
+    /// [`put`](Self::put) into an ordered lane's slot, its key kept in
+    /// order for [`ordered`](Self::ordered).
+    pub fn put_ordered(
+        &mut self,
+        slot: usize,
+        key: &[u8],
+        bytes: Option<&[u8]>,
+    ) {
+        self.put(slot, key, bytes);
+        if let Some(keys) = self.ordered.get_mut(slot)
+            && !keys.contains(key)
+        {
+            keys.insert(key.to_vec());
+        }
+    }
+
+    /// An ordered lane's keys the cache holds in `range`, in order, with
+    /// what it knows of each.
+    pub fn ordered<'a>(
+        &'a self,
+        slot: usize,
+        range: (std::ops::Bound<&'a [u8]>, std::ops::Bound<&'a [u8]>),
+    ) -> impl DoubleEndedIterator<Item = (&'a [u8], Lookup)> + 'a {
+        self.ordered
+            .get(slot)
+            .into_iter()
+            .flat_map(move |keys| keys.range::<[u8], _>(range))
+            .map(move |key| (key.as_slice(), self.get(slot, key)))
     }
 
     /// What the cache knows about `id`, in whichever type holds it.
