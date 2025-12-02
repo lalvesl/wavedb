@@ -26,46 +26,47 @@ use crate::record_cache::Lookup;
 pub enum Settled {
     /// The answer: the bytes, or absent.
     Found(Option<Vec<u8>>),
-    /// The id's disk page (of slot `idx`) was evicted: the object store
-    /// holds the answer.
-    Evicted { idx: usize, key: Vec<u8> },
+    /// The key's disk page (of slot `idx`, found by `page`) was evicted:
+    /// the object store holds the answer.
+    Evicted { idx: usize, page: Vec<u8> },
 }
 
 /// What the synchronous half of an untyped read found.
 pub enum SettledAny {
     /// The answer: the bytes, or absent from every type.
     Found(Option<Vec<u8>>),
-    /// Absent from every page on disk; these `(slot, key)`s were evicted.
+    /// Absent from every page on disk; these `(slot, page key)`s were
+    /// evicted.
     Evicted(Vec<(usize, Vec<u8>)>),
 }
 
 impl PageStore {
-    /// Read `id` from slot `idx`'s settled page — the fallback when the
+    /// Read `key` from slot `idx`'s settled page — the fallback when the
     /// cache does not hold it. Absent when the type has never settled
-    /// anything or the page does not hold the id. A remove not yet settled
+    /// anything or the page does not hold the key. A remove not yet settled
     /// never reaches here: its tombstone is in the cache, which answers
     /// first.
     pub(crate) fn read_from_pages(
         &self,
         idx: usize,
-        id: Id,
+        key: &[u8],
     ) -> StorageResult<Settled> {
         let slot = &self.types[idx];
         let index = slot.directory().borrow();
         let Some(index) = index.as_ref() else {
             return Ok(Settled::Found(None));
         };
-        let Located::Page { run, flags, .. } = locate(index, id) else {
+        let Located::Page { run, flags, at } = locate(index, key) else {
             return Ok(Settled::Found(None));
         };
         if flags & EVICTED != 0 {
-            let key = key_of_id(id).to_vec();
-            return Ok(Settled::Evicted { idx, key });
+            let page = index.key_of(at).unwrap_or_default();
+            return Ok(Settled::Evicted { idx, page });
         }
         self.touch(idx, run.start);
         let dict = slot.dictionary().borrow();
         let bytes = with_page(&self.file, run, &dict, |p| {
-            p.get(id).map(<[u8]>::to_vec)
+            p.get(key).map(<[u8]>::to_vec)
         })?;
         Ok(Settled::Found(bytes))
     }
@@ -80,20 +81,20 @@ impl PageStore {
     pub(crate) fn read_now(
         &self,
         struct_hash: u64,
-        id: Id,
+        key: &[u8],
     ) -> StorageResult<Settled> {
         #[cfg(feature = "probe")]
         let start = std::time::Instant::now();
         let Some(idx) = self.slot_index(struct_hash) else {
             return Ok(Settled::Found(None));
         };
-        let cached = self.cache.borrow().get(idx, id);
+        let cached = self.cache.borrow().get(idx, key);
         #[cfg(feature = "probe")]
         crate::probe::record_lookup(&cached);
         let found = match cached {
             Lookup::Hit(bytes) => Ok(Settled::Found(Some(bytes))),
             Lookup::Removed => Ok(Settled::Found(None)),
-            Lookup::Miss => self.read_from_pages(idx, id),
+            Lookup::Miss => self.read_from_pages(idx, key),
         };
         #[cfg(feature = "probe")]
         crate::probe::read_done(
@@ -128,12 +129,12 @@ impl PageStore {
     pub(crate) async fn read_rest(
         &self,
         now: StorageResult<Settled>,
-        id: Id,
+        key: &[u8],
     ) -> StorageResult<Option<Vec<u8>>> {
         match now? {
             Settled::Found(bytes) => Ok(bytes),
-            Settled::Evicted { idx, key } => {
-                self.read_evicted(idx, key, id).await
+            Settled::Evicted { idx, page } => {
+                self.read_evicted(idx, page, key).await
             }
         }
     }
@@ -144,9 +145,9 @@ impl PageStore {
     pub(crate) fn read_of(
         &self,
         struct_hash: u64,
-        id: Id,
+        key: &[u8],
     ) -> StorageResult<Option<Vec<u8>>> {
-        match self.read_now(struct_hash, id)? {
+        match self.read_now(struct_hash, key)? {
             Settled::Found(bytes) => Ok(bytes),
             Settled::Evicted { .. } => {
                 Err(StorageError::Corrupt("a guard read an evicted bucket"))
@@ -162,8 +163,8 @@ impl PageStore {
     /// path may call this (RFC 0063). `Store::get` keeps it because an
     /// untyped read is what that method *means*; typed callers use
     /// `get_of`.
-    pub(crate) fn read_any_now(&self, id: Id) -> StorageResult<SettledAny> {
-        let cached = self.cache.borrow().get_any(id);
+    pub(crate) fn read_any_now(&self, key: &[u8]) -> StorageResult<SettledAny> {
+        let cached = self.cache.borrow().get_any(key);
         match cached {
             Lookup::Hit(bytes) => return Ok(SettledAny::Found(Some(bytes))),
             Lookup::Removed => return Ok(SettledAny::Found(None)),
@@ -171,12 +172,12 @@ impl PageStore {
         }
         let mut evicted = Vec::new();
         for idx in 0..self.types.len() {
-            match self.read_from_pages(idx, id)? {
+            match self.read_from_pages(idx, key)? {
                 Settled::Found(Some(bytes)) => {
                     return Ok(SettledAny::Found(Some(bytes)));
                 }
                 Settled::Found(None) => {}
-                Settled::Evicted { idx, key } => evicted.push((idx, key)),
+                Settled::Evicted { idx, page } => evicted.push((idx, page)),
             }
         }
         Ok(if evicted.is_empty() {
@@ -190,14 +191,14 @@ impl PageStore {
     pub(crate) async fn read_any_rest(
         &self,
         now: StorageResult<SettledAny>,
-        id: Id,
+        key: &[u8],
     ) -> StorageResult<Option<Vec<u8>>> {
         let evicted = match now? {
             SettledAny::Found(bytes) => return Ok(bytes),
             SettledAny::Evicted(evicted) => evicted,
         };
-        for (idx, key) in evicted {
-            if let Some(bytes) = self.read_evicted(idx, key, id).await? {
+        for (idx, page) in evicted {
+            if let Some(bytes) = self.read_evicted(idx, page, key).await? {
                 return Ok(Some(bytes));
             }
         }
@@ -224,12 +225,12 @@ impl PageStore {
     ) -> StorageResult<Option<Vec<u8>>> {
         self.object()?;
         match self.slot_index(struct_hash) {
-            Some(idx) => self.read_remote(idx, id).await,
+            Some(idx) => self.read_remote(idx, &key_of_id(id)).await,
             None => Ok(None),
         }
     }
 
-    /// `id`'s bytes in the uploaded page of slot `idx` that covers it.
+    /// `key`'s bytes in the uploaded page of slot `idx` that covers it.
     ///
     /// A compaction may carry the page forward and delete its file while
     /// the request is out: a fetch that fails when the descriptor has moved
@@ -237,18 +238,18 @@ impl PageStore {
     pub(crate) async fn read_remote(
         &self,
         idx: usize,
-        id: Id,
+        key: &[u8],
     ) -> StorageResult<Option<Vec<u8>>> {
-        let mut run = self.remote_run(idx, id);
+        let mut run = self.remote_run(idx, key);
         loop {
             let Some(at) = run else {
                 return Ok(None);
             };
-            let read = |page: &SlotPage| page.get(id).map(<[u8]>::to_vec);
+            let read = |page: &SlotPage| page.get(key).map(<[u8]>::to_vec);
             match self.with_remote_page(idx, at, read).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(e) => {
-                    let now = self.remote_run(idx, id);
+                    let now = self.remote_run(idx, key);
                     if now == run {
                         return Err(e);
                     }
@@ -283,11 +284,11 @@ impl PageStore {
         Ok(done)
     }
 
-    /// The run of the uploaded page of slot `idx` covering `id`, if one
+    /// The run of the uploaded page of slot `idx` covering `key`, if one
     /// does.
-    fn remote_run(&self, idx: usize, id: Id) -> Option<Run> {
+    fn remote_run(&self, idx: usize, key: &[u8]) -> Option<Run> {
         let remote = self.types[idx].remote_directory().borrow();
-        match locate(remote.as_ref()?, id) {
+        match locate(remote.as_ref()?, key) {
             Located::Page { run, .. } => Some(run),
             Located::Absent => None,
         }

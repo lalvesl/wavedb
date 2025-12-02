@@ -55,18 +55,18 @@ pub const fn run_of(page: Placed<u8>) -> Run {
     Run::new(page.address, page.blocks)
 }
 
-/// Where `id`'s page is.
+/// Where a key's page is.
 pub enum Located {
-    /// The page covering `id` — on disk, or [`EVICTED`] from it.
+    /// The page covering the key — on disk, or [`EVICTED`] from it.
     Page { at: Slot, run: Run, flags: u8 },
-    /// No page holds `id`.
+    /// No page holds the key.
     Absent,
 }
 
-/// Where `id`'s page is in `pages`.
+/// Where `key`'s page is in `pages`.
 #[must_use]
-pub fn locate(pages: &Pages, id: Id) -> Located {
-    match pages.find(&key_of_id(id)) {
+pub fn locate(pages: &Pages, key: &[u8]) -> Located {
+    match pages.find(key) {
         Found::Page { at, page } => Located::Page {
             at,
             run: run_of(page),

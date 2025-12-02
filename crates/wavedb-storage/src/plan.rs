@@ -79,7 +79,7 @@ impl PageStore {
         let slot = &self.types[idx];
         let mut index =
             slot.directory().borrow().clone().unwrap_or_else(disk_pages);
-        records.sort_by_key(|(id, _)| id.raw());
+        records.sort_by(|a, b| a.0.cmp(&b.0));
         let mut dict = slot.dictionary().borrow_mut();
         let mut grew = false;
         for bytes in records.iter().filter_map(|(_, b)| b.as_ref()) {
