@@ -14,8 +14,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use wavedb_core::Id;
-
 use crate::block::Run;
 use crate::error::{StorageError, StorageResult};
 use crate::ordered::{Journal, Placed};
@@ -24,10 +22,11 @@ use crate::page_store::PageStore;
 use futures::stream::{self, StreamExt, TryStreamExt};
 
 use crate::pages::{
-    PENDING, Pages, coverage, entries_between, key_of_id, read_page,
-    remote_pages, run_of, within,
+    PENDING, Pages, coverage, entries_between, read_page, remote_pages, run_of,
+    within,
 };
 use crate::plan::{PlannedPage, image_of};
+use crate::record_cache::Records;
 use crate::shape::weight;
 use crate::shape::{Rules, Shaped, shape};
 use crate::upload::{IN_FLIGHT, UPLOAD_INPUT_BLOCKS};
@@ -86,28 +85,25 @@ impl SlotUpload {
     /// The records the remote pages take: every one a flagged page holds,
     /// and the removal of every one the fetched pages hold within a flagged
     /// coverage that the page does not — in key order.
-    fn records(&self) -> Vec<(Id, Option<Vec<u8>>)> {
-        let mut out: BTreeMap<u128, Option<Vec<u8>>> = BTreeMap::new();
+    fn records(&self) -> Records {
+        let mut out: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
         for page in self.fetched.values() {
-            for (id, _) in page.iter() {
-                let key = key_of_id(id);
+            for (key, _) in page.iter() {
                 let covered = self
                     .flagged
                     .iter()
-                    .any(|f| within(&key, &f.lo, f.hi.as_deref()));
+                    .any(|f| within(key, &f.lo, f.hi.as_deref()));
                 if covered {
-                    out.insert(id.raw(), None);
+                    out.insert(key.to_vec(), None);
                 }
             }
         }
         for f in &self.flagged {
-            for (id, bytes) in f.page.iter() {
-                out.insert(id.raw(), Some(bytes.to_vec()));
+            for (key, bytes) in f.page.iter() {
+                out.insert(key.to_vec(), Some(bytes.to_vec()));
             }
         }
-        out.into_iter()
-            .map(|(raw, bytes)| (Id::from_raw(raw), bytes))
-            .collect()
+        out.into_iter().collect()
     }
 }
 

@@ -22,13 +22,12 @@
 
 use std::collections::BTreeMap;
 
-use wavedb_core::Id;
-
 use crate::block::{BLOCK_SIZE, Run};
 use crate::error::{StorageError, StorageResult};
 use crate::ordered::{Cut, CutOutcome, Found, Placed, Slot};
 use crate::page::SlotPage;
-use crate::pages::{EVICTED, PENDING, Pages, key_of_id, run_of};
+use crate::pages::{EVICTED, PENDING, Pages, run_of};
+use crate::record_cache::Records;
 
 /// A page a round writes.
 pub struct PlannedPage {
@@ -86,7 +85,7 @@ pub const fn weight(flags: u8, blocks: u64) -> u64 {
     }
 }
 
-/// Shape `records` (sorted by `Id`) into `index`'s pages, loading a page by
+/// Shape `records` (sorted by key) into `index`'s pages, loading a page by
 /// `load` and encoding one by `encode`.
 ///
 /// # Errors
@@ -95,7 +94,7 @@ pub const fn weight(flags: u8, blocks: u64) -> u64 {
 /// and the loader's and encoder's faults.
 pub fn shape<L, E>(
     index: &mut Pages,
-    records: Vec<(Id, Option<Vec<u8>>)>,
+    records: Records,
     rules: &Rules,
     struct_hash: u64,
     mut load: L,
@@ -106,8 +105,7 @@ where
     E: FnMut(&mut SlotPage) -> StorageResult<Vec<u8>>,
 {
     let mut staged: BTreeMap<Vec<u8>, Staged> = BTreeMap::new();
-    for (id, bytes) in records {
-        let key = key_of_id(id);
+    for (key, bytes) in records {
         let at = match index.find(&key) {
             Found::Page { at, page } => {
                 let sk = staged_key(index, at)?;
@@ -153,9 +151,9 @@ where
             page: SlotPage::new(struct_hash),
         });
         match bytes {
-            Some(bytes) => entry.page.upsert(id, bytes),
+            Some(bytes) => entry.page.upsert(&key, bytes),
             None => {
-                entry.page.remove(id);
+                entry.page.remove(&key);
             }
         }
     }
@@ -206,18 +204,18 @@ where
 {
     let mut stack = vec![page];
     while let Some(mut page) = stack.pop() {
-        let ids: Vec<Id> = page.iter().map(|(id, _)| id).collect();
-        let first = key_of_id(ids[0]).to_vec();
+        let keys: Vec<Vec<u8>> = page.iter().map(|(k, _)| k.to_vec()).collect();
+        let first = keys[0].clone();
         let image = encode(&mut page)?;
         let blocks = blocks_for(image.len());
         if index.seed().unit_for(blocks) > u64::from(u8::MAX) {
             return Err(StorageError::PageTooLarge(image.len() as u64));
         }
         let fits = index.canonical(blocks) <= rules.target_blocks;
-        let parts = if fits || ids.len() < 2 {
+        let parts = if fits || keys.len() < 2 {
             None
         } else {
-            cut_at(index, &first, &ids)?
+            cut_at(index, &first, &keys)?
         };
         let Some(at) = parts else {
             shaped.pages.push(PlannedPage {
@@ -228,31 +226,30 @@ where
             });
             continue;
         };
-        let (left, right) = halves(&page, &ids[at]);
+        let (left, right) = halves(&page, &keys[at]);
         stack.push(left);
         stack.push(right);
     }
     Ok(())
 }
 
-/// Cut the page whose first key is `first` and whose ids are `ids`: at its
-/// middle, or at the quantum boundary nearest it. The index where the right
-/// half starts; `None` when the keys cannot part.
+/// Cut the page whose first key is `first` and whose keys are `keys`: at
+/// its middle, or at the quantum boundary nearest it. The index where the
+/// right half starts; `None` when the keys cannot part.
 fn cut_at(
     index: &mut Pages,
     first: &[u8],
-    ids: &[Id],
+    keys: &[Vec<u8>],
 ) -> StorageResult<Option<usize>> {
     let Found::Page { at, .. } = index.find(first) else {
         return Err(StorageError::Corrupt("a page to cut lost its entry"));
     };
-    let keys: Vec<[u8; 16]> = ids.iter().map(|&id| key_of_id(id)).collect();
-    let last = keys[keys.len() - 1];
+    let last = &keys[keys.len() - 1];
     let cut = |i: usize| Cut {
         first: &keys[0],
         left_last: &keys[i - 1],
         right_first: &keys[i],
-        last: &last,
+        last,
     };
     let stand_in = |index: &Pages, at| {
         index
@@ -280,16 +277,12 @@ fn cut_at(
 }
 
 /// `page` in two: the records before `from`, and the rest.
-fn halves(page: &SlotPage, from: &Id) -> (SlotPage, SlotPage) {
+fn halves(page: &SlotPage, from: &[u8]) -> (SlotPage, SlotPage) {
     let hash = page.struct_hash();
     let (mut left, mut right) = (SlotPage::new(hash), SlotPage::new(hash));
-    for (id, bytes) in page.iter() {
-        let half = if id.raw() < from.raw() {
-            &mut left
-        } else {
-            &mut right
-        };
-        half.upsert(id, bytes.to_vec());
+    for (key, bytes) in page.iter() {
+        let half = if key < from { &mut left } else { &mut right };
+        half.upsert(key, bytes.to_vec());
     }
     (left, right)
 }
