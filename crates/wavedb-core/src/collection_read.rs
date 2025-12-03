@@ -20,7 +20,7 @@ use futures::{Stream, TryStreamExt};
 use crate::collection::Collection;
 use crate::error::{Error, Result};
 use crate::id::Id;
-use crate::index::{Bound, Pivot, SecKey};
+use crate::index::{Bound, SecKey};
 use crate::local_id::LocalId;
 use crate::metadata::Metadata;
 use crate::record::{decode_record, history_stream, wire_record};
@@ -123,9 +123,8 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// Ordered by the indexed field. The generated `by_<field>` wrappers call
     /// this with the field's exact encoding.
     ///
-    /// One sparse-index descent to the bound's least key, then the chain in
-    /// order while the bound holds ([RFC 0075]): a range read touches the
-    /// segments it returns from, and one more at most.
+    /// One read from the bound's least key, then the chain in order while
+    /// the bound holds ([RFC 0075]).
     ///
     /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains.md
     pub fn search_by<'a, S: Store>(
@@ -140,16 +139,15 @@ impl<T: NonUniqueStruct> Collection<T> {
         let handle = self;
         let tenant = self.tenant();
         futures::stream::once(async move {
-            let pivot = handle.load_pivot(store).await?;
-            let roots = *pivot
-                .secondaries()
-                .get(index)
-                .ok_or(Error::SecondaryIndexOutOfRange(index))?;
+            handle.check_pivot(store).await?;
+            if index >= T::NUM_SECONDARIES {
+                return Err(Error::SecondaryIndexOutOfRange(index));
+            }
             let from = SecKey {
                 field: bound.least().to_vec(),
                 rec: LocalId::default(),
             };
-            let keys = handle.sec_chain(roots).scan_from(store, from);
+            let keys = handle.sec_chain(index).scan_from(store, &from);
             Ok::<_, Error>(keys.try_take_while(move |(key, ())| {
                 futures::future::ready(Ok(bound.contains(&key.field)))
             }))
@@ -167,10 +165,10 @@ impl<T: NonUniqueStruct> Collection<T> {
 
     /// Stream every living record, **most recently changed first**.
     ///
-    /// This walks the record chain (RFC 0050) back from its tail. The chain
-    /// holds **pointers** (RFC 0054 — a record is stored once, at its anchor),
-    /// so one read per segment gives membership and order and each record is
-    /// then resolved at its address. A collection that wants a listing without
+    /// This reads the recency chain back from its end. The chain holds
+    /// **pointers** (RFC 0054 — a record is stored once, at its anchor), so a
+    /// read of the chain gives membership and order and each record is then
+    /// resolved at its address. A collection that wants a listing without
     /// that per-record read declares a `#[wavedb::list]`, which is the
     /// structure that holds records inline.
     ///
@@ -194,41 +192,19 @@ impl<T: NonUniqueStruct> Collection<T> {
         T: 'a,
     {
         let handle = self;
+        let tenant = self.tenant();
         futures::stream::once(async move {
-            let pivot = handle.load_pivot(store).await?;
-            let chain = handle.recency_chain(&pivot);
-            let tenant = handle.tenant();
-            Ok::<_, Error>(
-                futures::stream::try_unfold(
-                    Some(chain.tail()),
-                    move |cursor| async move {
-                        let Some(id) = cursor else {
-                            return Ok::<_, Error>(None);
-                        };
-                        let seg = chain.segment(store, id).await?;
-                        // The chain holds pointers, not records: one segment
-                        // read gives the membership and the order, and each
-                        // record is then resolved at its anchor. Reversed: a
-                        // segment holds its keys ascending, the walk runs
-                        // descending.
-                        let mut page = Vec::with_capacity(seg.len());
-                        for (key, ()) in seg.entries() {
-                            let rec = key.rec.to_id(tenant);
-                            let bytes = store
-                                .get_of(T::STRUCT_HASH, rec)
-                                .await?
-                                .ok_or(Error::RecordMissing(rec))?;
-                            let (_, value) =
-                                wire_record::<T>(T::STRUCT_HASH, bytes)?;
-                            page.push(Ok((rec, value)));
-                        }
-                        page.reverse();
-                        Ok(Some((futures::stream::iter(page), seg.prev())))
-                    },
-                )
-                .try_flatten(),
-            )
+            handle.check_pivot(store).await?;
+            Ok::<_, Error>(handle.recency_chain().scan_back(store))
         })
         .try_flatten()
+        .and_then(move |(key, ())| async move {
+            let rec = key.rec.to_id(tenant);
+            let bytes = store
+                .get_of(T::STRUCT_HASH, rec)
+                .await?
+                .ok_or(Error::RecordMissing(rec))?;
+            Ok((rec, wire_record::<T>(T::STRUCT_HASH, bytes)?.1))
+        })
     }
 }
