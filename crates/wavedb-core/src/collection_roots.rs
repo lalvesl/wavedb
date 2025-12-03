@@ -58,103 +58,46 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// rather than the whole value.
     ///
     /// [RFC 0056]: https://github.com/wavedb/wavedb/blob/main/rfcs/0056-fuzzy-string-search-WIP.md
-    pub(crate) fn fuzzy_chains(&self, pivot: &T::Pivot) -> Vec<Chain<()>> {
-        pivot
-            .fuzzy()
-            .iter()
-            .map(|roots| self.pointer_chain(*roots, Lane::Fuzzy))
+    pub(crate) fn fuzzy_chains(&self) -> Vec<Chain<()>> {
+        (0..T::NUM_FUZZY)
+            .map(|i| self.chain(Lane::Fuzzy, i))
             .collect()
     }
 
-    /// The **record chain** this pivot names: one entry per living record, in
-    /// modification order, with a sparse index above it (RFC 0050).
+    /// The **recency chain**: one entry per living record, in modification
+    /// order.
     ///
-    /// The entry carries **no payload** ([RFC 0054]) — a `SecKey` already holds
-    /// `rec`, the anchor, and the record lives there and nowhere else. So one
-    /// segment read gives membership and order, and there is no derived copy
-    /// that could disagree with its source. Duplication is what a
-    /// `#[wavedb::list]` asks for, and only that.
+    /// The entry carries **no payload** ([RFC 0054]) — a `SecKey` already
+    /// holds `rec`, the anchor, and the record lives there and nowhere else.
     ///
     /// [RFC 0054]: https://github.com/wavedb/wavedb/blob/main/rfcs/0054-no-duplication-by-default.md
-    pub(crate) fn recency_chain(&self, pivot: &T::Pivot) -> Chain<()> {
-        let roots = pivot.recency();
-        Chain::at(
-            roots.head,
-            roots.tail,
-            roots.index,
-            self.tenant,
-            T::STRUCT_HASH,
-            Lane::Recency,
-        )
-        // Pointer entries are ~18 bytes, so this chain wants the removal
-        // log's kind of capacity, not a page size — there are no records in
-        // here to paginate.
-        .with_min(DEFAULT_DEAD_MIN)
+    pub(crate) fn recency_chain(&self) -> Chain<()> {
+        self.chain(Lane::Recency, 0)
     }
 
-    /// The **removal log** this pivot names — the same chain shape with no
-    /// index, keyed by removal instant, payload-free.
-    pub(crate) fn dead_log(&self, pivot: &T::Pivot) -> Chain<()> {
-        let roots = pivot.removals();
-        Chain::log_at(
-            roots.head,
-            roots.tail,
-            self.tenant,
-            T::STRUCT_HASH,
-            Lane::Dead,
-        )
+    /// The **removal log** — keyed by removal instant, payload-free.
+    pub(crate) fn dead_log(&self) -> Chain<()> {
+        self.chain(Lane::Dead, 0)
     }
 
-    /// The **declared lists** this pivot names, in declaration order — the same
-    /// chain shape as the built-in one, sorted by a declared property instead of
-    /// by modification instant (RFC 0051).
-    ///
-    /// These own `Lane::Records` outright: they are the only chains that carry
-    /// record envelopes, so one directory and one zstd dictionary model one kind
-    /// of content — which is exactly what a lane is for. Recency and the removal
-    /// log, being id-only, are filed elsewhere.
-    pub(crate) fn list_chains(&self, pivot: &T::Pivot) -> Vec<Chain<Vec<u8>>> {
-        pivot
-            .lists()
-            .iter()
-            .enumerate()
-            .map(|(i, r)| self.record_chain(*r, T::list_page(i)))
+    /// The **declared lists**, in declaration order — sorted by a declared
+    /// property, each entry the record's envelope (RFC 0051).
+    pub(crate) fn list_chains(&self) -> Vec<Chain<Vec<u8>>> {
+        (0..T::NUM_LISTS)
+            .map(|i| self.chain(Lane::Records, i))
             .collect()
     }
 
     /// One declared list's chain, by declaration index.
     ///
     /// # Errors
-    /// [`Error::ListOutOfRange`] when the pivot declares no such list.
-    pub(crate) fn list_chain(
-        &self,
-        pivot: &T::Pivot,
-        index: usize,
-    ) -> Result<Chain<Vec<u8>>> {
-        pivot
-            .lists()
-            .get(index)
-            .map(|r| self.record_chain(*r, T::list_page(index)))
-            .ok_or(Error::ListOutOfRange(index))
-    }
-
-    /// A record-lane chain handle at `roots` holding `min`…`2*min` records —
-    /// the built-in chain and every declared list are the same structure,
-    /// differing only in the key they are laid out by and the capacity they
-    /// were declared at.
-    fn record_chain(&self, roots: ChainRoots, min: usize) -> Chain<Vec<u8>> {
-        Chain::at(
-            roots.head,
-            roots.tail,
-            roots.index,
-            self.tenant,
-            T::STRUCT_HASH,
-            Lane::Records,
-        )
-        // The declared `page = N` (RFC 0052), or the engine default. It folds
-        // into the `STRUCT_HASH`, so every segment this chain ever held was
-        // laid out at this same capacity.
-        .with_min(min)
+    /// [`Error::ListOutOfRange`] when the type declares no such list.
+    pub(crate) fn list_chain(&self, index: usize) -> Result<Chain<Vec<u8>>> {
+        if index < T::NUM_LISTS {
+            Ok(self.chain(Lane::Records, index))
+        } else {
+            Err(Error::ListOutOfRange(index))
+        }
     }
 
     /// Declared list `i`'s sort key for `value` stored at `id`.
