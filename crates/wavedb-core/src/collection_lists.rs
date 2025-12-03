@@ -335,11 +335,6 @@ mod tests {
                 .collect();
             assert_eq!(page, want, "a page from row {at}");
         }
-        assert_eq!(
-            index.total(store).await.unwrap(),
-            total,
-            "{what}: the root's sum disagrees with the chain"
-        );
     }
 
     /// Assert every entry a list holds is byte-identical to the record at its
@@ -366,35 +361,26 @@ mod tests {
         }
     }
 
-    /// Both of a collection's record chains, checked together — counts and
-    /// bytes.
+    /// A collection's list, checked whole — counts, pages and bytes.
     async fn all_counts_agree(store: &MemStore, col: &Collection<Row>) {
-        let pivot = col.load_pivot(store).await.unwrap();
-        let records = col.recency_chain(&pivot);
-        let list = col.list_chain(&pivot, 0).unwrap();
-        counts_agree(store, &records, "built-in chain").await;
-        counts_agree(store, &list, "list 0").await;
+        counts_agree(store, col).await;
         // Only a declared list duplicates bytes, so only a list can drift from
         // its anchor; the built-in chain holds pointers and cannot.
+        let list = col.list_chain(0).unwrap();
         payloads_agree(store, &list, col.tenant(), "list 0").await;
     }
 
-    // RFC 0052 asked whether an index entry and its segment can ever disagree,
-    // and answered it with an argument: the single-batch rule makes it
-    // impossible. The chain's own tests check that over a bare `Chain`; this
-    // checks it where the batch is **composed** — the collection interleaves
-    // the record write, the built-in chain, every declared list and the pivot
-    // into one `apply`, and a plan that forgot an index write in that traffic
-    // would still leave a chain that reads correctly and a pager that lies.
+    // Every list write rides the collection's one batch: the record write,
+    // the recency entry, every declared list. A plan that forgot one in that
+    // traffic would leave a list that reads and a pager that lies.
     #[test]
-    fn index_counts_track_the_segments_through_a_collection_mutation() {
+    fn a_list_counts_and_pages_through_a_collection_mutation() {
         block_on(async {
             let store = MemStore::default();
             let pivot =
                 Collection::<Row>::create(&store, tenant()).await.unwrap();
             let col = Collection::<Row>::at(pivot, tenant());
 
-            // Past 2N = 8 in both chains, so both have really split.
             let mut ids = Vec::new();
             for n in 0..12u32 {
                 ids.push(
@@ -407,7 +393,7 @@ mod tests {
 
             // A save relocates in the built-in chain (its key is the authoring
             // instant, which just changed) and, when the ordering property
-            // changed, in the list too — two counts revised per chain.
+            // changed, in the list too.
             for (i, id) in ids.iter().enumerate().take(6) {
                 col.save(&store, *id, &row(&format!("s{i:02}")))
                     .await
@@ -415,8 +401,7 @@ mod tests {
                 all_counts_agree(&store, &col).await;
             }
 
-            // And down through the merges: N/2 = 2, so emptying a 12-record
-            // chain folds segments repeatedly.
+            // And down to empty.
             for id in &ids {
                 assert!(col.remove(&store, *id).await.unwrap());
                 all_counts_agree(&store, &col).await;
@@ -429,8 +414,7 @@ mod tests {
     // *position* is unchanged.
     //
     // This is the failure a count check cannot see: the entry stays where it
-    // was, the segment length is right, the index is right, and the body is
-    // last week's. Found by mutation — skipping the list when
+    // was, the count is right, and the body is last week's. Found by mutation — skipping the list when
     // `old_key == new_key` reads like an obvious optimisation and passed the
     // entire suite.
     #[test]
@@ -466,8 +450,7 @@ mod tests {
             }
             all_counts_agree(&store, &col).await;
 
-            let pivot = col.load_pivot(&store).await.unwrap();
-            let list = col.list_chain(&pivot, 0).unwrap();
+            let list = col.list_chain(0).unwrap();
             let notes: Vec<u64> = list
                 .collect(&store)
                 .await
@@ -486,60 +469,6 @@ mod tests {
                 "the list served bodies from before the save"
             );
         });
-    }
-
-    // A list is laid out at **its own** capacity, not the struct's. The two
-    // chains hold the very same records, so a difference in segment count can
-    // only come from the capacity — which is the whole point of separating
-    // them: the built-in chain holds only pointers (RFC 0054 — no duplication
-    // by default) and wants the removal log's large capacity, while a list
-    // holds whole records and wants the page a view renders.
-    #[test]
-    fn a_list_lays_out_at_its_own_page() {
-        block_on(async {
-            let store = MemStore::default();
-            let pivot =
-                Collection::<Row>::create(&store, tenant()).await.unwrap();
-            let col = Collection::<Row>::at(pivot, tenant());
-            for n in 0..40u32 {
-                col.insert(&store, &row(&format!("r{n:02}"))).await.unwrap();
-            }
-
-            let pivot = col.load_pivot(&store).await.unwrap();
-            let built_in = segments(&store, &col.recency_chain(&pivot)).await;
-            let list =
-                segments(&store, &col.list_chain(&pivot, 0).unwrap()).await;
-
-            // 40 records, three capacities, three answers — which is what makes
-            // this an assertion rather than a coincidence:
-            //   the struct's `page = 4`   → ~10 segments
-            //   the list's   `page = 16`  → 2…4 segments   ← what it declared
-            //   the pointer chain's 256   → 1 segment
-            assert!(
-                (2..=4).contains(&list),
-                "the list is not laid out at its own page = 16: {list} \
-                 segment(s) — a 4 would give ~10, a 256 would give 1"
-            );
-            assert_eq!(
-                built_in, 1,
-                "the built-in chain holds pointers, so it takes the removal \
-                 log's capacity rather than the struct's page"
-            );
-        });
-    }
-
-    /// How many segments a chain currently holds.
-    async fn segments<P: crate::wire::WaveWire>(
-        store: &MemStore,
-        chain: &Chain<P>,
-    ) -> usize {
-        let mut n = 0;
-        let mut cursor = Some(chain.head());
-        while let Some(id) = cursor {
-            n += 1;
-            cursor = chain.segment(store, id).await.unwrap().next();
-        }
-        n
     }
 
     // The same invariant under the arrival order that stresses it hardest: a
