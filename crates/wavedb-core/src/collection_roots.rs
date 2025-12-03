@@ -1,74 +1,61 @@
-//! Which **structures** a collection has, and how they are created.
+//! Which **chains** a collection has, and how it is created.
 //!
 //! Split from [`collection`](crate::collection) for the file budget.
 //!
-//! Every collection has three chains of the **same shape** — instant-keyed
-//! segments holding ids and nothing else ([RFC 0054]): the **recency** chain
-//! (one entry per living record, at its live version's instant) and the
-//! **removal log** (one per removed record, at its removal instant), which
-//! together answer "what changed" and "what died"; plus one chain per declared
-//! `#[wavedb::list]`, which is the only kind that carries records.
+//! A collection is named by its Pivot, and every chain of it is the key
+//! range of a lane under that name ([RFC 0078] §7) — so a chain is opened
+//! from the Pivot's id alone, and nothing is created for it:
 //!
-//! Everything here answers "open the structure this `Pivot` names"; the creator
-//! at the end is where they are made.
+//! - the **recency** chain, one entry per living record at its live
+//!   version's instant, and the **removal log**, one per removed record at
+//!   its removal instant — together "what changed" and "what died" — both
+//!   ids and nothing else ([RFC 0054]);
+//! - one chain per `#[wavedb::pivot(...)]` secondary, per `#[wavedb::fuzzy]`
+//!   posting index, and per `#[wavedb::list]` — the only kind that carries
+//!   records — each under its declaration's index.
 //!
 //! [RFC 0054]: https://github.com/wavedb/wavedb/blob/main/rfcs/0054-no-duplication-by-default.md
+//! [RFC 0078]: https://github.com/wavedb/wavedb/blob/main/rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
 use crate::collection::Collection;
 use crate::error::{Error, Result};
 use crate::id::Id;
-use crate::index::{
-    Chain, ChainRoots, DEFAULT_DEAD_MIN, Lane, Pivot, Roots, SecKey,
-};
+use crate::index::{Chain, Lane, Pivot, SecKey};
 use crate::local_id::LocalId;
 use crate::record::{encode_envelope, mint_floored_id};
 use crate::store::{Store, Write};
 use crate::traits::NonUniqueStruct;
 use crate::u48::U48;
+use crate::wire::WaveWire;
 
 impl<T: NonUniqueStruct> Collection<T> {
-    /// A **secondary chain** at `roots` ([RFC 0075]): the recency chain's
-    /// shape — `[field][anchor]` keys, no payload ([RFC 0054]), a sparse
-    /// index above — keyed by a declared field instead of an instant.
-    ///
-    /// Pointer entries, so the removal log's kind of capacity: there are no
-    /// records in here to paginate.
+    /// This collection's chain `declaration` in `lane`.
+    fn chain<P: WaveWire>(&self, lane: Lane, declaration: usize) -> Chain<P> {
+        Chain::at(
+            self.pivot().to_id(self.tenant),
+            T::STRUCT_HASH,
+            lane,
+            u8::try_from(declaration).unwrap_or(u8::MAX),
+        )
+    }
+
+    /// Secondary index `i`'s chain ([RFC 0075]): `[field][anchor]` keys, no
+    /// payload ([RFC 0054]).
     ///
     /// [RFC 0054]: https://github.com/wavedb/wavedb/blob/main/rfcs/0054-no-duplication-by-default.md
     /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains.md
-    pub(crate) fn sec_chain(&self, roots: ChainRoots) -> Chain<()> {
-        self.pointer_chain(roots, Lane::Secondary)
+    pub(crate) fn sec_chain(&self, i: usize) -> Chain<()> {
+        self.chain(Lane::Secondary, i)
     }
 
-    /// A payload-free chain at `roots` in `lane`, at the index capacity.
-    fn pointer_chain(&self, roots: ChainRoots, lane: Lane) -> Chain<()> {
-        Chain::at(
-            roots.head,
-            roots.tail,
-            roots.index,
-            self.tenant,
-            T::STRUCT_HASH,
-            lane,
-        )
-        .with_min(self.index_min)
+    /// Every secondary chain, in declaration order.
+    pub(crate) fn sec_chains(&self) -> Vec<Chain<()>> {
+        (0..T::NUM_SECONDARIES).map(|i| self.sec_chain(i)).collect()
     }
 
-    /// The secondary chains this pivot declares, in declaration order.
-    pub(crate) fn sec_chains(&self, pivot: &T::Pivot) -> Vec<Chain<()>> {
-        pivot
-            .secondaries()
-            .iter()
-            .map(|roots| self.sec_chain(*roots))
-            .collect()
-    }
-
-    /// The **fuzzy posting chains** this pivot declares, in declaration order
-    /// ([RFC 0056]).
-    ///
-    /// Structurally a secondary index and nothing more: the same chain, the
-    /// same `SecKey`, the same capacity, a lane of its own (RFC 0075). What differs is only what the key
-    /// means — one gram of the indexed value rather than the whole value — and
-    /// that a record contributes many keys instead of one.
+    /// The **fuzzy posting chains**, in declaration order ([RFC 0056]):
+    /// structurally a secondary index, one gram of the indexed value per key
+    /// rather than the whole value.
     ///
     /// [RFC 0056]: https://github.com/wavedb/wavedb/blob/main/rfcs/0056-fuzzy-string-search-WIP.md
     pub(crate) fn fuzzy_chains(&self, pivot: &T::Pivot) -> Vec<Chain<()>> {
