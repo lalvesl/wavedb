@@ -473,8 +473,7 @@ mod tests {
 
     // The same invariant under the arrival order that stresses it hardest: a
     // list is keyed by a domain value, so records land in the *middle* of the
-    // chain rather than at its growth end, and every insert can split a segment
-    // that is not an endpoint.
+    // list rather than at its growth end.
     #[test]
     fn a_list_keeps_its_counts_under_middle_insertions() {
         block_on(async {
@@ -484,8 +483,8 @@ mod tests {
             let col = Collection::<Row>::at(pivot, tenant());
 
             // Descending names: every arrival sorts below everything already
-            // in the list, so the list's head splits over and over while the
-            // built-in chain only ever appends at its tail.
+            // in the list, while the built-in chain only ever appends at its
+            // end.
             let mut ids = Vec::new();
             for n in (0..14u32).rev() {
                 ids.push(
@@ -496,8 +495,7 @@ mod tests {
                 all_counts_agree(&store, &col).await;
             }
 
-            // Removing from the middle outward drains interior segments, which
-            // is the merge case the endpoints never exercise.
+            // Removing from the middle outward.
             for id in ids.iter().skip(3).take(8) {
                 assert!(col.remove(&store, *id).await.unwrap());
                 all_counts_agree(&store, &col).await;
