@@ -33,17 +33,17 @@ use crate::overlay::Overlay;
 use crate::store::{Store, Write};
 use crate::traits::NonUniqueStruct;
 
-/// Every structure a save re-keys, borrowed together so the planners can be
-/// handed one thing instead of four.
-pub struct Reindex<'a> {
+/// Every structure a save re-keys, gathered so the planners can be handed
+/// one thing instead of four.
+pub struct Reindex {
     /// The built-in recency chain.
-    pub records: &'a mut Chain<()>,
+    pub records: Chain<()>,
     /// The declared lists (RFC 0051).
-    pub lists: &'a mut [Chain<Vec<u8>>],
+    pub lists: Vec<Chain<Vec<u8>>>,
     /// The `#[wavedb::pivot(...)]` secondary chains (RFC 0075).
-    pub secs: &'a mut [Chain<()>],
+    pub secs: Vec<Chain<()>>,
     /// The `#[wavedb::fuzzy]` posting chains (RFC 0056).
-    pub fuzzy: &'a mut [Chain<()>],
+    pub fuzzy: Vec<Chain<()>>,
 }
 
 impl<T: NonUniqueStruct> Collection<T> {
@@ -51,88 +51,67 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// changed from `old_value` to `value`.
     ///
     /// `at` is the record's `(anchor, previous authoring instant)` — the chain
-    /// entry to vacate.
+    /// entry to vacate. The recency chain's verdict gates the lists: a record
+    /// it does not hold must not enter any other chain.
     pub(crate) async fn plan_reindex<S: Store>(
         &self,
         view: &mut Overlay<'_, S>,
         batch: &mut Vec<Write>,
-        moving: &mut Reindex<'_>,
+        moving: &Reindex,
         at: (Id, u64),
         live_meta: &Metadata,
         values: (&T, &T),
     ) -> Result<()> {
         let (id, old_instant) = at;
         let (old_value, value) = values;
-        // A save **relocates** the record in the chain: its key is the live
-        // version's authoring instant, and that instant just changed. Out of
-        // the old position, in at the new one — which is the movement that
-        // *is* the modification log (RFC 0050).
         let moved = self
             .plan_chain_move(
                 view,
                 batch,
-                moving.records,
+                &moving.records,
                 Self::instant_key(old_instant, LocalId::from_id(id)),
                 live_meta,
                 value,
             )
             .await?;
-        // Only a record the built-in chain holds belongs in a declared list —
-        // the same liveness gate, applied once (RFC 0051).
         if let Some(envelope) = moved {
-            self.plan_list_moves(
-                view,
+            Self::plan_list_moves(
                 batch,
-                moving.lists,
+                &moving.lists,
                 id,
                 &envelope,
                 (old_value, value),
-            )
-            .await?;
+            );
         }
-        self.plan_secondary_rekeys(
-            view,
+        Self::plan_secondary_rekeys(
             batch,
-            moving.secs,
+            &moving.secs,
             id,
             (old_value, value),
-        )
-        .await?;
-        // Only the grams that actually moved — an unchanged indexed field
-        // writes nothing at all here (RFC 0056).
-        self.plan_fuzzy_moves(view, batch, moving.fuzzy, id, (old_value, value))
-            .await
+        );
+        Self::plan_fuzzy_moves(batch, &moving.fuzzy, id, (old_value, value));
+        Ok(())
     }
 
     /// Re-key every secondary index whose fields the save changed.
     ///
-    /// An index whose fields are untouched is skipped outright — the same
-    /// shape as [`plan_fuzzy_moves`](Collection::plan_fuzzy_moves)'s rule, and
-    /// for the same reason: a secondary stores a key and an anchor, never the
-    /// record, so nothing about it can go stale when another field moves.
-    async fn plan_secondary_rekeys<S: Store>(
-        &self,
-        view: &mut Overlay<'_, S>,
+    /// An index whose fields are untouched is skipped outright: a secondary
+    /// stores a key and an anchor, never the record, so nothing about it can
+    /// go stale when another field moves.
+    fn plan_secondary_rekeys(
         batch: &mut Vec<Write>,
-        secs: &mut [Chain<()>],
+        secs: &[Chain<()>],
         id: Id,
         values: (&T, &T),
-    ) -> Result<()> {
+    ) {
         let (old_value, value) = values;
-        for (i, chain) in secs.iter_mut().enumerate() {
+        for (i, chain) in secs.iter().enumerate() {
             let old_key = Self::sec_key(old_value, i, id);
             let new_key = Self::sec_key(value, i, id);
-            if old_key == new_key {
-                continue;
+            if old_key != new_key {
+                batch.push(chain.remove(&old_key));
+                batch.push(chain.insert(&new_key, &()));
             }
-            if let Some(writes) = chain.plan_remove(&*view, &old_key).await? {
-                view.stage(&writes);
-                batch.extend(writes);
-            }
-            let writes = chain.plan_insert(&*view, new_key, ()).await?;
-            view.stage(&writes);
-            batch.extend(writes);
         }
-        Ok(())
     }
 }

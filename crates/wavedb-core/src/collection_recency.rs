@@ -55,28 +55,22 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// chain and removal log record (`0` when both are empty). Every
     /// instant minted for this collection must land strictly above it.
     ///
-    /// Both structures are instant-ordered and both keep permanent
-    /// endpoints, so this is **two endpoint reads** — the tail segment of
-    /// each, its last key — where the equivalent trees cost two full
-    /// `max_key` descents to a rightmost leaf. The floor is taken on every
-    /// mint, so it is the read that pays most for the chain's shape.
+    /// Both are instant-ordered, so this is **two reads of one entry** —
+    /// each chain's greatest key, read from its end. The floor is taken on
+    /// every mint.
     pub(crate) async fn instant_floor<S: Store>(
         &self,
         store: &S,
-        pivot: &T::Pivot,
     ) -> Result<u64> {
-        let records = self.recency_chain(pivot);
-        let removals = self.dead_log(pivot);
-        let live = records.segment(store, records.tail()).await?;
+        let live = self.recency_chain().last_key(store).await?;
         // The removal log is the other half and not an optimisation: a
         // removed record leaves the chain, so its instant survives only
         // here — without it a rewound clock could re-mint under a cursor
         // a client already advanced past.
-        let gone = removals.segment(store, removals.tail()).await?;
+        let gone = self.dead_log().last_key(store).await?;
         Ok(live
-            .last_key()
-            .into_iter()
-            .chain(gone.last_key())
+            .iter()
+            .chain(&gone)
             .map(Self::key_instant)
             .max()
             .unwrap_or(0))
@@ -104,7 +98,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         &self,
         view: &mut Overlay<'_, S>,
         batch: &mut Vec<Write>,
-        records: &mut Chain<()>,
+        records: &Chain<()>,
         old_key: SecKey,
         live_meta: &Metadata,
         value: &T,
@@ -120,26 +114,22 @@ impl<T: NonUniqueStruct> Collection<T> {
         // chainless first version — must not *enter* the living set through a
         // save. Without this the record would reappear in `all()` while its own
         // anchor still reads removed.
-        let Some(writes) = records.plan_remove(&*view, &old_key).await? else {
+        let Some(write) = records.plan_remove(&*view, &old_key).await? else {
             return Ok(None);
         };
+        let insert = records
+            .insert(&Self::instant_key(instant, LocalId::from_id(id)), &());
+        let writes = [write, insert];
         view.stage(&writes);
         batch.extend(writes);
         // The chain entry carries nothing: its key already names the anchor,
         // and the record is at that anchor. The envelope is still encoded here
         // because the caller's declared lists DO hold it, and encoding once is
         // the point of handing it back.
-        let envelope =
-            crate::record::encode_record(T::STRUCT_HASH, live_meta, value);
-        let writes = records
-            .plan_insert(
-                &*view,
-                Self::instant_key(instant, LocalId::from_id(id)),
-                (),
-            )
-            .await?;
-        view.stage(&writes);
-        batch.extend(writes);
-        Ok(Some(envelope))
+        Ok(Some(crate::record::encode_record(
+            T::STRUCT_HASH,
+            live_meta,
+            value,
+        )))
     }
 }
