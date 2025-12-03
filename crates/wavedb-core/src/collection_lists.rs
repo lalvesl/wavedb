@@ -234,16 +234,22 @@ impl<T: NonUniqueStruct> Collection<T> {
             Ok::<_, Error>(handle.list_chain(index)?.scan_skip(store, offset))
         })
         .try_flatten()
+        .and_then(move |(key, bytes)| async move {
+            let (meta, value) = wire_record::<T>(T::STRUCT_HASH, bytes)?;
+            Ok((key.rec.to_id(tenant), meta, value))
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use futures::TryStreamExt;
     use futures::executor::block_on;
 
     use crate::collection::Collection;
+    use crate::id::Id;
     use crate::index::mem_store::MemStore;
-    use crate::index::{Chain, ChainRoots, IndexKey, LogRoots, Pivot, Roots};
+    use crate::index::{Chain, IndexKey, Pivot};
     use crate::permission::PermissionRef;
     use crate::store::Store;
     use crate::traits::{NonUniqueStruct, Shape, WaveDbStruct};
@@ -252,8 +258,6 @@ mod tests {
 
     // Hand-rolled fixture of what `#[wavedb(NonUnique, page = 4)]` with one
     // `#[wavedb::list]` on `name` generates (core can't use the proc-macro).
-    // `page = 4` puts the split at 8 and the merge at 2, so a dozen records
-    // exercise both without a long setup.
     #[derive(Debug, Clone, PartialEq, Eq, WaveWire)]
     struct Row {
         name: String,
@@ -268,38 +272,13 @@ mod tests {
 
     #[derive(Debug, Clone, Default, PartialEq, Eq, WaveWire)]
     struct RowPivot {
-        recency: ChainRoots,
-        removals: LogRoots,
-        lists: [ChainRoots; 1],
         permission: Option<PermissionRef>,
     }
 
     impl Pivot for RowPivot {
         const STRUCT_HASH: u64 = 0x115_0002;
-        fn secondaries(&self) -> &[ChainRoots] {
-            &[]
-        }
-        fn recency(&self) -> ChainRoots {
-            self.recency
-        }
-        fn removals(&self) -> LogRoots {
-            self.removals
-        }
-        fn lists(&self) -> &[ChainRoots] {
-            &self.lists
-        }
         fn permission(&self) -> Option<&PermissionRef> {
             self.permission.as_ref()
-        }
-        fn replace_roots(&self, roots: Roots<'_>) -> Self {
-            let mut lists = self.lists;
-            lists.copy_from_slice(roots.lists);
-            Self {
-                recency: roots.recency,
-                removals: roots.removals,
-                lists,
-                permission: self.permission.clone(),
-            }
         }
     }
 
@@ -332,36 +311,29 @@ mod tests {
         }
     }
 
-    /// Assert the sparse index's counts agree with the segments they name —
-    /// per segment and in aggregate.
+    /// Assert a list's count, its pages and the living set agree.
     ///
-    /// This is the invariant a pager rests on: `_at_page` descends by count, so
-    /// a count that has drifted from its segment does not fail, it silently
-    /// returns the wrong rows.
-    async fn counts_agree<P: crate::wire::WaveWire>(
-        store: &MemStore,
-        chain: &Chain<P>,
-        what: &str,
-    ) {
-        let index = chain.index().expect("a record chain always has an index");
-        let mut total = 0;
-        let mut cursor = Some(chain.head());
-        while let Some(id) = cursor {
-            let seg = chain.segment(store, id).await.unwrap();
-            if let Some(first) = seg.first_key() {
-                let slot =
-                    index.find(store, first).await.unwrap().unwrap_or_else(
-                        || panic!("{what}: segment not indexed"),
-                    );
-                assert_eq!(slot.seg, id, "{what}: index names another segment");
-                assert_eq!(
-                    slot.count,
-                    seg.len() as u64,
-                    "{what}: count drifted from segment {id:?}"
-                );
-            }
-            total += seg.len() as u64;
-            cursor = seg.next();
+    /// This is the invariant a pager rests on: `_len` counts the list and
+    /// `_at_page` skips into it, so a count or a skip that drifted from the
+    /// entries does not fail, it silently returns the wrong rows.
+    async fn counts_agree(store: &MemStore, col: &Collection<Row>) {
+        let list = col.list_chain(0).unwrap();
+        let held = list.collect(store).await.unwrap();
+        let living = col.recency_chain().len(store).await.unwrap();
+        assert_eq!(col.list_len(store, 0).await.unwrap(), held.len() as u64);
+        assert_eq!(living, held.len() as u64, "the list and the living set");
+        for at in 0..=held.len() {
+            let page: Vec<Id> = col
+                .listed_at(store, 0, at as u64)
+                .map_ok(|(id, _)| id)
+                .try_collect()
+                .await
+                .unwrap();
+            let want: Vec<Id> = held[at..]
+                .iter()
+                .map(|(k, _)| k.rec.to_id(col.tenant()))
+                .collect();
+            assert_eq!(page, want, "a page from row {at}");
         }
         assert_eq!(
             index.total(store).await.unwrap(),
