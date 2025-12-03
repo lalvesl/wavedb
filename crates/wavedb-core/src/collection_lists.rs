@@ -104,16 +104,14 @@ impl<T: NonUniqueStruct> Collection<T> {
         for (i, chain) in self.list_chains().iter().enumerate() {
             batch.push(chain.remove(&Self::list_key(value, i, id)));
         }
-        Ok(())
     }
 
     /// Stream every living record in declared list `index`'s order, ascending.
     ///
-    /// One read per segment, records **inline** — unlike
-    /// [`all`](Collection::all), which walks pointers and resolves each record
-    /// at its anchor. Buying that difference is what declaring a list is for.
-    /// The generated `listed_by_<fields>` wrapper calls this with the
-    /// declaration's index.
+    /// Records **inline** — unlike [`all`](Collection::all), which walks
+    /// pointers and resolves each record at its anchor. Buying that
+    /// difference is what declaring a list is for. The generated
+    /// `listed_by_<fields>` wrapper calls this with the declaration's index.
     pub fn listed<'a, S: Store>(
         self,
         store: &'a S,
@@ -122,12 +120,12 @@ impl<T: NonUniqueStruct> Collection<T> {
     where
         T: 'a,
     {
-        self.listed_from(store, index, None)
+        self.listed_from(store, index, 0)
             .map_ok(|(id, _, value)| (id, value))
     }
 
     /// [`listed`](Self::listed) entered at global offset `offset` — the pager's
-    /// "jump to page k", one sparse-index descent rather than a walk.
+    /// "jump to page k".
     ///
     /// The stream still runs to the end of the list; a caller takes the page it
     /// wants. An offset at or past the end yields nothing.
@@ -140,13 +138,13 @@ impl<T: NonUniqueStruct> Collection<T> {
     where
         T: 'a,
     {
-        self.listed_from(store, index, Some(offset))
+        self.listed_from(store, index, offset)
             .map_ok(|(id, _, value)| (id, value))
     }
 
     /// [`listed_at`](Self::listed_at) keeping each record's [`Metadata`].
     ///
-    /// The wire `Listed` reads through this: a list segment holds the whole
+    /// The wire `Listed` reads through this: a list entry holds the whole
     /// **envelope**, so the metadata is decoded either way and dropping it
     /// would only force a client mirror to author its own — one that disagrees
     /// with the node about the version chain. It costs nothing here and it is
@@ -162,14 +160,14 @@ impl<T: NonUniqueStruct> Collection<T> {
     where
         T: 'a,
     {
-        self.listed_from(store, index, Some(offset))
+        self.listed_from(store, index, offset)
     }
 
     /// The living records declared list `index` holds under `bound` (over
     /// its [`IndexKey`](crate::index::IndexKey) encoding), in its order and
-    /// **inline** ([RFC 0075]): one sparse-index descent to the bound's least
-    /// key, then the chain while the bound holds — a secondary's read without
-    /// a fetch per record. The generated `by_<fields>` of a list call this.
+    /// **inline** ([RFC 0075]): one read from the bound's least key, then the
+    /// chain while the bound holds — a secondary's read without a fetch per
+    /// record. The generated `by_<fields>` of a list call this.
     ///
     /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains.md
     pub fn listed_where<'a, S: Store>(
@@ -184,13 +182,13 @@ impl<T: NonUniqueStruct> Collection<T> {
         let handle = self;
         let tenant = self.tenant();
         futures::stream::once(async move {
-            let pivot = handle.load_pivot(store).await?;
-            let chain = handle.list_chain(&pivot, index)?;
+            handle.check_pivot(store).await?;
+            let chain = handle.list_chain(index)?;
             let from = SecKey {
                 field: bound.least().to_vec(),
                 rec: LocalId::default(),
             };
-            Ok::<_, Error>(chain.scan_from(store, from).try_take_while(
+            Ok::<_, Error>(chain.scan_from(store, &from).try_take_while(
                 move |(key, _)| {
                     futures::future::ready(Ok(bound.contains(&key.field)))
                 },
@@ -204,7 +202,7 @@ impl<T: NonUniqueStruct> Collection<T> {
     }
 
     /// How many living records declared list `index` holds — the pager's
-    /// "of M", one read cold (the index root carries the sum).
+    /// "of M".
     ///
     /// # Errors
     /// [`Error::ListOutOfRange`] for an undeclared index, or a [`Store`]
@@ -214,68 +212,26 @@ impl<T: NonUniqueStruct> Collection<T> {
         store: &S,
         index: usize,
     ) -> Result<u64> {
-        let pivot = self.load_pivot(store).await?;
-        let chain = self.list_chain(&pivot, index)?;
-        match chain.index() {
-            Some(tree) => tree.total(store).await,
-            None => Ok(0),
-        }
+        self.check_pivot(store).await?;
+        self.list_chain(index)?.len(store).await
     }
 
-    /// Every list reader: walk the chain forward from `offset` (or from the
-    /// head), yielding whole segments' worth of records with their metadata.
+    /// Every list reader: the chain read forward past its first `offset`
+    /// entries, each record with its metadata.
     fn listed_from<'a, S: Store>(
         self,
         store: &'a S,
         index: usize,
-        offset: Option<u64>,
+        offset: u64,
     ) -> impl Stream<Item = Result<(Id, crate::metadata::Metadata, Wire<T>)>> + 'a
     where
         T: 'a,
     {
         let handle = self;
+        let tenant = self.tenant();
         futures::stream::once(async move {
-            let pivot = handle.load_pivot(store).await?;
-            let chain = handle.list_chain(&pivot, index)?;
-            let tenant = handle.tenant();
-            // Where the walk starts, and how far into that first segment: an
-            // offset descent when one was asked for, the head otherwise.
-            let start = match (offset.filter(|at| *at > 0), chain.index()) {
-                (Some(at), Some(tree)) => tree
-                    .find_offset(store, at)
-                    .await?
-                    .map(|(slot, within)| (slot.seg, within)),
-                // No index to descend, so no way to skip: an index-less chain
-                // is the removal log's shape, which is never a declared list.
-                (Some(_), None) => None,
-                // Offset zero is the head by definition — no descent, and no
-                // dependence on the index for the common whole-list read.
-                (None, _) => Some((chain.head(), 0)),
-            };
-            Ok::<_, Error>(
-                futures::stream::try_unfold(start, move |cursor| async move {
-                    let Some((id, skip)) = cursor else {
-                        return Ok::<_, Error>(None);
-                    };
-                    let seg = chain.segment(store, id).await?;
-                    let mut page = Vec::with_capacity(seg.len());
-                    // Ascending, and no reverse: a declared list reads in its
-                    // own order, where recency reads backwards.
-                    for (key, bytes) in
-                        seg.entries().skip(usize::try_from(skip).unwrap_or(0))
-                    {
-                        // The record's own buffer: one copy out of the segment.
-                        let (meta, value) =
-                            wire_record::<T>(T::STRUCT_HASH, bytes.clone())?;
-                        page.push(Ok((key.rec.to_id(tenant), meta, value)));
-                    }
-                    Ok(Some((
-                        futures::stream::iter(page),
-                        seg.next().map(|next| (next, 0)),
-                    )))
-                })
-                .try_flatten(),
-            )
+            handle.check_pivot(store).await?;
+            Ok::<_, Error>(handle.list_chain(index)?.scan_skip(store, offset))
         })
         .try_flatten()
     }
