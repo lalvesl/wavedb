@@ -1,7 +1,7 @@
 //! [`Collection`]'s mutating half — `insert` / `save` / `remove` — each one
-//! atomic [`Store::apply`] batch: the record write, every touched chain
-//! segment and index node (recency, removals, lists, secondaries, fuzzy, via
-//! the chains' `plan_*` planners), and the rewritten `Pivot` when a root moved.
+//! atomic [`Store::apply`] batch: the record write and one entry per chain it
+//! touches (recency, removals, lists, secondaries, fuzzy), each a key of its
+//! lane (RFC 0078 §7). No chain write rewrites the `Pivot`.
 //!
 //! Every instant minted here (an insert's id, a save's version instant, a
 //! removal's log key) lands strictly above the collection's **instant
@@ -12,7 +12,6 @@ use crate::collection::Collection;
 use crate::collection_reindex::Reindex;
 use crate::error::Result;
 use crate::id::Id;
-use crate::index::{Chain, ChainRoots, LogRoots, Pivot, Roots};
 use crate::local_id::LocalId;
 use crate::metadata::{Metadata, Succession};
 use crate::notify::{Mutation, MutationKind};
@@ -23,76 +22,22 @@ use crate::store::{Store, Write};
 use crate::traits::NonUniqueStruct;
 use crate::wire::to_wire;
 
-/// Everything one mutation may have moved, gathered so the `Pivot` is compared
-/// and rewritten **exactly once** — a second write built from the pre-batch
-/// pivot would drop whatever the first one carried.
-pub struct MovedRoots<'a> {
-    /// The secondary chains, in declaration order (RFC 0075).
-    pub secondaries: &'a [Chain<()>],
-    /// The record chain's endpoints and index root (RFC 0050).
-    pub recency: ChainRoots,
-    /// The removal log's endpoints.
-    pub removals: LogRoots,
-    /// The declared lists' chains, in declaration order (RFC 0051).
-    pub lists: &'a [Chain<Vec<u8>>],
-    /// The fuzzy posting chains, in declaration order (RFC 0056).
-    pub fuzzy: &'a [Chain<()>],
-}
-
 impl<T: NonUniqueStruct> Collection<T> {
-    /// When any root moved — a chain's endpoint, at its first split —
-    /// append the `Pivot` rewrite carrying them all.
-    ///
-    /// A chain moves an endpoint at most once in its life (its first split) and
-    /// its index root never moves, so a collection with no declared secondary
-    /// index compares and writes nothing here after that one split. What used
-    /// to make this fire constantly — `current`, `recency`, `dead` — is gone
-    /// (RFC 0050 phase 5c).
-    pub(crate) fn push_root_moves(
-        &self,
-        batch: &mut Vec<Write>,
-        pivot: &T::Pivot,
-        moved: &MovedRoots<'_>,
-    ) {
-        let sec_roots: Vec<ChainRoots> =
-            moved.secondaries.iter().map(Chain::roots).collect();
-        let list_roots: Vec<ChainRoots> =
-            moved.lists.iter().map(Chain::roots).collect();
-        let fuzzy_roots: Vec<ChainRoots> =
-            moved.fuzzy.iter().map(Chain::roots).collect();
-        if sec_roots.as_slice() != pivot.secondaries()
-            || moved.recency != pivot.recency()
-            || moved.removals != pivot.removals()
-            || list_roots.as_slice() != pivot.lists()
-            || fuzzy_roots.as_slice() != pivot.fuzzy()
-        {
-            let rewritten = pivot.replace_roots(Roots {
-                secondaries: &sec_roots,
-                recency: moved.recency,
-                removals: moved.removals,
-                lists: &list_roots,
-                fuzzy: &fuzzy_roots,
-            });
-            batch.push(self.pivot_rewrite(&rewritten));
-        }
-    }
-
     /// Insert `value` as a new record: mints its timestamp-keyed [`Id`] (the
-    /// stable identity for the record's whole life), writes the record,
-    /// indexes it in `current`, the recency log, and every secondary tree,
-    /// and rewrites the `Pivot` if any root moved — one atomic batch.
-    /// Returns the minted `Id`.
+    /// stable identity for the record's whole life), writes the record, and
+    /// files it in the recency chain, every declared list and every
+    /// secondary — one atomic batch. Returns the minted `Id`.
     ///
     /// # Errors
     /// Propagates a [`Store`] failure, [`Error::PivotMissing`](crate::Error::PivotMissing)
     /// on a stale handle, or a decode fault on a corrupt pivot.
     pub async fn insert<S: Store>(&self, store: &S, value: &T) -> Result<Id> {
-        let pivot = self.load_pivot(store).await?;
+        self.check_pivot(store).await?;
         // A `#[wavedb::key(...)]` type's identity is its key fields —
         // insert IS the upsert at the content-derived anchor (see
         // `collection_keyed`).
         if let Some(id) = self.keyed_anchor(value) {
-            self.upsert_keyed(store, &pivot, id, value).await?;
+            self.upsert_keyed(store, id, value).await?;
             return Ok(id);
         }
         let floor = self.instant_floor(store, &pivot).await?;
