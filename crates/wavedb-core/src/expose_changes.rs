@@ -4,14 +4,12 @@
 //! seen for a topic. Answering "what changed since?" never replays a log
 //! of requests — the disk structures phase 3 laid down *are* the answer:
 //!
-//! - a **collection** scans the tails of its record chain and its removal
-//!   log past the cursor (RFC 0050) — every record inserted or updated
-//!   since (once, at its live instant) and every removal (at its removal
-//!   instant). Both are ordered by instant, so each scan starts at its
-//!   chain's tail and stops at the first segment reaching the cursor; and
-//!   the record chain carries each version's bytes **inline**, so a change
-//!   costs no read of its own. A caught-up client pays two segment reads
-//!   for "nothing new";
+//! - a **collection** reads its recency chain and its removal log past the
+//!   cursor (RFC 0050) — every record inserted or updated since (once, at
+//!   its live instant) and every removal (at its removal instant). Both are
+//!   ordered by instant, so each read starts just past the cursor's key and
+//!   runs to the chain's end; a caught-up client pays two empty reads for
+//!   "nothing new";
 //! - a **Unique** walks its chain forward from the client's own version:
 //!   the derived slot of the cursor instant holds its archive, whose
 //!   `Next` names the successor — a MISS means the successor is the live
@@ -22,6 +20,8 @@
 //! `since: None` is **registration**: answer the topic's current tail as
 //! the starting cursor, with no events — a fresh watch begins at "now",
 //! never with a surprise full-set replay.
+
+use futures::TryStreamExt;
 
 use crate::collection::Collection;
 use crate::error::{Error, Result};
@@ -52,39 +52,29 @@ pub enum Change {
 }
 
 /// One chain's tail past `cursor`: every entry whose key instant is
-/// strictly greater, as `(instant, anchor, payload)`.
-///
-/// The chain is instant-ordered, so the scan starts at the tail and stops
-/// at the first segment reaching at or below the cursor — a client `k`
-/// changes behind reads `k / entries-per-segment` segments, not `k`
-/// records. Order is per-segment ascending, newest segment first; the two
-/// chains are merged by instant afterwards, so it does not matter here.
+/// strictly greater, as `(instant, anchor, payload)`, ascending — one read
+/// from the least key past the cursor to the chain's end.
 async fn tail_since<P, S>(
     chain: &Chain<P>,
     store: &S,
     cursor: u64,
 ) -> Result<Vec<(u64, LocalId, P)>>
 where
-    P: WaveWire,
+    P: WaveWire + Clone,
     S: Store,
 {
-    let mut out = Vec::new();
-    let mut at = Some(chain.tail());
-    while let Some(id) = at {
-        let mut seg = chain.segment(store, id).await?;
-        let prev = seg.prev();
-        // Ascending keys: a segment whose least key already sits at or
-        // below the cursor is the last one worth reading.
-        let reached = seg
-            .first_key()
-            .is_some_and(|key| key_instant(key) <= cursor);
-        out.extend(seg.take_entries().into_iter().filter_map(|(key, load)| {
-            let instant = key_instant(&key);
-            (instant > cursor).then_some((instant, key.rec, load))
-        }));
-        at = if reached { None } else { prev };
-    }
-    Ok(out)
+    let Some(next) = cursor.checked_add(1) else {
+        return Ok(Vec::new());
+    };
+    let from = SecKey {
+        field: next.to_be_bytes().to_vec(),
+        rec: LocalId::default(),
+    };
+    chain
+        .scan_from(store, &from)
+        .map_ok(|(key, load)| (key_instant(&key), key.rec, load))
+        .try_collect()
+        .await
 }
 
 /// The instant a chain key encodes (their field IS the 8-byte big-endian
@@ -103,9 +93,8 @@ fn key_instant(key: &SecKey) -> u64 {
 /// order. `None` = register at the collection's current tail with no
 /// events.
 ///
-/// The chain stores each record's envelope inline, so a `Saved` is
-/// assembled from bytes the tail scan already read — catching up costs
-/// segment reads, never one read per change.
+/// The chains name the records; each `Saved` reads its record at its
+/// anchor.
 ///
 /// # Errors
 /// Propagates a [`Store`] failure, [`Error::PivotMissing`] on a stale
@@ -123,16 +112,14 @@ where
     S: Store,
 {
     let col = Collection::<T>::at(pivot, tenant);
-    let pivot_record = col.load_pivot(store).await?;
+    col.check_pivot(store).await?;
     let Some(cursor) = since else {
-        let tail = col.instant_floor(store, &pivot_record).await?;
+        let tail = col.instant_floor(store).await?;
         return Ok(values(tail, &[]));
     };
 
-    let saved =
-        tail_since(&col.recency_chain(&pivot_record), store, cursor).await?;
-    let removed =
-        tail_since(&col.dead_log(&pivot_record), store, cursor).await?;
+    let saved = tail_since(&col.recency_chain(), store, cursor).await?;
+    let removed = tail_since(&col.dead_log(), store, cursor).await?;
 
     // Merge the two tails into one instant-ordered timeline.
     let mut timeline = Vec::with_capacity(saved.len() + removed.len());
@@ -248,8 +235,8 @@ mod tests {
     use crate::error::Result;
     use crate::expose::Reply;
     use crate::id::Id;
+    use crate::index::Pivot;
     use crate::index::mem_store::MemStore;
-    use crate::index::{ChainRoots, LogRoots, Pivot, Roots};
     use crate::metadata::Succession;
     use crate::permission::PermissionRef;
     use crate::record::{adopt_unique, get_unique, save_unique};
@@ -275,30 +262,12 @@ mod tests {
 
     #[derive(Debug, Clone, Default, PartialEq, Eq, WaveWire)]
     struct DocPivot {
-        recency: ChainRoots,
-        removals: LogRoots,
         permission: Option<PermissionRef>,
     }
     impl Pivot for DocPivot {
         const STRUCT_HASH: u64 = 0xC4A6_0002;
-        fn secondaries(&self) -> &[ChainRoots] {
-            &[]
-        }
-        fn recency(&self) -> ChainRoots {
-            self.recency
-        }
-        fn removals(&self) -> LogRoots {
-            self.removals
-        }
         fn permission(&self) -> Option<&PermissionRef> {
             self.permission.as_ref()
-        }
-        fn replace_roots(&self, roots: Roots<'_>) -> Self {
-            Self {
-                recency: roots.recency,
-                removals: roots.removals,
-                permission: self.permission.clone(),
-            }
         }
     }
 
@@ -322,6 +291,7 @@ mod tests {
     struct Watched<'a> {
         inner: &'a MemStore,
         reads: Mutex<Vec<Id>>,
+        scans: Mutex<usize>,
     }
 
     impl<'a> Watched<'a> {
@@ -329,11 +299,16 @@ mod tests {
             Self {
                 inner,
                 reads: Mutex::new(Vec::new()),
+                scans: Mutex::new(0),
             }
         }
 
         fn reads(&self) -> Vec<Id> {
             self.reads.lock().unwrap().clone()
+        }
+
+        fn scans(&self) -> usize {
+            *self.scans.lock().unwrap()
         }
     }
 
@@ -348,6 +323,7 @@ mod tests {
             lane: u64,
             span: &crate::store::Span,
         ) -> Result<Vec<crate::store::Entry>> {
+            *self.scans.lock().unwrap() += 1;
             self.inner.scan(lane, span).await
         }
 
@@ -445,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn a_collection_catch_up_is_segment_shaped_not_collection_shaped() {
+    fn a_collection_catch_up_reads_what_changed_not_the_collection() {
         block_on(async {
             let store = MemStore::default();
             let pivot =
@@ -482,28 +458,22 @@ mod tests {
             assert_eq!(bodies, (0..n).collect::<Vec<_>>());
 
             // The claim, restated for RFC 0054's no-duplication default: the
-            // *scan* is segment-shaped even though the *bodies* are not. The
-            // chain holds pointers, so a change's record is fetched at its
-            // anchor — but only for records that actually changed, and finding
-            // which ones took a handful of segment reads rather than a walk
-            // over the collection.
+            // *finding* is a read of each chain even though the *bodies* are
+            // not. The chain holds pointers, so a change's record is fetched
+            // at its anchor — but only for records that actually changed, and
+            // finding which ones took one read of each chain rather than a
+            // walk over the collection.
             let reads = watched.reads();
             assert!(
                 anchors.iter().all(|id| reads.contains(id)),
                 "every changed record is resolved at its anchor"
             );
-            // 40 changes: 40 anchors + the pivot + a few segments. What the
-            // chain buys is that the second number stays small — the cost is
-            // proportional to what changed, never to the collection.
-            assert!(
-                reads.len() < anchors.len() + 10,
-                "{n} changes in {} reads — finding them must stay \
-                 segment-shaped",
-                reads.len()
-            );
+            // 40 changes: 40 anchors + the pivot, and one read per chain.
+            assert_eq!(reads.len(), anchors.len() + 1);
+            assert_eq!(watched.scans(), 2, "one read of each chain");
 
-            // And a caught-up client pays a constant: the pivot, the record
-            // chain's tail segment, the removal log's tail segment.
+            // And a caught-up client pays a constant: the pivot, and one
+            // empty read of each chain.
             let watched = Watched::new(&store);
             let (again, rest) = decode(
                 collection_changes::<Doc, _>(
@@ -516,7 +486,8 @@ mod tests {
                 .unwrap(),
             );
             assert_eq!((again, rest.len()), (cursor, 0));
-            assert_eq!(watched.reads().len(), 3, "reads for 'nothing new'");
+            assert_eq!(watched.reads().len(), 1, "the pivot");
+            assert_eq!(watched.scans(), 2, "reads for 'nothing new'");
         });
     }
 
