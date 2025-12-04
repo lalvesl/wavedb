@@ -197,7 +197,7 @@ impl<T: NonUniqueStruct> Collection<T> {
             self.plan_reindex(
                 &mut view,
                 &mut batch,
-                &mut moving,
+                &moving,
                 (id, *old_instant),
                 &live_meta,
                 (old_value, value),
@@ -206,17 +206,6 @@ impl<T: NonUniqueStruct> Collection<T> {
         } else if T::NUM_SECONDARIES > 0 {
             return Err(crate::Error::RecordMissing(id));
         }
-        self.push_root_moves(
-            &mut batch,
-            &pivot,
-            &MovedRoots {
-                secondaries: &secs,
-                recency: records.roots(),
-                removals: pivot.removals(),
-                lists: &lists,
-                fuzzy: &fuzzy,
-            },
-        );
         store.apply(&batch).await?;
         store.note_mutation(|| Mutation {
             struct_hash: T::STRUCT_HASH,
