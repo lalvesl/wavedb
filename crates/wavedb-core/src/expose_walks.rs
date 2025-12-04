@@ -1,5 +1,7 @@
 //! The buffered walks behind the generated `All` and `History` steps.
 
+use futures::TryStreamExt;
+
 use crate::collection::Collection;
 use crate::error::Result;
 use crate::expose::Reply;
@@ -38,32 +40,24 @@ where
     // identity and the authoritative chain data ride along so a client mirror
     // adopts them verbatim, where the typed surface yields values alone.
     //
-    // Walked off the **record chain** (RFC 0050), back from its tail, for two
-    // reasons. It is the same order `Collection::all` yields — most recently
-    // written first — and the two surfaces must not disagree about what "all"
-    // means. The chain gives membership and order in one read per segment; each
-    // record is then resolved at its anchor, which is where it lives (RFC 0054 —
-    // no duplication by default).
-    let pivot_record = col.load_pivot(store).await?;
-    let chain = col.recency_chain(&pivot_record);
+    // Read off the **recency chain**, back from its end, for two reasons. It
+    // is the same order `Collection::all` yields — most recently written
+    // first — and the two surfaces must not disagree about what "all" means.
+    // The chain gives membership and order; each record is then resolved at
+    // its anchor, which is where it lives (RFC 0054 — no duplication by
+    // default).
+    col.check_pivot(store).await?;
+    let mut keys = Box::pin(col.recency_chain().scan_back(store));
     let mut items: Vec<Vec<u8>> = Vec::new();
-    let mut cursor = Some(chain.tail());
-    while let Some(seg_id) = cursor {
-        let seg = chain.segment(store, seg_id).await?;
-        let from = items.len();
-        for (key, ()) in seg.entries() {
-            let rec = key.rec.to_id(col.tenant());
-            let bytes = store
-                .get_of(T::STRUCT_HASH, rec)
-                .await?
-                .ok_or(crate::Error::RecordMissing(rec))?;
-            let (meta, body) =
-                crate::record::wire_record::<T>(T::STRUCT_HASH, bytes)?;
-            items.push(framed(&(rec, meta), body));
-        }
-        // A segment holds its keys ascending; the walk runs descending.
-        items[from..].reverse();
-        cursor = seg.prev();
+    while let Some((key, ())) = keys.try_next().await? {
+        let rec = key.rec.to_id(col.tenant());
+        let bytes = store
+            .get_of(T::STRUCT_HASH, rec)
+            .await?
+            .ok_or(crate::Error::RecordMissing(rec))?;
+        let (meta, body) =
+            crate::record::wire_record::<T>(T::STRUCT_HASH, bytes)?;
+        items.push(framed(&(rec, meta), body));
     }
     Ok(Reply::Values(items))
 }
