@@ -120,11 +120,9 @@ impl<T: NonUniqueStruct> Collection<T> {
         }
     }
 
-    /// Create a new, empty collection under `tenant`: the recency chain and
-    /// its sparse index, the removal log, one chain per
-    /// `#[wavedb::pivot(...)]`, and the `Pivot` record pointing at them all,
-    /// committed in one atomic batch. Returns the pivot's `LocalId` — the caller stores it (via the
-    /// generated `{Name}PivotId`) in an owning record.
+    /// Create a new, empty collection under `tenant`: its `Pivot` record,
+    /// one write. Returns the pivot's `LocalId` — the caller stores it (via
+    /// the generated `{Name}PivotId`) in an owning record.
     ///
     /// # Errors
     /// Propagates a [`Store`] failure.
@@ -155,85 +153,21 @@ impl<T: NonUniqueStruct> Collection<T> {
         tenant: U48,
         pivot: LocalId,
     ) -> Result<()> {
-        Self::create_rooted(store, tenant, pivot.to_id(tenant)).await
+        Self::create_rooted(store, pivot.to_id(tenant)).await
     }
 
     /// [`create`](Self::create)'s body with the pivot's identity supplied
     /// instead of minted — the seam [`adopt_pivot`](Self::adopt_pivot)
     /// bootstraps a cache-local copy of a **node-minted** collection through.
+    ///
+    /// # Errors
+    /// Propagates a [`Store`] failure.
     pub(crate) async fn create_rooted<S: Store>(
         store: &S,
-        tenant: U48,
         pivot_id: Id,
     ) -> Result<()> {
-        // One chain per declared `#[wavedb::pivot(...)]` index (RFC 0075),
-        // in its own lane. The recency chain IS the membership set and the
-        // modification order at once (RFC 0050 phase 5c folded them together).
-        let mut batch = Vec::new();
-        let mut sec_roots = Vec::with_capacity(T::NUM_SECONDARIES);
-        for _ in 0..T::NUM_SECONDARIES {
-            let (chain, writes) = Chain::<()>::plan_create(
-                tenant,
-                T::STRUCT_HASH,
-                Lane::Secondary,
-            );
-            sec_roots.push(chain.roots());
-            batch.extend(writes);
-        }
-        // The **recency chain**: one pointer per living record, keyed by the
-        // instant its live version was authored (RFC 0054). It is the same
-        // shape as the removal log — a chain of ids and nothing else — and for
-        // the same reason: the key already names the anchor, and the record
-        // lives there. The two together are "what changed, and what died".
-        //
-        // No `with_min` here on purpose: creation only seeds the one empty
-        // segment that is both endpoints, and a capacity has nothing to say
-        // about an empty segment. `recency_chain` applies the capacity on every
-        // subsequent open, which is where splits and merges are decided.
-        let (recency_chain, record_writes) =
-            Chain::<()>::plan_create(tenant, T::STRUCT_HASH, Lane::Recency);
-        let recency = recency_chain.roots();
-        batch.extend(record_writes);
-        // The removal log: the same shape again, minus the index, since nothing
-        // ever *searches* it.
-        let (removals, removal_writes) =
-            Chain::<()>::plan_create_log(tenant, T::STRUCT_HASH, Lane::Dead);
-        batch.extend(removal_writes);
-        // One more chain per `#[wavedb::list(...)]` — same shape, same lane,
-        // sorted by a declared property, and the **only** one of these chains
-        // that carries records (RFC 0051). Declaring one is how a collection
-        // asks for duplication; declaring none is how it pays for nothing.
-        let mut list_roots = Vec::with_capacity(T::NUM_LISTS);
-        for _ in 0..T::NUM_LISTS {
-            let (chain, writes) = Chain::<Vec<u8>>::plan_create(
-                tenant,
-                T::STRUCT_HASH,
-                Lane::Records,
-            );
-            list_roots.push(chain.roots());
-            batch.extend(writes);
-        }
-        // One posting chain per `#[wavedb::fuzzy]` (RFC 0056) — a chain like
-        // a secondary, because a posting is a key and an anchor and nothing
-        // else. Nothing here duplicates a record.
-        let mut fuzzy_roots = Vec::with_capacity(T::NUM_FUZZY);
-        for _ in 0..T::NUM_FUZZY {
-            let (chain, writes) =
-                Chain::<()>::plan_create(tenant, T::STRUCT_HASH, Lane::Fuzzy);
-            fuzzy_roots.push(chain.roots());
-            batch.extend(writes);
-        }
-        let pivot_record = T::Pivot::default().replace_roots(Roots {
-            secondaries: &sec_roots,
-            recency,
-            removals: removals.log_roots(),
-            lists: &list_roots,
-            fuzzy: &fuzzy_roots,
-        });
-        batch.push(Write::Put(
-            pivot_id,
-            encode_envelope(T::Pivot::STRUCT_HASH, &pivot_record),
-        ));
-        store.apply(&batch).await
+        let record =
+            encode_envelope(T::Pivot::STRUCT_HASH, &T::Pivot::default());
+        store.apply(&[Write::Put(pivot_id, record)]).await
     }
 }
