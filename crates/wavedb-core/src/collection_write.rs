@@ -40,9 +40,9 @@ impl<T: NonUniqueStruct> Collection<T> {
             self.upsert_keyed(store, id, value).await?;
             return Ok(id);
         }
-        let floor = self.instant_floor(store, &pivot).await?;
+        let floor = self.instant_floor(store).await?;
         let id = mint_floored_id(self.tenant(), T::STRUCT_HASH, floor);
-        self.insert_at(store, &pivot, id, value).await?;
+        self.insert_at(store, id, value).await?;
         Ok(id)
     }
 
@@ -52,12 +52,10 @@ impl<T: NonUniqueStruct> Collection<T> {
     pub(crate) async fn insert_at<S: Store>(
         &self,
         store: &S,
-        pivot: &T::Pivot,
         id: Id,
         value: &T,
     ) -> Result<()> {
         // First version: no chain yet; the pivot back-link is stamped here
-        // (the future handle-less `record.save(&db)` reaches roots through it)
         // and the writer identity is the tenant until node auth exists (M8).
         // The authoring instant is the id's own key — the key IS when that
         // version was authored.
@@ -67,7 +65,7 @@ impl<T: NonUniqueStruct> Collection<T> {
             user: self.user(),
             ..Metadata::default()
         };
-        self.insert_with_meta(store, pivot, id, meta, value).await
+        self.insert_with_meta(store, id, meta, value).await
     }
 
     /// The indexed first-version write, with the [`Metadata`] supplied —
@@ -76,7 +74,6 @@ impl<T: NonUniqueStruct> Collection<T> {
     pub(crate) async fn insert_with_meta<S: Store>(
         &self,
         store: &S,
-        pivot: &T::Pivot,
         id: Id,
         meta: Metadata,
         value: &T,
@@ -86,42 +83,20 @@ impl<T: NonUniqueStruct> Collection<T> {
         let Succession::CreatedAt(instant) = meta.succession else {
             return Err(crate::Error::ChainCorrupt(id));
         };
-        let mut records = self.recency_chain(pivot);
-        let mut secs = self.sec_chains(pivot);
-        let mut lists = self.list_chains(pivot);
-        let mut fuzzy = self.fuzzy_chains(pivot);
         let envelope = encode_record(T::STRUCT_HASH, &meta, value);
         let key = Self::instant_key(instant, LocalId::from_id(id));
-        // The chain carries the record **inline**, keyed by the instant its
-        // live version was authored. That one entry is the membership set and
-        // the modification log at once (RFC 0050).
         let mut batch = vec![Write::Put(id, envelope.clone())];
-        batch.extend(records.plan_insert(store, key, ()).await?);
-        // …and one more copy per declared list, sorted by its own property
-        // (RFC 0051).
-        self.plan_list_inserts(
-            store, &mut batch, &mut lists, id, &envelope, value,
-        )
-        .await?;
-        for (i, chain) in secs.iter_mut().enumerate() {
-            let key = Self::sec_key(value, i, id);
-            batch.extend(chain.plan_insert(store, key, ()).await?);
+        // One recency entry: the membership set and the modification log at
+        // once (RFC 0050)…
+        batch.push(self.recency_chain().insert(&key, &()));
+        // …one more copy per declared list, sorted by its own property
+        // (RFC 0051)…
+        self.plan_list_inserts(&mut batch, id, &envelope, value);
+        for (i, chain) in self.sec_chains().iter().enumerate() {
+            batch.push(chain.insert(&Self::sec_key(value, i, id), &()));
         }
         // …and `L + n - 1` postings per fuzzy declaration (RFC 0056).
-        let mut view = Overlay::new(store);
-        self.plan_fuzzy_inserts(&mut view, &mut batch, &mut fuzzy, id, value)
-            .await?;
-        self.push_root_moves(
-            &mut batch,
-            pivot,
-            &MovedRoots {
-                secondaries: &secs,
-                recency: records.roots(),
-                removals: pivot.removals(),
-                lists: &lists,
-                fuzzy: &fuzzy,
-            },
-        );
+        self.plan_fuzzy_inserts(&mut batch, id, value);
         store.apply(&batch).await?;
         store.note_mutation(|| Mutation {
             struct_hash: T::STRUCT_HASH,
@@ -138,9 +113,8 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// Overwrite the record at `id` with `value` — the NonUnique *update*.
     /// The superseded version is **archived** (its bytes move to a fresh id)
     /// and the modification chain linked, so the timeline stays walkable via
-    /// [`history`](Collection::history). The `Id` (and so the record's place
-    /// in `current`) is unchanged — the primary tree never reindexes; each
-    /// **secondary** tree re-keys when its field values changed (old key out,
+    /// [`history`](Collection::history). The `Id` is unchanged; each
+    /// **secondary** re-keys when its field values changed (old key out,
     /// new key in), and the recency entry re-keys to the new version's
     /// instant. Everything commits as one atomic batch.
     ///
@@ -178,6 +152,8 @@ impl<T: NonUniqueStruct> Collection<T> {
         self.save_planned(store, id, value, Some(meta)).await
     }
 
+    /// The body of [`save`](Self::save), with `imposed` metadata when a
+    /// mirror writes the node's verbatim.
     pub(crate) async fn save_planned<S: Store>(
         &self,
         store: &S,
@@ -192,8 +168,8 @@ impl<T: NonUniqueStruct> Collection<T> {
         {
             return Err(crate::Error::KeyMismatch(id));
         }
-        let pivot = self.load_pivot(store).await?;
-        let floor = self.instant_floor(store, &pivot).await?;
+        self.check_pivot(store).await?;
+        let floor = self.instant_floor(store).await?;
         let plan = crate::record::SavePlan {
             hash: T::STRUCT_HASH,
             shape: T::SHAPE,
@@ -207,19 +183,16 @@ impl<T: NonUniqueStruct> Collection<T> {
         };
         let (mut batch, old, live_meta) =
             plan_chained_save::<T, S>(store, &plan, value).await?;
-        let mut records = self.recency_chain(&pivot);
-        let mut secs = self.sec_chains(&pivot);
-        let mut lists = self.list_chains(&pivot);
-        let mut fuzzy = self.fuzzy_chains(&pivot);
-        // Removals and inserts mutate the same structures in one batch: each
-        // plan reads through the overlay of the pending node writes.
+        // The moves are gated on reads of the chains; each reads through the
+        // overlay of what the batch already writes.
         let mut view = Overlay::new(store);
+        view.stage(&batch);
         if let Some((old_instant, old_value)) = &old {
-            let mut moving = Reindex {
-                records: &mut records,
-                lists: &mut lists,
-                secs: &mut secs,
-                fuzzy: &mut fuzzy,
+            let moving = Reindex {
+                records: self.recency_chain(),
+                lists: self.list_chains(),
+                secs: self.sec_chains(),
+                fuzzy: self.fuzzy_chains(),
             };
             self.plan_reindex(
                 &mut view,
