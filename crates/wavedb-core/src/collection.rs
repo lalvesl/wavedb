@@ -39,8 +39,8 @@ use crate::error::{Error, Result};
 use crate::id::Id;
 use crate::index::Pivot;
 use crate::local_id::LocalId;
-use crate::record::{decode_envelope, encode_envelope};
-use crate::store::{Store, Write};
+use crate::record::decode_envelope;
+use crate::store::Store;
 use crate::traits::NonUniqueStruct;
 use crate::u48::U48;
 
@@ -55,16 +55,15 @@ pub use crate::record::{
 /// The typed handle into one NonUnique collection.
 ///
 /// Holds a `PivotId` plus the tenant, nothing else — cheap to construct per
-/// call. Every op loads the `Pivot` record fresh, so concurrent root moves are
-/// always observed.
+/// call. Every chain of the collection is named by the `PivotId` alone
+/// (RFC 0078 §7); an op reads the `Pivot` record only to know the
+/// collection exists.
 #[derive(Debug)]
 pub struct Collection<T: NonUniqueStruct> {
     pivot: LocalId,
     // Read by `collection_roots`, which opens the structures this handle names.
     pub(crate) tenant: U48,
     user: U48,
-    /// The secondary and fuzzy chains' segment minimum (RFC 0075).
-    pub(crate) index_min: usize,
     _record: PhantomData<fn() -> T>,
 }
 
@@ -87,8 +86,6 @@ impl<T: NonUniqueStruct> Collection<T> {
             pivot,
             tenant,
             user: tenant,
-
-            index_min: crate::index::DEFAULT_DEAD_MIN,
             _record: PhantomData,
         }
     }
@@ -98,15 +95,6 @@ impl<T: NonUniqueStruct> Collection<T> {
     #[must_use]
     pub const fn stamped_by(mut self, user: U48) -> Self {
         self.user = user;
-        self
-    }
-
-    /// Override the secondary and fuzzy chains' segment minimum (small segments make
-    /// long chains cheap to build in tests; production uses the default).
-    /// Use one for a collection's whole lifetime.
-    #[must_use]
-    pub const fn with_index_min(mut self, min: usize) -> Self {
-        self.index_min = min;
         self
     }
 
@@ -126,24 +114,17 @@ impl<T: NonUniqueStruct> Collection<T> {
         self.pivot
     }
 
-    /// Load and decode the `Pivot` record.
-    pub(crate) async fn load_pivot<S: Store>(
-        &self,
-        store: &S,
-    ) -> Result<T::Pivot> {
+    /// Check the collection exists: its `Pivot` record is there, and is one.
+    ///
+    /// # Errors
+    /// [`Error::PivotMissing`] when it is not there; a [`Store`] failure, or
+    /// a record that does not decode as this type's `Pivot`.
+    pub(crate) async fn check_pivot<S: Store>(&self, store: &S) -> Result<()> {
         let bytes = store
             .get_of(T::Pivot::STRUCT_HASH, self.pivot.to_id(self.tenant))
             .await?
             .ok_or(Error::PivotMissing(self.pivot))?;
-        decode_envelope(T::Pivot::STRUCT_HASH, &bytes)
-    }
-
-    /// A `Put` rewriting the `Pivot` record with moved roots.
-    pub(crate) fn pivot_rewrite(&self, pivot: &T::Pivot) -> Write {
-        Write::Put(
-            self.pivot.to_id(self.tenant),
-            encode_envelope(T::Pivot::STRUCT_HASH, pivot),
-        )
+        decode_envelope::<T::Pivot>(T::Pivot::STRUCT_HASH, &bytes).map(|_| ())
     }
 
     /// Load and decode the record at `id` (metadata + body), failing if it is
@@ -169,8 +150,8 @@ mod tests {
 
     use super::{Collection, get_unique, save_unique};
     use crate::error::Error;
+    use crate::index::Pivot;
     use crate::index::mem_store::MemStore;
-    use crate::index::{ChainRoots, LogRoots, Pivot, Roots};
     use crate::local_id::LocalId;
     use crate::metadata::Succession;
     use crate::permission::PermissionRef;
@@ -195,31 +176,13 @@ mod tests {
 
     #[derive(Debug, Clone, Default, PartialEq, Eq, WaveWire)]
     struct DocPivot {
-        recency: ChainRoots,
-        removals: LogRoots,
         permission: Option<PermissionRef>,
     }
 
     impl Pivot for DocPivot {
         const STRUCT_HASH: u64 = 0xD0C_0002;
-        fn secondaries(&self) -> &[ChainRoots] {
-            &[]
-        }
-        fn recency(&self) -> ChainRoots {
-            self.recency
-        }
-        fn removals(&self) -> LogRoots {
-            self.removals
-        }
         fn permission(&self) -> Option<&PermissionRef> {
             self.permission.as_ref()
-        }
-        fn replace_roots(&self, roots: Roots<'_>) -> Self {
-            Self {
-                recency: roots.recency,
-                removals: roots.removals,
-                permission: self.permission.clone(),
-            }
         }
     }
 
@@ -243,35 +206,13 @@ mod tests {
 
     #[derive(Debug, Clone, Default, PartialEq, Eq, WaveWire)]
     struct TaggedPivot {
-        recency: ChainRoots,
-        removals: LogRoots,
-        secondaries: [ChainRoots; 1],
         permission: Option<PermissionRef>,
     }
 
     impl Pivot for TaggedPivot {
         const STRUCT_HASH: u64 = 0x7A6_0002;
-        fn secondaries(&self) -> &[ChainRoots] {
-            &self.secondaries
-        }
-        fn recency(&self) -> ChainRoots {
-            self.recency
-        }
-        fn removals(&self) -> LogRoots {
-            self.removals
-        }
         fn permission(&self) -> Option<&PermissionRef> {
             self.permission.as_ref()
-        }
-        fn replace_roots(&self, roots: Roots<'_>) -> Self {
-            let mut s = self.secondaries;
-            s.copy_from_slice(roots.secondaries);
-            Self {
-                recency: roots.recency,
-                removals: roots.removals,
-                secondaries: s,
-                permission: self.permission.clone(),
-            }
         }
     }
 
@@ -405,7 +346,7 @@ mod tests {
             let store = MemStore::default();
             let pivot =
                 Collection::<Doc>::create(&store, tenant()).await.unwrap();
-            let col = Collection::<Doc>::at(pivot, tenant()).with_index_min(4);
+            let col = Collection::<Doc>::at(pivot, tenant());
 
             // Enough inserts to split the current tree's root repeatedly.
             let mut ids = Vec::new();
@@ -415,8 +356,7 @@ mod tests {
 
             // A fresh handle (same PivotId) must see everything: the moved
             // root came from the rewritten Pivot record, not handle state.
-            let reopened =
-                Collection::<Doc>::at(pivot, tenant()).with_index_min(4);
+            let reopened = Collection::<Doc>::at(pivot, tenant());
             let walked: Vec<(crate::id::Id, Doc)> = reopened
                 .all(&store)
                 .map_ok(|(a, w)| (a, w.decode().unwrap()))
@@ -589,8 +529,7 @@ mod tests {
             let pivot = Collection::<Tagged>::create(&store, tenant())
                 .await
                 .unwrap();
-            let col =
-                Collection::<Tagged>::at(pivot, tenant()).with_index_min(4);
+            let col = Collection::<Tagged>::at(pivot, tenant());
 
             let mut ids = Vec::new();
             for (label, n) in
@@ -657,8 +596,7 @@ mod tests {
                 .await
                 .unwrap();
             }
-            let fresh =
-                Collection::<Tagged>::at(pivot, tenant()).with_index_min(4);
+            let fresh = Collection::<Tagged>::at(pivot, tenant());
             assert_eq!(
                 by_label(fresh, &store, "bulk").await,
                 (0..40).collect::<Vec<u64>>()
@@ -766,11 +704,9 @@ mod tests {
             }
             // Something must actually have happened, or the assertions above
             // were comparing two empty structures.
-            let pivot = col.load_pivot(&store).await.unwrap();
-            let recency =
-                col.recency_chain(&pivot).collect(&store).await.unwrap();
+            let recency = col.recency_chain().collect(&store).await.unwrap();
             assert!(!recency.is_empty(), "{recency:?}");
-            let dead = col.dead_log(&pivot).collect(&store).await.unwrap();
+            let dead = col.dead_log().collect(&store).await.unwrap();
             assert!(!dead.is_empty(), "{dead:?}");
         });
     }
@@ -782,8 +718,7 @@ mod tests {
         use crate::local_id::LocalId;
         use crate::store::Store;
 
-        let pivot = col.load_pivot(store).await.unwrap();
-        let chain = col.recency_chain(&pivot).collect(store).await.unwrap();
+        let chain = col.recency_chain().collect(store).await.unwrap();
         let mut in_chain: Vec<LocalId> = Vec::with_capacity(chain.len());
         for (key, ()) in &chain {
             let id = key.rec.to_id(col.tenant());
@@ -803,7 +738,7 @@ mod tests {
             in_chain.push(key.rec);
         }
 
-        let log = col.dead_log(&pivot).collect(store).await.unwrap();
+        let log = col.dead_log().collect(store).await.unwrap();
         for (key, ()) in &log {
             // A revived keyed anchor keeps its removal as a historical event,
             // so the dead side is checked only where the chain has not taken
@@ -868,8 +803,7 @@ mod tests {
             col: Collection<Doc>,
             store: &MemStore,
         ) -> Vec<crate::id::Id> {
-            let pivot = col.load_pivot(store).await.unwrap();
-            col.recency_chain(&pivot)
+            col.recency_chain()
                 .collect(store)
                 .await
                 .unwrap()
@@ -894,9 +828,7 @@ mod tests {
             let (meta, _) = col.load_record(&store, a).await.unwrap();
             let live_instant = meta.succession.instant();
             assert!(live_instant > b.key(), "the chain tail is the newest");
-            let pivot_rec = col.load_pivot(&store).await.unwrap();
-            let entries =
-                col.recency_chain(&pivot_rec).collect(&store).await.unwrap();
+            let entries = col.recency_chain().collect(&store).await.unwrap();
             let (key, ()) = entries.last().unwrap();
             assert_eq!(
                 (
@@ -911,8 +843,7 @@ mod tests {
             // removal log — keyed above every instant minted before it.
             assert!(col.remove(&store, b).await.unwrap());
             assert_eq!(chain_ids(col, &store).await, vec![a]);
-            let pivot_rec = col.load_pivot(&store).await.unwrap();
-            let log = col.dead_log(&pivot_rec).collect(&store).await.unwrap();
+            let log = col.dead_log().collect(&store).await.unwrap();
             let (removed_key, ()) = log.last().unwrap();
             assert_eq!(log.len(), 1);
             assert_eq!(removed_key.rec.to_id(col.tenant()), b);
@@ -923,8 +854,8 @@ mod tests {
         });
     }
 
-    // The floor is read off both chains' tail segments (RFC 0050, A2), and
-    // it needs both: a removed record *leaves* the record chain, so once a
+    // The floor is read off both chains' ends (RFC 0050, A2), and it needs
+    // both: a removed record *leaves* the record chain, so once a
     // collection has been emptied its whole history lives in the removal
     // log alone.
     #[test]
@@ -935,18 +866,16 @@ mod tests {
                 Collection::<Doc>::create(&store, tenant()).await.unwrap();
             let col = Collection::<Doc>::at(pivot, tenant());
 
-            let pivot_rec = col.load_pivot(&store).await.unwrap();
             assert_eq!(
-                col.instant_floor(&store, &pivot_rec).await.unwrap(),
+                col.instant_floor(&store).await.unwrap(),
                 0,
                 "an empty collection floors at zero"
             );
 
             let a = col.insert(&store, &Doc { n: 1 }).await.unwrap();
             let b = col.insert(&store, &Doc { n: 2 }).await.unwrap();
-            let pivot_rec = col.load_pivot(&store).await.unwrap();
             assert_eq!(
-                col.instant_floor(&store, &pivot_rec).await.unwrap(),
+                col.instant_floor(&store).await.unwrap(),
                 b.key(),
                 "the floor is the record chain's tail while records live"
             );
@@ -955,9 +884,8 @@ mod tests {
             // removal log can still answer.
             assert!(col.remove(&store, a).await.unwrap());
             assert!(col.remove(&store, b).await.unwrap());
-            let pivot_rec = col.load_pivot(&store).await.unwrap();
             assert!(
-                col.recency_chain(&pivot_rec)
+                col.recency_chain()
                     .collect(&store)
                     .await
                     .unwrap()
@@ -965,7 +893,7 @@ mod tests {
                 "the removals did not empty the chain"
             );
             assert!(
-                col.instant_floor(&store, &pivot_rec).await.unwrap() > b.key(),
+                col.instant_floor(&store).await.unwrap() > b.key(),
                 "the removal log must hold the floor once the chain is empty"
             );
         });
@@ -989,7 +917,7 @@ mod tests {
                 future,
                 tenant(),
                 false,
-                crate::record::type_salt(Doc::STRUCT_HASH),
+                crate::mint::type_salt(Doc::STRUCT_HASH),
             );
             let meta = crate::metadata::Metadata {
                 succession: Succession::CreatedAt(future),
