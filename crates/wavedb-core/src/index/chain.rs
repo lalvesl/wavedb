@@ -132,58 +132,54 @@ impl<P: WaveWire> Chain<P> {
     /// The write putting `payload` under `key` — whether or not the key was
     /// there.
     #[must_use]
-    pub const fn head(&self) -> LocalId {
-        self.head
+    pub fn insert(&self, key: &SecKey, payload: &P) -> Write {
+        Write::Set(self.lane, self.entry_key(key), to_wire(payload))
     }
 
-    /// The segment holding the greatest keys — the growth end of a chain keyed
-    /// by an instant.
+    /// The write taking `key` out — whether or not it was there.
     #[must_use]
-    pub const fn tail(&self) -> LocalId {
-        self.tail
+    pub fn remove(&self, key: &SecKey) -> Write {
+        Write::Unset(self.lane, self.entry_key(key))
     }
 
-    /// The sparse index above this chain, or `None` for the removal log.
-    #[must_use]
-    pub const fn index(&self) -> Option<SparseTree> {
-        self.index
-    }
-
-    /// This chain's ids in the shape a `Pivot` holds them.
+    /// The write taking `key` out, when the chain holds it — the verdict a
+    /// caller gates on: `None` is a key that was not there.
     ///
-    /// The removal log is held as [`LogRoots`] and uses
-    /// [`log_roots`](Self::log_roots) instead, so the index named here is always
-    /// a real root.
-    #[must_use]
-    pub fn roots(&self) -> ChainRoots {
-        ChainRoots {
-            head: self.head,
-            tail: self.tail,
-            index: self.index.map_or_else(LocalId::default, |ix| ix.root()),
-        }
-    }
-
-    /// Every entry in key order, materialised.
-    ///
-    /// Deliberately test-only: it exists so the chain can be checked against the
-    /// `recency` and `dead` trees it is being grown alongside. The read path
-    /// proper streams segment by segment and never collects a whole collection.
-    #[cfg(test)]
-    pub(crate) async fn collect<S: Store>(
+    /// # Errors
+    /// A [`Store`] failure.
+    pub async fn plan_remove<S: Store>(
         &self,
         store: &S,
-    ) -> Result<Vec<(SecKey, P)>>
-    where
-        P: Clone,
-    {
-        let mut out = Vec::new();
-        let mut cursor = Some(self.head);
-        while let Some(id) = cursor {
-            let seg = self.load(store, id).await?;
-            out.extend(seg.entries().cloned());
-            cursor = seg.next();
-        }
-        Ok(out)
+        key: &SecKey,
+    ) -> Result<Option<Write>> {
+        Ok(self.holds(store, key).await?.then(|| self.remove(key)))
+    }
+
+    /// Whether the chain holds `key`.
+    ///
+    /// # Errors
+    /// A [`Store`] failure.
+    pub async fn holds<S: Store>(
+        &self,
+        store: &S,
+        key: &SecKey,
+    ) -> Result<bool> {
+        Ok(self.entry(store, key).await?.is_some())
+    }
+
+    /// The payload filed under `key`, if the chain holds it.
+    ///
+    /// # Errors
+    /// A [`Store`] failure, or a payload that does not decode.
+    pub async fn get<S: Store>(
+        &self,
+        store: &S,
+        key: &SecKey,
+    ) -> Result<Option<P>> {
+        self.entry(store, key)
+            .await?
+            .map(|bytes| from_wire(&bytes).map_err(Into::into))
+            .transpose()
     }
 
     /// This chain's endpoints in the shape a `Pivot` holds a removal log.
