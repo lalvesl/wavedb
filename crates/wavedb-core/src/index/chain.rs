@@ -86,78 +86,51 @@ impl<P: WaveWire> Chain<P> {
 
     /// The bytes every key of this chain starts with.
     #[must_use]
-    pub const fn with_min(mut self, min: usize) -> Self {
-        self.min = min;
-        self
+    pub const fn prefix(&self) -> &[u8] {
+        &self.prefix
     }
 
-    /// Override the index's node capacity (tests build deep trees cheaply).
+    /// The lane key of `key`.
     #[must_use]
-    pub const fn with_index_cap(mut self, cap: usize) -> Self {
-        if let Some(index) = self.index {
-            self.index = Some(index.with_cap(cap));
-        }
-        self
+    pub fn entry_key(&self, key: &SecKey) -> Vec<u8> {
+        let mut out = Vec::with_capacity(PREFIX + key.field.len() + ANCHOR);
+        out.extend_from_slice(&self.prefix);
+        out.extend_from_slice(&key.field);
+        key.rec.encode_key(&mut out);
+        out
     }
 
-    /// Plan a fresh, empty chain: one empty segment that is both `head` and
-    /// `tail`, plus an empty index. The caller commits the writes in its own
-    /// batch and persists the three ids in its `Pivot`.
-    #[must_use]
-    pub fn plan_create(
-        tenant: U48,
-        struct_hash: u64,
-        lane: Lane,
-    ) -> (Self, Vec<Write>) {
-        let (index, index_write) = SparseTree::plan_create(tenant, struct_hash);
-        let (chain, seed) = Self::seed(
-            tenant,
-            struct_hash,
-            lane,
-            Some(index),
-            DEFAULT_SEGMENT_MIN,
+    /// The [`SecKey`] a lane key of this chain holds.
+    ///
+    /// # Errors
+    /// [`Error::LaneBadTag`] for a key outside the chain or too short to
+    /// hold an anchor.
+    pub fn sec_key(&self, entry: &[u8]) -> Result<SecKey> {
+        let own = entry
+            .strip_prefix(self.prefix.as_slice())
+            .filter(|rest| rest.len() >= ANCHOR)
+            .ok_or(Error::LaneBadTag(self.lane))?;
+        let (field, anchor) = own.split_at(own.len() - ANCHOR);
+        let key = u64::from_be_bytes(
+            anchor[..8]
+                .try_into()
+                .map_err(|_| Error::LaneBadTag(self.lane))?,
         );
-        (chain, vec![seed, index_write])
+        let lower = u16::from_be_bytes([anchor[8], anchor[9]]);
+        Ok(SecKey {
+            field: field.to_vec(),
+            rec: LocalId::new(key, lower >> 15 == 1, lower & 0x7FFF),
+        })
     }
 
-    /// Plan a fresh, empty **index-less** chain — the removal log. One empty
-    /// segment and nothing above it; see [`log_at`](Self::log_at).
+    /// The span of every key of this chain, ascending, at most `limit`.
     #[must_use]
-    pub fn plan_create_log(
-        tenant: U48,
-        struct_hash: u64,
-        lane: Lane,
-    ) -> (Self, Vec<Write>) {
-        let (chain, seed) =
-            Self::seed(tenant, struct_hash, lane, None, DEFAULT_DEAD_MIN);
-        (chain, vec![seed])
+    pub fn span(&self, limit: usize) -> Span {
+        Span::prefix(&self.prefix, limit)
     }
 
-    /// The shared body of the two creators: mint the one segment that is both
-    /// endpoints and hand back the write that persists it.
-    fn seed(
-        tenant: U48,
-        struct_hash: u64,
-        lane: Lane,
-        index: Option<SparseTree>,
-        min: usize,
-    ) -> (Self, Write) {
-        let lane_hash = lane.hash(struct_hash);
-        let only = mint_lane_id(lane_hash);
-        let chain = Self {
-            head: only,
-            tail: only,
-            tenant,
-            lane_hash,
-            index,
-            min,
-            _payload: PhantomData,
-        };
-        let seed = chain.put(only, &Segment::new(None, None));
-        (chain, seed)
-    }
-
-    /// The segment holding the least keys.
+    /// The write putting `payload` under `key` — whether or not the key was
+    /// there.
     #[must_use]
     pub const fn head(&self) -> LocalId {
         self.head
