@@ -1,76 +1,46 @@
-//! The record chain ([RFC 0050]) — [`Chain`], a doubly-linked run of sorted
-//! [`Segment`]s with a [`SparseTree`] above it, over a [`Store`].
+//! The chain ([RFC 0078] §7) — a collection's sorted entries, as a key
+//! range of one ordered lane: `[owner][declaration]` then each entry's key.
 //!
-//! [`segment`](super::segment) is one segment's bytes and in-place edits;
-//! [`sparse_tree`](super::sparse_tree) is the index that finds one. This is the
-//! structure: locate the segment a key belongs to, edit it, split it when it
-//! fills, and keep the index in step — all as one [`Write`] batch the caller
-//! folds into its own, so a segment and the entry naming it can never disagree.
+//! A chain is not a structure of its own. Its lane is ordered by the store
+//! (the page index of RFC 0078 natively, a key range in IndexedDB), every
+//! collection of the type shares the lane, and the chain is the range under
+//! its owner — the collection's Pivot — and its declaration. So there is
+//! nothing to create, nothing to link and no root to move:
 //!
-//! This file is the handle. Inserting and splitting live in
-//! [`chain_insert`](super::chain_insert), removal and merging in
-//! [`chain_remove`](super::chain_remove), reading in order from a seek in
-//! [`chain_scan`](super::chain_scan), and reaching a segment in
-//! [`chain_io`](super::chain_io).
+//! - an **insert** is one [`Write::Set`], blind — no read, so two inserts
+//!   planned from the same state cannot clobber each other;
+//! - a **removal** is one [`Write::Unset`]; [`plan_remove`](Chain::plan_remove)
+//!   reads first, for the callers whose verdict is whether the key was there;
+//! - a **read** is a [`Store::scan`] of the range, from a key or from either
+//!   end, skipping as far as asked ([`chain_scan`](super::chain_scan)).
 //!
-//! ## Endpoints are permanent, and that is the point
+//! An entry's key is `prefix ‖ field ‖ anchor`: the [`SecKey`]'s
+//! order-preserving field bytes, then its record's `LocalId` as 10 bytes
+//! (`KEY` big-endian, then `FLAG | SALT`). The anchor is a fixed width at the
+//! end, which is what lets a key read back into its `SecKey`.
 //!
-//! A B+tree moves its root as it grows, and every move rewrites the `Pivot` —
-//! the reason none is left (RFC 0075). A chain does not: a split always hands the **new** id to the interior side and
-//! lets the endpoint keep its own — the growth end keeps the newer half, any other
-//! segment keeps the lower half. So after a chain's first split its `head` and
-//! `tail` never change again, the index root never moves either
-//! ([`SparseTree`]), and the `Pivot` is written at creation and then essentially
-//! never.
-//!
-//! The one exception is that first split, when `head == tail` and one of them must
-//! become the fresh id. `plan_insert` takes `&mut self` for exactly that, and the
-//! caller compares the endpoints afterwards.
-//!
-//! ## The size band
-//!
-//! A segment holds `N…2N` entries: it **splits 50/50 on reaching 2N** and merges
-//! at `N/2` (in `chain_remove`). The hysteresis of 4 between the triggers is what
-//! stops a chain thrashing at a boundary. RFC 0052 has the reasoning, and why the
-//! declared `page = N` is a minimum rather than an exact count.
-//!
-//! [RFC 0050]: https://github.com/wavedb/wavedb/blob/main/rfcs/0050-clustered-record-chains.md
+//! [RFC 0078]: https://github.com/wavedb/wavedb/blob/main/rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
 use core::marker::PhantomData;
 
-#[cfg(doc)]
-use crate::error::Error;
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::id::Id;
 use crate::local_id::LocalId;
-use crate::store::{Store, Write};
-use crate::u48::U48;
-use crate::wire::WaveWire;
+use crate::store::{Span, Store, Write, successor};
+use crate::wire::{WaveWire, from_wire, to_wire};
 
+use super::IndexKey;
+use super::lane::Lane;
 use super::sec_key::SecKey;
-use super::segment::{Lane, Segment, mint_lane_id};
-use super::sparse_tree::SparseTree;
-use super::{ChainRoots, LogRoots};
 
-/// Default minimum entries per record segment — a segment holds 16…32 records.
-///
-/// Small on purpose, and for the *write* side: the built-in chain is ordered by
-/// the live version's authoring instant, so every save rewrites the growth-end
-/// segment whole. A collection that paginates declares `page = N` and pays the
-/// bigger rewrite knowingly (RFC 0052).
-pub const DEFAULT_SEGMENT_MIN: usize = 16;
+/// Bytes before an entry's own key: the owner's `Id`, then the declaration.
+pub const PREFIX: usize = 17;
 
-/// Default minimum entries per removal-log segment.
-///
-/// Far larger than [`DEFAULT_SEGMENT_MIN`] because a `dead` entry is an instant
-/// and an anchor — about 18 bytes — and the only read it ever serves is a
-/// sequential scan back from the tail.
-pub const DEFAULT_DEAD_MIN: usize = 256;
+/// Bytes an entry's anchor takes at the end of its key.
+const ANCHOR: usize = 10;
 
-/// A chain of segments holding `P` payloads, keyed by [`SecKey`], with a sparse
-/// index above it.
-///
-/// Holds only its endpoints, its index handle and its size band; the segments
-/// live in the [`Store`] under `LocalId::to_id(tenant)`.
+/// A collection's chain of `P` values, keyed by [`SecKey`] — a key range of
+/// its lane in the [`Store`].
 #[derive(Debug)]
 pub struct Chain<P> {
     pub(super) head: LocalId,
