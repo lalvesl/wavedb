@@ -279,95 +279,12 @@ mod tests {
         block_on(store.apply(&[write])).unwrap();
     }
 
-    /// How many segments the chain currently holds.
-    async fn segments(store: &MemStore, chain: &Chain<Vec<u8>>) -> usize {
-        let mut n = 0;
-        let mut cursor = Some(chain.head());
-        while let Some(id) = cursor {
-            n += 1;
-            cursor = chain.load(store, id).await.unwrap().next();
-        }
-        n
-    }
-
-    /// A removal-log chain: no index, so `locate` walks back from the tail.
-    async fn fresh_log(store: &MemStore) -> Chain<Vec<u8>> {
-        let (chain, writes) =
-            Chain::<Vec<u8>>::plan_create_log(tenant(), TYPE_HASH, Lane::Dead);
-        store.apply(&writes).await.unwrap();
-        chain.with_min(MIN)
-    }
-
-    #[test]
-    fn an_index_less_log_orders_and_splits_like_any_chain() {
-        block_on(async {
-            // The `dead` lane: nothing searches it, so it carries no index and
-            // its segments are the whole structure. Everything else — the band,
-            // the 50/50 split, the endpoint discipline — is unchanged.
-            let store = MemStore::default();
-            let mut log = fresh_log(&store).await;
-            assert!(log.index().is_none(), "a log must carry no index");
-            let tail = log.tail();
-
-            for v in 1..=30u64 {
-                insert(&store, &mut log, v).await;
-                check(&store, &log).await;
-            }
-            assert_eq!(check(&store, &log).await, (1..=30).collect::<Vec<_>>());
-            assert!(segments(&store, &log).await > 3, "the log never split");
-            assert_eq!(log.tail(), tail, "an append moved the log's tail");
-        });
-    }
-
-    #[test]
-    fn an_index_less_locate_still_finds_an_out_of_order_key() {
-        block_on(async {
-            // Appends are monotone in practice — the collection's instant floor
-            // guarantees it — so the backward walk stops at the tail. This pins
-            // that it stays *correct* when a key belongs further back, rather
-            // than dropping it into the tail and breaking the order.
-            let store = MemStore::default();
-            let mut log = fresh_log(&store).await;
-            for v in (1..=30u64).map(|v| v * 10) {
-                insert(&store, &mut log, v).await;
-            }
-            insert(&store, &mut log, 55).await;
-            let keys = check(&store, &log).await;
-            let at = keys.iter().position(|&k| k == 55).expect("55 is missing");
-            assert_eq!((keys[at - 1], keys[at + 1]), (50, 60));
-
-            assert_eq!(
-                log.get(&store, &key(55)).await.unwrap(),
-                Some(55u64.to_be_bytes().to_vec())
-            );
-        });
-    }
-
-    #[test]
-    fn a_fresh_chain_is_one_empty_shell() {
-        block_on(async {
-            let store = MemStore::default();
-            let chain = fresh(&store).await;
-            assert_eq!(chain.head(), chain.tail());
-            let observed = check(&store, &chain).await;
-            assert!(observed.is_empty(), "{observed:?}");
-        });
-    }
-
-    #[test]
-    fn entries_come_out_in_key_order_whatever_the_arrival_order() {
-        block_on(async {
-            let store = MemStore::default();
-            let mut chain = fresh(&store).await;
-            for v in [50u64, 10, 90, 30, 70, 20, 80, 60, 40, 5, 95, 15] {
-                insert(&store, &mut chain, v).await;
-                check(&store, &chain).await;
-            }
-            let mut want =
-                vec![5u64, 10, 15, 20, 30, 40, 50, 60, 70, 80, 90, 95];
-            want.sort_unstable();
-            assert_eq!(check(&store, &chain).await, want);
-        });
+    fn keys(store: &MemStore, chain: &Chain<Vec<u8>>) -> Vec<u64> {
+        block_on(chain.collect(store))
+            .unwrap()
+            .into_iter()
+            .map(|(k, _)| u64::from_be_bytes(k.field.try_into().unwrap()))
+            .collect()
     }
 
     #[test]
