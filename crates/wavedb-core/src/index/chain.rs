@@ -249,136 +249,34 @@ mod tests {
     use futures::executor::block_on;
 
     use super::Chain;
+    use crate::id::Id;
+    use crate::index::lane::Lane;
     use crate::index::mem_store::MemStore;
     use crate::index::sec_key::SecKey;
-    use crate::index::segment::Lane;
     use crate::local_id::LocalId;
     use crate::store::Store;
     use crate::u48::U48;
 
-    // Insert *and* remove are exercised here rather than split across the two
-    // modules: they are one structure, and every assertion below is about the
-    // invariant they jointly maintain.
-
     const TYPE_HASH: u64 = 0x0C4A_1111_2222_3333;
-    /// Small band (2N = 8, N/2 = 2) so a handful of inserts forces real splits.
-    const MIN: usize = 4;
 
-    fn tenant() -> U48 {
-        U48::new(3).unwrap()
+    fn owner(n: u64) -> Id {
+        Id::new(n, U48::new(3).unwrap(), false, 7)
     }
 
     fn key(value: u64) -> SecKey {
         SecKey {
             field: value.to_be_bytes().to_vec(),
-            rec: LocalId::new(value, false, 2),
+            rec: LocalId::new(value, value.is_multiple_of(2), 2),
         }
     }
 
-    async fn fresh(store: &MemStore) -> Chain<Vec<u8>> {
-        let (chain, writes) =
-            Chain::<Vec<u8>>::plan_create(tenant(), TYPE_HASH, Lane::Records);
-        store.apply(&writes).await.unwrap();
-        chain.with_min(MIN).with_index_cap(3)
+    fn chain(n: u64) -> Chain<Vec<u8>> {
+        Chain::at(owner(n), TYPE_HASH, Lane::Records, 0)
     }
 
-    async fn insert(store: &MemStore, chain: &mut Chain<Vec<u8>>, value: u64) {
-        let writes = chain
-            .plan_insert(store, key(value), value.to_be_bytes().to_vec())
-            .await
-            .unwrap();
-        store.apply(&writes).await.unwrap();
-    }
-
-    async fn remove(store: &MemStore, chain: &mut Chain<Vec<u8>>, value: u64) {
-        let Some(writes) = chain.plan_remove(store, &key(value)).await.unwrap()
-        else {
-            panic!("{value} was not in the chain");
-        };
-        store.apply(&writes).await.unwrap();
-    }
-
-    /// Walk the whole chain asserting every invariant it claims, and return the
-    /// keys in walk order.
-    ///
-    /// - links are consistent in both directions and the walk ends at `tail`;
-    /// - keys ascend strictly across segment boundaries;
-    /// - every segment sits inside the `N/2 … 2N` band (a lone segment is
-    ///   exempt: it is the chain's shell);
-    /// - the index names every segment, with the right id and the right count;
-    /// - the store holds nothing but the walked segments and the live index
-    ///   nodes — no orphans.
-    async fn check(store: &MemStore, chain: &Chain<Vec<u8>>) -> Vec<u64> {
-        let mut keys = Vec::new();
-        let mut ids = Vec::new();
-        let mut expect_prev = None;
-        let mut cursor = Some(chain.head());
-        let lone = chain.head() == chain.tail();
-
-        while let Some(id) = cursor {
-            let seg = chain.load(store, id).await.unwrap();
-            assert_eq!(seg.prev(), expect_prev, "prev link broken at {id:?}");
-            assert!(
-                lone || seg.len() > chain.min() / 2,
-                "segment {id:?} starved: {} entries",
-                seg.len()
-            );
-            assert!(
-                seg.len() < chain.min() * 2,
-                "segment {id:?} over the band: {} entries",
-                seg.len()
-            );
-            if let Some(index) = chain.index()
-                && let Some(first) = seg.first_key()
-            {
-                let slot = index
-                    .find(store, first)
-                    .await
-                    .unwrap()
-                    .expect("segment absent from the index");
-                assert_eq!(slot.seg, id, "index names the wrong segment");
-                assert_eq!(
-                    slot.count,
-                    seg.len() as u64,
-                    "index count is stale"
-                );
-            }
-            for (k, _) in seg.entries() {
-                let bytes: [u8; 8] = k.field.as_slice().try_into().unwrap();
-                keys.push(u64::from_be_bytes(bytes));
-            }
-            ids.push(id);
-            expect_prev = Some(id);
-            cursor = seg.next();
-        }
-
-        assert_eq!(
-            ids.last().copied(),
-            Some(chain.tail()),
-            "the forward walk did not end at the tail"
-        );
-        assert!(
-            keys.windows(2).all(|w| w[0] < w[1]),
-            "keys not strictly ascending: {keys:?}"
-        );
-        // An index-less chain (the removal log) has neither a total to compare
-        // nor nodes to account for — the segments are the whole structure.
-        let index_nodes = if let Some(index) = chain.index() {
-            assert_eq!(
-                index.total(store).await.unwrap(),
-                keys.len() as u64,
-                "the index's total disagrees with the chain"
-            );
-            index.reachable(store).await.0
-        } else {
-            0
-        };
-        assert_eq!(
-            store.len(),
-            ids.len() + index_nodes,
-            "orphan values left in the store"
-        );
-        keys
+    fn insert(store: &MemStore, chain: &Chain<Vec<u8>>, value: u64) {
+        let write = chain.insert(&key(value), &value.to_be_bytes().to_vec());
+        block_on(store.apply(&[write])).unwrap();
     }
 
     /// How many segments the chain currently holds.
