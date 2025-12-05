@@ -43,21 +43,14 @@ const ANCHOR: usize = 10;
 /// its lane in the [`Store`].
 #[derive(Debug)]
 pub struct Chain<P> {
-    pub(super) head: LocalId,
-    pub(super) tail: LocalId,
-    pub(super) tenant: U48,
-    pub(super) lane_hash: u64,
-    /// `None` for the removal log, which nothing searches — see
-    /// [`log_at`](Chain::log_at).
-    pub(super) index: Option<SparseTree>,
-    pub(super) min: usize,
+    lane: u64,
+    prefix: [u8; PREFIX],
     _payload: PhantomData<fn() -> P>,
 }
 
-// Manual: a derive would demand `P: Copy`, but the
-// handle holds only ids and caps — the `PhantomData` is `fn() -> P`, which is
-// unconditionally `Copy`. A scan captures the handle in a long-lived closure,
-// so this is load-bearing, not cosmetic.
+// Manual: a derive would demand `P: Copy`, but the handle holds only its lane
+// and prefix. A scan captures the handle in a long-lived closure, so this is
+// load-bearing, not cosmetic.
 impl<P> Clone for Chain<P> {
     fn clone(&self) -> Self {
         *self
@@ -66,60 +59,32 @@ impl<P> Clone for Chain<P> {
 impl<P> Copy for Chain<P> {}
 
 impl<P: WaveWire> Chain<P> {
-    /// Open the chain running `head`..`tail` with its index rooted at
-    /// `index_root`, for `tenant`, in `lane`'s lane of `struct_hash`.
+    /// The chain `declaration` of `owner` (a collection's Pivot) in `lane`'s
+    /// lane of `struct_hash`.
     #[must_use]
     pub fn at(
-        head: LocalId,
-        tail: LocalId,
-        index_root: LocalId,
-        tenant: U48,
+        owner: Id,
         struct_hash: u64,
         lane: Lane,
+        declaration: u8,
     ) -> Self {
+        let mut prefix = [0; PREFIX];
+        prefix[..16].copy_from_slice(&owner.raw().to_be_bytes());
+        prefix[16] = declaration;
         Self {
-            head,
-            tail,
-            tenant,
-            lane_hash: lane.hash(struct_hash),
-            index: Some(SparseTree::at(index_root, tenant, struct_hash)),
-            min: DEFAULT_SEGMENT_MIN,
+            lane: lane.hash(struct_hash),
+            prefix,
             _payload: PhantomData,
         }
     }
 
-    /// Open an **index-less** chain — the removal log, and only it.
-    ///
-    /// Nothing ever *searches* `dead` (RFC 0050): a removal appends at the tail,
-    /// a catch-up scans back from it, and "is this record dead?" is answered by
-    /// the anchor's own [`Metadata`](crate::Metadata). An index would be pure
-    /// write cost on every removal, over a structure that grows forever.
-    ///
-    /// The price is that locating a key walks back from the tail instead of
-    /// descending to it — one read for the monotone appends the engine
-    /// actually produces, and O(segments) for a key that belongs further back.
-    /// Do not open an ordinary record chain this way.
+    /// The lane's hash: where the store keeps this chain.
     #[must_use]
-    pub fn log_at(
-        head: LocalId,
-        tail: LocalId,
-        tenant: U48,
-        struct_hash: u64,
-        lane: Lane,
-    ) -> Self {
-        Self {
-            head,
-            tail,
-            tenant,
-            lane_hash: lane.hash(struct_hash),
-            index: None,
-            min: DEFAULT_DEAD_MIN,
-            _payload: PhantomData,
-        }
+    pub const fn lane(&self) -> u64 {
+        self.lane
     }
 
-    /// Override the size band's minimum — the developer's `page = N` (RFC 0052),
-    /// or [`DEFAULT_DEAD_MIN`] for a removal log.
+    /// The bytes every key of this chain starts with.
     #[must_use]
     pub const fn with_min(mut self, min: usize) -> Self {
         self.min = min;
