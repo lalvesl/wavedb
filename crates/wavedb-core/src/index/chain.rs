@@ -182,31 +182,65 @@ impl<P: WaveWire> Chain<P> {
             .transpose()
     }
 
-    /// This chain's endpoints in the shape a `Pivot` holds a removal log.
-    #[must_use]
-    pub const fn log_roots(&self) -> LogRoots {
-        LogRoots {
-            head: self.head,
-            tail: self.tail,
-        }
-    }
-
-    /// The payload filed under `key`, if the chain holds it.
-    ///
-    /// # Errors
-    /// Propagates a [`Store`] failure, [`Error::ChainNodeMissing`] on a dangling
-    /// pointer, or [`Error::LaneBadTag`] when a pointer resolves to a foreign
-    /// value.
-    pub async fn get<S: Store>(
+    /// The stored value under `key`, if the chain holds it.
+    async fn entry<S: Store>(
         &self,
         store: &S,
         key: &SecKey,
-    ) -> Result<Option<P>>
-    where
-        P: Clone,
-    {
-        let (_, seg) = self.locate(store, key).await?;
-        Ok(seg.get(key).cloned())
+    ) -> Result<Option<Vec<u8>>> {
+        let at = self.entry_key(key);
+        let span = Span {
+            hi: successor(&at),
+            lo: at.clone(),
+            rev: false,
+            skip: 0,
+            limit: 1,
+        };
+        let found = store.scan(self.lane, &span).await?;
+        Ok(found.into_iter().find(|(k, _)| *k == at).map(|(_, v)| v))
+    }
+
+    /// The greatest key the chain holds — the growth end of one keyed by an
+    /// instant.
+    ///
+    /// # Errors
+    /// A [`Store`] failure, or a key that does not read back.
+    pub async fn last_key<S: Store>(
+        &self,
+        store: &S,
+    ) -> Result<Option<SecKey>> {
+        let span = self.span(1).reversed();
+        store
+            .scan(self.lane, &span)
+            .await?
+            .first()
+            .map(|(key, _)| self.sec_key(key))
+            .transpose()
+    }
+
+    /// How many entries the chain holds.
+    ///
+    /// # Errors
+    /// A [`Store`] failure.
+    pub async fn len<S: Store>(&self, store: &S) -> Result<u64> {
+        let span = self.span(0);
+        store.count(self.lane, &span.lo, span.hi.as_deref()).await
+    }
+
+    /// Every entry in key order, materialised — tests only: a read proper
+    /// streams.
+    #[cfg(test)]
+    pub(crate) async fn collect<S: Store>(
+        &self,
+        store: &S,
+    ) -> Result<Vec<(SecKey, P)>> {
+        let mut out = Vec::new();
+        for (key, bytes) in
+            store.scan(self.lane, &self.span(usize::MAX)).await?
+        {
+            out.push((self.sec_key(&key)?, from_wire(&bytes)?));
+        }
+        Ok(out)
     }
 }
 
