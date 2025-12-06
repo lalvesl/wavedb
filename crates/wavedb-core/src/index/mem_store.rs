@@ -25,18 +25,6 @@ impl MemStore {
         *self.durable.lock().unwrap()
     }
 
-    /// Number of stored values — records and lane entries.
-    pub fn len(&self) -> usize {
-        self.records.lock().unwrap().len()
-            + self
-                .lanes
-                .lock()
-                .unwrap()
-                .values()
-                .map(BTreeMap::len)
-                .sum::<usize>()
-    }
-
     /// Every stored `(Id, bytes)` pair — byte-level comparisons between two
     /// stores (mirror-fidelity tests).
     pub fn entries(&self) -> Vec<(Id, Vec<u8>)> {
