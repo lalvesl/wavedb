@@ -92,44 +92,57 @@ impl<P: WaveWire + Clone> Chain<P> {
     where
         P: 'a,
     {
-        let start = Scan {
-            seek: Some(from),
-            next: None,
+        let start = Cursor {
+            span: Some(span),
             ready: VecDeque::new(),
         };
-        futures::stream::unfold(start, move |mut st| async move {
+        futures::stream::unfold(start, move |mut at| async move {
             loop {
-                if let Some(entry) = st.ready.pop_front() {
-                    return Some((Ok(entry), st));
+                if let Some(entry) = at.ready.pop_front() {
+                    return Some((Ok(entry), at));
                 }
-                let read = if let Some(from) = st.seek.take() {
-                    self.locate(store, &from)
-                        .await
-                        .map(|(_, seg)| (seg, Some(from)))
-                } else {
-                    // Nothing left to follow: the stream ends here.
-                    let id = st.next.take()?;
-                    self.load(store, id).await.map(|seg| (seg, None))
-                };
-                match read {
-                    Ok((seg, floor)) => st.take(&seg, floor.as_ref()),
-                    // Neither a seek nor a link is left: it ends after this.
-                    Err(e) => return Some((Err(e), st)),
+                let span = at.span.take()?;
+                match self.read(store, span).await {
+                    Ok((entries, next)) => {
+                        at.ready.extend(entries);
+                        at.span = next;
+                    }
+                    Err(e) => return Some((Err(e), at)),
                 }
             }
         })
     }
-}
 
-impl<P: Clone> Scan<P> {
-    /// Queue `seg`'s entries at or above `floor` and follow its link.
-    fn take(&mut self, seg: &Segment<P>, floor: Option<&SecKey>) {
-        self.next = seg.next();
-        self.ready.extend(
-            seg.entries()
-                .filter(|(key, _)| floor.is_none_or(|f| key >= f))
-                .cloned(),
+    /// One read of `span`: its entries, and the span reading on past them —
+    /// `None` when this read reached the range's end.
+    async fn read<S: Store>(
+        &self,
+        store: &S,
+        span: Span,
+    ) -> Result<(Vec<(SecKey, P)>, Option<Span>)> {
+        let found = store.scan(self.lane(), &span).await?;
+        let next = found.last().filter(|_| found.len() == span.limit).map(
+            |(last, _)| {
+                let mut next = Span {
+                    skip: 0,
+                    ..span.clone()
+                };
+                if span.rev {
+                    next.hi = Some(last.clone());
+                } else {
+                    // The least key above `last`.
+                    let mut above = last.clone();
+                    above.push(0);
+                    next.lo = above;
+                }
+                next
+            },
         );
+        let mut entries = Vec::with_capacity(found.len());
+        for (key, bytes) in found {
+            entries.push((self.sec_key(&key)?, from_wire(&bytes)?));
+        }
+        Ok((entries, next))
     }
 }
 
@@ -138,6 +151,8 @@ mod tests {
     use futures::executor::block_on;
     use futures::{StreamExt, TryStreamExt};
 
+    use super::BATCH;
+    use crate::id::Id;
     use crate::index::Chain;
     use crate::index::mem_store::MemStore;
     use crate::index::sec_key::SecKey;
