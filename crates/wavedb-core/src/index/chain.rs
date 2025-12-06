@@ -300,35 +300,46 @@ mod tests {
         assert!(other.sec_key(&chain.entry_key(&key(1))).is_err());
     }
 
+    /// Inserts in any order read back in key order, and two chains of one
+    /// lane — two collections, or two declarations — share nothing.
     #[test]
-    fn removing_an_absent_key_plans_nothing() {
-        block_on(async {
-            let store = MemStore::default();
-            let mut chain = fresh(&store).await;
-            for v in 1..=10u64 {
-                insert(&store, &mut chain, v).await;
-            }
-            assert!(
-                chain.plan_remove(&store, &key(99)).await.unwrap().is_none(),
-                "an absent key planned work"
-            );
-        });
+    fn chains_sharing_a_lane_read_only_their_own_keys_in_order() {
+        let store = MemStore::default();
+        let (a, b) = (chain(1), chain(2));
+        let declared =
+            Chain::<Vec<u8>>::at(owner(1), TYPE_HASH, Lane::Records, 1);
+        for v in [5, 1, 9, 3, 7] {
+            insert(&store, &a, v);
+            insert(&store, &b, v * 10);
+            insert(&store, &declared, v + 100);
+        }
+        assert_eq!(keys(&store, &a), [1, 3, 5, 7, 9]);
+        assert_eq!(keys(&store, &b), [10, 30, 50, 70, 90]);
+        assert_eq!(keys(&store, &declared), [101, 103, 105, 107, 109]);
+        assert_eq!(block_on(a.len(&store)).unwrap(), 5);
+        let last = block_on(a.last_key(&store)).unwrap();
+        assert_eq!(last, Some(key(9)));
     }
 
+    /// A planned removal is the verdict: a key that is there goes, one that
+    /// is not plans nothing.
     #[test]
-    fn a_dangling_head_is_a_typed_fault_not_a_panic() {
-        block_on(async {
-            let store = MemStore::default();
-            // Never committed: the handle names segments that do not exist.
-            let (chain, _) = Chain::<Vec<u8>>::plan_create(
-                tenant(),
-                TYPE_HASH,
-                Lane::Records,
-            );
-            assert!(matches!(
-                chain.get(&store, &key(1)).await,
-                Err(crate::error::Error::ChainNodeMissing(_))
-            ));
-        });
+    fn a_planned_removal_says_whether_the_key_was_there() {
+        let store = MemStore::default();
+        let chain = chain(1);
+        insert(&store, &chain, 4);
+        assert_eq!(
+            block_on(chain.get(&store, &key(4))).unwrap(),
+            Some(4u64.to_be_bytes().to_vec())
+        );
+        let write = block_on(chain.plan_remove(&store, &key(4))).unwrap();
+        block_on(store.apply(&[write.expect("4 is there")])).unwrap();
+        assert!(
+            block_on(chain.plan_remove(&store, &key(4)))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(block_on(chain.last_key(&store)).unwrap(), None);
+        assert_eq!(block_on(chain.len(&store)).unwrap(), 0);
     }
 }
