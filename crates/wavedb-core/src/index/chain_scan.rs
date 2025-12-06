@@ -154,18 +154,14 @@ mod tests {
     use super::BATCH;
     use crate::id::Id;
     use crate::index::Chain;
+    use crate::index::lane::Lane;
     use crate::index::mem_store::MemStore;
     use crate::index::sec_key::SecKey;
-    use crate::index::segment::Lane;
     use crate::local_id::LocalId;
     use crate::store::Store;
     use crate::u48::U48;
 
     const TYPE_HASH: u64 = 0x0075_5CA1_0000_0001;
-
-    fn tenant() -> U48 {
-        U48::new(5).unwrap()
-    }
 
     fn key(value: u64) -> SecKey {
         SecKey {
@@ -182,63 +178,64 @@ mod tests {
         }
     }
 
-    /// A chain of the even numbers below `2n`, small segments (4…8) and a
-    /// narrow index, so a scan crosses many of both.
+    /// A chain of the even numbers below `2n` — more than one read's worth —
+    /// beside another collection's chain in the same lane.
     fn evens(store: &MemStore, n: u64) -> Chain<()> {
-        block_on(async {
-            let (chain, writes) =
-                Chain::<()>::plan_create(tenant(), TYPE_HASH, Lane::Recency);
-            store.apply(&writes).await.unwrap();
-            let mut chain = chain.with_min(4).with_index_cap(3);
-            for v in 0..n {
-                let writes =
-                    chain.plan_insert(store, key(v * 2), ()).await.unwrap();
-                store.apply(&writes).await.unwrap();
-            }
-            chain
-        })
+        let owner = |k| Id::new(k, U48::new(5).unwrap(), false, 1);
+        let chain = Chain::<()>::at(owner(1), TYPE_HASH, Lane::Recency, 0);
+        let other = Chain::<()>::at(owner(2), TYPE_HASH, Lane::Recency, 0);
+        let mut writes = Vec::new();
+        for v in 0..n {
+            writes.push(chain.insert(&key(v * 2), &()));
+            writes.push(other.insert(&key(v * 2 + 1), &()));
+        }
+        block_on(store.apply(&writes)).unwrap();
+        chain
+    }
+
+    fn values(keys: Vec<(SecKey, ())>) -> Vec<u64> {
+        keys.into_iter()
+            .map(|(k, ())| u64::from_be_bytes(k.field.try_into().unwrap()))
+            .collect()
     }
 
     fn scan(store: &MemStore, chain: Chain<()>, from: u64) -> Vec<u64> {
-        block_on(
-            chain
-                .scan_from(store, floor(from))
-                .map_ok(|(k, ())| {
-                    u64::from_be_bytes(k.field.as_slice().try_into().unwrap())
-                })
-                .try_collect(),
+        values(
+            block_on(chain.scan_from(store, &floor(from)).try_collect())
+                .unwrap(),
         )
-        .unwrap()
     }
 
-    /// From anywhere, the rest of the chain in order, across every segment
-    /// boundary after the seek.
+    /// From anywhere, the rest of the chain in order, across reads.
     #[test]
     fn a_scan_from_a_key_yields_every_key_above_it() {
         let store = MemStore::default();
-        let chain = evens(&store, 100);
+        let n = BATCH as u64 * 2 + 10;
+        let chain = evens(&store, n);
         assert_eq!(
             scan(&store, chain, 0),
-            (0..100).map(|v| v * 2).collect::<Vec<_>>()
+            (0..n).map(|v| v * 2).collect::<Vec<_>>()
         );
         assert_eq!(
             scan(&store, chain, 101),
-            (51..100).map(|v| v * 2).collect::<Vec<_>>()
+            (51..n).map(|v| v * 2).collect::<Vec<_>>()
         );
-        assert_eq!(scan(&store, chain, 198), [198]);
+        assert_eq!(scan(&store, chain, (n - 1) * 2), [(n - 1) * 2]);
+        assert_eq!(scan(&store, chain, n * 2), [0; 0]);
     }
 
-    /// A bound inside one segment reads it and stops: taking ends at the
-    /// first key past the bound.
+    /// A bounded take stops at its end.
     #[test]
     fn a_bounded_range_stops_at_its_end() {
         let store = MemStore::default();
         let chain = evens(&store, 100);
-        let got: Vec<u64> = block_on(
+        let got: Vec<(SecKey, ())> = block_on(
             chain
-                .scan_from(&store, floor(40))
-                .map_ok(|(k, ())| {
-                    u64::from_be_bytes(k.field.as_slice().try_into().unwrap())
+                .scan_from(&store, &floor(40))
+                .try_take_while(|(k, ())| {
+                    futures::future::ready(Ok(
+                        k.field < 47u64.to_be_bytes().to_vec()
+                    ))
                 })
                 .try_take_while(|&v| futures::future::ready(Ok(v < 47)))
                 .try_collect(),
