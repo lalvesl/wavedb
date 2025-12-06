@@ -1,50 +1,93 @@
-//! A chain read in key order from a seek ([RFC 0075]): one descent to the
-//! segment covering a key, then the `next` links.
+//! A chain read as a stream ([RFC 0078] §7): from a key, from either end,
+//! or past a number of entries — one [`Store::scan`] of the chain's range
+//! per [`BATCH`] entries, the next one starting where the last one ended.
 //!
-//! This is what makes a chain an index and not only a log: a secondary or a
-//! fuzzy posting chain answers "every key from here" with one sparse-index
-//! descent and one read per segment it passes, and a range read stops at
-//! the first key past its bound — it reads what it returns, and one segment
-//! more at most.
+//! A caller after a bounded range stops taking at its first key past it,
+//! and the stream asks for nothing more.
 //!
-//! [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains.md
+//! [RFC 0078]: https://github.com/wavedb/wavedb/blob/main/rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
 use std::collections::VecDeque;
 
 use futures::Stream;
 
 use crate::error::Result;
-use crate::local_id::LocalId;
-use crate::store::Store;
-use crate::wire::WaveWire;
+use crate::store::{Span, Store};
+use crate::wire::{WaveWire, from_wire};
 
 use super::chain::Chain;
 use super::sec_key::SecKey;
-use super::segment::Segment;
 
-/// Where a scan stands: the seek still to make, the next segment to read,
-/// and the entries of the last one read not yet yielded.
-struct Scan<P> {
-    seek: Option<SecKey>,
-    next: Option<LocalId>,
+/// Entries one read of the store asks for.
+pub const BATCH: usize = 256;
+
+/// Where a stream stands: the span still to read (`None` once the range is
+/// done), and the entries of the last read not yet yielded.
+struct Cursor<P> {
+    span: Option<Span>,
     ready: VecDeque<(SecKey, P)>,
 }
 
 impl<P: WaveWire + Clone> Chain<P> {
-    /// Every entry with a key `≥ from`, ascending — the chain's own order,
-    /// so a caller after a bounded range stops taking at its first key past
-    /// it, and the scan reads no further.
-    ///
-    /// A key below every entry starts at the head; one past every entry
-    /// yields nothing.
+    /// Every entry with a key `≥ from`, ascending.
     ///
     /// # Errors
-    /// Each item may be a [`Store`] failure, or a dangling or foreign
-    /// segment pointer, as [`get`](Self::get); the stream ends after one.
+    /// Each item may be a [`Store`] failure, or an entry that does not read
+    /// back; the stream ends after one.
     pub fn scan_from<'a, S: Store>(
         self,
         store: &'a S,
-        from: SecKey,
+        from: &SecKey,
+    ) -> impl Stream<Item = Result<(SecKey, P)>> + use<'a, S, P>
+    where
+        P: 'a,
+    {
+        let span = Span {
+            lo: self.entry_key(from),
+            ..self.span(BATCH)
+        };
+        self.stream(store, span)
+    }
+
+    /// Every entry past the first `skip`, ascending — a page of a list.
+    ///
+    /// # Errors
+    /// As [`scan_from`](Self::scan_from).
+    pub fn scan_skip<'a, S: Store>(
+        self,
+        store: &'a S,
+        skip: u64,
+    ) -> impl Stream<Item = Result<(SecKey, P)>> + 'a
+    where
+        P: 'a,
+    {
+        let span = Span {
+            skip,
+            ..self.span(BATCH)
+        };
+        self.stream(store, span)
+    }
+
+    /// Every entry, descending — newest first in a chain keyed by instant.
+    ///
+    /// # Errors
+    /// As [`scan_from`](Self::scan_from).
+    pub fn scan_back<'a, S: Store>(
+        self,
+        store: &'a S,
+    ) -> impl Stream<Item = Result<(SecKey, P)>> + 'a
+    where
+        P: 'a,
+    {
+        self.stream(store, self.span(BATCH).reversed())
+    }
+
+    /// The entries `span` reads, then the rest of the range past them, read
+    /// [`BATCH`] at a time.
+    fn stream<'a, S: Store>(
+        self,
+        store: &'a S,
+        span: Span,
     ) -> impl Stream<Item = Result<(SecKey, P)>> + 'a
     where
         P: 'a,
