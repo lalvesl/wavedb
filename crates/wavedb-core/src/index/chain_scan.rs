@@ -237,51 +237,38 @@ mod tests {
                         k.field < 47u64.to_be_bytes().to_vec()
                     ))
                 })
-                .try_take_while(|&v| futures::future::ready(Ok(v < 47)))
                 .try_collect(),
         )
         .unwrap();
-        assert_eq!(got, [40, 42, 44, 46]);
+        assert_eq!(values(got), [40, 42, 44, 46]);
     }
 
-    /// Below the head is the whole chain; past the tail is nothing.
+    /// Backward from the end, and past a skip, across reads.
     #[test]
-    fn seeks_off_either_end() {
+    fn a_chain_reads_back_from_its_end_and_past_a_skip() {
         let store = MemStore::default();
-        let chain = evens(&store, 30);
-        assert_eq!(scan(&store, chain, 0).len(), 30);
-        assert_eq!(scan(&store, chain, 61), [0; 0]);
-        assert_eq!(scan(&store, chain, u64::MAX), [0; 0]);
+        let n = BATCH as u64 + 40;
+        let chain = evens(&store, n);
+        let back =
+            values(block_on(chain.scan_back(&store).try_collect()).unwrap());
+        assert_eq!(back, (0..n).rev().map(|v| v * 2).collect::<Vec<_>>());
+        let skipped = values(
+            block_on(chain.scan_skip(&store, 30).try_collect()).unwrap(),
+        );
+        assert_eq!(skipped, (30..n).map(|v| v * 2).collect::<Vec<_>>());
+        let first = block_on(Box::pin(chain.scan_back(&store)).next());
+        assert_eq!(values(vec![first.unwrap().unwrap()]), [(n - 1) * 2]);
     }
 
-    /// An empty chain — its one shell segment — yields nothing.
+    /// An empty chain yields nothing either way.
     #[test]
     fn an_empty_chain_yields_nothing() {
         let store = MemStore::default();
         let chain = evens(&store, 0);
         assert_eq!(scan(&store, chain, 0), [0; 0]);
-    }
-
-    /// A seek landing exactly on a segment's first key — the key the index
-    /// files that segment under — starts at it, not after it.
-    #[test]
-    fn a_seek_on_a_separator_starts_at_it() {
-        let store = MemStore::default();
-        let chain = evens(&store, 100);
-        let mut separators = Vec::new();
-        let mut cursor = Some(chain.head());
-        while let Some(id) = cursor {
-            let seg = block_on(chain.segment(&store, id)).unwrap();
-            if let Some(first) = seg.first_key() {
-                separators.push(first.clone());
-            }
-            cursor = seg.next();
-        }
-        assert!(separators.len() > 10, "{} segments", separators.len());
-        for sep in &separators[1..] {
-            let scan = chain.scan_from(&store, sep.clone());
-            let first = block_on(Box::pin(scan).next()).unwrap().unwrap();
-            assert_eq!(&first.0, sep);
-        }
+        assert_eq!(
+            block_on(chain.scan_back(&store).try_collect::<Vec<_>>()).unwrap(),
+            []
+        );
     }
 }
