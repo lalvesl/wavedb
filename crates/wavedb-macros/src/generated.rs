@@ -1,10 +1,11 @@
 //! Per-NonUnique generated types: the `{Name}PivotId` handle and the `{Name}Pivot`
-//! roots holder.
+//! record.
 //!
 //! These carry no business data — pure addressing. `PivotId` is a `LocalId`
-//! newtype callers store in a field to reference the collection; `Pivot` holds the
-//! roots of every chain the collection holds — recency, removals, lists,
-//! secondaries, fuzzy — and implements [`wavedb_core::index::Pivot`].
+//! newtype callers store in a field to reference the collection; every chain
+//! of the collection is the key range of a lane under it (RFC 0078 §7), so
+//! the `Pivot` record holds no roots — only the collection's default access
+//! rule — and implements [`wavedb_core::index::Pivot`].
 //!
 //! The chains themselves live in `wavedb-core`'s index layer; the macro
 //! generates only the data-carrying types here.
@@ -81,73 +82,24 @@ fn natural_key_items(key_fields: Option<&[(Ident, syn::Type)]>) -> TokenStream {
 /// The pivot record's own identity: hashed like any struct, under the
 /// reserved `Pivot` shape discriminator so it can never collide with a
 /// user-declared `Unique`/`NonUnique` type of the same name and fields.
-fn pivot_identity(
-    pivot: &Ident,
-    num_secondaries: usize,
-    num_lists: usize,
-    num_fuzzy: usize,
-) -> u64 {
-    // A pivot with no fuzzy index keeps the identity it had before the kind
-    // existed: the entry appears only when one is declared, exactly as the
-    // record type's `#fuzzy` fold does.
-    let mut shape = vec![
-        ("records".into(), "ChainRoots".into()),
-        ("removals".into(), "LogRoots".into()),
-        (
-            "secondaries".into(),
-            format!("[ChainRoots;{num_secondaries}]"),
-        ),
-        ("lists".into(), format!("[ChainRoots;{num_lists}]")),
-    ];
-    if num_fuzzy > 0 {
-        shape.push(("fuzzy".into(), format!("[ChainRoots;{num_fuzzy}]")));
-    }
-    shape.push(("permission".into(), "Option<PermissionRef>".into()));
+fn pivot_identity(pivot: &Ident) -> u64 {
+    let shape = vec![("permission".into(), "Option<PermissionRef>".into())];
     struct_hash::compute(&pivot.to_string(), "Pivot", &shape)
 }
 
-/// The `Pivot` trait impl for the generated roots holder: every chain's
-/// roots (RFC 0050, RFC 0075), plus the rewrite constructor the engine uses
-/// when a root moves.
+/// The `Pivot` trait impl for the generated record.
 fn pivot_impl(pivot: &Ident, pivot_hash: u64) -> TokenStream {
     quote! {
         impl ::wavedb_core::index::Pivot for #pivot {
             const STRUCT_HASH: u64 = #pivot_hash;
 
-            fn secondaries(&self) -> &[::wavedb_core::ChainRoots] { &self.secondaries }
-            fn recency(&self) -> ::wavedb_core::ChainRoots { self.recency }
-            fn removals(&self) -> ::wavedb_core::LogRoots { self.removals }
-            fn lists(&self) -> &[::wavedb_core::ChainRoots] { &self.lists }
-            fn fuzzy(&self) -> &[::wavedb_core::ChainRoots] { &self.fuzzy }
             fn permission(&self) -> ::core::option::Option<&::wavedb_core::PermissionRef> {
                 self.permission.as_ref()
-            }
-            fn replace_roots(
-                &self,
-                roots: ::wavedb_core::index::Roots<'_>,
-            ) -> Self {
-                let mut secs = self.secondaries;
-                let mut lists = self.lists;
-                let mut fuzzy = self.fuzzy;
-                // The engine always passes exactly this pivot's root counts
-                // (it derives every slice from the accessors); a mismatch is
-                // a caller bug worth failing loudly on.
-                secs.copy_from_slice(roots.secondaries);
-                lists.copy_from_slice(roots.lists);
-                fuzzy.copy_from_slice(roots.fuzzy);
-                Self {
-                    recency: roots.recency,
-                    removals: roots.removals,
-                    secondaries: secs,
-                    lists,
-                    fuzzy,
-                    permission: ::core::clone::Clone::clone(&self.permission),
-                }
             }
         }
     }
 }
-/// Emit the `PivotId` newtype and the `Pivot` roots holder for a NonUnique struct
+/// Emit the `PivotId` newtype and the `Pivot` record for a NonUnique struct
 /// named `name` with the given resolved secondary indexes and (for a
 /// `#[wavedb::key(...)]` type) natural-key fields.
 pub fn nonunique_types(
@@ -156,22 +108,16 @@ pub fn nonunique_types(
     declared: &Declared,
     page: Option<usize>,
 ) -> syn::Result<TokenStream> {
-    // `page = N` rides the trait as a const the chain builders read; unset
+    // `page = N` rides the trait as a const the list readers read; unset
     // leaves the trait default (RFC 0052).
     let page_const = page.map(|n| quote!(const PAGE: usize = #n;));
     let secondaries_specs = &declared.secondaries;
-    let num_secondaries = secondaries_specs.len();
-    let num_lists = declared.lists.len();
-    let num_fuzzy = declared.fuzzy.len();
     let pivot_id = format_ident!("{}PivotId", name);
     let pivot = format_ident!("{}Pivot", name);
-    let pivot_hash =
-        pivot_identity(&pivot, num_secondaries, num_lists, num_fuzzy);
+    let pivot_hash = pivot_identity(&pivot);
     let pivot_id_tokens = pivot_id_tokens(&pivot_id)?;
 
-    // `struct {Name}Pivot { recency, removals, secondaries: [ChainRoots; N], … }`.
-    // `#[repr(C)]` keeps a clean layout when `N == 0` (a trailing zero-sized array
-    // is otherwise a lint footgun); WaveWire never depends on the repr.
+    // `struct {Name}Pivot { permission }`.
     // The pivot record is stored like any value, so it gets its own native
     // storage slot too (always compressed — pivots are tiny, cold, uniform);
     // the record type's `storage_entries()` bundles both.
@@ -199,15 +145,9 @@ pub fn nonunique_types(
     let lane_statics = storage_statics::lane_statics(name, hash);
 
     let pivot_def: syn::DeriveInput = parse_quote! {
-        #[repr(C)]
         #[derive(::core::clone::Clone, ::core::cmp::PartialEq, ::core::cmp::Eq,
                  ::core::fmt::Debug, ::core::default::Default)]
         pub struct #pivot {
-            pub recency: ::wavedb_core::ChainRoots,
-            pub removals: ::wavedb_core::LogRoots,
-            pub secondaries: [::wavedb_core::ChainRoots; #num_secondaries],
-            pub lists: [::wavedb_core::ChainRoots; #num_lists],
-            pub fuzzy: [::wavedb_core::ChainRoots; #num_fuzzy],
             pub permission: ::core::option::Option<::wavedb_core::PermissionRef>,
         }
     };
