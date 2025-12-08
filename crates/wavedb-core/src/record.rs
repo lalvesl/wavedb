@@ -41,7 +41,7 @@ use crate::wire::{WaveWire, Wire, from_wire, to_wire};
 // The plan-time read view and the minting half live in their own modules;
 // re-exported so the established `crate::record::*` paths still resolve.
 pub(crate) use crate::mint::{
-    archive_id, keyed_id, mint_floored_id, mint_instant, type_salt,
+    archive_id, keyed_id, mint_floored_id, mint_instant,
 };
 pub(crate) use crate::overlay::Overlay;
 

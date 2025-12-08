@@ -91,8 +91,7 @@ pub use futures::{Stream, TryStreamExt};
 pub use hooks::LookupHooks;
 pub use id::Id;
 pub use index::{
-    Bound, ChainRoots, Except, IdStreamExt, IndexKey, Intersect, LogRoots,
-    Pivot, SecKey, Union,
+    Bound, Except, IdStreamExt, IndexKey, Intersect, Pivot, SecKey, Union,
 };
 pub use local_id::LocalId;
 pub use metadata::{Metadata, Succession};

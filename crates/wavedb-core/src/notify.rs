@@ -71,8 +71,8 @@ mod tests {
     use crate::collection::Collection;
     use crate::error::Result;
     use crate::id::Id;
+    use crate::index::Pivot;
     use crate::index::mem_store::MemStore;
-    use crate::index::{ChainRoots, LogRoots, Pivot, Roots};
     use crate::permission::PermissionRef;
     use crate::record::save_unique;
     use crate::store::{Store, Write};
@@ -138,30 +138,12 @@ mod tests {
 
     #[derive(Debug, Clone, Default, PartialEq, Eq, WaveWire)]
     struct NotePivot {
-        recency: ChainRoots,
-        removals: LogRoots,
         permission: Option<PermissionRef>,
     }
     impl Pivot for NotePivot {
         const STRUCT_HASH: u64 = 0x1107_0002;
-        fn secondaries(&self) -> &[ChainRoots] {
-            &[]
-        }
-        fn recency(&self) -> ChainRoots {
-            self.recency
-        }
-        fn removals(&self) -> LogRoots {
-            self.removals
-        }
         fn permission(&self) -> Option<&PermissionRef> {
             self.permission.as_ref()
-        }
-        fn replace_roots(&self, roots: Roots<'_>) -> Self {
-            Self {
-                recency: roots.recency,
-                removals: roots.removals,
-                permission: self.permission.clone(),
-            }
         }
     }
 

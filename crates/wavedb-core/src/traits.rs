@@ -103,6 +103,9 @@ pub trait WaveDbStruct: WaveWire {
 /// gates the collection surface — the two never overlap.
 pub trait UniqueStruct: WaveDbStruct {}
 
+/// The rows of a rendered page when a type declares none (RFC 0052).
+pub const DEFAULT_PAGE: usize = 16;
+
 /// Implemented (by the proc-macro) for every `#[wavedb(NonUnique)]` struct.
 ///
 /// Ties the record type to its generated `{Name}Pivot` roots holder. This is
@@ -117,41 +120,23 @@ pub trait NonUniqueStruct: WaveDbStruct {
     type Pivot: crate::index::Pivot + Clone + Default;
 
     /// Number of `#[wavedb::pivot(...)]` secondary indexes, declaration order.
-    /// Must equal the generated pivot's `secondaries()` length.
     const NUM_SECONDARIES: usize = 0;
 
-    /// The record chain's segment capacity as a **minimum** — the developer's
-    /// `#[wavedb(NonUnique, page = N)]`, defaulting to
-    /// [`DEFAULT_SEGMENT_MIN`](crate::index::DEFAULT_SEGMENT_MIN).
-    ///
-    /// A segment holds `N…2N` records, splits 50/50 at `2N` and merges at
-    /// `N/2` (RFC 0052), so a rendered page of N rows is one segment read —
-    /// which is the whole reason the knob is spelled `page`. The cost lands on
-    /// the write side: the chain is modification-ordered, so **every save
-    /// rewrites the growth-end segment whole**, and that is `N…2N` records'
-    /// bytes re-encoded per save.
+    /// The rows of a rendered page — the developer's
+    /// `#[wavedb(NonUnique, page = N)]`, defaulting to [`DEFAULT_PAGE`]: what
+    /// a list's `_at_page(k)` reads, rows `k·N` onward (RFC 0052).
     ///
     /// It folds into the [`STRUCT_HASH`](crate::WaveDbStruct::STRUCT_HASH),
-    /// so a chain is only ever laid out at one capacity.
-    const PAGE: usize = crate::index::DEFAULT_SEGMENT_MIN;
+    /// like every declaration that changes what a reader gets.
+    const PAGE: usize = DEFAULT_PAGE;
 
     /// Number of `#[wavedb::list(...)]` declared lists, declaration order.
-    /// Must equal the generated pivot's `lists()` length.
     const NUM_LISTS: usize = 0;
 
-    /// Declared list `index`'s segment capacity — its own `page = N`, or the
-    /// struct's [`PAGE`](Self::PAGE) when it declared none.
-    ///
-    /// A per-list capacity exists because the two chain kinds have opposite
-    /// write profiles. The built-in chain is modification-ordered, so **every**
-    /// save rewrites its growth-end segment whole — which is why its default is
-    /// deliberately small (16). A declared list is keyed by a domain value, so
-    /// an ordinary save rewrites its entry *in place* in one segment; it can
-    /// afford the N a rendered page actually wants without taxing every write.
-    ///
-    /// It folds into the [`STRUCT_HASH`](crate::WaveDbStruct::STRUCT_HASH) with
-    /// the declaration it belongs to, so a list chain is only ever laid out at
-    /// one capacity (RFC 0052).
+    /// Declared list `index`'s page — its own `page = N`, or the struct's
+    /// [`PAGE`](Self::PAGE) when it declared none. It folds into the
+    /// [`STRUCT_HASH`](crate::WaveDbStruct::STRUCT_HASH) with the declaration
+    /// it belongs to (RFC 0052).
     #[must_use]
     fn list_page(index: usize) -> usize {
         let _ = index;
