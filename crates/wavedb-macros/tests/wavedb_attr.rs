@@ -6,7 +6,7 @@
 #![allow(clippy::assertions_on_constants)]
 
 use wavedb_core::index::Pivot as _;
-use wavedb_core::traits::{Shape, WaveDbStruct};
+use wavedb_core::traits::{NonUniqueStruct, Shape, WaveDbStruct};
 use wavedb_core::wire::{WaveWire, from_wire, to_wire};
 use wavedb_macros::wavedb;
 
@@ -69,23 +69,26 @@ fn unique_wire_roundtrips() {
 fn nonunique_shape_and_generated_types() {
     assert_eq!(Note::SHAPE, Shape::NonUnique);
 
-    // Generated handle + roots holder exist and the PivotId assoc type points at it.
+    // Generated handle + pivot record exist and the PivotId assoc type points
+    // at it.
     let handle = NotePivotId::new(wavedb_core::LocalId::new(7, false, 3));
     assert_eq!(handle.local_id().key(), 7);
     let _: <Note as WaveDbStruct>::PivotId = handle;
 
     let pivot = NotePivot::default();
-    assert_eq!(pivot.recency(), wavedb_core::ChainRoots::default());
-    assert_eq!(pivot.removals(), wavedb_core::LogRoots::default());
-    assert_eq!(pivot.secondaries().len(), 0); // no #[wavedb::pivot]
     assert_eq!(pivot.permission(), None, "default = tenant-only");
 }
 
 #[test]
-fn secondary_indexes_size_the_pivot() {
-    // Order declares two secondary indexes → two extra roots.
-    let pivot = OrderPivot::default();
-    assert_eq!(pivot.secondaries().len(), 2);
+fn a_pivot_holds_no_roots_whatever_it_declares() {
+    // Order declares two secondary indexes, Note none: their chains are key
+    // ranges of the type's lanes (RFC 0078), so both pivots are the same
+    // shape and differ only by name.
+    assert_eq!(
+        wavedb_core::wire::to_wire(&OrderPivot::default()),
+        wavedb_core::wire::to_wire(&NotePivot::default())
+    );
+    assert_eq!(<Order as NonUniqueStruct>::NUM_SECONDARIES, 2);
 }
 
 #[test]
