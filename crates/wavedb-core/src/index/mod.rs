@@ -1,38 +1,31 @@
 //! The `Store`-generic index layer.
 //!
 //! Order-preserving [`IndexKey`] encoding, the [`Bound`] search range, the
-//! [`Pivot`] roots holder, the [`Chain`] every index is (RFC 0075), and
-//! [`IdStreamExt`] set algebra over `Id` streams.
+//! [`Pivot`] a collection is named by, the [`Chain`] every index is — a key
+//! range of an ordered lane (RFC 0078 §7) — and [`IdStreamExt`] set algebra
+//! over `Id` streams.
 //!
-//! Everything here depends only on [`Store`](crate::Store) (`get` + `apply`), so the same code
+//! Everything here depends only on [`Store`](crate::Store), so the same code
 //! compiles for the node (`PageStore` in `wavedb-storage`) and the browser
-//! (IndexedDB). Pages, blocks, and the journal are backend internals and are
+//! (IndexedDB). Pages, blocks, and the settle are backend internals and are
 //! never named here.
 
 mod chain;
-mod chain_insert;
-mod chain_io;
-mod chain_remove;
 mod chain_scan;
 mod key;
+mod lane;
 #[cfg(test)]
 pub(crate) mod mem_store;
 mod sec_key;
-mod segment;
-mod sparse;
-mod sparse_tree;
-mod sparse_write;
 mod stream;
 
-pub use chain::{Chain, DEFAULT_DEAD_MIN, DEFAULT_SEGMENT_MIN};
+pub use chain::{Chain, PREFIX};
+pub use chain_scan::BATCH;
 pub use key::IndexKey;
+pub use lane::Lane;
 pub use sec_key::SecKey;
-pub use segment::{Lane, Segment, mint_lane_id};
-pub use sparse::{Branch, Slot, SparseNode, Step};
-pub use sparse_tree::{DEFAULT_SPARSE_CAP, SparseTree};
 pub use stream::{Except, IdStreamExt, Intersect, Union};
 
-use crate::local_id::LocalId;
 use crate::permission::PermissionRef;
 use crate::wire::WaveWire;
 
@@ -79,78 +72,16 @@ impl Bound {
     }
 }
 
-// ---- Chain roots ------------------------------------------------------------
+// ---- Pivot: what names a collection ----------------------------------------
 
-/// The ids naming one **indexed** chain: both endpoints, and its sparse index's
-/// root.
+/// What names a collection.
 ///
-/// All three are **permanent** (RFC 0050): a split hands its new id to the
-/// interior side so an endpoint keeps its own, and an index root that overflows
-/// keeps its id by moving its contents into a fresh child. So a `Pivot` holding
-/// these is written once at creation and then essentially never — the reason
-/// every index is a chain (RFC 0075): the B+tree they replaced moved its root
-/// on every root split, and rewrote the `Pivot` with it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, WaveWire)]
-pub struct ChainRoots {
-    /// The segment holding the least keys.
-    pub head: LocalId,
-    /// The segment holding the greatest keys — the growth end.
-    pub tail: LocalId,
-    /// Root of the sparse index above the chain.
-    pub index: LocalId,
-}
-
-/// The ids naming one **index-less** chain — the removal log, which nothing
-/// searches, so there is no index root to name (RFC 0050).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, WaveWire)]
-pub struct LogRoots {
-    /// The segment holding the earliest removals.
-    pub head: LocalId,
-    /// The segment holding the most recent — where an append lands and a
-    /// catch-up starts.
-    pub tail: LocalId,
-}
-
-/// Every root a collection holds, gathered so [`Pivot::replace_roots`] takes
-/// one argument instead of a growing positional list.
-///
-/// A struct rather than parameters because the members are three slices and two
-/// `LocalId`-shaped records: positionally, `secondaries` and `lists` are one
-/// transposition away from silently swapping. Every `Pivot` implementation is
-/// generated or hand-written to mirror the macro, so a field added here is a
-/// compile error everywhere it matters and nowhere it doesn't.
-pub struct Roots<'a> {
-    /// One chain per `#[wavedb::pivot(...)]` secondary index, declaration
-    /// order ([RFC 0075]).
-    ///
-    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains.md
-    pub secondaries: &'a [ChainRoots],
-    /// The built-in modification-ordered record chain.
-    pub recency: ChainRoots,
-    /// The removal log.
-    pub removals: LogRoots,
-    /// One per `#[wavedb::list(...)]` declaration, declaration order
-    /// ([RFC 0051]).
-    ///
-    /// [RFC 0051]: https://github.com/wavedb/wavedb/blob/main/rfcs/0051-ordered-record-lists.md
-    pub lists: &'a [ChainRoots],
-    /// One chain per `#[wavedb::fuzzy]` declaration, declaration order
-    /// ([RFC 0056]) — an n-gram posting chain (RFC 0075).
-    ///
-    /// [RFC 0056]: https://github.com/wavedb/wavedb/blob/main/rfcs/0056-fuzzy-string-search-WIP.md
-    pub fuzzy: &'a [ChainRoots],
-}
-
-// ---- Pivot: the collection's roots holder -----------------------------------
-
-/// The collection's roots holder.
-///
-/// `#[wavedb]` generates one per NonUnique type; this trait is the portable shape
-/// the engine reads. Root pointers are [`LocalId`] (tenant-scoped ⇒ `TENANT`
-/// derivable). No element counter — the `Pivot` is rewritten only when a
-/// chain's endpoint moves (its first split) or its default permission changes
-/// (a rare admin op).
-pub trait Pivot: WaveWire + Sized {
+/// `#[wavedb]` generates one per NonUnique type; this trait is the portable
+/// shape the engine reads. Its id is the collection's identity — every chain
+/// of the collection is the key range under it (RFC 0078 §7), so the record
+/// holds no roots and no chain write ever rewrites it. What it holds is the
+/// collection's default access rule.
+pub trait Pivot: WaveWire + Sized + Default {
     /// Identity stamped at the head of the stored pivot record (`[STRUCT_HASH]
     /// [wire]`), routing all pivots of one collection type into one storage
     /// directory. The macro derives it from the generated pivot's own shape.
