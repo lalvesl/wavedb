@@ -118,8 +118,8 @@ impl Plan {
 /// How many consumers a given configuration runs with.
 ///
 /// One, except for sharded WaveDB — the shape of [RFC 0065] §3. A collection
-/// is indivisible (its chain segments and index nodes belong to the Pivot's
-/// owner), so `wavedb/multi` splits by owner: on `shop` a user is a tenant is
+/// is indivisible (its chains are key ranges under the Pivot's id, and
+/// belong to the Pivot's owner), so `wavedb/multi` splits by owner: on `shop` a user is a tenant is
 /// a collection, and on `micro` each consumer gets a `Thing` collection of
 /// its own, on its own data shard, row `n` going to `n % N`. The clamp is
 /// here, at the point the matrix is built, so no row can be *created* with a

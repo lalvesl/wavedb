@@ -199,8 +199,8 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
         db.listed_where(self.pivot, index, bound)
     }
 
-    /// Stream every living record in declared list `index`'s order — one read
-    /// per segment with the records **inline** — where `all` walks pointers and
+    /// Stream every living record in declared list `index`'s order — read by
+    /// range with the records **inline** — where `all` walks pointers and
     /// resolves each record at its anchor. The generated `listed_by_<fields>` wrappers
     /// call this with the declaration's index.
     pub fn listed<'d, D: DbHandle>(
@@ -214,8 +214,9 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
         db.listed(self.pivot, index, 0)
     }
 
-    /// [`listed`](Self::listed) entered at global `offset` — one sparse-index
-    /// descent rather than a walk. The stream runs on to the end of the list.
+    /// [`listed`](Self::listed) entered at global `offset` — skipped to, by
+    /// the page counts, rather than walked. The stream runs on to the end of
+    /// the list.
     pub fn listed_at<'d, D: DbHandle>(
         &self,
         db: &'d D,

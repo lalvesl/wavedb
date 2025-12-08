@@ -7,9 +7,8 @@
 //!
 //! Every read here resolves records **by address**: the index yields anchors and
 //! each one is fetched with `get_of`. That is one page read and one dictionary
-//! decompression per record, which is exactly the cost RFC 0050's chain exists
-//! to collapse — so this module is where phase 6 lands, descending the chain's
-//! sparse index and streaming whole segments instead.
+//! decompression per record — the cost a declared list exists to collapse,
+//! by holding the records inline in its own order.
 //!
 //! [`get`](Collection::get) already needs no index at all: a record's anchor is
 //! a computed address, and it resolves for removed records too, which is what

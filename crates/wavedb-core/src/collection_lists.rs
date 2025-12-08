@@ -256,7 +256,7 @@ mod tests {
     use crate::u48::U48;
     use crate::wire::WaveWire;
 
-    // Hand-rolled fixture of what `#[wavedb(NonUnique, page = 4)]` with one
+    // Hand-rolled fixture of what `#[wavedb(NonUnique)]` with one
     // `#[wavedb::list]` on `name` generates (core can't use the proc-macro).
     #[derive(Debug, Clone, PartialEq, Eq, WaveWire)]
     struct Row {
@@ -284,14 +284,7 @@ mod tests {
 
     impl NonUniqueStruct for Row {
         type Pivot = RowPivot;
-        const PAGE: usize = 4;
         const NUM_LISTS: usize = 1;
-        fn list_page(index: usize) -> usize {
-            match index {
-                0 => 16,
-                _ => Self::PAGE,
-            }
-        }
         fn list_key(&self, index: usize) -> Vec<u8> {
             match index {
                 0 => self.name.key_bytes(),

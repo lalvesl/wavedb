@@ -19,10 +19,11 @@
 //!   how trees nest, and it is the structural counterpart of the two foreign
 //!   keys the SQL schema needs.
 //! - **The lists are the read path.** `Shopping` declares a list ordered by
-//!   `bought_at` and `Product` one ordered by `name`, both `page = 10`, so
-//!   rendering a page of ten is one segment read rather than a walk. That is
-//!   the whole point of RFC 0051, and this workload is where it gets priced —
-//!   against `ORDER BY … LIMIT 10 OFFSET n` on the other four.
+//!   `bought_at` and `Product` one ordered by `name`, so rendering a page of
+//!   ten is one skip into the list's key range and the records inline rather
+//!   than a read per row. That is the whole point of RFC 0051, and this
+//!   workload is where it gets priced — against `ORDER BY … LIMIT 10 OFFSET n`
+//!   on the other four.
 
 use wavedb_core::WaveDbStruct;
 use wavedb_macros::wavedb;
@@ -46,17 +47,12 @@ pub struct User {
 /// bought. It carries only what belongs to the order itself; the line items
 /// hang off the `PivotId` it holds, which is the SQL `shopping_id` foreign key
 /// seen from the other side.
-///
-/// `page = 32` on the built-in chain, `page = 10` on the declared list: the
-/// chain is rewritten at its growth end on every save and wants a small
-/// segment, while the list is rewritten in place and should hold exactly the
-/// page a view renders (RFC 0052).
-#[wavedb(NonUnique, page = 32)]
+#[wavedb(NonUnique)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shopping {
     /// The ordering of the order-history page. `IndexKey` encodes integers
     /// big-endian, so the byte order of this list *is* the chronological one.
-    #[wavedb::list(page = 10)]
+    #[wavedb::list]
     pub bought_at: u64,
     pub discount_cents: u64,
     pub transport_cents: u64,
@@ -64,16 +60,16 @@ pub struct Shopping {
 }
 
 /// NonUnique — the line items of **one** order, in their own collection.
-#[wavedb(NonUnique, page = 32)]
+#[wavedb(NonUnique)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Product {
-    #[wavedb::list(page = 10)]
+    #[wavedb::list]
     pub name: String,
     pub quantity: u32,
     pub unit_cents: u64,
 }
 
-/// The page a list is declared at, and the page every system is asked for.
+/// The rows of a rendered page: what every system is asked for.
 pub const PAGE: usize = 10;
 
 /// The system-neutral form of the generated data. The stored types above carry
@@ -116,7 +112,7 @@ pub fn user_row(u: u64, seed: u64) -> UserRow {
 }
 
 /// How many orders user `u` has: uniform in `1..=max`. With the default
-/// `max = 20` against a `page = 10` list, about half the users have a second
+/// `max = 20` against a [`PAGE`] of ten, about half the users have a second
 /// page, so the pager is exercised rather than merely called.
 #[must_use]
 pub fn shopping_count(u: u64, seed: u64, max: u64) -> u64 {
@@ -141,10 +137,9 @@ pub fn shopping_row(u: u64, s: u64, seed: u64) -> ShoppingRow {
 
 /// How many line items order `(u, s)` has: uniform in `1..=max`.
 ///
-/// At the default `max = 5` this never fills the `page = 10` list, so
-/// `order_detail` is always exactly one segment read — which is the point of
-/// sizing a list's page to the view it renders (RFC 0052), and makes that row
-/// a clean measure of the page descent rather than of a walk.
+/// At the default `max = 5` this never fills a [`PAGE`] of ten, so
+/// `order_detail` is always one whole order's items — a clean measure of a
+/// page read rather than of a walk.
 #[must_use]
 pub fn product_count(u: u64, s: u64, seed: u64, max: u64) -> u64 {
     let mut rng = rng_for(seed, 0x5EED_0004, u, s, 0);

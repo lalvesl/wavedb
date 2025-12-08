@@ -10,8 +10,8 @@
 //!
 //! ## How `wavedb/multi` partitions one dataset
 //!
-//! A collection is indivisible — its chain segments and index nodes belong
-//! to the Pivot's owner — so the multi row does what a node does with many
+//! A collection is indivisible — its chains are key ranges under the
+//! Pivot's id, and belong to the Pivot's owner — so the multi row does what a node does with many
 //! owners: **one `Thing` collection per consumer**, each on that consumer's
 //! own data shard, and row `n` belongs to consumer `n % N`. Every consumer
 //! mints its own Pivot; the dataset, the operations and their order per

@@ -78,7 +78,7 @@ pub enum ShopOp {
     /// Point-read user `u`'s own record.
     Profile { u: u64 },
     /// Render page `page` of user `u`'s order history — the user, then ten of
-    /// their orders. One segment read on WaveDB ([RFC 0051]), an
+    /// their orders. One read of a list's range on WaveDB ([RFC 0051]), an
     /// `ORDER BY … LIMIT 10 OFFSET n` on the other four.
     ///
     /// [RFC 0051]: ../../../rfcs/0051-ordered-record-lists.md
@@ -100,8 +100,8 @@ impl MicroOp {
 
     /// What decides which consumer owns this op: the row, `n`.
     ///
-    /// A collection is indivisible — its chain segments and index nodes
-    /// carry ids of their own and belong to the Pivot's owner, so two
+    /// A collection is indivisible — its chains are key ranges under the
+    /// Pivot's id and belong to the Pivot's owner, so two
     /// consumers writing disjoint *records* of one collection would still
     /// contend on shared *structure* (`wavedb-quick-node/src/shard/route.rs`
     /// states the rule). So the only row with several consumers,
