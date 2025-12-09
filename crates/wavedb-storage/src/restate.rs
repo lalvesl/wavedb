@@ -172,7 +172,7 @@ mod tests {
             blocks: 1,
             meta: 0,
         };
-        let mut pages = disk_pages();
+        let mut pages = disk_pages(false);
         pages.place(&key(0), page(0)).unwrap();
         for i in 1..n {
             let Found::Page { at, .. } = pages.find(&key(i - 1)) else {

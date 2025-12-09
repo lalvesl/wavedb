@@ -268,6 +268,12 @@ impl TypeLog {
         self.r = self.w;
     }
 
+    /// Whether the entry at `loc` is settled: its page holds it.
+    pub fn settled(&self, loc: Loc) -> bool {
+        self.chunk(loc.chunk)
+            .is_some_and(|c| c.start + u64::from(loc.offset) < self.s)
+    }
+
     /// A round's pages are written up to `to`.
     pub fn advance(&mut self, to: u64) {
         self.s = self.s.max(to).min(self.w);

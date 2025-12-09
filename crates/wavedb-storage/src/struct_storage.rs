@@ -23,7 +23,7 @@ use std::cell::RefCell;
 use crate::block::BlockDescriptor;
 use crate::dictionary::DictState;
 use crate::ordered::Journal;
-use crate::pages::Pages;
+use crate::pages::{Pages, disk_pages, remote_pages};
 
 /// One type's page index (RFC 0078). `None` until the store settles the
 /// type's first page.
@@ -44,6 +44,7 @@ pub struct StructStorage {
     struct_hash: u64,
     compress: bool,
     resident: bool,
+    counted: bool,
 }
 
 impl StructStorage {
@@ -54,6 +55,7 @@ impl StructStorage {
             struct_hash,
             compress: true,
             resident: false,
+            counted: false,
         }
     }
 
@@ -66,18 +68,30 @@ impl StructStorage {
             struct_hash,
             compress: false,
             resident: false,
+            counted: false,
         }
     }
 
     /// The same declaration, its pages **resident**: an object-backed store
     /// never evicts them (RFC 0070 §10). For what navigation reads — the
-    /// recency, removal, secondary and fuzzy chains, sparse indexes, Pivots —
+    /// recency, removal, secondary and fuzzy chains, Pivots —
     /// so a walk never waits on the object store, only the record bytes it
     /// leads to do. Behaviour, not bytes: it does not fold into the hash.
     #[must_use]
     pub const fn resident(self) -> Self {
         Self {
             resident: true,
+            ..self
+        }
+    }
+
+    /// The same declaration, each page's entries **counted** in its index
+    /// (RFC 0078 §7): a declared list's lane, whose length and page skips
+    /// are then sums in RAM rather than reads.
+    #[must_use]
+    pub const fn counted(self) -> Self {
+        Self {
+            counted: true,
             ..self
         }
     }
@@ -109,6 +123,8 @@ pub(crate) struct TypeSlot {
     struct_hash: u64,
     /// Never evicted ([`StructStorage::resident`]).
     resident: bool,
+    /// Its pages' entries counted ([`StructStorage::counted`]).
+    counted: bool,
     dir: StructDirectory,
     /// The object store's index for this type (RFC 0070 §2): 128 KiB
     /// pages, ordered by the same keys. `None` until the first upload.
@@ -131,6 +147,7 @@ impl TypeSlot {
         Self {
             struct_hash: declared.struct_hash,
             resident: declared.resident,
+            counted: declared.counted,
             dir: RefCell::new(None),
             remote: RefCell::new(None),
             remote_dict: std::cell::Cell::new(BlockDescriptor::EMPTY),
@@ -148,6 +165,16 @@ impl TypeSlot {
     /// Whether this type's pages are never evicted.
     pub(crate) const fn is_resident(&self) -> bool {
         self.resident
+    }
+
+    /// An empty disk index for this type.
+    pub(crate) const fn new_pages(&self) -> Pages {
+        disk_pages(self.counted)
+    }
+
+    /// An empty object-store index for this type.
+    pub(crate) const fn new_remote_pages(&self) -> Pages {
+        remote_pages(self.counted)
     }
 
     /// This type's page-directory slot — its own cell. `None` until the store settles the first value.
@@ -228,7 +255,7 @@ mod tests {
         assert_eq!(a.struct_hash(), 0xABCD);
         assert!(a.dictionary().borrow_mut().enabled());
 
-        *a.directory().borrow_mut() = Some(disk_pages());
+        *a.directory().borrow_mut() = Some(disk_pages(false));
         assert!(a.directory().borrow_mut().is_some());
         assert!(
             b.directory().borrow_mut().is_none(),

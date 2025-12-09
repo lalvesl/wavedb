@@ -22,8 +22,7 @@ use crate::page_store::PageStore;
 use futures::stream::{self, StreamExt, TryStreamExt};
 
 use crate::pages::{
-    PENDING, Pages, coverage, entries_between, read_page, remote_pages, run_of,
-    within,
+    PENDING, Pages, coverage, entries_between, read_page, run_of, within,
 };
 use crate::plan::{PlannedPage, image_of};
 use crate::record_cache::Records;
@@ -161,7 +160,7 @@ impl PageStore {
             work.push(SlotUpload {
                 idx,
                 flagged,
-                remote: remote.unwrap_or_else(remote_pages),
+                remote: remote.unwrap_or_else(|| slot.new_remote_pages()),
                 fetched: BTreeMap::new(),
                 moved,
                 move_dict,

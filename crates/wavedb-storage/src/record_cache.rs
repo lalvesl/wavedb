@@ -124,6 +124,29 @@ impl RecordCache {
             .map(move |key| (key.as_slice(), self.get(slot, key)))
     }
 
+    /// Whether every key of `slot` the cache holds in `range` is settled —
+    /// so the pages there hold exactly what the cache does, and a page's
+    /// count is the range's.
+    pub fn settled_in<'a>(
+        &'a self,
+        slot: usize,
+        range: (std::ops::Bound<&'a [u8]>, std::ops::Bound<&'a [u8]>),
+    ) -> bool {
+        let (Some(keys), Some(log)) =
+            (self.ordered.get(slot), self.logs.get(slot))
+        else {
+            return true;
+        };
+        keys.range::<[u8], _>(range).all(|key| {
+            let hash = self.index.hash(key);
+            self.index
+                .get(hash, |at| {
+                    at.slot as usize == slot && holds(&self.logs, at, key)
+                })
+                .is_none_or(|at| log.settled(at))
+        })
+    }
+
     /// The index forgot `key` in `slot`: so does its ordered set.
     pub(crate) fn forget(
         ordered: &mut [BTreeSet<Vec<u8>>],

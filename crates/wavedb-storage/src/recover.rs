@@ -304,6 +304,7 @@ mod tests {
             shape: u32::from_le_bytes(Shape::REMOTE.to_bytes()),
             pages: vec![0],
             meta: vec![0],
+            counts: Vec::new(),
         })
     }
 

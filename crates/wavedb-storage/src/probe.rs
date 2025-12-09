@@ -12,8 +12,7 @@
 //! A page's `bytes` is its stored image (compressed), `records` how many it
 //! holds, and `heads` the decoded records grouped by their leading 8 bytes —
 //! the `STRUCT_HASH` every stored value starts with — as `head:count:bytes`,
-//! which tells a type's records from the chain segments, index nodes and
-//! Pivots sharing its slot. `scripts/probe_summary.sh` folds a log of them
+//! which tells a type's records from the Pivots sharing its slot. `scripts/probe_summary.sh` folds a log of them
 //! into KiB per round by component.
 //!
 //! The read path writes `reads` lines beside them — one per 20 000 typed
