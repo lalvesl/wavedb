@@ -7,7 +7,6 @@
 //! #[wavedb(NonUnique)]                       // NonUnique shape
 //! #[wavedb(validate = path, preprocess = p)] // hook fns (either shape)
 //! #[wavedb(compress = false)]                // opt out of zstd (folds into the hash)
-//! #[wavedb(NonUnique, page = 50)]           // segment capacity (folds too)
 //! ```
 
 use syn::punctuated::Punctuated;
@@ -45,11 +44,6 @@ pub struct WavedbArgs {
     /// reaches stored bytes, so it **folds into** the `STRUCT_HASH` (RFC 0052):
     /// flipping it mints a new type rather than reinterpreting old pages.
     pub compress: bool,
-    /// `page = N` — the record chain's segment capacity as a **minimum**
-    /// (RFC 0052): a segment holds N…2N records, splits at 2N, merges at N/2.
-    /// `None` = the engine default. Folds into the `STRUCT_HASH`, because a
-    /// chain laid out at one capacity cannot be reinterpreted at another.
-    pub page: Option<usize>,
 }
 
 impl Default for WavedbArgs {
@@ -59,7 +53,6 @@ impl Default for WavedbArgs {
             validate: None,
             preprocess: None,
             compress: true,
-            page: None,
         }
     }
 }
@@ -88,15 +81,12 @@ impl WavedbArgs {
                 Meta::NameValue(nv) if nv.path.is_ident("compress") => {
                     args.compress = expr_as_bool(&nv.value)?;
                 }
-                Meta::NameValue(nv) if nv.path.is_ident("page") => {
-                    args.page = Some(expr_as_page(&nv.value)?);
-                }
                 other => {
                     return Err(syn::Error::new_spanned(
                         other,
                         "unsupported #[wavedb(...)] argument; expected `NonUnique`, \
-                         `Unique`, `validate = fn`, `preprocess = fn`, \
-                         `compress = bool`, or `page = N`",
+                         `Unique`, `validate = fn`, `preprocess = fn`, or \
+                         `compress = bool`",
                     ));
                 }
             }
@@ -124,32 +114,5 @@ fn expr_as_bool(expr: &syn::Expr) -> syn::Result<bool> {
         Ok(b.value)
     } else {
         Err(syn::Error::new_spanned(expr, "expected `true` or `false`"))
-    }
-}
-
-/// Interpret a `name = value` value as a segment capacity (`page = 50`).
-///
-/// Zero is refused rather than clamped: the split trigger is `len >= 2N`, so
-/// `N = 0` splits every segment on every insert, including an empty one. A
-/// silently-corrected capacity would also be a lie, since the value folds into
-/// the identity — the type would not be the one the declaration names.
-pub fn expr_as_page(expr: &syn::Expr) -> syn::Result<usize> {
-    let syn::Expr::Lit(syn::ExprLit {
-        lit: syn::Lit::Int(n),
-        ..
-    }) = expr
-    else {
-        return Err(syn::Error::new_spanned(
-            expr,
-            "expected an integer literal, e.g. `page = 50`",
-        ));
-    };
-    match n.base10_parse::<usize>()? {
-        0 => Err(syn::Error::new_spanned(
-            expr,
-            "`page` must be at least 1 — a segment capacity of 0 would split \
-             on every insert",
-        )),
-        n => Ok(n),
     }
 }

@@ -46,7 +46,7 @@ pub fn take_declarations(
 ) -> syn::Result<Declared> {
     let key_fields =
         take_and_fold_key(&mut input.attrs, named, args.shape, hash_fields)?;
-    fold_layout_args(args, hash_fields)?;
+    fold_layout_args(args, hash_fields);
     let lists = lists::take_and_fold(input, named, args.shape, hash_fields)?;
     let fuzzy = crate::fuzzy::take_and_fold(input, args.shape, hash_fields)?;
     let pivot_specs = take_pivot_specs(&mut input.attrs)?;
@@ -176,19 +176,8 @@ fn is_pivot_attr(attr: &Attribute) -> bool {
 fn fold_layout_args(
     args: &WavedbArgs,
     hash_fields: &mut Vec<(String, String)>,
-) -> syn::Result<()> {
+) {
     if !args.compress {
         hash_fields.push(("#compress".into(), "false".into()));
     }
-    if let Some(page) = args.page {
-        if args.shape != Shape::NonUnique {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "`page = N` is only valid on a #[wavedb(NonUnique)] struct — \
-                 a Unique type has no collection and so no record chain",
-            ));
-        }
-        hash_fields.push(("#page".into(), page.to_string()));
-    }
-    Ok(())
 }
