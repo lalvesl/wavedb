@@ -1,16 +1,17 @@
-//! Do the sparse index's element counts still agree with the segments they name
-//! **after a crash**? ([RFC 0052]'s last open question.)
+//! Do a list's page counts still agree with the pages they count **after
+//! a crash**? ([RFC 0078] §7.)
 //!
-//! The agreement itself is pinned in `wavedb-core`, but every test there applies
-//! whole batches to an in-memory store that cannot tear. The claim those tests
-//! cannot reach is the one the single-batch rule actually makes: a mutation's
-//! segment writes and the index writes that describe them land together **or not
-//! at all**, so no recovery can produce a chain whose counts have drifted.
+//! A declared list's lane keeps, beside each page's entry in its index, how
+//! many entries the page holds. Its length sums them, and a skip into it
+//! passes whole pages by them, reading none. The counts ride the same
+//! headers as the entries they sit beside, so a recovery that brings back a
+//! page brings back its count — or neither.
 //!
-//! That matters more than it sounds. A drifted count does not fail — the pager
-//! descends by count, so `_at_page` silently returns the wrong rows, and
-//! `_len` silently reports a total the list cannot serve. The failure mode is a
-//! wrong answer, not an error, which is exactly the kind that needs a test.
+//! That matters more than it sounds. A drifted count does not fail — the
+//! pager skips by count, so `_at_page` silently returns the wrong rows, and
+//! `_len` silently reports a total the list cannot serve. The failure mode
+//! is a wrong answer, not an error, which is exactly the kind that needs a
+//! test.
 //!
 //! ## What "crash" means here
 //!
@@ -25,14 +26,14 @@
 //! Two public numbers answer it without reaching into the engine, and they
 //! disagree exactly when the invariant breaks:
 //!
-//! - `listed_by_name_len` is the **index**'s answer (the root's subtree sum);
-//! - counting what `listed_by_name` yields is the **segments**' answer (the walk
-//!   decodes records out of the segments themselves).
+//! - `listed_by_name_len` is the **counts**' answer (a sum over the pages);
+//! - counting what `listed_by_name` yields is the **pages**' answer (the
+//!   walk decodes records out of the pages themselves).
 //!
-//! Comparing them is the user-visible form of "an index entry and its segment
+//! Comparing them is the user-visible form of "a count and its page
 //! disagree", which is a better assertion than poking at internals would be.
 //!
-//! [RFC 0052]: https://github.com/wavedb/wavedb/blob/main/rfcs/0052-segment-size-as-the-pagination-unit.md
+//! [RFC 0078]: https://github.com/wavedb/wavedb/blob/main/rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
 #![allow(clippy::cast_possible_truncation)]
 // row counts, bounded by the test
@@ -45,17 +46,28 @@ use wavedb_core::{LocalHandle, U48};
 use wavedb_macros::wavedb;
 use wavedb_storage::PageStore;
 
-/// A record type with a declared list, both chains at a small capacity.
-///
-/// Small so a few dozen records really do span many segments — and removals
-/// really do drive merges — rather than sitting in the single segment a default
-/// capacity would give them.
-#[wavedb(NonUnique, page = 4)]
+/// A record type with a declared list, its records large enough that a
+/// few dozen span several pages.
+#[wavedb(NonUnique)]
 #[derive(Debug, PartialEq, Eq, Clone, Default)]
 pub struct Entry {
     #[wavedb::list]
     pub name: String,
     pub note: u64,
+    pub pad: Vec<u8>,
+}
+
+/// 3 KiB that do not compress away.
+fn pad(n: u32) -> Vec<u8> {
+    let mut x = u64::from(n).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..3 << 10)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x.to_le_bytes()[0]
+        })
+        .collect()
 }
 
 const TENANT: u32 = 42;
@@ -68,6 +80,7 @@ fn entry(n: u32) -> Entry {
     Entry {
         name: format!("e{n:03}"),
         note: 0,
+        pad: pad(n),
     }
 }
 
@@ -100,7 +113,7 @@ async fn observe(
 }
 
 #[test]
-fn a_crash_cannot_leave_the_counts_disagreeing_with_the_segments() {
+fn a_crash_cannot_leave_the_counts_disagreeing_with_the_pages() {
     let dir = tempfile::tempdir().unwrap();
     let crashed = dir.path().with_extension("crashed");
     let tenant = U48::from(TENANT);
@@ -111,7 +124,7 @@ fn a_crash_cannot_leave_the_counts_disagreeing_with_the_segments() {
         let pivot = Entry::create_pivot(&db).await.unwrap();
         let col = Entry::collection(pivot);
 
-        // Phase 1 — grow past several splits, then force everything out to
+        // Phase 1 — grow over several pages, then force everything out to
         // the data files. These records recover from settled pages.
         let mut ids = Vec::new();
         for n in 0..24u32 {
@@ -120,14 +133,14 @@ fn a_crash_cannot_leave_the_counts_disagreeing_with_the_segments() {
         store.drain().unwrap();
 
         // Phase 2 — more traffic: saves that relocate a record inside both
-        // chains, removals that drive merges, and fresh inserts. A batch of
-        // its own.
+        // chains, removals, and fresh inserts. A batch of its own.
         for (i, id) in ids.iter().enumerate().take(6) {
             let renamed = Entry {
                 // Sorts below everything, so the list relocates the record to
                 // its head — the index must revise two counts, not one.
                 name: format!("a{i:03}"),
                 note: 7,
+                pad: pad(1_000 + i as u32),
             };
             col.save(&db, *id, &renamed).await.unwrap();
         }
@@ -174,7 +187,7 @@ fn a_crash_cannot_leave_the_counts_disagreeing_with_the_segments() {
         assert_eq!(
             after.0,
             after.1.len() as u64,
-            "after recovery the index reports {} rows but the segments hold \
+            "after recovery the counts report {} rows but the pages hold \
              {} — a pager would serve the difference silently",
             after.0,
             after.1.len()
@@ -196,9 +209,9 @@ fn a_crash_cannot_leave_the_counts_disagreeing_with_the_segments() {
             &after.1[..6]
         );
 
-        // And the descent agrees with the walk: entering at an offset must land
-        // on the row the ordered walk has there. This is the count's *only*
-        // consumer, so a drift that both other assertions missed shows up here.
+        // And the skip agrees with the walk: entering at an offset must land
+        // on the row the ordered walk has there. It passes whole pages by
+        // their counts, so a drift the other assertions missed shows up here.
         let page: Vec<Entry> =
             wavedb_core::CollectionHandle::listed_at(&col, &db, 0, 20)
                 .map_ok(|w| w.decode().unwrap())
@@ -208,7 +221,7 @@ fn a_crash_cannot_leave_the_counts_disagreeing_with_the_segments() {
         assert_eq!(
             page.first().map(|e| e.name.clone()),
             after.1.get(20).cloned(),
-            "the offset descent and the ordered walk disagree at 20"
+            "the offset skip and the ordered walk disagree at 20"
         );
     });
 }

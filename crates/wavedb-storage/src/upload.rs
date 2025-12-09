@@ -281,7 +281,8 @@ fn install_remote(
         match *placed {
             Placed::Page { slot, page, run } => {
                 let w = &mut work[slot];
-                let key = &w.shaped.pages[page].key;
+                let planned = &w.shaped.pages[page];
+                let key = &planned.key;
                 let at = match w.remote.find(key) {
                     Found::Page { at, .. } | Found::Hole(at) => at,
                     Found::Uncovered => {
@@ -295,9 +296,13 @@ fn install_remote(
                     blocks: run.count,
                     meta: 0,
                 };
-                w.remote
+                let at = w
+                    .remote
                     .retarget(at, entry)
                     .ok_or(StorageError::Corrupt("a run no range can name"))?;
+                if let Some(page) = &planned.decoded {
+                    w.remote.set_count(at, page.len());
+                }
             }
             Placed::Dict { slot, desc } => dicts[slot] = Some(desc),
         }

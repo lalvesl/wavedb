@@ -112,9 +112,15 @@ pub fn install(
             blocks: run.count,
             meta,
         };
-        work.index
+        let at = work
+            .index
             .retarget(at, placed)
             .ok_or(StorageError::Corrupt("a run no range can name"))?;
+        // A page the round built is counted afresh; one it only moved keeps
+        // its count.
+        if let Some(page) = &planned.decoded {
+            work.index.set_count(at, page.len());
+        }
         pending += weight(meta, run.count);
     }
     for work in plans.iter_mut() {
