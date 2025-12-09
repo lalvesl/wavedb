@@ -1,8 +1,9 @@
 # wavedb-storage
 
-The per-node **storage engine**: the block manager, the per-`STRUCT_HASH` page
-directory (extendible-hashed), the page format, dictionaries, and the write
-pipeline whose settle is the durability point. This is where most of WaveDB's engineering energy lives.
+The per-node **storage engine**: the block manager, the per-`STRUCT_HASH`
+ordered page index ([RFC 0078](../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md)),
+the page format, dictionaries, and the write pipeline whose settle is the
+durability point. This is where most of WaveDB's engineering energy lives.
 
 > For the project-wide idea and quickstart see the
 > [root README](../../readme.md). The browser does **not** use this engine — see
@@ -19,9 +20,12 @@ pipeline whose settle is the durability point. This is where most of WaveDB's en
 | `block_file`      | A shard's data files, named by the block each starts at and found by listing: positioned run I/O, create/cut/delete, the lock, fsync.              |
 | `data_file`       | One data file: its handle and name (16 hex digits), the per-file lock, create/cut/delete.                                                              |
 | `dictionary`      | Per-`STRUCT_HASH` raw-content zstd dictionary (`Dictionary` + `DictState`): capped append-only buffer, version = prefix length, own run persistence. |
-| `directory`       | The per-`STRUCT_HASH` page directory container + the extendible-hashing addressing math (pure addressing).                                           |
-| `directory_pages` | The directory's page **reads**: resolving a bucket to its `SlotPage`, decompressing against the passed-in `DictState`.                               |
-| `plan`            | A settle round's phase 1: touched ids → page images grouped per bucket, splits decided, nothing written.                                             |
+| `ordered`         | The quantized page index of one lane (RFC 0078): sorted sub-headers, one `u32` per page, flags, a list lane's counts; its journal and rebuild.    |
+| `pages`           | A type's index as the store addresses it: a key's page, a page's coverage, reads through the page cache.                                          |
+| `shape`           | One round's pages: records routed to the pages their keys fall in, those pages rebuilt and cut on a quantum boundary when over target.          |
+| `lane_read`       | A scan or count of an ordered lane, started synchronously and finished after restoring any evicted page it meets.                                |
+| `lane_walk`       | One walk of a lane's pages with the record cache's keys merged over them; a counted page passed by its count.                                    |
+| `plan`            | A settle round's phase 1: touched keys → page images per lane, cuts decided, nothing written.                                                    |
 | `checkpoint`      | One window for every image at the end of the active file, ending with its header; one positioned write, then the descriptor swap.                  |
 | `header`          | The header every batch ends with, disk and object store alike (`Header`, `TypeEntry`), and where the object store's chain stands.                 |
 | `restate`         | The header's spare room: restating the addresses of the type restated longest ago, and the horizon that moves.                                     |
@@ -58,7 +62,8 @@ pipeline whose settle is the durability point. This is where most of WaveDB's en
 Settle and rebalance are **off the mutation path**: `apply` only commits to the
 caches; the node's maintenance loop opens a settle cycle every 200 ms, and
 `apply_durable` waits for it ([RFC 0072](../../rfcs/0072-the-settle-is-the-durability-point.md)). The
-`Pivot`/`BpTree` index layer lives in `wavedb_core::index`, not here.
+chains a collection keeps live in `wavedb_core::index`, not here: to this
+crate they are keys of ordered lanes.
 
 ---
 
@@ -66,8 +71,8 @@ caches; the node's maintenance loop opens a settle cycle every 200 ms, and
 
 This crate is the **node's authoritative engine** — native only: per shard, the
 data files (block runs, each settle window ending with its header). It provides the native **`PageStore`** — the
-disk-optimised `Store` backend (`get` + atomic `apply`) — that the `Store`-generic
-`Pivot`/`BpTree` contracts in [`wavedb-core`](../wavedb-core/README.md#index-contracts--pivot-bptree-indexkey)
+disk-optimised `Store` backend (`get`, `scan`, `count` + atomic `apply`) — that
+the `Store`-generic chains in [`wavedb-core`](../wavedb-core/README.md#index-contracts--pivot-chain-indexkey)
 run over. The index logic itself is portable; pages, blocks, headers, and the
 allocator are this crate's internals, hidden behind the `Store` seam.
 
@@ -194,83 +199,48 @@ surfaces as the wire `CrcMismatch` before any decode runs.
 
 ---
 
-## Per-`STRUCT_HASH` page directory
+## Ordered page index
 
-A shard's pages are **partitioned by type**: each `STRUCT_HASH` owns its own page
-directory — an in-memory `Vec<u64>` where every entry is a 64-bit **page
-descriptor** pointing at one homogeneous page (a run of blocks holding records of
-exactly that `STRUCT_HASH`). One `Vec<u64>` per type, so unrelated types never
-share a page and each page compresses against one tight dictionary.
+> Design and progress: [RFC 0078](../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md).
 
-> **"bucket" and "page".** A _page_ is the physical run of blocks holding
-> records of one type; its _bucket_ is the directory entry that identifies it.
-> Under extendible hashing several entries may point at one page — its
-> aliases — and the bucket is the lowest of them, the key every per-page map
-> uses.
+A shard's pages are **partitioned by type**, and a NonUnique type's chains by
+kind: every registered slot — a type's records, its Pivots, and each of its
+five ordered **lanes** (declared lists, recency, removals, secondary, fuzzy)
+— keeps an index of its own, so unrelated content never shares a page and
+each page compresses against one tight dictionary.
 
-### Block descriptor (`u64`) — one format everywhere
+Keys are bytes, compared in order. An anchor's key is its `Id`'s raw `u128`
+big-endian — `KEY`, `TENANT`, `FLAG | SALT` — so a NonUnique type's records
+append at their tail in creation order. A lane entry's key is its chain's
+`[pivot Id 16 B][declaration u8]`, then the entry's own: a collection is a
+key range.
 
-Pages (for every `STRUCT_HASH`) **and** dictionary runs share a single 64-bit
-descriptor — there is no second format ([RFC 0074](../../rfcs/0074-extendible-hashing.md)):
+A page holds the keys of one contiguous range, and the index finds it in
+RAM:
+- **sorted sub-headers**, each a range of the key space: a shared prefix,
+  the next 8 bytes quantized by a power-of-two shift, a base block and the
+  multipliers of the entries' address and size fields;
+- under each, **one `u32` per page** — `q << 16 | address | size` — its
+  first quantum and its run; beside it a flag byte (`PENDING`: not uploaded,
+  `EVICTED`: gone from disk), and in a declared list's lane a **count**, how
+  many entries the page holds (255 means "read it").
 
-| Bits   | Field         | Width | Meaning                                                         |
-| ------ | ------------- | ----- | --------------------------------------------------------------- |
-| 63..18 | `start_block` | `u46` | First 4 KiB block (2⁴⁶ × 4 KiB ≈ **256 PiB** of address).       |
-| 17     | `flag`        | `u1`  | Not uploaded yet (RFC 0070): set on a disk page the object store has not received. |
-| 16..10 | `depth`       | `u7`  | The page's local depth ℓ: the low hash bits its records share (0 for a dictionary). |
-| 9..0   | `size`        | `u10` | A size code: `max(N, round(2^(N/64)))` blocks, exact below 589, ≤ **~253 MiB**. |
+A lookup is two binary searches: the sub-header, then the entry. A page
+boundary is always a quantum boundary, so a key names exactly one page.
 
-`46 + 1 + 7 + 10 = 64` — exact fit. The size code is decoded through a table
-built at compile time from integers alone (`size_code`), so every target reads
-a stored size the same way; a run is always allocated at a size a code stands
-for, and the page's envelope carries its own length.
+A page a round rewrites over `target_blocks_per_bucket` is **cut in that
+round** — at its middle, or the quantum boundary nearest it, refining the
+range when its keys share one quantum. Every page is rewritten
+copy-on-write into the round's window, so the index only ever points at a
+fully written page. What changed is journaled and named in the round's
+header (`RangeRecord`: a range whole, some entries, or gone); a reopen
+rebuilds each index from the newest header down.
 
-### The `Id` hash
-
-`hash_of(id)` is **SeaHash over the 16 little-endian bytes of the `Id`** — fast and
-DoS-resistant. It is seeded with a **per-database random `[u64; 4]` seed persisted
-in the `MANIFEST`**, read once at startup. The seed is
-per-database (not the fixed `STRUCT_HASH` seed): each node rebuilds its own
-directory consistently, and an attacker can't precompute bucket collisions. SeaHash
-is portable across architectures and endianness, so data files reopened on
-another machine route every record to the same bucket. The resulting
-`u64` feeds the extendible-hashing addressing below.
-
-### Extendible hashing
-
-The directory is `2^d` entries, indexed by the hash's low `d` bits; `d` is the
-length's `trailing_zeros`, never stored. A page of local depth ℓ is named by
-the `2^(d−ℓ)` entries `j ≡ c (mod 2^ℓ)`, its bucket `c < 2^ℓ`.
-
-```rust
-let entry = (hash & (dir.len() as u64 - 1)) as usize;
-let bucket = entry & ((1 << dir[entry].depth()) - 1);
-```
-
-A page a settle round rewrites over `target_blocks_per_bucket` splits **in that
-round, by itself**: its records partition by hash bit ℓ — clear stays at `c`,
-set goes to `c + 2^ℓ` — and both halves take ℓ + 1; when ℓ = d the directory
-doubles first by copying itself, so no other record moves. A half still over
-target splits again in the same round. The split costs no extra IO: the page
-was being rewritten anyway, and its halves are the same bytes. A page of one
-record never splits (a large record is a large page, RFC 0049), and none
-splits past depth 32, nor doubles a directory already holding 16 entries a
-page — which keeps the directory at most 128 bytes of RAM a page however the
-records' hashes fall.
-
-The headers name buckets, never aliases, and carry each type's depth; the
-walk that rebuilds a directory fills every alias of a named bucket from the
-ℓ in its descriptor.
-
-### Two kinds of growth
-
-| Growth           | Trigger                                        | Cost                                                                                          |
-| ---------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| **Page grow**    | a round's image of a page outgrows its run     | the page lands in a new run of the round's window, its descriptor rewritten. No keys move.     |
-| **Bucket split** | a page the round rewrites is over target       | the page splits by its next hash bit in the same round, the directory doubling first if needed. No extra IO. |
-
-Every page is rewritten copy-on-write into the round's window, so the
-directory only ever points at a fully written page.
+A **scan** walks the index from the span's edge, one page's coverage at a
+time, merging each page with the record cache's keys over it. In a counted
+lane a page the span covers whole, its count known and the cache holding
+nothing of it unsettled, is passed by its count: a list's length and a skip
+into it read only their edge pages.
 
 ---
 
