@@ -30,12 +30,14 @@ use crate::error::{StorageError, StorageResult};
 pub enum RangeRecord {
     Whole(WholeRange),
     /// Some entries of a range: its base and shape restated, so the
-    /// entries decode on their own.
+    /// entries decode on their own; their counts beside them in a counted
+    /// index, and none otherwise.
     Entries {
         start: Vec<u8>,
         base_block: u64,
         shape: u32,
         entries: Vec<(u32, u8)>,
+        counts: Vec<u8>,
     },
     Gone {
         start: Vec<u8>,
@@ -52,6 +54,8 @@ pub struct WholeRange {
     pub shape: u32,
     pub pages: Vec<u32>,
     pub meta: Vec<u8>,
+    /// Each page's count in a counted index; empty otherwise.
+    pub counts: Vec<u8>,
 }
 
 impl RangeRecord {
@@ -117,13 +121,17 @@ pub(super) fn whole_of(range: &Range<u8>) -> RangeRecord {
         shape: u32::from_le_bytes(range.head.shape.to_bytes()),
         pages: range.entries.pages.clone(),
         meta: range.entries.meta.clone(),
+        counts: range.entries.counts.clone().unwrap_or_default(),
     })
 }
+
+/// An entry as a record restates it: the entry, its flags, its count.
+type Restated = (u32, u8, Option<u8>);
 
 /// One range being gathered.
 enum Building {
     /// Entries newer than any `Whole` met, by quantum.
-    Open(BTreeMap<u16, (u32, u8)>),
+    Open(BTreeMap<u16, Restated>),
     /// Known whole.
     Closed(Range<u8>),
     /// Known gone.
@@ -181,15 +189,26 @@ impl Rebuild {
                     self.closed += 1;
                     Building::Closed(range_of(whole, &newer)?)
                 }
-                (open, RangeRecord::Entries { entries, .. }) => {
+                (
+                    open,
+                    RangeRecord::Entries {
+                        entries, counts, ..
+                    },
+                ) => {
+                    if !counts.is_empty() && counts.len() != entries.len() {
+                        return Err(StorageError::Corrupt("a range's counts"));
+                    }
                     let mut known = if let Some(Building::Open(known)) = open {
                         known
                     } else {
                         self.open += 1;
                         BTreeMap::new()
                     };
-                    for &(entry, meta) in entries {
-                        known.entry(q_of(entry)).or_insert((entry, meta));
+                    for (i, &(entry, meta)) in entries.iter().enumerate() {
+                        let count = counts.get(i).copied();
+                        known
+                            .entry(q_of(entry))
+                            .or_insert((entry, meta, count));
                     }
                     Building::Open(known)
                 }
@@ -229,21 +248,27 @@ impl Rebuild {
 /// The range `whole` names, with the `newer` entries over its own.
 fn range_of(
     whole: &WholeRange,
-    newer: &BTreeMap<u16, (u32, u8)>,
+    newer: &BTreeMap<u16, Restated>,
 ) -> StorageResult<Range<u8>> {
     let shape = Shape::from_bytes(whole.shape.to_le_bytes())
         .ok_or(StorageError::Corrupt("a range's shape"))?;
-    if whole.pages.is_empty() || whole.pages.len() != whole.meta.len() {
+    let n = whole.pages.len();
+    let counted = !whole.counts.is_empty();
+    if n == 0 || whole.meta.len() != n || (counted && whole.counts.len() != n) {
         return Err(StorageError::Corrupt("a range's entries"));
     }
     let mut entries = Entries {
         pages: whole.pages.clone(),
         meta: whole.meta.clone(),
+        counts: counted.then(|| whole.counts.clone()),
     };
     for (i, entry) in entries.pages.iter_mut().enumerate() {
-        if let Some(&(newer, meta)) = newer.get(&q_of(*entry)) {
+        if let Some(&(newer, meta, count)) = newer.get(&q_of(*entry)) {
             *entry = newer;
             entries.meta[i] = meta;
+            if let (Some(counts), Some(count)) = (&mut entries.counts, count) {
+                counts[i] = count;
+            }
         }
     }
     let ascending = entries.pages.windows(2).all(|w| q_of(w[0]) < q_of(w[1]));

@@ -128,7 +128,11 @@ impl<M: Copy + Default> PageIndex<M> {
         let page = entries.pages[at.entry];
         let middle = Range {
             head: middle_head,
-            entries: Entries::one(with_q(page, 0), entries.meta[at.entry]),
+            entries: Entries::one(
+                with_q(page, 0),
+                entries.meta[at.entry],
+                entries.count(at.entry),
+            ),
         };
         let own = u32::from(q_of(page));
         let end = entries.end_of(at.entry);
@@ -162,7 +166,8 @@ impl<M: Copy + Default> PageIndex<M> {
         let entry = middle_head.encode(0, page.address, page.blocks)?;
         let middle = Range {
             head: middle_head,
-            entries: Entries::one(entry, page.meta),
+            // The page moves, its entries with it.
+            entries: Entries::one(entry, page.meta, entries.count(at.entry)),
         };
         let left = entries.head(at.entry);
         let right = self.right_of(at, end, end);

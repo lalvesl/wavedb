@@ -16,7 +16,7 @@ use crate::dictionary::DictState;
 use crate::error::StorageResult;
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
-use crate::pages::{Pages, disk_pages, run_of, take_page};
+use crate::pages::{Pages, run_of, take_page};
 use crate::record_cache::Records;
 pub use crate::shape::{PlannedPage, blocks_for};
 use crate::shape::{Rules, shape};
@@ -77,8 +77,11 @@ impl PageStore {
         mut records: Records,
     ) -> StorageResult<SlotPlan> {
         let slot = &self.types[idx];
-        let mut index =
-            slot.directory().borrow().clone().unwrap_or_else(disk_pages);
+        let mut index = slot
+            .directory()
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| slot.new_pages());
         records.sort_by(|a, b| a.0.cmp(&b.0));
         let mut dict = slot.dictionary().borrow_mut();
         let mut grew = false;

@@ -31,16 +31,20 @@ pub const PENDING: u8 = 1;
 /// A page gone from disk: the object store holds it.
 pub const EVICTED: u8 = 2;
 
-/// An empty index for a disk lane.
+/// An empty index for a disk lane, its pages counted or not.
 #[must_use]
-pub const fn disk_pages() -> Pages {
-    PageIndex::new(Shape::DISK)
+pub const fn disk_pages(counted: bool) -> Pages {
+    counting(PageIndex::new(Shape::DISK), counted)
 }
 
-/// An empty index for the object store's pages.
+/// An empty index for the object store's pages, counted or not.
 #[must_use]
-pub const fn remote_pages() -> Pages {
-    PageIndex::new(Shape::REMOTE)
+pub const fn remote_pages(counted: bool) -> Pages {
+    counting(PageIndex::new(Shape::REMOTE), counted)
+}
+
+const fn counting(pages: Pages, counted: bool) -> Pages {
+    if counted { pages.counting() } else { pages }
 }
 
 /// The key `id` is stored under.
