@@ -37,8 +37,8 @@ pub struct ResolvedFuzzy {
 /// fold each into the STRUCT_HASH.
 ///
 /// **The fold writes resolved values, not declared ones**, which departs from
-/// how `#[wavedb(compress)]` and `page` elide their defaults — and the reason
-/// is worth stating. Those knobs elide so that types predating the knob keep
+/// how `#[wavedb(compress)]` elides its default — and the reason
+/// is worth stating. That knob elides so that types predating it keep
 /// their identity. `#fuzzy` is new, so there is no identity to preserve, and
 /// eliding would create a real hazard instead: if [`DEFAULT_N`] ever changed,
 /// an undeclared `#[wavedb::fuzzy]` would keep its old hash while its postings

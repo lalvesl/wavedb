@@ -7,7 +7,7 @@
 //! same chain over the same order, `ResolvedPivot` reused verbatim — and
 //! differ only in what they store under it ([RFC 0075]): a secondary stores
 //! anchors and pays one random read per row, a list stores whole records
-//! inline and pays one read per segment. So a list answers the same
+//! inline and reads them with the range. So a list answers the same
 //! `by_<fields>` lookups ([`orderings`](crate::orderings)), and declaring both
 //! on one ordering is refused. Swapping one for the other is a one-word
 //! change, and a new type.
@@ -23,14 +23,11 @@ use crate::arg_specs::ListSpec;
 use crate::args::Shape;
 use crate::secondaries::ResolvedPivot;
 
-/// One resolved `#[wavedb::list(...)]`: the ordering, plus its own segment
-/// capacity when it declared one.
+/// One resolved `#[wavedb::list(...)]`: its ordering.
 pub struct ResolvedList {
     /// The ordering itself — the same shape a secondary index takes, because
     /// the two impose the same order.
     pub order: ResolvedPivot,
-    /// This list's `page = N`, or `None` to inherit the struct's.
-    pub page: Option<usize>,
 }
 
 /// Take every `#[wavedb::list]` declaration off `input` — the field-level
@@ -51,11 +48,10 @@ pub fn take_and_fold(
 ) -> syn::Result<Vec<ResolvedList>> {
     let mut lists: Vec<ResolvedList> = take_field_lists(input)?
         .into_iter()
-        .map(|(ident, ty, page)| ResolvedList {
+        .map(|(ident, ty)| ResolvedList {
             order: ResolvedPivot {
                 fields: vec![(ident, ty)],
             },
-            page,
         })
         .collect();
     for spec in take_list_specs(&mut input.attrs)? {
@@ -73,7 +69,6 @@ pub fn take_and_fold(
                     "#[wavedb::list(...)]",
                 )?,
             },
-            page: spec.page,
         });
     }
     if !lists.is_empty() && shape != Shape::NonUnique {
@@ -91,26 +86,20 @@ pub fn take_and_fold(
             .map(|(f, _)| f.to_string())
             .collect::<Vec<_>>()
             .join(",");
-        // The capacity rides the same entry: it lays the chain out, so it is a
-        // fact about stored bytes exactly as the struct-level `page` is.
-        let entry = match list.page {
-            Some(n) => format!("{joined}@{n}"),
-            None => joined,
-        };
-        hash_fields.push((format!("#list{i}"), entry));
+        hash_fields.push((format!("#list{i}"), joined));
     }
     Ok(lists)
 }
 
 /// Strip `#[wavedb::list]` from the struct's fields, returning each marked
-/// field in declaration order with the capacity it declared.
+/// field in declaration order.
 ///
 /// The field spelling names no fields: the field it sits on *is* the ordering.
-/// It may still carry `page = N`. A composite ordering has no single field to
-/// sit on, which is what the struct-level spelling is for.
+/// A composite ordering has no single field to sit on, which is what the
+/// struct-level spelling is for.
 fn take_field_lists(
     input: &mut DeriveInput,
-) -> syn::Result<Vec<(Ident, syn::Type, Option<usize>)>> {
+) -> syn::Result<Vec<(Ident, syn::Type)>> {
     let Data::Struct(data) = &mut input.data else {
         return Ok(Vec::new());
     };
@@ -122,14 +111,7 @@ fn take_field_lists(
                 kept.push(attr);
                 continue;
             }
-            let spec = match &attr.meta {
-                syn::Meta::Path(_) => ListSpec {
-                    fields: Vec::new(),
-                    page: None,
-                },
-                _ => attr.parse_args::<ListSpec>()?,
-            };
-            if !spec.fields.is_empty() {
+            if !matches!(attr.meta, syn::Meta::Path(_)) {
                 return Err(syn::Error::new_spanned(
                     &attr,
                     "a field's #[wavedb::list] names no fields — the field it \
@@ -140,7 +122,7 @@ fn take_field_lists(
             let ident = field.ident.clone().ok_or_else(|| {
                 syn::Error::new_spanned(&attr, "unnamed field")
             })?;
-            marked.push((ident, field.ty.clone(), spec.page));
+            marked.push((ident, field.ty.clone()));
         }
         field.attrs = kept;
     }
@@ -169,8 +151,8 @@ fn is_list_attr(attr: &Attribute) -> bool {
     segs.len() == 2 && segs[0].ident == "wavedb" && segs[1].ident == "list"
 }
 
-/// The items injected into the `NonUniqueStruct` impl: the list count, the
-/// per-list sort-key encoder, and the per-list segment capacity.
+/// The items injected into the `NonUniqueStruct` impl: the list count and the
+/// per-list sort-key encoder.
 pub fn trait_items(lists: &[ResolvedList]) -> TokenStream {
     if lists.is_empty() {
         return TokenStream::new();
@@ -180,12 +162,6 @@ pub fn trait_items(lists: &[ResolvedList]) -> TokenStream {
         let expr = list.order.self_key_expr();
         quote!(#i => #expr,)
     });
-    // Only the lists that declared one need an arm; the rest fall through to
-    // the struct's own `page`, which is the trait default's job.
-    let page_arms = lists
-        .iter()
-        .enumerate()
-        .filter_map(|(i, list)| list.page.map(|n| quote!(#i => #n,)));
     quote! {
         const NUM_LISTS: usize = #n;
 
@@ -195,19 +171,11 @@ pub fn trait_items(lists: &[ResolvedList]) -> TokenStream {
                 _ => ::std::vec::Vec::new(),
             }
         }
-
-        fn list_page(index: usize) -> usize {
-            match index {
-                #(#page_arms)*
-                _ => <Self as ::wavedb_core::NonUniqueStruct>::PAGE,
-            }
-        }
     }
 }
 
 /// The `{Name}Lists` trait + its `CollectionHandle<{Name}>` impl: per declared
-/// list, a whole-list enumeration and the paged entry point the sparse index's
-/// counts make one descent.
+/// list, a whole-list enumeration, a paged entry point and its length.
 pub fn listed_readers(name: &Ident, lists: &[ResolvedList]) -> TokenStream {
     if lists.is_empty() {
         return TokenStream::new();
@@ -249,13 +217,13 @@ fn reader_decls(
     };
     let Some(i) = index else {
         return quote! {
-            /// Stream every living record in this declared order — one read
-            /// per segment, records inline.
+            /// Stream every living record in this declared order, records
+            /// inline.
             fn #listed<D: ::wavedb_core::DbHandle>(&self, db: &D) -> #stream;
 
-            /// The same list entered at page `page` of `page_size` rows: one
-            /// sparse-index descent instead of a walk. The stream runs on to
-            /// the end of the list; take `page_size` from it.
+            /// The same list entered at page `page` of `page_size` rows —
+            /// skipped to, not walked. The stream runs on to the end of the
+            /// list; take `page_size` from it.
             fn #at_page<D: ::wavedb_core::DbHandle>(
                 &self,
                 db: &D,

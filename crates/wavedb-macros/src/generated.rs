@@ -106,11 +106,7 @@ pub fn nonunique_types(
     name: &Ident,
     hash: u64,
     declared: &Declared,
-    page: Option<usize>,
 ) -> syn::Result<TokenStream> {
-    // `page = N` rides the trait as a const the list readers read; unset
-    // leaves the trait default (RFC 0052).
-    let page_const = page.map(|n| quote!(const PAGE: usize = #n;));
     let secondaries_specs = &declared.secondaries;
     let pivot_id = format_ident!("{}PivotId", name);
     let pivot = format_ident!("{}Pivot", name);
@@ -161,7 +157,6 @@ pub fn nonunique_types(
 
         impl ::wavedb_core::NonUniqueStruct for #name {
             type Pivot = #pivot;
-            #page_const
             #secondary_items
             #list_items
             #fuzzy_items
