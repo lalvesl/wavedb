@@ -100,11 +100,8 @@ pub enum NodeErrorKind {
     /// An index pointed at a record the store no longer holds.
     RecordMissing,
 
-    /// A value read as a chain segment or sparse-index node had a foreign
-    /// lane tag.
+    /// A key read as a chain's entry lies outside the chain.
     LaneBadTag,
-    /// A chain segment or sparse-index pointer resolved to nothing.
-    ChainNodeMissing,
     /// A secondary-index lookup out of the declared range.
     SecondaryIndexOutOfRange,
     /// A value did not fit in 48 bits.
@@ -161,7 +158,6 @@ impl NodeError {
             CoreError::UnknownStructHash(_) => NodeErrorKind::UnknownStructHash,
 
             CoreError::LaneBadTag(_) => NodeErrorKind::LaneBadTag,
-            CoreError::ChainNodeMissing(_) => NodeErrorKind::ChainNodeMissing,
             CoreError::PivotMissing(_) => NodeErrorKind::PivotMissing,
             CoreError::RecordMissing(_) => NodeErrorKind::RecordMissing,
             CoreError::SecondaryIndexOutOfRange(_) => {

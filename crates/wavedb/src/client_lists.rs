@@ -36,11 +36,9 @@ use crate::error::{Error, Result};
 
 /// How many records the unbounded reader asks for per round trip.
 ///
-/// Deliberately **not** the list's declared `page`: that number is the segment
-/// capacity a rendered page wants, and a type declaring `page = 4` would turn a
-/// full walk into a round trip per four records. A pager that does want exactly
-/// one declared page asks for it — that is what
-/// [`listed_page`](wavedb_core::DbHandle::listed_page) is for.
+/// Deliberately **not** a rendered page: a full walk in page-sized round trips
+/// would pay one per page. A pager that wants exactly one page asks for it —
+/// that is what [`listed_page`](wavedb_core::DbHandle::listed_page) is for.
 const CHUNK: u32 = 256;
 
 /// Fetch one page of declared list `index` as its raw framed

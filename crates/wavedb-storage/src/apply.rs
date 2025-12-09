@@ -246,7 +246,11 @@ impl Store for PageStore {
     ) -> impl Future<Output = CoreResult<Vec<Entry>>> {
         let now = self.scan_now(lane, span);
         let span = span.clone();
-        async move { self.scan_rest(lane, &span, now).await.map_err(Into::into) }
+        async move {
+            let again = || self.scan_now(lane, &span);
+            let (entries, _) = self.walk_rest(now, again).await?;
+            Ok(entries)
+        }
     }
 
     fn count(
@@ -255,11 +259,12 @@ impl Store for PageStore {
         lo: &[u8],
         hi: Option<&[u8]>,
     ) -> impl Future<Output = CoreResult<u64>> {
-        let span = Self::counted(lo, hi);
-        let now = self.scan_now(lane, &span);
+        let now = self.count_now(lane, lo, hi);
+        let (lo, hi) = (lo.to_vec(), hi.map(<[u8]>::to_vec));
         async move {
-            let all = self.scan_rest(lane, &span, now).await?;
-            Ok(all.len() as u64)
+            let again = || self.count_now(lane, &lo, hi.as_deref());
+            let (_, counted) = self.walk_rest(now, again).await?;
+            Ok(counted)
         }
     }
 

@@ -102,11 +102,10 @@ fn node_serves_declared_list_pages_over_http() {
         let node = start(dir.path().to_path_buf());
         let client = NetClient::new(node.addr.to_string());
 
-        // `Row` declares `#[wavedb::list]` on `n` at `page = 4`, so ten records
-        // span three segments and a page read really does cross them. The values
-        // go in scrambled: a list is sorted at write time, so what comes back
-        // ascending proves the order is the list's and not the arrival order's
-        // (which is what `All` would answer with).
+        // `Row` declares `#[wavedb::list]` on `n`. The values go in scrambled:
+        // a list is sorted at write time, so what comes back ascending proves
+        // the order is the list's and not the arrival order's (which is what
+        // `All` would answer with).
         for n in [7u64, 2, 9, 0, 5, 3, 8, 1, 6, 4] {
             client
                 .call_ok(
@@ -122,7 +121,7 @@ fn node_serves_declared_list_pages_over_http() {
         assert_eq!(
             list_len(&client, node.rows, 0).await,
             10,
-            "the pager's `of M` comes off the sparse index's root sum"
+            "the pager's `of M` is the sum of the list's page counts"
         );
 
         // The pages are the caller's: `limit` is what it renders.

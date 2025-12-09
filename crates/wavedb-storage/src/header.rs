@@ -262,6 +262,7 @@ mod tests {
                     base_block: 9,
                     shape: 0x0101_0c30,
                     entries: vec![(3, 0), (4, 1)],
+                    counts: vec![7, 255],
                 }],
             }],
             remote: Vec::new(),

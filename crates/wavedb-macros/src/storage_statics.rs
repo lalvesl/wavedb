@@ -119,12 +119,13 @@ pub fn lane_statics(name: &Ident, hash: u64) -> TokenStream {
             }
 
             /// Storage slot for this type's **declared lists** — the only
-            /// entries holding whole records.
+            /// entries holding whole records, and the only ones counted
+            /// per page, for a list's length and its pages.
             #[must_use]
             pub fn records_lane_storage()
             -> &'static ::wavedb_storage::StructStorage {
                 static SLOT: ::wavedb_storage::StructStorage =
-                    ::wavedb_storage::StructStorage::new(#records);
+                    ::wavedb_storage::StructStorage::new(#records).counted();
                 &SLOT
             }
 

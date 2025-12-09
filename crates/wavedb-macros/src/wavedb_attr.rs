@@ -81,8 +81,7 @@ pub fn expand(
         Shape::Unique => (quote!(()), unique_ops(&name)),
         Shape::NonUnique => {
             let pivot_id = format_ident!("{}PivotId", name);
-            let types =
-                generated::nonunique_types(&name, hash, &declared, args.page)?;
+            let types = generated::nonunique_types(&name, hash, &declared)?;
             (quote!(#pivot_id), types)
         }
     };
