@@ -252,11 +252,11 @@ fn secondary_index_survives_reopen() {
     });
 }
 
-/// A secondary chain long enough to span many segments — and a sparse index
-/// above them — answers every value after a reopen, the removed records
-/// gone from it and the re-keyed ones at their new value only.
+/// A secondary chain long enough to span many pages answers every value
+/// after a reopen, the removed records gone from it and the re-keyed ones at
+/// their new value only.
 #[test]
-fn a_secondary_chain_of_many_segments_survives_reopen() {
+fn a_secondary_chain_of_many_pages_survives_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let tenant = U48::from(TENANT);
     let tag = |k: usize| format!("t{:02}", k % 20);

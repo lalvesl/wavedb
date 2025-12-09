@@ -6,6 +6,11 @@
 //! read by the same span (`read_span`), so a scan here means what a scan of
 //! any in-memory store means.
 //!
+//! Each runs over a plain lane and over a **counted** one (a declared
+//! list's), whose skips and counts pass whole pages by their count: they
+//! must read exactly the same — with writes unsettled over the pages, and
+//! with pages holding more entries than a count byte says.
+//!
 //! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
 // The engine is used from one thread; its futures are not `Send` (lib.rs).
@@ -21,11 +26,13 @@ use wavedb_storage::{PageStore, StructStorage};
 
 const LANE: u64 = 0x0078_0004_1A4E_0001;
 static SLOT: StructStorage = StructStorage::new(LANE);
+const COUNTED: u64 = 0x0078_0004_1A4E_0002;
+static COUNTED_SLOT: StructStorage = StructStorage::new(COUNTED).counted();
 
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 
 fn open(dir: &Path) -> PageStore {
-    PageStore::open(dir, &[&SLOT]).expect("open")
+    PageStore::open(dir, &[&SLOT, &COUNTED_SLOT]).expect("open")
 }
 
 /// A collection's key: its 16-byte prefix, then a big-endian position.
@@ -35,9 +42,10 @@ fn key(collection: u8, at: u64) -> Vec<u8> {
     key
 }
 
-fn value(at: u64, version: u8) -> Vec<u8> {
+/// A value of `len` bytes: a page holds about 40 of 200, and hundreds of 1.
+fn value(at: u64, version: u8, len: usize) -> Vec<u8> {
     let mut bytes = at.to_le_bytes().to_vec();
-    bytes.resize(200, version);
+    bytes.resize(len, version);
     bytes
 }
 
@@ -62,7 +70,8 @@ fn write(store: &PageStore, model: &mut Model, writes: &[Write]) {
 fn spans(collection: u8) -> Vec<Span> {
     let whole = Span::prefix(&[collection; 16], usize::MAX);
     let mut out = vec![whole.clone(), whole.clone().reversed()];
-    for (skip, limit) in [(0, 1), (0, 7), (5, 3), (40, 25), (1_000, 10)] {
+    let skips = [(0, 1), (0, 7), (5, 3), (40, 25), (333, 4), (1_000, 10)];
+    for (skip, limit) in skips {
         let span = Span {
             skip,
             limit,
@@ -85,13 +94,13 @@ fn spans(collection: u8) -> Vec<Span> {
 
 /// Every span over both collections reads what the model holds, and every
 /// count counts it.
-fn agrees(store: &PageStore, model: &Model) {
+fn agrees(store: &PageStore, lane: u64, model: &Model) {
     for collection in [1, 2] {
         for span in spans(collection) {
-            let got = block_on(store.scan(LANE, &span)).expect("scan");
+            let got = block_on(store.scan(lane, &span)).expect("scan");
             assert_eq!(got, read_span(model, &span), "{span:?}");
             let counted =
-                block_on(store.count(LANE, &span.lo, span.hi.as_deref()))
+                block_on(store.count(lane, &span.lo, span.hi.as_deref()))
                     .expect("count");
             assert_eq!(
                 counted,
@@ -105,8 +114,7 @@ fn agrees(store: &PageStore, model: &Model) {
 /// Two collections share the lane, each read alone, from the cache before
 /// a settle, from the pages after, from both once more is written, and
 /// from the pages alone after a reopen.
-#[test]
-fn a_lane_reads_the_same_from_cache_pages_and_a_reopen() {
+fn reads_the_same(lane: u64, len: usize) {
     let dir = tempfile::tempdir().unwrap();
     let mut model = Model::new();
     {
@@ -115,45 +123,69 @@ fn a_lane_reads_the_same_from_cache_pages_and_a_reopen() {
         // the writes would have given them.
         let mut writes = Vec::new();
         for at in 0..1_000u64 {
-            writes.push(Write::Set(LANE, key(1, at * 2), value(at, 1)));
-            writes.push(Write::Set(LANE, key(2, at), value(at, 2)));
+            writes.push(Write::Set(lane, key(1, at * 2), value(at, 1, len)));
+            writes.push(Write::Set(lane, key(2, at), value(at, 2, len)));
         }
         write(&store, &mut model, &writes);
-        agrees(&store, &model);
+        agrees(&store, lane, &model);
 
         block_on(store.apply_durable(&[])).expect("settle");
-        agrees(&store, &model);
+        agrees(&store, lane, &model);
 
         // Over the pages: removals, rewrites and keys between pages.
         let mut writes = Vec::new();
         for at in (0..1_000u64).step_by(3) {
-            writes.push(Write::Unset(LANE, key(1, at * 2)));
-            writes.push(Write::Set(LANE, key(1, at * 2 + 1), value(at, 3)));
-            writes.push(Write::Set(LANE, key(2, at), value(at, 4)));
+            writes.push(Write::Unset(lane, key(1, at * 2)));
+            let between = value(at, 3, len);
+            writes.push(Write::Set(lane, key(1, at * 2 + 1), between));
+            writes.push(Write::Set(lane, key(2, at), value(at, 4, len)));
         }
         write(&store, &mut model, &writes);
-        agrees(&store, &model);
+        agrees(&store, lane, &model);
         block_on(store.apply_durable(&[])).expect("settle");
+        agrees(&store, lane, &model);
     }
     let store = open(dir.path());
-    agrees(&store, &model);
+    agrees(&store, lane, &model);
+}
+
+#[test]
+fn a_lane_reads_the_same_from_cache_pages_and_a_reopen() {
+    reads_the_same(LANE, 200);
+}
+
+/// A counted lane's skips and counts pass pages by their counts, and read
+/// what a plain lane reads.
+#[test]
+fn a_counted_lane_reads_the_same_from_cache_pages_and_a_reopen() {
+    reads_the_same(COUNTED, 200);
+}
+
+/// Pages holding more entries than a count byte says are read, not
+/// passed: the count is never a guess.
+#[test]
+fn a_counted_lane_reads_pages_past_its_count_byte() {
+    reads_the_same(COUNTED, 1);
 }
 
 /// Unsetting a key never written, or one already unset, changes nothing;
 /// an emptied collection reads empty from either end.
 #[test]
 fn an_emptied_collection_reads_empty() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = open(dir.path());
-    let mut model = Model::new();
-    let sets = (0..300).map(|at| Write::Set(LANE, key(1, at), value(at, 1)));
-    write(&store, &mut model, &sets.collect::<Vec<_>>());
-    block_on(store.apply_durable(&[])).expect("settle");
-    let unsets = (0..300).map(|at| Write::Unset(LANE, key(1, at)));
-    write(&store, &mut model, &unsets.collect::<Vec<_>>());
-    write(&store, &mut model, &[Write::Unset(LANE, key(1, 9_999))]);
-    agrees(&store, &model);
-    block_on(store.apply_durable(&[])).expect("settle");
-    agrees(&store, &model);
-    assert!(model.is_empty());
+    for lane in [LANE, COUNTED] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let mut model = Model::new();
+        let sets =
+            (0..300).map(|at| Write::Set(lane, key(1, at), value(at, 1, 200)));
+        write(&store, &mut model, &sets.collect::<Vec<_>>());
+        block_on(store.apply_durable(&[])).expect("settle");
+        let unsets = (0..300).map(|at| Write::Unset(lane, key(1, at)));
+        write(&store, &mut model, &unsets.collect::<Vec<_>>());
+        write(&store, &mut model, &[Write::Unset(lane, key(1, 9_999))]);
+        agrees(&store, lane, &model);
+        block_on(store.apply_durable(&[])).expect("settle");
+        agrees(&store, lane, &model);
+        assert!(model.is_empty());
+    }
 }
