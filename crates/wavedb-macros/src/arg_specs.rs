@@ -10,7 +10,7 @@
 use syn::punctuated::Punctuated;
 use syn::{Ident, Meta, Token, parse::ParseStream};
 
-use crate::args::{expr_as_page, expr_as_path};
+use crate::args::expr_as_path;
 
 /// One `#[wavedb::pivot(...)]` declaration: the indexed field(s) in
 /// declaration order — `pivot(amount)` or a composite `pivot((customer, date))`
@@ -43,77 +43,50 @@ impl syn::parse::Parse for PivotSpec {
     }
 }
 
-/// One `#[wavedb::list(...)]` declaration ([RFC 0051]): the ordering's field(s)
-/// and its own optional segment capacity.
+/// One struct-level `#[wavedb::list(...)]` declaration ([RFC 0051]): the
+/// ordering's field(s).
 ///
 /// ```text
 /// #[wavedb::list]                    // on a field: that field is the ordering
-/// #[wavedb::list(page = 25)]         // on a field, with its own capacity
 /// #[wavedb::list(name)]              // on the struct
 /// #[wavedb::list((city, name))]      // composite
-/// #[wavedb::list((city, name), page = 25)]
 /// ```
 ///
-/// The capacity is per **list** rather than inherited from the struct's `page`
-/// because the two chains have opposite write profiles: the built-in chain is
-/// modification-ordered, so every save rewrites its growth-end segment whole and
-/// wants a small N, while a list keyed by a domain value is rewritten in place
-/// and can afford the N a rendered page actually needs (RFC 0052).
+/// A list takes no capacity: a page of it is a skip and a limit on its key
+/// range ([RFC 0078] §7), so nothing about its layout is the declaration's
+/// to choose.
 ///
 /// [RFC 0051]: https://github.com/wavedb/wavedb/blob/main/rfcs/0051-ordered-record-lists.md
+/// [RFC 0078]: https://github.com/wavedb/wavedb/blob/main/rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 #[derive(Debug, Clone)]
 pub struct ListSpec {
-    /// The ordering's fields; empty for the field-level spelling, where the
-    /// field it sits on is the ordering.
+    /// The ordering's fields; empty when the declaration named none.
     pub fields: Vec<Ident>,
-    /// This list's segment capacity, or `None` to inherit the struct's.
-    pub page: Option<usize>,
 }
 
 impl syn::parse::Parse for ListSpec {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut spec = Self {
-            fields: Vec::new(),
-            page: None,
-        };
-        // A leading `(f1, f2)` or bare `field` names the ordering; `page = N`
-        // is a `name = value` and never an ordering, so peeking for it is what
-        // separates the field-level spelling from the struct-level one.
-        if input.peek(syn::token::Paren) {
-            let inner;
-            syn::parenthesized!(inner in input);
-            spec.fields =
-                Punctuated::<Ident, Token![,]>::parse_terminated(&inner)?
-                    .into_iter()
-                    .collect();
-            if !(2..=3).contains(&spec.fields.len()) {
-                return Err(syn::Error::new(
-                    inner.span(),
-                    "a composite #[wavedb::list((..))] takes 2 or 3 fields",
-                ));
-            }
-        } else if input.peek(Ident) && !input.peek2(Token![=]) {
-            spec.fields = vec![input.parse()?];
+        if input.is_empty() {
+            return Ok(Self { fields: Vec::new() });
         }
-        if !input.is_empty() {
-            input.parse::<Token![,]>().ok();
+        if !input.peek(syn::token::Paren) {
+            return Ok(Self {
+                fields: vec![input.parse()?],
+            });
         }
-        for meta in Punctuated::<Meta, Token![,]>::parse_terminated(input)? {
-            let Meta::NameValue(nv) = &meta else {
-                return Err(syn::Error::new_spanned(
-                    &meta,
-                    "expected `page = N` after the ordering's field(s)",
-                ));
-            };
-            if !nv.path.is_ident("page") {
-                return Err(syn::Error::new_spanned(
-                    &nv.path,
-                    "the only #[wavedb::list(...)] option is `page = N`",
-                ));
-            }
-            spec.page = Some(expr_as_page(&nv.value)?);
+        let inner;
+        syn::parenthesized!(inner in input);
+        let fields: Vec<Ident> =
+            Punctuated::<Ident, Token![,]>::parse_terminated(&inner)?
+                .into_iter()
+                .collect();
+        if !(2..=3).contains(&fields.len()) {
+            return Err(syn::Error::new(
+                inner.span(),
+                "a composite #[wavedb::list((..))] takes 2 or 3 fields",
+            ));
         }
-        Ok(spec)
+        Ok(Self { fields })
     }
 }
 
