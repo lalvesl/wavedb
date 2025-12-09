@@ -10,18 +10,44 @@ use super::journal::Journal;
 /// of a 32 KiB header.
 pub const MAX_RANGE_ENTRIES: usize = 1024;
 
+/// A page's count from here up says only "this many or more": its entries
+/// are counted by reading it ([RFC 0078] §7).
+///
+/// [RFC 0078]: ../../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
+pub const COUNT_SATURATED: u8 = u8::MAX;
+
 impl<M: Copy + Default> PageIndex<M> {
-    /// An index over `ranges`, sorted and disjoint, nothing unrecorded.
+    /// An index over `ranges`, sorted and disjoint, nothing unrecorded —
+    /// counted when they count.
     #[must_use]
-    pub(super) const fn from_ranges(
-        seed: Shape,
-        ranges: Vec<Range<M>>,
-    ) -> Self {
+    pub(super) fn from_ranges(seed: Shape, ranges: Vec<Range<M>>) -> Self {
         Self {
             seed,
+            counted: ranges.first().is_some_and(|r| r.entries.counts.is_some()),
             ranges,
             journal: Journal::new(),
         }
+    }
+
+    /// How many entries `at`'s page holds — `None` where the index counts
+    /// nothing, or the page holds [`COUNT_SATURATED`] or more.
+    #[must_use]
+    pub fn count_at(&self, at: Slot) -> Option<u64> {
+        let n = self.ranges.get(at.range)?.entries.count(at.entry)?;
+        (n < COUNT_SATURATED).then_some(u64::from(n))
+    }
+
+    /// `at`'s page holds `n` entries — kept in a counted index, saturating
+    /// at [`COUNT_SATURATED`].
+    pub fn set_count(&mut self, at: Slot, n: usize) -> Option<()> {
+        let counts = self.ranges.get_mut(at.range)?.entries.counts.as_mut()?;
+        let held = counts.get_mut(at.entry)?;
+        let n = u8::try_from(n).unwrap_or(COUNT_SATURATED);
+        if *held != n {
+            *held = n;
+            self.note_entry(at);
+        }
+        Some(())
     }
 
     /// The shape new ranges take.
@@ -132,6 +158,9 @@ impl<M: Copy + Default> PageIndex<M> {
         let entry = *r.entries.pages.get(at.entry)?;
         r.entries.pages[at.entry] = r.head.hole(q_of(entry));
         r.entries.meta[at.entry] = meta;
+        if let Some(counts) = &mut r.entries.counts {
+            counts[at.entry] = 0;
+        }
         self.note_entry(at);
         Some(())
     }

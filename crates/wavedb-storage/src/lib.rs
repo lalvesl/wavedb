@@ -33,6 +33,7 @@ mod evict;
 mod file_space;
 mod header;
 mod lane_read;
+mod lane_walk;
 mod link;
 pub mod manifest;
 mod object_mode;

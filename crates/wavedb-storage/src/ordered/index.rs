@@ -17,20 +17,33 @@ use super::key::{prefix, shared_prefix, slice};
 
 /// The entries under one sub-header, ascending by quantum.
 ///
-/// Two parallel columns: the `u32` that finds the page, and what a lane keeps
-/// beside it (`()` where nothing is counted, a `u8` count in a list's lane).
+/// Parallel columns: the `u32` that finds the page, what a lane keeps beside
+/// it (`()`, or the store's flags), and in a counted index how many entries
+/// each page holds ([RFC 0078] §7) — a list's lane, the only one whose pages
+/// pay that byte.
+///
+/// [RFC 0078]: ../../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Entries<M> {
     pub(super) pages: Vec<u32>,
     pub(super) meta: Vec<M>,
+    /// `None` in an index that counts nothing.
+    pub(super) counts: Option<Vec<u8>>,
 }
 
 impl<M: Copy> Entries<M> {
-    pub(super) fn one(entry: u32, meta: M) -> Self {
+    /// One entry; `count` is `None` in an index that counts nothing.
+    pub(super) fn one(entry: u32, meta: M, count: Option<u8>) -> Self {
         Self {
             pages: vec![entry],
             meta: vec![meta],
+            counts: count.map(|n| vec![n]),
         }
+    }
+
+    /// Entry `i`'s count, in a counted index.
+    pub(super) fn count(&self, i: usize) -> Option<u8> {
+        self.counts.as_ref().and_then(|c| c.get(i).copied())
     }
 
     pub(super) const fn len(&self) -> usize {
@@ -45,14 +58,21 @@ impl<M: Copy> Entries<M> {
             .map_or(QUANTA, |&e| u32::from(q_of(e)))
     }
 
+    /// A new entry at `i`, counting nothing until a page is written to it.
     pub(super) fn insert(&mut self, i: usize, entry: u32, meta: M) {
         self.pages.insert(i, entry);
         self.meta.insert(i, meta);
+        if let Some(counts) = &mut self.counts {
+            counts.insert(i, 0);
+        }
     }
 
     pub(super) fn remove(&mut self, i: usize) {
         self.pages.remove(i);
         self.meta.remove(i);
+        if let Some(counts) = &mut self.counts {
+            counts.remove(i);
+        }
     }
 
     /// The entries from `i` on, moved `by` quanta down.
@@ -64,6 +84,7 @@ impl<M: Copy> Entries<M> {
         Self {
             pages,
             meta: self.meta[i..].to_vec(),
+            counts: self.counts.as_ref().map(|c| c[i..].to_vec()),
         }
     }
 
@@ -72,6 +93,7 @@ impl<M: Copy> Entries<M> {
         Self {
             pages: self.pages[..i].to_vec(),
             meta: self.meta[..i].to_vec(),
+            counts: self.counts.as_ref().map(|c| c[..i].to_vec()),
         }
     }
 }
@@ -117,6 +139,8 @@ pub struct PageIndex<M> {
     /// The shape a range starts with when nothing before it suggests one.
     pub(super) seed: Shape,
     pub(super) ranges: Vec<Range<M>>,
+    /// Whether each page's entries are counted ([`Entries`]).
+    pub(super) counted: bool,
     /// What changed since a header last named it.
     pub(super) journal: Journal,
 }
@@ -128,8 +152,22 @@ impl<M: Copy + Default> PageIndex<M> {
         Self {
             seed,
             ranges: Vec::new(),
+            counted: false,
             journal: Journal::new(),
         }
+    }
+
+    /// The same index, counting each page's entries.
+    #[must_use]
+    pub const fn counting(mut self) -> Self {
+        self.counted = true;
+        self
+    }
+
+    /// Whether each page's entries are counted.
+    #[must_use]
+    pub const fn is_counted(&self) -> bool {
+        self.counted
     }
 
     /// Pages and holes under every range.
@@ -243,7 +281,11 @@ impl<M: Copy + Default> PageIndex<M> {
             range,
             Range {
                 head,
-                entries: Entries::one(entry, page.meta),
+                entries: Entries::one(
+                    entry,
+                    page.meta,
+                    self.counted.then_some(0),
+                ),
             },
         );
         self.note_whole(range);
