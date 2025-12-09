@@ -187,68 +187,56 @@ mod tests {
             writes.push(Write::Set(lane, key(0, at), value(at)));
             writes.push(Write::Set(lane, key(2, at), value(at)));
         }
-        Ok(None)
+        block_on(store.apply(&writes)).unwrap();
+        block_on(store.apply_durable(&[])).unwrap();
     }
 
-    /// `at` with its coverage `[start, next)`.
-    fn cover(
-        &self,
-        at: Option<Slot>,
-    ) -> Option<(Slot, Vec<u8>, Option<Vec<u8>>)> {
-        let slot = at?;
-        let (start, next) = coverage(self.index?, slot)?;
-        Some((slot, start, next))
+    /// Pages a closure read: what the emptied page cache holds after it.
+    fn pages_read(store: &PageStore, read: impl FnOnce()) -> usize {
+        store.file.cache.clear();
+        read();
+        store.file.cache.len()
     }
 
-    /// Append the entries in `[lo, hi)` — `slot`'s page's, when it has one,
-    /// with the cache's over them — in the walk's order. The key of `slot`
-    /// when its page is evicted, and nothing appended.
-    fn merged(
-        &mut self,
-        slot: Option<Slot>,
-        lo: &[u8],
-        hi: Option<&[u8]>,
-        rev: bool,
-    ) -> StorageResult<Option<Vec<u8>>> {
-        let inside = |key: &[u8]| !below(key, Some(lo)) && below(key, hi);
-        let placed = slot.zip(self.index).and_then(|(slot, index)| match index
-            .at(
-            slot,
-        )? {
-            Found::Page { page, .. } => Some((slot, index, page)),
-            Found::Hole(_) | Found::Uncovered => None,
-        });
-        let page: Vec<Entry> = match placed {
-            Some((slot, index, placed)) if placed.meta & EVICTED != 0 => {
-                return Ok(index.key_of(slot));
-            }
-            Some((_, _, placed)) => {
-                let run = run_of(placed);
-                self.store.touch(self.idx, run.start);
-                let dict = self.store.types[self.idx].dictionary().borrow();
-                with_page(&self.store.file, run, &dict, |p| {
-                    p.iter()
-                        .filter(|(k, _)| inside(k))
-                        .map(|(k, v)| (k.to_vec(), v.to_vec()))
-                        .collect()
-                })?
-            }
-            None => Vec::new(),
+    /// A count of a collection, and a skip deep into it, read its edge
+    /// pages in a counted lane and every page in a plain one — the same
+    /// answers either way.
+    #[test]
+    fn a_counted_lane_counts_and_skips_reading_only_its_edges() {
+        let collection = Span::prefix(&[1; 16], 5);
+        let deep = Span {
+            skip: 1_500,
+            ..collection.clone()
         };
-        let cache = self.store.cache.borrow();
-        let bounds = (
-            std::ops::Bound::Included(lo),
-            hi.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
-        );
-        let over = cache.ordered(self.idx, bounds).filter(|(k, _)| inside(k));
-        let mut merged = merge(page, over);
-        if rev {
-            merged.reverse();
-        }
-        self.out.extend(merged);
-        Ok(None)
-    }
-}
+        for lane in [PLAIN, COUNTED] {
+            let dir = tempfile::tempdir().unwrap();
+            let store =
+                PageStore::open(dir.path(), &[&PLAIN_SLOT, &COUNTED_SLOT])
+                    .unwrap();
+            filled(&store, lane);
+            let pages = store.bucket_count(lane);
+            assert!(pages > 10, "{pages} pages");
+            let (lo, hi) = (collection.lo.clone(), collection.hi.clone());
+
+            let mut n = 0;
+            let counting = pages_read(&store, || {
+                n = block_on(store.count(lane, &lo, hi.as_deref())).unwrap();
+            });
+            assert_eq!(n, ROWS);
+            let mut got = Vec::new();
+            let skipping = pages_read(&store, || {
+                got = block_on(store.scan(lane, &deep)).unwrap();
+            });
+            let at: Vec<_> = (1_500..1_505).map(|at| key(1, at)).collect();
+            assert_eq!(got.into_iter().map(|(k, _)| k).collect::<Vec<_>>(), at);
+
+            if lane == COUNTED {
+                assert!(counting <= 2, "a count read {counting} pages");
+                assert!(skipping <= 3, "a skip read {skipping} pages");
+            } else {
+                assert!(counting + 2 >= pages, "a count read {counting}");
+                assert!(skipping * 2 >= pages, "a skip read {skipping}");
+            }
 
 /// `page`'s entries with the cache's `over` them, both ascending: a hit
 /// replaces or adds, a removal drops.
