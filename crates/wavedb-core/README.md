@@ -102,7 +102,7 @@ It lets one `Id` type encode two addressing schemes in the same `KEY` slot:
 
 - **Unique anchor** — `FLAG = 1`, `KEY = STRUCT_HASH`, `SALT = 0`: a directly
   computable, single-record address. One lookup, no index.
-- **Everything timestamped** (NonUnique records, Pivots, chain segments) —
+- **Everything timestamped** (NonUnique records, Pivots) —
   `FLAG = 0`, `KEY = CREATED_AT`: chronologically ordered, indexable by a chain.
 
 There is **no `STRUCT_ID`** and **no schema-version field** in the ID. Type
@@ -320,9 +320,9 @@ write-through happens immediately; the node confirms.
 ## `Store` — the local backend trait
 
 `Store` is the **backend seam** — the only thing that differs native vs web. Core
-declares the contract (async, no I/O — WASM/macro-safe). It is key→value over `Id`
-plus an **atomic batch** (`apply`) so a multi-record op (record + chain segments)
-commits all-or-nothing:
+declares the contract (async, no I/O — WASM/macro-safe). It is key→value over `Id`,
+ordered **lanes** of byte keys read by span, plus an **atomic batch** (`apply`) so
+a multi-record op (record + an entry per chain it touches) commits all-or-nothing:
 
 ```rust
 pub trait Store {                  // key→value over Id + wire bytes
@@ -336,6 +336,10 @@ pub trait Store {                  // key→value over Id + wire bytes
     // …and resolved only once durable (RFC 0072). Default = `apply`: a store
     // with no settle of its own (IndexedDB) is durable when `apply` resolves.
     async fn apply_durable(&self, batch: &[Write]) -> Result<()>;
+    // An ordered lane (RFC 0078 §7): the entries of a span — `[lo, hi)`,
+    // either way, past `skip`, at most `limit` — and how many lie in a range.
+    async fn scan(&self, lane: u64, span: &Span) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+    async fn count(&self, lane: u64, lo: &[u8], hi: Option<&[u8]>) -> Result<u64>;
 }
 // `Put`'s type is the STRUCT_HASH at the head of its bytes; the other two
 // carry it, because an Id names no type and a per-type backend would
@@ -344,6 +348,8 @@ pub enum Write {
     Put(Id, Vec<u8>),
     Remove(u64, Id),
     Expect(u64, Id, Option<Vec<u8>>),
+    Set(u64, Vec<u8>, Vec<u8>),   // an ordered lane's key, set
+    Unset(u64, Vec<u8>),          // …and taken out
 }
 ```
 
@@ -375,20 +381,21 @@ which is `Store`-generic, so it runs **wherever the engine is linked**: on the n
 
 ## Index contracts — `Pivot`, `Chain`, `IndexKey`
 
-The index lives **above** `Store` and depends only on it (`get` + `apply`), so it is
-**portable** — pages and headers are `PageStore` internals, never named here. Core
-declares the contracts; the same code compiles for the node (PageStore) and the web
-(IndexedDB).
+The index lives **above** `Store` and depends only on it (`get`, `scan`,
+`count` + `apply`), so it is **portable** — pages and headers are `PageStore`
+internals, never named here. Core declares the contracts; the same code
+compiles for the node (PageStore) and the web (IndexedDB).
 
-Every index a collection holds is a **chain** ([RFC 0050](../../rfcs/0050-clustered-record-chains.md),
-[RFC 0075](../../rfcs/0075-secondary-indexes-as-chains.md)): a doubly linked run
-of sorted segments keyed by `SecKey { field, rec }` — an order-preserving field
-encoding, then the record's anchor — with a sparse index above it (one entry per
-segment, carrying its count). The recency chain, the removal log, each
-`#[wavedb::pivot]` secondary and each `#[wavedb::fuzzy]` posting set are
-`Chain<()>`: keys and anchors, no payload. A `#[wavedb::list]` is `Chain<Vec<u8>>`,
-the only kind holding whole records. Each kind has a lane of its own (its own
-storage directory and dictionary).
+Every index a collection holds is a **chain**
+([RFC 0078](../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md) §7):
+the key range `[pivot Id 16 B][declaration u8]` of an ordered lane, each
+entry keyed by its `SecKey { field, rec }` — an order-preserving field
+encoding, then the record's anchor as 10 bytes. The recency chain, the
+removal log, each `#[wavedb::pivot]` secondary and each `#[wavedb::fuzzy]`
+posting set are `Chain<()>`: keys and anchors, no payload. A
+`#[wavedb::list]` is `Chain<Vec<u8>>`, the only kind holding whole records.
+Each kind has a lane of its own (its own pages and dictionary), and a
+collection's chains need nothing created: a chain is found by its prefix.
 
 ```rust
 /// Order-preserving key encoding: byte order == value order, so a chain
@@ -398,19 +405,12 @@ pub trait IndexKey {
     fn encode_key(&self, out: &mut Vec<u8>);
 }
 
-/// The collection's roots holder. `#[wavedb]` generates one per NonUnique type.
-/// Every root is a chain's, and a chain's roots are permanent — an endpoint
-/// moves once, at its first split, and the index root never — so the Pivot is
-/// written at creation and then essentially never.
+/// The collection's handle record. `#[wavedb]` generates one per NonUnique
+/// type. It names the collection — its id is every chain's prefix — and
+/// holds its default permission; nothing ever rewrites it.
 pub trait Pivot: WaveWire + Sized {
     const STRUCT_HASH: u64;
-    fn secondaries(&self) -> &[ChainRoots];   // one per `#[wavedb::pivot(...)]`
-    fn recency(&self)     -> ChainRoots;      // living records, by live instant
-    fn removals(&self)    -> LogRoots;        // the removal log (no index)
-    fn lists(&self)       -> &[ChainRoots];   // one per `#[wavedb::list]`
-    fn fuzzy(&self)       -> &[ChainRoots];   // one per `#[wavedb::fuzzy]`
-    fn permission(&self)  -> Option<&PermissionRef>;
-    fn replace_roots(&self, roots: Roots<'_>) -> Self;
+    fn permission(&self) -> Option<&PermissionRef>;
 }
 
 /// A search bound over the order-preserving key space.
@@ -422,25 +422,29 @@ pub enum Bound {
 }
 
 impl<P: WaveWire> Chain<P> {
-    pub fn plan_create(tenant: U48, struct_hash: u64, lane: Lane) -> (Self, Vec<Write>);
-    pub async fn plan_insert<S: Store>(&mut self, store: &S, key: SecKey, payload: P)
-        -> Result<Vec<Write>>;
-    pub async fn plan_remove<S: Store>(&mut self, store: &S, key: &SecKey)
-        -> Result<Option<Vec<Write>>>;
+    pub fn at(owner: Id, struct_hash: u64, lane: Lane, declaration: u8) -> Self;
+    pub fn insert(&self, key: &SecKey, payload: &P) -> Write;       // blind
+    pub fn remove(&self, key: &SecKey) -> Write;                    // blind
+    pub async fn plan_remove<S: Store>(&self, store: &S, key: &SecKey)
+        -> Result<Option<Write>>;                                   // gated on presence
     pub async fn get<S: Store>(&self, store: &S, key: &SecKey) -> Result<Option<P>>;
-    /// Every entry with a key ≥ `from`, ascending: one sparse-index descent,
-    /// then the `next` links.
-    pub fn scan_from<S: Store>(self, store: &S, from: SecKey)
+    pub async fn len<S: Store>(&self, store: &S) -> Result<u64>;
+    /// Every entry with a key ≥ `from`, ascending, 256 a scan.
+    pub fn scan_from<S: Store>(self, store: &S, from: &SecKey)
+        -> impl Stream<Item = Result<(SecKey, P)>>;
+    pub fn scan_skip<S: Store>(self, store: &S, skip: u64)  // a page of a list
+        -> impl Stream<Item = Result<(SecKey, P)>>;
+    pub fn scan_back<S: Store>(self, store: &S)             // newest first
         -> impl Stream<Item = Result<(SecKey, P)>>;
 }
 ```
 
-A segment holds `N…2N` entries — splitting 50/50 at `2N`, merging at `N/2` — with
-`N` the declared `page = N` for a list and 256 for the pointer chains. The planners
-return the `Write`s without applying them, so a caller folds record + every chain
-it touched + any `Pivot` rewrite into **one atomic batch**. A bounded read
-(`search_by`, a fuzzy gram) seeks the bound's least key and takes while the bound
-holds: it reads the segments it returns from, and one more at most.
+An insert or a removal is one blind `Write`, so a caller folds the record and
+an entry per chain it touched into **one atomic batch**, and two inserts
+planned from the same state never clobber each other. A bounded read
+(`search_by`, a fuzzy gram) scans from the bound's least key and takes while
+the bound holds. A list's length and a skip into it are sums of its pages'
+counts on the node, reading only the pages at its edges.
 
 ### `Collection<T>` — the layer application code actually touches
 

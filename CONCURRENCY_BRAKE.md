@@ -3,6 +3,16 @@
 > **Read this before putting any suspending `Store` under the node.**
 > Getting it wrong loses records with no error, no panic and no log line.
 
+> **Status (2026-10-31, RFC 0078 phase 4).** The chain half of this hazard
+> is gone: a chain is a key range of an ordered lane, and an insert or a
+> removal of an entry is one blind `Write::Set` / `Write::Unset`, so two
+> inserts planned from one state both survive (`concurrent_chain_inserts`).
+> A save still reads before it writes, and its `Write::Expect` on the
+> record's anchor turns a lost race into `Error::Conflict`. A removal still
+> reads its liveness gate (`plan_remove`) and carries no guard: two removals
+> of one record racing would both log it. The sections below describe the
+> engine before phase 4 — segments, the B+tree before them — and why.
+
 ## The hazard
 
 A collection op is a sequence: read the Pivot, descend the B+tree, read the
