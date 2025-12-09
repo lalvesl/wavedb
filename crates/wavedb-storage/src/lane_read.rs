@@ -163,54 +163,29 @@ mod tests {
         key
     }
 
-    /// Descending, from `span.hi`. The key of an evicted page met.
-    fn back(&mut self, need: usize) -> StorageResult<Option<Vec<u8>>> {
-        let lo = self.span.lo.clone();
-        let mut cursor = self.span.hi.clone();
-        let mut at = self.index.and_then(|ix| {
-            cursor.as_deref().map_or_else(
-                || ix.last(),
-                |hi| match ix.slot_from(hi) {
-                    Some(s)
-                        if ix
-                            .key_of(s)
-                            .is_some_and(|k| below(&k, Some(hi))) =>
-                    {
-                        Some(s)
-                    }
-                    Some(s) => ix.prev(s),
-                    None => ix.last(),
-                },
-            )
-        });
-        while self.out.len() < need && below(&lo, cursor.as_deref()) {
-            let Some((slot, start, next)) = self.cover(at) else {
-                self.merged(None, &lo, cursor.as_deref(), true)?;
-                break;
-            };
-            // Keys past this entry's coverage, below the cursor: no page.
-            if let Some(next) = next.as_deref()
-                && below(next, cursor.as_deref())
-            {
-                self.merged(None, next, cursor.as_deref(), true)?;
-                cursor = Some(next.to_vec());
-                continue;
-            }
-            let from = if below(&start, Some(&lo)) {
-                lo.clone()
-            } else {
-                start
-            };
-            if let Some(key) =
-                self.merged(Some(slot), &from, cursor.as_deref(), true)?
-            {
-                return Ok(Some(key));
-            }
-            if !below(&lo, Some(&from)) {
-                break;
-            }
-            cursor = Some(from);
-            at = self.index.and_then(|ix| ix.prev(slot));
+    /// 200 bytes that do not compress away, so pages fill.
+    fn value(at: u64) -> Vec<u8> {
+        let mut x = at.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        (0..200)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x.to_le_bytes()[0]
+            })
+            .collect()
+    }
+
+    /// `ROWS` entries of collection 1 between a few of its neighbours',
+    /// settled.
+    fn filled(store: &PageStore, lane: u64) {
+        let mut writes = Vec::new();
+        for at in 0..ROWS {
+            writes.push(Write::Set(lane, key(1, at), value(at)));
+        }
+        for at in 0..10 {
+            writes.push(Write::Set(lane, key(0, at), value(at)));
+            writes.push(Write::Set(lane, key(2, at), value(at)));
         }
         Ok(None)
     }
