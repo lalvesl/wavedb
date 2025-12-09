@@ -246,25 +246,25 @@ into it read only their edge pages.
 
 ## Page format
 
-A page is **homogeneous** — records of exactly one `STRUCT_HASH`. `SlotPage` is
-the one page format today (`Unique` anchors, NonUnique records, Pivots, and
-`BpTree` nodes all ride it), and its layout is the **checked wire encoding** —
-no page-private byte format:
+A page is **homogeneous** — entries of exactly one slot. `SlotPage` is the one
+page format (anchors, Pivots and lane entries all ride it), and its layout is
+the **checked wire encoding** — no page-private byte format:
 
 ```
 [ payload_len (u32 LE) ][ to_wire_checked(PageEnvelope) ]   … zero-padded to the run
                          └── [ crc32 (u32 LE) ][ wire bytes ] ──┘
 
 PageEnvelope (plain WaveWire struct):
-    struct_hash: u64                  — identifies the type; selects the dictionary
+    struct_hash: u64                  — identifies the slot; selects the dictionary
     payload: PagePayload              — the body, raw or compressed
 
 PagePayload (plain WaveWire enum):
-    Raw( to_wire(PageBody) )          — compression off for this type, or zstd gained nothing
-    Zstd { dict_len, raw_len, bytes } — zstd(to_wire(PageBody)) against dictionary[..dict_len]
+    Raw( body )                       — compression off for this slot, or zstd gained nothing
+    Zstd { dict_len, raw_len, bytes } — zstd(body) against dictionary[..dict_len]
 
-PageBody (plain WaveWire struct):
-    records: Vec<(u128, Vec<u8>)>     — (Id.raw, record wire bytes), ascending Id
+body — columns, ascending by key:
+    keys back to back, then their width (one for all) or their ends,
+    the values' ends, the values back to back
 ```
 
 - **`payload_len`** — the only framing outside the codec: a page reads back
@@ -275,35 +275,19 @@ PageBody (plain WaveWire struct):
   runs), surfaced as `StorageError::Corrupt`. The crc covers the **stored**
   bytes, so corruption is caught before zstd runs; `struct_hash` and the
   payload kind stay readable without the dictionary.
-- **per-type compression policy** — each `Directory` decides whether its pages
-  compress (`with_compression`); `PageStore` turns it **off for `BpTree` node
-  pages** (hot, rewritten on every index mutation) and on for record/Pivot
-  pages. Even when on, a body zstd cannot shrink is stored `Raw` — a page
-  never grows for having been "compressed".
+- **per-slot compression policy** — a `#[wavedb(compress = false)]` type's
+  pages skip zstd. Even when on, a body zstd cannot shrink is stored `Raw` —
+  a page never grows for having been "compressed".
+- **read as held** — a page decodes into its columns once and is lent from
+  the page cache; the writes since are kept beside them until an encode
+  seals them (RFC 0076).
 
-What a page's records hold, by the kind of `STRUCT_HASH` that routed them (a
-future per-kind split — e.g. its own dictionary — could specialise these without
-changing the framing):
-
-| Kind          | What the records hold                                              |
-| ------------- | ------------------------------------------------------------------ |
-| **Unique**    | The single live record per tenant at its fixed anchor address.     |
-| **NonUnique** | The collection's records (timestamp-keyed).                        |
-| **Pivot**     | Collection handles: `current`/`dead` BpTree pointers (no counter). |
-| **BpTree**    | Serialised B+tree nodes (packed in the shared page directory).     |
-
-### BpTree node storage
-
-> Status: the dedicated **32 KiB, one-node-per-page** format was **dropped
-> (2026-07-07)** — see [RFC 0031](../../rfcs/0031-node-per-page-bptree-DEPRECATED.md).
-> A `BpTree` exists per tenant, so a B2C node hosts millions of _small_ trees and
-> a page per node wastes exactly the dominant case.
-
-Nodes ride the shared `SlotPage` directory instead: a node is an
-ordinary `STRUCT_HASH`-headed value (`[hash][kind u8][WaveWire]`), packed with
-everything else of its type so many tenants' small nodes share common buckets.
-Entry format, split/rebalance, and merge policy live in
-[RFC 0011](../../rfcs/0011-bptree-index-and-collections.md).
+| Slot          | What the entries hold                                                   |
+| ------------- | ----------------------------------------------------------------------- |
+| **Unique**    | The single live record per tenant at its fixed anchor, and its archive. |
+| **NonUnique** | The collection's records at their anchors, and their archives.          |
+| **Pivot**     | Collection handles: `permission` only.                                  |
+| **Lanes**     | Chain entries: anchors (recency, removals, secondary, fuzzy) or whole records (lists). |
 
 ---
 
@@ -325,7 +309,7 @@ the block manager (`[len][to_wire_checked(buf)]`, same framing as everything
 else), tracked by a descriptor in the type's `DictState` — the compression
 slot the open store keeps for the type — and repointed
 with the same crash-safe write-then-free ordering pages use. A compression-off
-type (`#[wavedb(compress = false)]`, or the reserved `BpTree`-node slot) never
+type (`#[wavedb(compress = false)]`) never
 samples and never allocates a run.
 
 ### Versioning (the one rule)
@@ -367,16 +351,16 @@ mutation → the type's record log (RAM) → (client confirmed)
    (RFC 0068); reads serve from it directly.
 3. **The settle cycle — one window per round.** A cycle marks every log's end
    (the batch: every write before the mark), then settles it in bounded
-   rounds: the round's ids grouped by bucket, each touched page read once,
+   rounds: the round's keys routed to their pages, each touched page read once,
    every resulting image written into **one contiguous window** with a single
    positioned write ([RFC 0041](../../rfcs/0041-single-barrier-checkpoint.md)).
-   The descriptors are swapped only after the write lands, so a reader sees
+   The index entries are pointed at the new runs only after the write lands, so a reader sees
    either the old pages (still allocated — page writes are copy-on-write) or
    the new ones. A tick with nothing written opens no cycle: no window, no
    barrier.
-4. **Rebalance is part of that plan.** Splits are decided in RAM, before
-   anything is serialised, so an over-sized bucket is repartitioned and both
-   halves are written once — never a page written twice in one round.
+4. **Cuts are part of that plan.** They are decided in RAM, before anything
+   is serialised, so an over-sized page is cut and both halves are written
+   once — never a page written twice in one round.
 5. **The window ends with its header** — 32 KiB naming the addresses it
    changed, type by type, and `last`, the header before with entries for that
    type; its spare room restates the addresses of the type restated longest
