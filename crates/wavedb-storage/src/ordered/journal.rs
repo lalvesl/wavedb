@@ -189,19 +189,21 @@ impl PageIndex<u8> {
         let r = &self.ranges[range];
         match journal.ranges.get(start) {
             Some(Some(qs)) => {
-                let entries = r
-                    .entries
-                    .pages
-                    .iter()
-                    .zip(&r.entries.meta)
-                    .filter(|(e, _)| qs.contains(&q_of(**e)))
-                    .map(|(&e, &m)| (e, m))
+                let named: Vec<usize> = (0..r.entries.len())
+                    .filter(|&i| qs.contains(&q_of(r.entries.pages[i])))
                     .collect();
+                let entries = named
+                    .iter()
+                    .map(|&i| (r.entries.pages[i], r.entries.meta[i]))
+                    .collect();
+                let counts =
+                    named.iter().filter_map(|&i| r.entries.count(i)).collect();
                 RangeRecord::Entries {
                     start: start.to_vec(),
                     base_block: r.head.base_block,
                     shape: u32::from_le_bytes(r.head.shape.to_bytes()),
                     entries,
+                    counts,
                 }
             }
             _ => whole_of(r),

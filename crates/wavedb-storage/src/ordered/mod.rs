@@ -24,7 +24,7 @@ pub mod key;
 mod persist;
 mod reshape;
 
-pub use access::MAX_RANGE_ENTRIES;
+pub use access::{COUNT_SATURATED, MAX_RANGE_ENTRIES};
 pub use head::{MAX_SHIFT, QUANTA, Shape, SubHeader, q_of};
 pub use index::{Entries, Found, PageIndex, Placed, Slot};
 pub use journal::Journal;
@@ -108,8 +108,17 @@ mod tests {
 
     impl Lane {
         fn new(seed: Shape, cap: usize, max_blocks: u64) -> Self {
+            Self::with(PageIndex::new(seed), cap, max_blocks)
+        }
+
+        /// A lane whose index counts each page's keys.
+        fn counted(seed: Shape, cap: usize, max_blocks: u64) -> Self {
+            Self::with(PageIndex::new(seed).counting(), cap, max_blocks)
+        }
+
+        fn with(ix: PageIndex<u8>, cap: usize, max_blocks: u64) -> Self {
             Self {
-                ix: PageIndex::new(seed),
+                ix,
                 pages: BTreeMap::new(),
                 next: 0,
                 cap,
@@ -133,16 +142,28 @@ mod tests {
             }
         }
 
+        /// The page starting with `first` holds `n` keys — counted, as a
+        /// round counts the pages it writes.
+        fn count(&mut self, first: &[u8], n: usize) {
+            let Found::Page { at, .. } = self.ix.find(first) else {
+                panic!("a written page has an entry");
+            };
+            let counted = self.ix.set_count(at, n);
+            assert_eq!(counted.is_some(), self.ix.is_counted());
+        }
+
         fn insert(&mut self, key: Vec<u8>) {
             match self.ix.find(&key) {
                 Found::Uncovered => {
                     let page = self.alloc();
                     self.ix.place(&key, page).unwrap();
+                    self.count(&key, 1);
                     self.pages.insert(page.address, vec![key]);
                 }
                 Found::Hole(at) => {
                     let page = self.alloc();
                     self.ix.retarget(at, page).unwrap();
+                    self.count(&key, 1);
                     self.pages.insert(page.address, vec![key]);
                 }
                 Found::Page { at, page } => {
@@ -157,6 +178,7 @@ mod tests {
                     if keys.len() > self.cap {
                         self.split(at, left, &keys);
                     } else {
+                        self.count(&keys[0], keys.len());
                         self.pages.insert(left.address, keys);
                     }
                 }
@@ -191,6 +213,8 @@ mod tests {
                     panic!("distinct keys are separable")
                 }
             };
+            self.count(&keys[0], i);
+            self.count(&keys[i], keys.len() - i);
             self.pages.insert(left.address, keys[..i].to_vec());
             self.pages.insert(right.address, keys[i..].to_vec());
         }
@@ -206,6 +230,7 @@ mod tests {
             } else {
                 let moved = self.alloc();
                 self.ix.retarget(at, moved).unwrap();
+                self.count(&keys[0], keys.len());
                 self.pages.insert(moved.address, keys);
             }
         }
@@ -218,8 +243,14 @@ mod tests {
             for (address, keys) in &self.pages {
                 for key in keys {
                     match self.ix.find(key) {
-                        Found::Page { page, .. } => {
+                        Found::Page { page, at } => {
                             assert_eq!(page.address, *address);
+                            let held = self.ix.count_at(at);
+                            if self.ix.is_counted() {
+                                assert_eq!(held, Some(keys.len() as u64));
+                            } else {
+                                assert_eq!(held, None);
+                            }
                         }
                         other => panic!("key lost: {other:?}"),
                     }
@@ -406,8 +437,9 @@ mod tests {
         check(&ix);
     }
 
-    /// A range as the tests compare it: start, base, shape, entries, meta.
-    type Seen = (Vec<u8>, u64, [u8; 4], Vec<u32>, Vec<u8>);
+    /// A range as the tests compare it: start, base, shape, entries, meta,
+    /// counts.
+    type Seen = (Vec<u8>, u64, [u8; 4], Vec<u32>, Vec<u8>, Option<Vec<u8>>);
 
     /// The ranges of `ix`, comparable.
     fn ranges_of(ix: &PageIndex<u8>) -> Vec<Seen> {
@@ -420,6 +452,7 @@ mod tests {
                     r.head.shape.to_bytes(),
                     r.entries.pages.clone(),
                     r.entries.meta.clone(),
+                    r.entries.counts.clone(),
                 )
             })
             .collect()
@@ -444,12 +477,12 @@ mod tests {
     /// A lane whose changes go into a header every `every` inserts, `room`
     /// bytes a header; what does not fit waits for the next.
     fn persisted_lane(
+        mut lane: Lane,
         keys: &[Vec<u8>],
-        seed: Shape,
         every: usize,
         room: usize,
     ) {
-        let mut lane = Lane::new(seed, 16, 3);
+        let seed = lane.ix.seed();
         let mut headers = Vec::new();
         for (n, key) in keys.iter().enumerate() {
             lane.insert(key.clone());
@@ -475,9 +508,29 @@ mod tests {
     fn a_rebuild_from_every_header_is_the_index() {
         let mut rng = Rng(23);
         let keys = time_keys(&mut rng, 3000);
-        persisted_lane(&keys, shape(21, 6, 1, 1), 7, usize::MAX);
+        let lane = Lane::new(shape(21, 6, 1, 1), 16, 3);
+        persisted_lane(lane, &keys, 7, usize::MAX);
         let keys: Vec<_> = (0..3000).map(|_| rng.bytes(16)).collect();
-        persisted_lane(&keys, shape(48, 12, 1, 1), 5, usize::MAX);
+        let lane = Lane::new(shape(48, 12, 1, 1), 16, 3);
+        persisted_lane(lane, &keys, 5, usize::MAX);
+    }
+
+    /// A counted lane keeps every page's count through its reshapes and
+    /// through a rebuild from its headers — a list's length and its skips
+    /// are sums of them.
+    #[test]
+    fn a_counted_lane_keeps_its_counts_through_a_rebuild() {
+        let mut rng = Rng(37);
+        let keys = time_keys(&mut rng, 3000);
+        let mut lane = Lane::counted(shape(21, 6, 1, 1), 16, 3);
+        lane.run(&keys, 1000);
+        let lane = Lane::counted(shape(21, 6, 1, 1), 16, 3);
+        persisted_lane(lane, &keys, 7, usize::MAX);
+        let keys: Vec<_> = (0..2000).map(|_| rng.bytes(16)).collect();
+        let mut lane = Lane::counted(shape(48, 12, 1, 1), 12, 2);
+        lane.run(&keys, 700);
+        let lane = Lane::counted(shape(48, 12, 1, 1), 16, 3);
+        persisted_lane(lane, &keys, 3, 600);
     }
 
     #[test]
@@ -485,7 +538,8 @@ mod tests {
         let mut rng = Rng(29);
         let keys: Vec<_> = (0..2000).map(|_| rng.bytes(16)).collect();
         // A room of about two whole ranges: most changes wait.
-        persisted_lane(&keys, shape(48, 12, 1, 1), 3, 600);
+        let lane = Lane::new(shape(48, 12, 1, 1), 16, 3);
+        persisted_lane(lane, &keys, 3, 600);
     }
 
     #[test]
