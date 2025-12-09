@@ -12,39 +12,26 @@
 //! An evicted page is brought back first, as a write would: the walk stops
 //! at it, the page is restored, and the walk starts over.
 //!
+//! In a counted lane (a declared list's) a walk passes a page without
+//! reading it when the span covers it whole, its count is known and the
+//! cache holds nothing of its range unsettled: the count is then exactly
+//! what reading it would yield. So a skip into a list, or its length, sums
+//! counts in RAM and reads only the pages at its edges.
+//!
 //! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
-
-use std::cmp::Ordering;
 
 use wavedb_core::store::{Entry, Span};
 
 use crate::error::StorageResult;
-use crate::ordered::key::cmp_padded;
-use crate::ordered::{Found, Slot};
+use crate::lane_walk::{Walk, below};
 use crate::page_store::PageStore;
-use crate::pages::{EVICTED, Pages, coverage, run_of, with_page};
-use crate::record_cache::Lookup;
 
 /// What one synchronous walk came to.
 pub enum Walked {
-    /// The span's entries, skipped and limited.
-    Done(Vec<Entry>),
+    /// The span's entries past those it skipped, and how many it skipped.
+    Done { entries: Vec<Entry>, skipped: u64 },
     /// It met the evicted page of slot `idx` that `key` finds.
     Evicted { idx: usize, key: Vec<u8> },
-}
-
-/// `a < b`, padded as the index compares keys; `None` is past every key.
-fn below(a: &[u8], b: Option<&[u8]>) -> bool {
-    b.is_none_or(|b| cmp_padded(a, b) == Ordering::Less)
-}
-
-/// The lesser of two upper bounds, `None` being past every key.
-fn min_hi<'a>(a: Option<&'a [u8]>, b: Option<&'a [u8]>) -> Option<&'a [u8]> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(if below(a, Some(b)) { a } else { b }),
-        (a, None) => a,
-        (None, b) => b,
-    }
 }
 
 impl PageStore {
@@ -59,25 +46,34 @@ impl PageStore {
         lane: u64,
         span: &Span,
     ) -> StorageResult<Walked> {
-        let Some(idx) = self.slot_index(lane) else {
-            return Ok(Walked::Done(Vec::new()));
-        };
-        if !below(&span.lo, span.hi.as_deref()) {
-            return Ok(Walked::Done(Vec::new()));
-        }
-        let skip = usize::try_from(span.skip).unwrap_or(usize::MAX);
-        Ok(
-            match self.walk(idx, span, skip.saturating_add(span.limit))? {
-                Walked::Done(entries) => Walked::Done(
-                    entries.into_iter().skip(skip).take(span.limit).collect(),
-                ),
-                evicted @ Walked::Evicted { .. } => evicted,
-            },
-        )
+        self.walk(lane, span, span.skip, span.limit)
     }
 
-    /// Finish a scan [`scan_now`](Self::scan_now) began: each evicted page
-    /// it meets restored, and the walk made again.
+    /// The synchronous half of a count of `[lo, hi)` in the ordered lane
+    /// `lane`: a walk skipping every entry, its count what it skipped.
+    ///
+    /// # Errors
+    /// A page read or decode fault.
+    pub(crate) fn count_now(
+        &self,
+        lane: u64,
+        lo: &[u8],
+        hi: Option<&[u8]>,
+    ) -> StorageResult<Walked> {
+        let span = Span {
+            lo: lo.to_vec(),
+            hi: hi.map(<[u8]>::to_vec),
+            rev: false,
+            skip: u64::MAX,
+            limit: usize::MAX,
+        };
+        self.walk(lane, &span, u64::MAX, usize::MAX)
+    }
+
+    /// Finish a walk [`scan_now`](Self::scan_now) or
+    /// [`count_now`](Self::count_now) began: each evicted page it meets
+    /// restored, and the walk made `again`. Its entries, and how many it
+    /// skipped.
     ///
     /// # Errors
     /// As [`scan_now`](Self::scan_now); an object-store fault restoring a
