@@ -238,31 +238,13 @@ mod tests {
                 assert!(skipping * 2 >= pages, "a skip read {skipping}");
             }
 
-/// `page`'s entries with the cache's `over` them, both ascending: a hit
-/// replaces or adds, a removal drops.
-fn merge<'a>(
-    page: Vec<Entry>,
-    over: impl Iterator<Item = (&'a [u8], Lookup)>,
-) -> Vec<Entry> {
-    let mut out = Vec::with_capacity(page.len());
-    let mut page = page.into_iter().peekable();
-    for (key, lookup) in over {
-        // Not cached after all: the page is the truth for it.
-        if lookup == Lookup::Miss {
-            continue;
-        }
-        while let Some((k, _)) = page.peek()
-            && k.as_slice() < key
-        {
-            out.extend(page.next());
-        }
-        if page.peek().is_some_and(|(k, _)| k.as_slice() == key) {
-            page.next();
-        }
-        if let Lookup::Hit(value) = lookup {
-            out.push((key.to_vec(), value));
+            // A write not settled yet over the pages: they are read again
+            // where it lands, and the answers follow it.
+            block_on(store.apply(&[Write::Unset(lane, key(1, 10))])).unwrap();
+            let n = block_on(store.count(lane, &lo, hi.as_deref())).unwrap();
+            assert_eq!(n, ROWS - 1);
+            let got = block_on(store.scan(lane, &deep)).unwrap();
+            assert_eq!(got[0].0, key(1, 1_501));
         }
     }
-    out.extend(page);
-    out
 }
