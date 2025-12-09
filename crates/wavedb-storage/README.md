@@ -389,7 +389,7 @@ mutation → the type's record log (RAM) → (client confirmed)
    phases 3–6). A database created with `StoreOptions::remote` keeps its pages
    in an object store, the disk caching them. Settle rounds flag what they
    write; `upload` reassembles the flagged pages, record by record, into the
-   object store's own extendible hash of 128 KiB pages, packed into files of
+   object store's own ordered index of 128 KiB pages over the same keys, packed into files of
    `[roots block][32 KiB header][pages…]` (every page starts within the
    file's first 8 MiB; the roots block names the newest header ending a
    batch and where the chain of files stands, RFC 0073 §8), and clears the
@@ -397,13 +397,13 @@ mutation → the type's record log (RAM) → (client confirmed)
    headers (their own lane, and the object store's chain), so a reopen
    restores them from the disk alone. Past the
    compaction ceiling the least recently used uploaded pages leave the disk
-   (`BlockDescriptor::EVICTED`; phase 4): a read of one goes to the object
-   store and marks it wanted back, and a write restores its bucket before it
-   commits, so a page on disk is always the whole truth about its bucket.
+   (flagged `EVICTED`; phase 4): a read of one goes to the object store and
+   marks it wanted back, and a write restores its page before it commits, so
+   a page on disk is always the whole truth about its keys.
    A database whose disk is gone opens from its files alone (phase 5): the
    same header and the same walk as the disk's (RFC 0072), and the store
    adopts what the newest whole **cut** says (an upload that left nothing waiting: every batch up
-   to a point, none in part), every disk bucket evicted. In **object mode**
+   to a point, none in part), every disk page evicted. In **object mode**
    (`PageStore::open_object`, phase 6) there is no disk at all: what would
    be the data files sit in RAM, there is no settle to disk — a write is durable once
    an upload carries it, which happens on 8 MiB or an interval — and every
@@ -462,8 +462,7 @@ the `STRUCT_HASH`.
 
 `PageStore::open(dir, &[…])` takes the slots as an **explicit registry** —
 declared, not discovered, the same allowlist stance as exposure. A write whose
-`STRUCT_HASH` has no listed slot is refused (`UnregisteredStructHash`); the
-reserved `BpTree`-node slot is always included (compression off). A data
+`STRUCT_HASH` has no listed slot is refused (`UnregisteredStructHash`). A data
 directory has **one open `PageStore` at a time**: every data file is locked
 while open (an empty one is kept for a database nothing was written to yet), so a second open of the same directory — in this process or another —
 fails with `EngineBusy`. Stores over different directories open side by side.
@@ -480,8 +479,8 @@ measured against what the cache actually allocates.
 
 ### Atomicity is the batch
 
-A single operation can touch several records (a NonUnique insert writes the data
-record **and** a `BpTree` node). These are committed to the record cache as one
+A single operation can touch several values (a NonUnique insert writes the data
+record **and** an entry in each of its chains). These are committed to the record cache as one
 batch, on the one thread — so commits are totally ordered — and a settle cycle's
 mark falls between two of them: a batch on disk is every write before its mark,
 and a reconstruction roots only in a batch whose end is written, so a crash
@@ -494,11 +493,11 @@ separate, later concern.)
 ### IO cost
 
 **Per mutation: memory only.** `Store::apply` commits the whole batch — the
-record, every touched `BpTree` node, the `Pivot` rewrite when a root moved — to
-the per-type logs. Nothing reaches the disk on that path.
+record and an entry set or unset per chain it touched — to the per-slot logs.
+Nothing reaches the disk on that path.
 
-**Per settle round: one write.** The round's ids are grouped by bucket, each
-touched page is read **once**, and every resulting image is placed in **one
+**Per settle round: one write.** The round's keys are routed to their pages,
+each touched page is read **once** (or not at all: a new or cached one), and every resulting image is placed in **one
 contiguous window**, ending with its 32 KiB header, written with a single
 positioned write ([RFC 0041](../../rfcs/0041-single-barrier-checkpoint.md)).
 Reads are the floor: one per page the round modifies.
@@ -515,17 +514,15 @@ maintenance above the store, which decides how many values a batch contains:
 | Operation                         | Values in the batch                                                                               |
 | --------------------------------- | ------------------------------------------------------------------------------------------------- |
 | **Unique `save`**                 | the live record + the archived predecessor                                                        |
-| **NonUnique `save`** (update)     | record + archive + the recency log's re-key + each of `N` secondaries **whose fields changed**    |
-| **NonUnique `insert` / `remove`** | record + `current` + recency (or `dead`) + every one of `N` secondaries · `Pivot` if a root moved |
+| **NonUnique `save`** (update)     | record + archive + the recency re-key + every list's copy + each of `N` secondaries **whose fields changed** |
+| **NonUnique `insert` / `remove`** | record + recency (or the removal log) + every list + every one of `N` secondaries                |
 
-A NonUnique **`save`** never re-keys the `current` tree — its key is the record's
-immutable `CREATED_AT` identity — but it always re-keys the recency log and any
-secondary whose fields changed, reaching the roots through **`Metadata.pivot`**.
-The `Pivot` itself is **read, not written** unless a `BpTree` root moves (no
-counter). The **`dead`** tree is touched only by `remove`; an update's superseded
-version is archived at a derived slot and linked by `Metadata.succession`. The
-record's identity `Id` stays stable so references don't break. Reads of those
-tree nodes are served from the shared `BpTree` cache slot when warm.
+A NonUnique **`save`** always re-keys the recency entry and any secondary whose
+fields changed, and rewrites its copy in every declared list. The `Pivot` is
+**never written** after creation. The **removal log** is touched only by
+`remove`; an update's superseded version is archived at a derived slot and
+linked by `Metadata.succession`. The record's identity `Id` stays stable so
+references don't break.
 
 ---
 
@@ -536,36 +533,23 @@ tree nodes are served from the shared `BpTree` cache slot when warm.
   previous version into history via `Metadata`.
 - **NonUnique** — a collection's `Pivot` is created **explicitly** (one per
   holder, so a nesting NonUnique mints one per record) and its `PivotId` stored
-  by the holder; never auto-created. A
-  record's **identity `Id` is fixed at `insert`** (stable anchor for references),
-  so:
-  - **`save`** (update) **re-keys only the trees whose field changed** — the
-    `current` `BpTree` is keyed by the immutable `CREATED_AT` (never re-keyed),
-    each secondary only when its field changed. It reaches the roots through
-    `Metadata.pivot`. The **`dead`** tree is **not** touched: the superseded
-    version is archived at a derived slot and linked by `Metadata.succession`;
-  - **`insert`** adds the record to the `current` `BpTree` (and every secondary) and
-    stamps `Metadata.pivot`; **`remove`** moves it to the **dead** tree — the only
-    op that writes `dead`. All go through the `Pivot`.
-    The record bytes are never erased, keeping the timeline navigable.
+  by the holder; never auto-created. A record's **identity `Id` is fixed at
+  `insert`** (stable anchor for references), so:
+  - **`save`** (update) re-keys the recency entry and each secondary whose
+    field changed; the superseded version is archived at a derived slot and
+    linked by `Metadata.succession`;
+  - **`insert`** sets an entry in the recency chain, every list and every
+    secondary; **`remove`** unsets them and adds one to the removal log — the
+    only op that writes it. The record bytes are never erased, keeping the
+    timeline navigable.
 
-### `BpTree` stores only `Id`s — reads are two-phase
+### Chains hold anchors — reads are two-phase, lists aside
 
-A `BpTree` holds **`Id`s, never record bytes**. Its nodes are themselves stored
-as pages (the `BpTree` `STRUCT_HASH`) and linked by `Id`, so a search walks the
-tree node-by-node and **returns a set/range of matching record `Id`s** — nothing
-more. Resolving those `Id`s to actual records is a **separate step**: each `Id` is
-fetched through its type's page directory (a normal record `get`). So a NonUnique
-read is:
-
-1. **Index search** — walk the `Pivot`'s `current` `BpTree` (ordered by
-   `CREATED_AT`) → matching `Id`s;
-2. **Record fetch** — resolve each `Id` to its bytes via the per-`STRUCT_HASH`
-   directory.
-
-Keeping the tree ID-only is what makes it small and shallow, and lets the two
-phases be scheduled independently (e.g. fetch only the page of `Id`s the caller
-actually wants).
+A recency, removal, secondary or fuzzy chain holds **anchors, never record
+bytes**: a search scans the chain's key range and returns the matching
+anchors; each is then fetched at its anchor, a normal record `get`. A
+declared list is the exception it was declared to be: its entries are the
+records, read with the range.
 
 ### History & space
 
