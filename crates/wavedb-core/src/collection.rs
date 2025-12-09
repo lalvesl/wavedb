@@ -25,10 +25,10 @@
 //! ## Atomicity
 //!
 //! Each mutating op commits **one** [`Store::apply`] batch: the record write
-//! (plus its archived predecessor and chain relinks on a save), the record
-//! chain segments and sparse-index nodes it touched — secondary and fuzzy
-//! chains included — and, when a root moved, the rewritten `Pivot` record. A
-//! crash replays the whole batch or none of it.
+//! (plus its archived predecessor and chain relinks on a save) and an entry
+//! set or unset in every chain it touched — recency, removals, lists,
+//! secondary and fuzzy chains. No op rewrites the `Pivot`. A crash keeps the
+//! whole batch or none of it.
 
 use std::marker::PhantomData;
 

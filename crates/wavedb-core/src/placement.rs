@@ -35,8 +35,8 @@ pub const DEFAULT_SHARDS: usize = 64;
 /// version at an archive slot (`KEY` = its instant) and the live record at
 /// the anchor (`KEY` = the `STRUCT_HASH`) — two ids with nothing in common,
 /// which `hash(id)` would split across two shards with no owner to be atomic
-/// in. A collection is the same: its chain segments and index nodes carry
-/// ids of their own, and they belong to the Pivot because the operation does.
+/// in. A collection is the same: its chain entries are keys of lanes of
+/// their own, and they belong to the Pivot because the operation does.
 ///
 /// Ordered (any total order will do) so a body taking several owners takes
 /// them in one order everywhere (RFC 0067 §5).

@@ -3,8 +3,8 @@
 //! way [`crate::expose_changes`] is.
 //!
 //! A `#[wavedb::list]` is the only structure that stores records densely in a
-//! declared order ([RFC 0051]), and a rendered page is one segment read
-//! ([RFC 0052]) — but until these two commands existed, all of that was
+//! declared order ([RFC 0051]), and a rendered page is a skip and a read of
+//! its range ([RFC 0078]) — but until these two commands existed, all of that was
 //! reachable only from a `LocalHandle` or a `#[server]` body. The thing that
 //! renders the page is exactly the thing that could not ask for it.
 //!
@@ -27,7 +27,7 @@
 //! node-wide read budget belongs to the M8 gates, not to one op.
 //!
 //! [RFC 0051]: https://github.com/wavedb/wavedb/blob/main/rfcs/0051-ordered-record-lists.md
-//! [RFC 0052]: https://github.com/wavedb/wavedb/blob/main/rfcs/0052-segment-size-as-the-pagination-unit.md
+//! [RFC 0078]: https://github.com/wavedb/wavedb/blob/main/rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
 use futures::{StreamExt, TryStreamExt};
 
@@ -80,10 +80,10 @@ where
     ))
 }
 
-/// How many living records declared list `index` holds — one cold read, since
-/// the sparse index's root carries the sum ([RFC 0052]).
+/// How many living records declared list `index` holds — a sum of its
+/// pages' counts, its edge pages read ([RFC 0078] §7).
 ///
-/// [RFC 0052]: https://github.com/wavedb/wavedb/blob/main/rfcs/0052-segment-size-as-the-pagination-unit.md
+/// [RFC 0078]: https://github.com/wavedb/wavedb/blob/main/rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 ///
 /// # Errors
 /// [`Error::ListOutOfRange`](crate::Error::ListOutOfRange) for an undeclared

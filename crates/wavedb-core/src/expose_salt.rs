@@ -7,13 +7,13 @@
 //! available: the archive-slot address, and the browser's flat `Id → bytes`
 //! keyspace. Two occupants sharing it lose that separation.
 //!
-//! Since RFC 0050 the occupants are not just the declared record types. A
-//! NonUnique type also reserves three chain lanes — the record chain, the
-//! removal log, the sparse index — each a `STRUCT_HASH` of its own and so a
-//! salt of its own. A registry of `n` such types puts `4n` values in a
-//! 32768-slot space, and the property they exist to provide ("a segment id can
-//! never equal a record anchor, an archive slot, or a tree node") rests on all
-//! of them being distinct. So the guard compares occupant sets, not entries.
+//! The occupants are not just the declared record types. A NonUnique type
+//! also reserves five ordered lanes — its lists, recency, the removal log,
+//! its secondary and fuzzy chains (RFC 0078 §7) — each a `STRUCT_HASH` of its
+//! own and so a salt of its own. A registry of `n` such types puts `6n`
+//! values in a 32768-slot space, and one key space per kind of thing stored
+//! rests on all of them being distinct. So the guard compares occupant sets,
+//! not entries.
 //!
 //! [`type_salt`]: crate::mint::type_salt
 

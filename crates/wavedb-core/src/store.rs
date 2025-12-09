@@ -86,7 +86,7 @@ impl Write {
 /// Key→value backend over [`Id`] plus an **atomic batch**.
 ///
 /// `apply` commits all-or-nothing: a multi-record op (a record **and** the
-/// chain segments it touches) is one batch, so a reader never sees a half-applied
+/// chain entries it touches) is one batch, so a reader never sees a half-applied
 /// mutation and a crash keeps either the whole batch or none of it. There is no
 /// separate transaction manager — the batch *is* the atomic unit. When a crash
 /// may still take it is the store's: [`apply_durable`](Store::apply_durable)

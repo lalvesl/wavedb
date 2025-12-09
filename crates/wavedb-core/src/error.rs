@@ -23,17 +23,10 @@ pub enum Error {
     #[error("unknown struct hash {0:#018x}")]
     UnknownStructHash(u64),
 
-    /// A value read as a chain segment or sparse-index node did not start
-    /// with its lane's reserved hash — the pointer resolved to some other
-    /// kind of value.
+    /// A key read from a lane as a chain's entry lies outside the chain,
+    /// or is too short to end in an anchor.
     #[error("foreign lane tag {0:#018x}")]
     LaneBadTag(u64),
-    /// A chain segment or sparse-index pointer resolved to nothing in the
-    /// backing [`Store`](crate::Store) — a dangling neighbour, child or root
-    /// pointer. The chain's own writes are one atomic batch, so this means the
-    /// structure disagrees with the store, never a half-applied mutation.
-    #[error("chain node {0:?} missing")]
-    ChainNodeMissing(LocalId),
     /// A collection handle's `Pivot` record was not in the [`Store`] — a stale
     /// or foreign `PivotId`.
     ///

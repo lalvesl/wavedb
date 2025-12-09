@@ -68,20 +68,20 @@ pub trait WaveDbStruct: WaveWire {
     const SHAPE: Shape;
 
     /// The reserved lane hashes this type's storage occupies **beyond** its
-    /// own records — one directory per kind of thing a collection stores: the
-    /// **declared lists'** segments (the only ones holding records), the
-    /// **recency** chain, the **removal log**, and the **sparse index** above
-    /// them. Recency and `dead` are split from the record lane because they
-    /// hold ids rather than records (RFC 0054), and a lane exists so one page
-    /// and one zstd dictionary model one kind of content. A `Unique` type has
-    /// no collection and so no lanes, which is the default.
+    /// own records — one ordered lane per kind of thing a collection stores
+    /// (RFC 0078 §7): the **declared lists** (the only ones holding records),
+    /// the **recency** chain, the **removal log**, and the **secondary** and
+    /// **fuzzy** chains. Recency and `dead` are split from the record lane
+    /// because they hold ids rather than records (RFC 0054), and a lane exists
+    /// so one page and one zstd dictionary model one kind of content. A
+    /// `Unique` type has no collection and so no lanes, which is the default.
     ///
     /// Derived by the macro at expansion time, because SeaHash is not a
     /// `const fn` (the same reason the `StructStorage` slots carry literals).
     /// They are listed here because a lane occupies a
     /// `type_salt` (the low 15 bits) exactly as a record type does,
-    /// and the registry's collision guard has to see every occupant to
-    /// uphold "a segment id can never equal a record anchor".
+    /// and the registry's collision guard has to see every occupant to keep
+    /// one key space per kind of thing stored.
     const LANE_HASHES: &'static [u64] = &[];
 
     /// The typed handle into this type's collection.
@@ -103,9 +103,6 @@ pub trait WaveDbStruct: WaveWire {
 /// gates the collection surface — the two never overlap.
 pub trait UniqueStruct: WaveDbStruct {}
 
-/// The rows of a rendered page when a type declares none (RFC 0052).
-pub const DEFAULT_PAGE: usize = 16;
-
 /// Implemented (by the proc-macro) for every `#[wavedb(NonUnique)]` struct.
 ///
 /// Ties the record type to its generated `{Name}Pivot` roots holder. This is
@@ -122,26 +119,8 @@ pub trait NonUniqueStruct: WaveDbStruct {
     /// Number of `#[wavedb::pivot(...)]` secondary indexes, declaration order.
     const NUM_SECONDARIES: usize = 0;
 
-    /// The rows of a rendered page — the developer's
-    /// `#[wavedb(NonUnique, page = N)]`, defaulting to [`DEFAULT_PAGE`]: what
-    /// a list's `_at_page(k)` reads, rows `k·N` onward (RFC 0052).
-    ///
-    /// It folds into the [`STRUCT_HASH`](crate::WaveDbStruct::STRUCT_HASH),
-    /// like every declaration that changes what a reader gets.
-    const PAGE: usize = DEFAULT_PAGE;
-
     /// Number of `#[wavedb::list(...)]` declared lists, declaration order.
     const NUM_LISTS: usize = 0;
-
-    /// Declared list `index`'s page — its own `page = N`, or the struct's
-    /// [`PAGE`](Self::PAGE) when it declared none. It folds into the
-    /// [`STRUCT_HASH`](crate::WaveDbStruct::STRUCT_HASH) with the declaration
-    /// it belongs to (RFC 0052).
-    #[must_use]
-    fn list_page(index: usize) -> usize {
-        let _ = index;
-        Self::PAGE
-    }
 
     /// The order-preserving ([`IndexKey`](crate::index::IndexKey)-encoded) key
     /// of declared list `index` for this record's current values — the property
