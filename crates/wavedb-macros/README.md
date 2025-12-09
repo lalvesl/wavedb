@@ -131,17 +131,12 @@ carry no business data — pure addressing — so applications rarely name them
 directly; they reference a collection through its `PivotId`.
 
 ```rust
-// Generated type. The handle for one NonUnique collection: the roots of every
-// chain it holds (RFC 0050, RFC 0075). No counter — a size field would force a
-// Pivot write on every insert/remove — and a chain's roots are permanent, so
-// the Pivot is written at creation and then essentially never.
+// Generated type. The handle for one NonUnique collection: its id is the
+// prefix of every chain the collection holds — each a key range of an ordered
+// lane (RFC 0078 §7) — so it carries no roots and no counter, and is written
+// once, at creation.
 pub struct NotePivot {
-    pub recency:     ChainRoots,            // living records, by live instant
-    pub removals:    LogRoots,              // the removal log
-    pub secondaries: [ChainRoots; S],       // one per `#[wavedb::pivot(...)]`
-    pub lists:       [ChainRoots; L],       // one per `#[wavedb::list]`
-    pub fuzzy:       [ChainRoots; F],       // one per `#[wavedb::fuzzy]`
-    pub permission:  Option<PermissionRef>, // collection default; record Metadata overrides
+    pub permission: Option<PermissionRef>, // collection default; record Metadata overrides
 }
 ```
 
@@ -191,14 +186,14 @@ pub struct Order {
 
 Per declared pivot the macro:
 
-- adds a **`ChainRoots` to the `Pivot`** (one per index), and folds the
-  declaration into the `STRUCT_HASH` as `#pivot{i}` — reordering or retyping
-  them is a new type;
+- adds a **chain** — declaration `i` of the type's secondary lane, under each
+  collection's Pivot — and folds the declaration into the `STRUCT_HASH` as
+  `#pivot{i}`; reordering or retyping them is a new type;
 - generates **typed lookups** on the collection handle — `by_amount(&db, v)` and
   `by_amount_range(&db, lo, hi)` (half-open), `by_customer_date(&db, c, d)` and
   `by_customer_date_range(&db, (c0, d0), (c1, d1))` — returning a record async
   iterator (`impl Stream<Item = Result<T>>`), resolved two-phase (index → `Id`s →
-  fetch): one descent to the bound's least key, then the chain in order.
+  fetch): one scan from the bound's least key, then the chain in order.
 
 A `#[wavedb::list]` is the same chain with the records inline, so it gets the
 same `by_` / `by_…_range` lookups without the fetch per record. Declaring a
@@ -211,7 +206,7 @@ new type.
 every secondary; a `save` (update) **re-keys each secondary whose field values
 changed** — the old key comes out, the new key goes in, all inside the op's one
 atomic batch (the old record's bytes supply the stale keys). A secondary write
-rewrites one segment of pointers and never the `Pivot`. Cost scales with the
+sets or unsets one key of its lane and never touches the `Pivot`. Cost scales with the
 secondary-index count (see
 [`wavedb-storage`](../wavedb-storage/README.md#io-cost-per-operation)):
 secondary indexes are a write-amplification trade — faster lookups, costlier
