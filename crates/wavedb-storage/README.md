@@ -556,7 +556,7 @@ records, read with the range.
 There is **no cold tier** (the slow-node was removed — not part of the design for
 now). History is first-class and **never erased**: superseded versions and
 deleted-record bytes stay in the data files, reachable via the modification chain
-and the `dead` `BpTree`. So a node's data **grows unbounded** with history — and
+and the removal log. So a node's data **grows unbounded** with history — and
 that is **accepted for now**. History pruning / compaction / a separate archive
 tier is left for later; nothing reclaims old versions today.
 
@@ -577,8 +577,8 @@ tier is left for later; nothing reclaims old versions today.
 
 | Parameter             | Description                                        | Default        |
 | --------------------- | -------------------------------------------------- | -------------- |
-| `block_size`          | Allocation unit; a page is `block_count` of these  | 4 KiB          |
-| `first_page_size`     | Size of the first page / directory bucket          | 16 KiB         |
-| `max_blocks_per_page` | Ceiling on one page's run (`block_count` is `u20`) | 2²⁰−1 (~4 GiB) |
-| `warning_limit`       | Fill level that triggers a background `split_next` | tunable        |
-| `cache_budget`        | RAM budget for the `BTreeMap` write/read cache     | tunable        |
+| `block_size`               | Allocation unit; a page is a run of these           | 4 KiB          |
+| `target_blocks_per_bucket` | A page a round rewrites past this is cut            | see `StoreOptions` |
+| `record_cache_bytes`       | RAM the record cache is evicted down to             | see `StoreOptions` |
+| `page_cache_bytes`         | RAM for decoded pages (RFC 0044)                    | see `StoreOptions` |
+| `file_bytes`               | A data file closes at this                          | 10 GiB         |
