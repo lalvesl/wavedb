@@ -78,47 +78,51 @@ impl PageStore {
     /// # Errors
     /// As [`scan_now`](Self::scan_now); an object-store fault restoring a
     /// page.
-    pub(crate) async fn scan_rest(
+    pub(crate) async fn walk_rest(
         &self,
-        lane: u64,
-        span: &Span,
         mut now: StorageResult<Walked>,
-    ) -> StorageResult<Vec<Entry>> {
+        again: impl Fn() -> StorageResult<Walked>,
+    ) -> StorageResult<(Vec<Entry>, u64)> {
         loop {
             match now? {
-                Walked::Done(entries) => return Ok(entries),
+                Walked::Done { entries, skipped } => {
+                    return Ok((entries, skipped));
+                }
                 Walked::Evicted { idx, key } => {
                     self.restore(idx, &key).await?;
                 }
             }
-            now = self.scan_now(lane, span);
+            now = again();
         }
     }
 
-    /// The span reading every key in `[lo, hi)`, which a count walks.
-    pub(crate) fn counted(lo: &[u8], hi: Option<&[u8]>) -> Span {
-        Span {
-            lo: lo.to_vec(),
-            hi: hi.map(<[u8]>::to_vec),
-            rev: false,
-            skip: 0,
-            limit: usize::MAX,
-        }
-    }
-
-    /// Walk slot `idx`'s pages along `span` until `need` entries are held.
+    /// Walk lane `lane`'s pages along `span`, past `skip` entries, until
+    /// `need` entries are held.
     fn walk(
         &self,
-        idx: usize,
+        lane: u64,
         span: &Span,
+        skip: u64,
         need: usize,
     ) -> StorageResult<Walked> {
+        let done = Walked::Done {
+            entries: Vec::new(),
+            skipped: 0,
+        };
+        let Some(idx) = self.slot_index(lane) else {
+            return Ok(done);
+        };
+        if !below(&span.lo, span.hi.as_deref()) {
+            return Ok(done);
+        }
         let index = self.types[idx].directory().borrow();
         let mut walk = Walk {
             store: self,
             idx,
             index: index.as_ref(),
             span,
+            skip,
+            skipped: 0,
             out: Vec::new(),
         };
         let evicted = if span.rev {
@@ -126,50 +130,37 @@ impl PageStore {
         } else {
             walk.forth(need)?
         };
+        walk.out.truncate(need);
         Ok(match evicted {
             Some(key) => Walked::Evicted { idx, key },
-            None => Walked::Done(walk.out),
+            None => Walked::Done {
+                entries: walk.out,
+                skipped: walk.skipped,
+            },
         })
     }
 }
 
-/// One walk's state.
-struct Walk<'a> {
-    store: &'a PageStore,
-    idx: usize,
-    index: Option<&'a Pages>,
-    span: &'a Span,
-    out: Vec<Entry>,
-}
+#[cfg(test)]
+mod tests {
+    use futures::executor::block_on;
+    use wavedb_core::store::Span;
+    use wavedb_core::{Store, Write};
 
-impl Walk<'_> {
-    /// Ascending, from `span.lo`. The key of an evicted page met.
-    fn forth(&mut self, need: usize) -> StorageResult<Option<Vec<u8>>> {
-        let hi = self.span.hi.clone();
-        let mut cursor = self.span.lo.clone();
-        let mut at = self.index.and_then(|ix| ix.slot_from(&cursor));
-        while self.out.len() < need && below(&cursor, hi.as_deref()) {
-            let Some((slot, start, next)) = self.cover(at) else {
-                self.merged(None, &cursor, hi.as_deref(), false)?;
-                break;
-            };
-            if below(&cursor, Some(&start)) {
-                let gap = min_hi(Some(&start), hi.as_deref());
-                self.merged(None, &cursor, gap, false)?;
-                cursor = start;
-                continue;
-            }
-            let end = min_hi(next.as_deref(), hi.as_deref());
-            if let Some(key) = self.merged(Some(slot), &cursor, end, false)? {
-                return Ok(Some(key));
-            }
-            match end {
-                Some(end) => cursor = end.to_vec(),
-                None => break,
-            }
-            at = self.index.and_then(|ix| ix.next(slot));
-        }
-        Ok(None)
+    use crate::page_store::PageStore;
+    use crate::struct_storage::StructStorage;
+
+    const PLAIN: u64 = 0x0078_0007_1A4E_0001;
+    static PLAIN_SLOT: StructStorage = StructStorage::new(PLAIN);
+    const COUNTED: u64 = 0x0078_0007_1A4E_0002;
+    static COUNTED_SLOT: StructStorage = StructStorage::new(COUNTED).counted();
+
+    const ROWS: u64 = 2_000;
+
+    fn key(collection: u8, at: u64) -> Vec<u8> {
+        let mut key = vec![collection; 16];
+        key.extend_from_slice(&at.to_be_bytes());
+        key
     }
 
     /// Descending, from `span.hi`. The key of an evicted page met.
