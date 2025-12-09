@@ -85,8 +85,8 @@ async fn typed_surface_runs_serverless_over_indexeddb() {
         "porto"
     );
 
-    // NonUnique collection: the chain segments are ordinary values in the
-    // same flat keyspace — the whole engine-above-Store runs unchanged.
+    // NonUnique collection: the chains are key ranges of the `lanes` store
+    // — the whole engine-above-Store runs unchanged.
     let pivot = Note::create_pivot(&db).await.unwrap();
     let col = Note::collection(pivot);
     let first = col
