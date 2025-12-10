@@ -4,7 +4,7 @@
 - **Crates:** `wavedb-storage`
 - **Related:** [RFC 0044](0044-page-cache.md) is the *mechanism* this
   RFC sets policy for; [RFC 0051](0051-ordered-record-lists.md) and
-  [RFC 0052](0052-segment-size-as-the-pagination-unit.md) are the
+  [RFC 0052](0052-segment-size-as-the-pagination-unit-DEPRECATED.md) are the
   structures whose cold cost was designed small **because** this policy cannot
   promise them residency
 
