@@ -33,7 +33,7 @@ descent; a registered type still unnamed there is new, and empty.
       `floor` and `seen` no longer hold dead headers live — check nothing
       else relies on it.
 - [x] 1.7 Docs: RFC 0072 §6 (the stop at the horizon) + a Progress entry;
-      the `header.rs` module doc on `prev`; `CLAUDE.md`'s storage paragraph
+      the `header.rs` module doc on `prev`; `AGENTS.md`'s storage paragraph
       ("down by `prev` while a registered type is unnamed, never below the
       root's horizon").
 - [x] 1.8 The pre-commit bar: fmt, clippy, test, `check_file_length`, doc,
@@ -69,7 +69,7 @@ so in RAM.
       as on disk.
 - [x] 2.7 Docs: `page_cache.rs` module doc (the "still compressed"
       rationale reversed), `block_file.rs` `read_run_with`,
-      `directory_pages.rs`, RFC 0044 (design + status), `CLAUDE.md`'s
+      `directory_pages.rs`, RFC 0044 (design + status), `AGENTS.md`'s
       storage paragraph if it names the cache's form.
 - [x] 2.8 The pre-commit bar.
 
@@ -113,5 +113,5 @@ durable. Design: `rfcs/0073-data-shards-and-storage-shards.md`.
       `compact_remote`, `convert`, object mode.
 - [x] 3.9 Docs: RFC 0073 Progress per phase; RFC 0067 §2/§7/§8, 0072,
       0070, 0071 where they change; the storage and node READMEs;
-      `CLAUDE.md`'s storage and node paragraphs.
+      `AGENTS.md`'s storage and node paragraphs.
 - [x] 3.10 The pre-commit bar at every phase.
