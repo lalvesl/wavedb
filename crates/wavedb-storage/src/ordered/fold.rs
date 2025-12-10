@@ -18,16 +18,69 @@ use super::head::{QUANTA, Shape, SubHeader, q_of};
 use super::index::{Entries, PageIndex, Range, Slot};
 
 impl<M: Copy + Default> PageIndex<M> {
-    /// Fold `at`'s range with the ranges on either side where it can;
-    /// where `at`'s entry is now.
+    /// Fold `at`'s range with the ranges on either side for as long as it
+    /// can — a regroup's pages arrive one by one, and the piece of an old
+    /// range left between two of them may hold only a hole; where `at`'s
+    /// entry is now.
     pub(super) fn fold_around(&mut self, at: Slot) -> Slot {
-        self.fold(at.range);
-        let left = at.range.checked_sub(1);
-        left.and_then(|left| self.fold(left))
-            .map_or(at, |offset| Slot {
-                range: at.range - 1,
+        while self.fold(at.range).is_some() {}
+        let mut at = at;
+        while let Some(left) = at.range.checked_sub(1)
+            && let Some(offset) = self.fold(left)
+        {
+            at = Slot {
+                range: left,
                 entry: offset + at.entry,
-            })
+            };
+        }
+        at
+    }
+
+    /// Runs of neighbouring ranges worth rewriting side by side, so the
+    /// fold makes each one range ([RFC 0078] §12): consecutive ranges of one
+    /// prefix and quantization, each holding fewer than [`SCATTERED`]
+    /// pages, as many as one window can address — its blocks, at most
+    /// [`MAX_RANGE_ENTRIES`] entries and `most` pages — and at least two.
+    /// Each run named by its pages' keys, in key order.
+    ///
+    /// [RFC 0078]: ../../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
+    #[must_use]
+    pub fn scattered(&self, most: usize) -> Vec<Vec<Vec<u8>>> {
+        let mut out = Vec::new();
+        let mut run = Stretch::default();
+        for (i, r) in self.ranges.iter().enumerate() {
+            let pages: Vec<(Vec<u8>, u64)> = (0..r.entries.len())
+                .filter_map(|entry| {
+                    let (_, blocks) = r.head.decode(r.entries.pages[entry])?;
+                    Some((self.key_of(Slot { range: i, entry })?, blocks))
+                })
+                .collect();
+            if pages.len() >= SCATTERED {
+                run.close(&mut out);
+                continue;
+            }
+            let blocks: u64 = pages.iter().map(|p| p.1).sum();
+            let joins = run.head.is_some_and(|h| {
+                let (a, b) = (h.shape, r.head.shape);
+                h.prefix == r.head.prefix
+                    && a.key_shift() == b.key_shift()
+                    && a.address_bits() == b.address_bits()
+                    && a.address_factor() == b.address_factor()
+                    && run.blocks + blocks <= a.window()
+                    && run.entries + r.entries.len() <= MAX_RANGE_ENTRIES
+                    && run.keys.len() + pages.len() <= most
+            });
+            if !joins {
+                run.close(&mut out);
+            }
+            run.head = Some(&r.head);
+            run.ranges += 1;
+            run.blocks += blocks;
+            run.entries += r.entries.len();
+            run.keys.extend(pages.into_iter().map(|p| p.0));
+        }
+        run.close(&mut out);
+        out
     }
 
     /// Fold range `i + 1` into range `i`, if one sub-header can name both;
@@ -120,6 +173,30 @@ impl<M: Copy + Default> PageIndex<M> {
         self.ranges
             .get(i + 2)
             .is_some_and(|next| next.head.start_cmp(&end) != Ordering::Greater)
+    }
+}
+
+/// Pages a range holds from which it is not scattered: its sub-header
+/// costs about what eight entries do.
+pub const SCATTERED: usize = 8;
+
+/// A run of ranges [`scattered`](PageIndex::scattered) is gathering.
+#[derive(Default)]
+struct Stretch<'a> {
+    head: Option<&'a SubHeader>,
+    ranges: usize,
+    blocks: u64,
+    entries: usize,
+    keys: Vec<Vec<u8>>,
+}
+
+impl Stretch<'_> {
+    /// Hand the run over if it folds two ranges or more, and start afresh.
+    fn close(&mut self, out: &mut Vec<Vec<Vec<u8>>>) {
+        let run = std::mem::take(self);
+        if run.ranges >= 2 && !run.keys.is_empty() {
+            out.push(run.keys);
+        }
     }
 }
 
@@ -248,5 +325,31 @@ mod tests {
             .filter(|r| matches!(r, super::super::RangeRecord::Gone { .. }))
             .count();
         assert_eq!(gone, 1, "{records:?}");
+    }
+
+    #[test]
+    fn scattered_ranges_are_named_as_one_run_in_key_order() {
+        let mut ix = three();
+        rewrite(&mut ix, 1, 900);
+        rewrite(&mut ix, 2, 2000);
+        assert_eq!(ix.sub_headers().count(), 3);
+        let runs = ix.scattered(128);
+        let want: Vec<Vec<u8>> = (0..3).map(|n| key(n).to_vec()).collect();
+        assert_eq!(runs, std::slice::from_ref(&want));
+        // A round moves two pages at most: the run stops short.
+        assert_eq!(ix.scattered(2), [want[..2].to_vec()]);
+    }
+
+    #[test]
+    fn moved_side_by_side_a_run_folds_into_one_range() {
+        let mut ix = three();
+        rewrite(&mut ix, 1, 900);
+        rewrite(&mut ix, 2, 2000);
+        for (n, address) in [(0, 5000), (1, 5001), (2, 5002)] {
+            rewrite(&mut ix, n, address);
+        }
+        assert_eq!(ix.sub_headers().count(), 1);
+        assert_eq!([0, 1, 2].map(|n| address_of(&ix, n)), [5000, 5001, 5002]);
+        assert_eq!(ix.scattered(128), Vec::<Vec<Vec<u8>>>::new());
     }
 }
