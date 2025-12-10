@@ -10,7 +10,7 @@
 - **Builds on:** [RFC 0049](0049-elastic-pages-and-load-driven-splits.md) (a page is
   however many blocks its content needs, with no ceiling)
 - **Completed by:** [RFC 0051](0051-ordered-record-lists.md) (the sparse
-  index and further lists), [RFC 0052](0052-segment-size-as-the-pagination-unit.md)
+  index and further lists), [RFC 0052](0052-segment-size-as-the-pagination-unit-DEPRECATED.md)
   (segment sizing), [RFC 0053](0053-tenant-fair-cache-retention-PLANNED.md) (why
   every cost here is quoted cold)
 

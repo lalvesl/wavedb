@@ -14,7 +14,7 @@ change shape.
 > browser half of `Db::open`'s write-through cache; this crate re-exports
 > it, and `tests/idb_store.rs` still proves the raw batch contract and the
 > typed serverless flow in headless Chrome (chromedriver incantation in
-> `CLAUDE.md`). The **typed browser demo against a live node** is
+> `AGENTS.md`). The **typed browser demo against a live node** is
 > `tests/live_node.rs`, run through `scripts/browser_demo.sh`: `#[server]`
 > calls, a typed Unique save, and the streamed collection walk over
 > `fetch`, with IndexedDB caching reads. A raw `probe` export anchors the
@@ -40,27 +40,29 @@ pay write amplification for zero IO benefit. So the WASM build **skips the page
 layer entirely**:
 
 - **Key = the 128-bit `Id`** (big-endian). The Unique anchor lives at its
-  directly computable key; NonUnique records, Pivots, and BpTree nodes at their
-  timestamp-keyed `Id`.
+  directly computable key; NonUnique records and Pivots at their
+  timestamp-keyed `Id`. Chain entries live in the `lanes` object store, keyed
+  `[lane hash BE][key]`.
 - **Value = the wire-encoded record**, compressed exactly as on native.
 - Because `Id` orders by its most-significant `KEY` field, IndexedDB's ordered
   keyspace groups records **by type and time** (Unique by `STRUCT_HASH`,
-  NonUnique by `CREATED_AT`). Tenant/collection scoping is provided by the same
-  `Pivot` → `BpTree` index layer the engine uses on native — not by the raw key
-  order — so a collection read walks the tenant's own B+tree, never the whole
-  store.
-- The page-pressure machinery (page growth, bucket splits, the block allocator)
+  NonUnique by `CREATED_AT`). Collection scoping is provided by the same chains
+  the engine uses on native — a collection's chain is the key range under its
+  Pivot's id — so a collection read is a cursor over its own range, never the
+  whole store.
+- The page-pressure machinery (page cuts, the index, the block allocator)
   simply does not run client-side. Quota is the browser's job; the local store is
   a write-through cache that can always be re-fetched from the cluster.
 
 The engine layers above storage — the Unique anchor, history chains, the
-schema-evolution hooks, and the `Pivot`/`BpTree` index — are identical on both
+schema-evolution hooks, and the chains every index is — are identical on both
 targets, because they are the `Store`-generic
-[index contracts](../wavedb-core/README.md#index-contracts--pivot-bptree-indexkey)
-in `wavedb-core`. The web build supplies an **IndexedDB `Store`** and the _same_
-`BpTree`/`Pivot` code runs on it — pages and headers are `PageStore` internals, not
-the index. A thin client still ships filtered reads to a node; a **serverless** app
-(static files from a CDN, no node) links the engine and runs the `BpTree` walk +
+[index contracts](../wavedb-core/README.md#index-contracts--pivot-chain-indexkey)
+in `wavedb-core`. The web build supplies an **IndexedDB `Store`** — records in
+one object store, ordered lanes in another (`lanes`, keyed `[lane][key]`,
+read by cursor) — and the _same_ chain code runs on it; pages and headers are
+`PageStore` internals, not the index. A thin client still ships filtered reads to a node; a **serverless** app
+(static files from a CDN, no node) links the engine and runs the chain scans +
 `#[server]` bodies **in-browser over IndexedDB**, authoritative locally. Sync needs no page parity either: the sync
 protocol exchanges objects, never pages. (`localStorage` — synchronous,
 string-only, ~5 MB — cannot fill this role.)

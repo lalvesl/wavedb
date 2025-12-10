@@ -211,6 +211,21 @@ order of cost:
   column fits in L1 (6 KiB for a micro page).
 - **Decided** 2026-10-24, measuring RFC 0076: not now.
 
+### A list's count reads the pages at its edges
+
+- **Now.** A declared list's lane counts each page's entries, and a count
+  or a skip passes a page the span covers whole by its count. Pages are cut
+  at their middle, so a collection's first and last pages are usually
+  shared with its neighbours, and a count reads them — two pages at most.
+  A page the record cache holds anything unsettled of is read too.
+- **Instead.** RFC 0078 §4's split at a collection's edge: a page holding
+  more than one collection is cut between two of them, so a collection
+  spanning pages owns them and its count reads none. A per-page tally of
+  the cache's unsettled inserts and removals would also spare the read of
+  a page with writes pending.
+- **Decided** 2026-10-31, in RFC 0078 phase 4: the counts are exact
+  without either; the edge reads are what is left.
+
 ## Benchmarks
 
 ### Shop rows do not fit the 500 MB cage

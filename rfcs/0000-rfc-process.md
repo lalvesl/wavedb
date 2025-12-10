@@ -20,7 +20,7 @@ this one:
 
 - **Crate READMEs** describe the *target* architecture as a reference manual —
   organised by component, written for someone using the crate.
-- **`CLAUDE.md`** is a compressed operating brief for an agent.
+- **`AGENTS.md`** is a compressed operating brief for an agent.
 
 What neither holds is a *stable, per-idea record*: "here is one decision, the
 problem behind it, the design, and the roads not taken." That is the RFC. An

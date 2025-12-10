@@ -114,7 +114,7 @@ impl Contact {
 The two shapes differ deliberately: a lookup takes the value it is looking for, a
 list takes nothing because it *is* the whole ordering. `_at_page` reads as what it
 is — the same list, entered at a page boundary — and pairs with the `page = N`
-declaration of [RFC 0052](0052-segment-size-as-the-pagination-unit.md),
+declaration of [RFC 0052](0052-segment-size-as-the-pagination-unit-DEPRECATED.md),
 which is what makes a page one segment read.
 
 ### The sort key is (value, anchor), and the anchor is why it's stable
@@ -178,7 +178,7 @@ lucky case.
 A separator is updated when a segment's first record changes, which is a segment
 rewrite anyway; a split writes two.
 
-[RFC 0052](0052-segment-size-as-the-pagination-unit.md) adds element
+[RFC 0052](0052-segment-size-as-the-pagination-unit-DEPRECATED.md) adds element
 counts to the index, turning it into an order-statistic tree: "the segment holding
 global offset *o*" becomes one descent, and the pager's total is the root's sum.
 It also sets the segment's size band and shows why a declared capacity is a
