@@ -148,7 +148,9 @@ impl<M: Copy + Default> PageIndex<M> {
     /// Give `at` — a page or a hole — a range of its own pointing at `page`,
     /// based at the page's address and with a size unit large enough for it.
     /// The range covers the entry's quanta; the entries on either side keep
-    /// the old range's shape and base. Returns the page's slot.
+    /// the old range's shape and base — and the new range folds into a
+    /// neighbour that can address it ([`fold_around`](Self::fold_around)).
+    /// Returns the page's slot.
     pub(super) fn isolate(
         &mut self,
         at: Slot,
@@ -171,7 +173,8 @@ impl<M: Copy + Default> PageIndex<M> {
         };
         let left = entries.head(at.entry);
         let right = self.right_of(at, end, end);
-        Some(self.splice(at.range, left, middle, right))
+        let at = self.splice(at.range, left, middle, right);
+        Some(self.fold_around(at))
     }
 
     /// The part of `at`'s range from quantum `from` on: a hole up to `end`

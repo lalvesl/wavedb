@@ -301,6 +301,25 @@ A lane whose pages are rewritten all over the disk degrades toward one
 sub-header per page. That is the cost the affinity and the later regroup
 (§12) exist to bound.
 
+**A range isolated next to one that can address it folds into it.** The
+pages a round writes lie side by side, so the two halves of a cut, and
+neighbours in key order rewritten together, land in one window. When a
+page is isolated, its new range and each neighbour become one sub-header
+if one can name both:
+- the same prefix;
+- the finer of the two quantizations, which keeps every entry's start
+  (shifts are powers of two);
+- based at the lowest page, every page addressable from there, at the
+  larger size unit;
+- reaching as far as the second range did, or to the start of the range
+  after it;
+- 1024 entries at most.
+
+No page moves: every key finds the page it found before, and quanta between
+the two that no entry covered become a hole. The folded range is recorded
+whole and the range it took is recorded gone. What lies far apart on disk
+stays apart; bringing it together is the regroup's work (§12).
+
 **A range boundary is always an entry boundary**, so every page is named by
 exactly one entry. When a reshape gives a page a range of its own, the
 quanta the page covered but no key of it falls in become **holes**: entries
@@ -320,7 +339,8 @@ As built (`wavedb-storage::ordered`):
 - `PageIndex::find` answers a page, a hole, or uncovered.
 - `place` opens a range for an uncovered key.
 - `retarget` points an entry at a rewritten page, and isolates the page when
-  its range cannot address it.
+  its range cannot address it; the isolated range folds into a neighbour
+  that can (`fold_around`, `ordered/fold.rs`).
 - `cut` splits a page on a quantum boundary, refining when the page lies in
   one quantum.
 - `remove` hands a page's quanta to the entry before it.
@@ -499,8 +519,11 @@ Binary search stays for long vectors.
 
 ### 12. Later RFCs (out of scope here)
 
-- **Regroup.** Beside the copy-on-write cleanup, a pass reopens a range's
-  pages and rewrites them as fewer, larger pages:
+- **Regroup.** Its first step is taken here (phase 8): a phase of
+  compaction rewrites a stretch of fragmented ranges' pages verbatim, side
+  by side in key order, and the fold (§4) makes them one sub-header.
+  Beyond that, a pass reopens a range's pages and rewrites them as fewer,
+  larger pages:
   - larger factors and fewer sub-headers;
   - less RAM and better compression;
   - long sequential runs for analytical scans.
@@ -558,6 +581,15 @@ Each phase leaves the suite green.
    - bytes written per durable and relaxed insert, on micro and shop;
    - RAM per page;
    - read latency, hot and cold.
+8. **The fold and the regroup's first step.**
+   - The fold (§4): an isolated range merges into a neighbour that can
+     address it. In RAM, no page moved.
+   - The regroup, as a phase of compaction: on the same triggers, budget
+     and sealing, the pages of a stretch of fragmented ranges are rewritten
+     verbatim, side by side in key order, so the fold makes them one range.
+     The compaction's own moves go in key order for the same reason. Pages
+     merged into fewer, larger ones are left for §12.
+   - Decided 2026-10-31.
 
 ## As built (phases 1–3 and 6)
 
@@ -608,9 +640,9 @@ live in one `PageIndex<u8>` per type (`crate::pages`): the key is the
 
 **Known cost.** Data files only append, so a page rewritten long after its
 neighbours lands far from its range's base, and its range isolates it: a
-workload of scattered rewrites drifts toward one range per page. Merging
-adjacent ranges whose pages fit one window, and the regroup (§12), are
-what would bound it. Phase 5 measured it (below), and the decision is to
+workload of scattered rewrites drifts toward one range per page. The fold
+(§4) merges back the ranges whose pages already share a window; the
+regroup (§12) is what brings the rest together. Phase 5 measured it (below), and the decision is to
 keep it: an address is always one `u32` relative to its range's base, so
 every page is found — and every run the allocator rebuilds is named — the
 same way, and the sub-headers isolation adds are what the regroup folds

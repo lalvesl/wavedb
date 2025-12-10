@@ -17,6 +17,7 @@
 //! [RFC 0078]: ../../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
 mod access;
+mod fold;
 mod head;
 mod index;
 mod journal;
