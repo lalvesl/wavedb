@@ -22,11 +22,16 @@
 //!    no header older than the restatement is live.
 //! 2. **Moving.** Bounded passes, each a few rounds of one window write —
 //!    the same write a settle round makes, ending with its header.
-//! 3. **Sealing.** The vacated runs are still named by the newest durable
+//! 3. **Regrouping.** Runs of scattered ranges in every type's index —
+//!    neighbours of a few pages each — are moved the same way, a run per
+//!    round, side by side in key order, so each folds into one range
+//!    (RFC 0078 §12, [`crate::regroup`]). No header moves, so a store
+//!    through a storage thread with no file to empty regroups too.
+//! 4. **Sealing.** The vacated runs are still named by the newest durable
 //!    batch — a crash would reopen from it — so they are only deferred
 //!    frees. The next batch to end names the moved state; once it is
 //!    durable they are holes ([RFC 0072] §8).
-//! 4. **Reclaiming.** Every file's free tail is cut off, and a file left
+//! 5. **Reclaiming.** Every file's free tail is cut off, and a file left
 //!    empty is deleted ([`reclaim`](PageStore::reclaim)).
 //!
 //! Safety is the batch's: a moved run is written before any header names
@@ -81,6 +86,9 @@ pub enum Phase {
         since: u64,
     },
     Moving {
+        since: u64,
+    },
+    Regrouping {
         since: u64,
     },
     Sealing {
@@ -148,9 +156,14 @@ impl PageStore {
                         let percent = self.victim_free_percent;
                         let victims = self.shared_victims(percent).await?;
                         if victims.is_empty() {
-                            return Ok(Compacting::Done {
-                                reclaimed_blocks: 0,
-                            });
+                            self.plan_regroup();
+                            if self.regroup.borrow().is_empty() {
+                                return Ok(Compacting::Done {
+                                    reclaimed_blocks: 0,
+                                });
+                            }
+                            self.compaction.set(Phase::Regrouping { since });
+                            continue;
                         }
                         *self.victims.borrow_mut() = victims;
                     }
@@ -171,6 +184,15 @@ impl PageStore {
                 Phase::Moving { since } => {
                     let (images, blocks, finished) =
                         self.shift(budget_blocks).await?;
+                    if finished {
+                        self.plan_regroup();
+                        self.compaction.set(Phase::Regrouping { since });
+                    }
+                    return Ok(Compacting::Moved { images, blocks });
+                }
+                Phase::Regrouping { since } => {
+                    let (images, blocks, finished) =
+                        self.regroup_pass(budget_blocks).await?;
                     if finished {
                         let mark = self.seal_mark();
                         self.compaction.set(Phase::Sealing { since, mark });

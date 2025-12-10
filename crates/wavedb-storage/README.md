@@ -20,7 +20,7 @@ durability point. This is where most of WaveDB's engineering energy lives.
 | `block_file`      | A shard's data files, named by the block each starts at and found by listing: positioned run I/O, create/cut/delete, the lock, fsync.              |
 | `data_file`       | One data file: its handle and name (16 hex digits), the per-file lock, create/cut/delete.                                                              |
 | `dictionary`      | Per-`STRUCT_HASH` raw-content zstd dictionary (`Dictionary` + `DictState`): capped append-only buffer, version = prefix length, own run persistence. |
-| `ordered`         | The quantized page index of one lane (RFC 0078): sorted sub-headers, one `u32` per page, flags, a list lane's counts; its journal and rebuild.    |
+| `ordered`         | The quantized page index of one lane (RFC 0078): sorted sub-headers, one `u32` per page, flags, a list lane's counts; the fold; journal, rebuild. |
 | `pages`           | A type's index as the store addresses it: a key's page, a page's coverage, reads through the page cache.                                          |
 | `shape`           | One round's pages: records routed to the pages their keys fall in, those pages rebuilt and cut on a quantum boundary when over target.          |
 | `lane_read`       | A scan or count of an ordered lane, started synchronously and finished after restoring any evicted page it meets.                                |
@@ -51,7 +51,8 @@ durability point. This is where most of WaveDB's engineering energy lives.
 | `remote_live`     | What of the object store a store still names: live blocks per file, the space compaction weighs, the disk's rooted files.                      |
 | `settle`          | The record cache's side of a settle: what is unsettled, and the cache-eviction budget.                                                             |
 | `compact`         | Compaction's phases and surface (`compact_step`, `compact`, `reclaim`, `space`): move, drop the old addressing, seal, cut and delete.              |
-| `defrag`          | Compaction's moves: the emptiest data file's runs, highest first, verbatim, into the active file — one window write per round.                    |
+| `defrag`          | Compaction's moves: the emptiest data file's runs, highest first, verbatim, into the active file — one window write per round, in key order.      |
+| `regroup`         | Compaction's regroup (RFC 0078 §12): runs of scattered ranges' pages moved side by side in key order, so each folds into one sub-header.           |
 | `remote_compact`  | The object store's compaction (RFC 0070 §8): a survey run like a recovery, blind DELETEs below the horizon, mostly free files carried forward. |
 | `convert`         | Converting a database from or to disk mode, offline: the pages flagged for upload, or brought back from the object store.          |
 | `page`            | `SlotPage` — the homogeneous record page: `[len][to_wire_checked(PageEnvelope)]`, body raw or zstd.                                                  |
@@ -382,6 +383,11 @@ mutation → the type's record log (RAM) → (client confirmed)
    cut and the emptied files deleted
    ([RFC 0071](../../rfcs/0071-data-files-by-address.md), superseding
    [RFC 0069](../../rfcs/0069-compaction-into-the-holes-DEPRECATED.md)'s holes).
+   Before the sealing it **regroups**: a page rewritten far from its range's
+   base gets a range of its own, and runs of neighbouring ranges of a few
+   pages each have their pages moved the same way, side by side in key
+   order, so the index folds each run into one sub-header
+   ([RFC 0078](../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md) §12).
    It is stepped, a bounded pass at a time; the node starts one on a daily
    UTC time, a disk ceiling, or a free-space share.
 

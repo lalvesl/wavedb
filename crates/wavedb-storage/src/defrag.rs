@@ -9,22 +9,23 @@ use std::collections::BTreeMap;
 
 use crate::block::Run;
 use crate::error::{StorageError, StorageResult};
+use crate::ordered::key::cmp_padded;
 use crate::page_store::PageStore;
 use crate::pages::{EVICTED, run_of};
 use crate::plan::{PlannedPage, SlotPlan, blocks_for};
 use crate::shape::weight;
 
 /// Images one round moves at most, so its header has room for them.
-const ROUND_IMAGES: usize = 128;
+pub const ROUND_IMAGES: usize = 128;
 
 /// A run to carry forward.
 #[derive(Clone)]
-struct Movable {
-    slot: usize,
+pub struct Movable {
+    pub slot: usize,
     /// A key that finds the page, and its flags; `None` for the type's
     /// dictionary.
-    page: Option<(Vec<u8>, u8)>,
-    run: Run,
+    pub page: Option<(Vec<u8>, u8)>,
+    pub run: Run,
 }
 
 /// A file worth emptying, and what it still holds.
@@ -83,11 +84,19 @@ impl PageStore {
         }
     }
 
-    /// Write `loaded` into the active file as one round, repointing each.
-    async fn move_round(
+    /// Write `loaded` into the active file as one round, repointing each —
+    /// in key order, so pages that are neighbours in their lane land side
+    /// by side and their ranges fold (RFC 0078 §4).
+    pub(crate) async fn move_round(
         &self,
-        loaded: Vec<(Movable, Vec<u8>)>,
+        mut loaded: Vec<(Movable, Vec<u8>)>,
     ) -> StorageResult<()> {
+        loaded.sort_by(|(a, _), (b, _)| {
+            a.slot.cmp(&b.slot).then_with(|| match (&a.page, &b.page) {
+                (Some((a, _)), Some((b, _))) => cmp_padded(a, b),
+                (a, b) => a.is_some().cmp(&b.is_some()),
+            })
+        });
         let mut plans: BTreeMap<usize, SlotPlan> = BTreeMap::new();
         for (m, bytes) in loaded {
             let Some(index) = self.types[m.slot].directory().borrow().clone()
@@ -240,7 +249,7 @@ impl PageStore {
     /// The bytes a move writes: a page as stored, trimmed to its own length
     /// prefix; a dictionary as it stands (its newest image — growth is
     /// append-only, so every page's prefix of it is unchanged).
-    fn image_of(&self, m: &Movable) -> StorageResult<Vec<u8>> {
+    pub(crate) fn image_of(&self, m: &Movable) -> StorageResult<Vec<u8>> {
         if m.page.is_none() {
             return Ok(self.types[m.slot].dictionary().borrow().image());
         }
