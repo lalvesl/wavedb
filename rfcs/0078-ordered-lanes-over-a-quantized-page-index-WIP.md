@@ -6,8 +6,9 @@
   object store on the same index. Phase 4 landed 2026-10-31: chains are key
   ranges of ordered lanes, the segments, the sparse index and the Pivot's
   roots are gone, and a declared list's pages are counted (see "As built").
-  Phase 5 (the macro seed and the density hint) and phase 7 (measuring)
-  remain.
+  Phase 5 closed 2026-10-31 without code: measured, a seed per key type
+  and a density hint buy nothing, so one seed stays and the hint is
+  dropped (see "Phase 5, measured"). Phase 7, measuring, remains.
 - **Revises:**
   - [RFC 0074](0074-extendible-hashing.md): the hashed page directories go,
     anchors included.
@@ -27,7 +28,7 @@
 - **Crates:**
   - `wavedb-storage`: the index, the lanes, the header;
   - `wavedb-core`: the chain's storage, the Pivot's roots;
-  - `wavedb-macros`: the density hint.
+  - `wavedb-macros`: the lanes' slots (the density hint was dropped, phase 5).
 
 ## Summary
 
@@ -454,6 +455,10 @@ larger pages is the later regroup (§12).
 
 ### 9. The density hint
 
+> **Dropped, measured (phase 5).** Neither the typed seed nor the hint was
+> built: the coarse seed refined on demand matches a typed one, and a seed
+> too fine fragments a lane into a range per key. See "Phase 5, measured".
+
 The macro knows each key's type: an instant, an `Id`, an integer, a string, a
 composite. From that it seeds a structure's first sub-header (`key_shift`,
 factors, target page size).
@@ -546,7 +551,8 @@ Each phase leaves the suite green.
    - Drop the segment links, the index lane and the roots.
    - **Tests:** a collection growing out of a shared page into pages of its
      own; `_len` and `_at_page` across sub-headers; reopen.
-5. **The macro seed and the density hint.**
+5. **The macro seed and the density hint.** Closed without code: measured,
+   it buys nothing (see "Phase 5, measured").
 6. **The object store's directory** as the same index.
 7. **Measure** against RFC 0074's rows:
    - bytes written per durable and relaxed insert, on micro and shop;
@@ -604,7 +610,11 @@ live in one `PageIndex<u8>` per type (`crate::pages`): the key is the
 neighbours lands far from its range's base, and its range isolates it: a
 workload of scattered rewrites drifts toward one range per page. Merging
 adjacent ranges whose pages fit one window, and the regroup (§12), are
-what would bound it.
+what would bound it. Phase 5 measured it (below), and the decision is to
+keep it: an address is always one `u32` relative to its range's base, so
+every page is found — and every run the allocator rebuilds is named — the
+same way, and the sub-headers isolation adds are what the regroup folds
+back later.
 
 ## As built (phase 4)
 
@@ -662,6 +672,40 @@ ride the headers with the entries — `WholeRange::counts`, and `counts` in
 **`page = N` retired.** It no longer laid anything out, so it was a knob in
 the identity that changed nothing on disk. `_at_page(page, page_size)` and
 `listed_page(offset, limit)` take the size from the caller.
+
+## Phase 5, measured
+
+The index alone (the cut and refinement rules of `crate::shape`, pages of
+30 or 250 keys, a fresh run of 2 blocks for every page written), 60 000
+keys of each shape the engine stores. Ranges per page:
+
+| keys | seed shift 48 (today) | a typed seed | a seed too fine |
+|---|---|---|---|
+| A. NonUnique anchors, ~1 ms apart | 0.01 | 0.01 (21) | 1.00 (0) |
+| B. one collection's recency | 0.09 | 0.09 (21) | 0.08 (0) |
+| C. recency of 2 000 collections | 0.98 | 0.97 (21) | 1.00 (0) |
+| D. one list by a string | 0.96 | 0.96 (21) | 0.96 (0) |
+| E. a `u64` secondary, 50 collections | 2.11 | 2.16 (21) | 1.87 (0) |
+| F. keyed anchors, uniform | 0.95 | 1.00 (21) | 1.00 (32) |
+
+- **The seed barely matters.** The coarsest quantization, refined where a
+  cut needs it, lands within a few ranges of the best typed seed. A seed
+  too fine is the only one that matters, and it is a disaster: keys past
+  its range's quanta each open a range, and a uniform key at shift ≤ 32
+  makes one page and one range per key. A hint would hand the developer
+  that failure and nothing else.
+- **What fragments is the address window.** C, D and F rewrite pages
+  scattered over their key space, each landing past its range's 16 MiB
+  window and isolated into a range of its own. Fifteen address bits only
+  take it to ~0.82 a page; appending files lose locality however wide the
+  window.
+- **Decided.** One seed (`Shape::DISK`, `Shape::REMOTE`), no hint, and the
+  isolation kept: more sub-headers now, reorganized later by the regroup
+  (§12). A second encoding of an address — absolute addresses in a table
+  beside the entries — was weighed and refused: every reader of an entry
+  (lookup, compaction's moves, upload, eviction, the allocator's rebuild)
+  would carry both forms, and one that forgot the second would leak or
+  double-allocate blocks without an error.
 
 ## Alternatives
 

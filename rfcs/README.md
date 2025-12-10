@@ -75,7 +75,8 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   length and a skip into it read only its edge pages. `page = N` is gone
   with the segments ([0052](0052-segment-size-as-the-pagination-unit-DEPRECATED.md),
   [0055](0055-sparse-index-merge-DEPRECATED.md) deprecated). The macro's
-  density hint and the measurement remain.
+  density hint was measured and dropped: one seed, refined on demand,
+  matches a typed one. The measurement against RFC 0074 remains.
 - **The storage write path (2026-07-28 → 07-29):**
   [0041](0041-single-barrier-checkpoint.md) *(Implemented)* replaced the per-id
   settle — which read-modify-wrote a bucket page once per record — with a
@@ -664,7 +665,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0074](0074-extendible-hashing.md) | Extendible hashing for the page directories (a page over target splits at once; ℓ and a 10-bit size code in the descriptor) | Implemented |
 | [0075](0075-secondary-indexes-as-chains.md) | Secondary indexes as chains (`#[wavedb::pivot]` and fuzzy postings over `Chain<()>`; the B+tree deleted; a list also answers `by_f`) | Implemented |
 | [0076](0076-zero-copy-views-WIP.md) | Zero-copy views over the wire (a derived `NameRef<'a>` built in one pass, `Wire<T>` one `Send` buffer, `to_owned()` back; the format unchanged — steps 1–2, the codec and both derives, then `SlotPage` as one buffer, landed) | In progress |
-| [0078](0078-ordered-lanes-over-a-quantized-page-index-WIP.md) | Ordered lanes over a quantized page index (pages by key order, one `u32` per page in RAM under sorted sub-headers; replaces the hashed directories and the chain's segments and sparse index) | In progress (phases 1–4 and 6 landed: every value in ordered pages, the header, the object store, chains as key ranges of ordered lanes with a list's pages counted; phase 5, the density hint, and phase 7, measuring, remain) |
+| [0078](0078-ordered-lanes-over-a-quantized-page-index-WIP.md) | Ordered lanes over a quantized page index (pages by key order, one `u32` per page in RAM under sorted sub-headers; replaces the hashed directories and the chain's segments and sparse index) | In progress (phases 1–4 and 6 landed: every value in ordered pages, the header, the object store, chains as key ranges of ordered lanes with a list's pages counted; phase 5, the density hint, measured and dropped; phase 7, measuring, remains) |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
