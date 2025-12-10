@@ -64,6 +64,18 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   chains in lanes of their own, the B+tree is gone, and a list answers the
   same `by_` lookups with the records inline. A durable micro insert writes
   202 KiB where it wrote 306, and no longer grows with the database.
+- **Ordered lanes over a quantized page index (2026-10-30 → 10-31,
+  [0078](0078-ordered-lanes-over-a-quantized-page-index-WIP.md), In
+  progress):** every value lives in pages ordered by its key, found through
+  sorted sub-headers over one `u32` per page in RAM; the extendible
+  directories are gone. A chain is the key range `[pivot][declaration]` of
+  an ordered lane, written blind (`Write::Set` / `Write::Unset`) and read
+  by span — no segments, no sparse index, no roots in the Pivot, which now
+  holds only `permission`. A declared list's pages are counted, so its
+  length and a skip into it read only its edge pages. `page = N` is gone
+  with the segments ([0052](0052-segment-size-as-the-pagination-unit-DEPRECATED.md),
+  [0055](0055-sparse-index-merge-DEPRECATED.md) deprecated). The macro's
+  density hint and the measurement remain.
 - **The storage write path (2026-07-28 → 07-29):**
   [0041](0041-single-barrier-checkpoint.md) *(Implemented)* replaced the per-id
   settle — which read-modify-wrote a bucket page once per record — with a
@@ -189,7 +201,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   sparse index's missing merge — **taken as accepted debt**, since that index
   holds one entry per *segment* and a drained version of it is still two
   levels, and written up as
-  [0055](0055-sparse-index-merge-PLANNED-LOW.md) so the bound is on the
+  [0055](0055-sparse-index-merge-DEPRECATED.md) so the bound is on the
   record — and removal-log retention, which is a client-liveness policy and
   got moved out to its own planning. The structure
   (`index/{segment,sparse,sparse_write,chain,chain_remove}.rs`): locate, insert
@@ -228,7 +240,8 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   streaming-frame work `search_by` waits on, because a page is bounded by the
   caller's own `limit`; the typed surface gained `listed_page` so that limit is
   reachable, and the unbounded `listed` pages over it at a fixed chunk;
-  [0052](0052-segment-size-as-the-pagination-unit.md) — the developer
+  [0052](0052-segment-size-as-the-pagination-unit-DEPRECATED.md) (*deprecated*
+  2026-10-31 for RFC 0078 §7, which removed the segments and the knob) — the developer
   declares a chain's capacity as a **minimum** N, normally the page size the UI
   renders (undeclared: **16** for record chains, **256** for the removal log); a
   segment holds N…2N records, splits 50/50 at 2N with the endpoint keeping its own
@@ -551,12 +564,9 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   [0037](0037-multi-node-cluster-PLANNED-LOW.md) (multi-node cluster),
   [0038](0038-argon2-and-oauth-credentials-PLANNED-LOW.md) (Argon2/OAuth),
   [0039](0039-developer-experience-PLANNED-LOW.md) (M9 dev tooling),
-  [0055](0055-sparse-index-merge-PLANNED-LOW.md) — the sparse index's merge,
-  redistribute and root collapse: it grows and never shrinks, which is bounded
-  (one entry per *segment*, so drained is still two or three levels) but
-  permanent, and the sideways read a merge needs has to go through the
-  `Overlay` rather than the `Store` — the reason this half of 0050 phase 3a
-  was skipped while the rest landed.
+  [0055](0055-sparse-index-merge-DEPRECATED.md) — the sparse index's merge,
+  redistribute and root collapse (*deprecated* 2026-10-31: RFC 0078 removed
+  the sparse index).
 - **Partial seams:** [0013](0013-permissions.md) (per-record grants, gate 4),
   [0023](0023-quick-node-and-gates.md) (node gates 5–6).
 
@@ -636,10 +646,8 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0049](0049-elastic-pages-and-load-driven-splits.md) | Elastic pages and load-driven splits | Implemented |
 | [0050](0050-clustered-record-chains.md) | Clustered record chains (B+trees become opt-in) | Implemented |
 | [0051](0051-ordered-record-lists.md) | Declared lists: sorted chains + sparse index | Implemented |
-| [0052](0052-segment-size-as-the-pagination-unit.md) | Segment size as the pagination unit | Implemented |
 | [0053](0053-tenant-fair-cache-retention-PLANNED.md) | Tenant-fair cache retention | Planned |
 | [0054](0054-no-duplication-by-default.md) | No duplication by default | Implemented |
-| [0055](0055-sparse-index-merge-PLANNED-LOW.md) | Sparse-index merge and root collapse | Planned (low) |
 | [0056](0056-fuzzy-string-search-WIP.md) | Fuzzy string search | In progress |
 | [0057](0057-page-arena-and-checkpoint-staging.md) | The page arena and checkpoint staging | Planned |
 | [0059](0059-object-storage-capacity-tier-PLANNED.md) | Object storage as the capacity tier (§1 archive lane; §2–§5 superseded by 0070) | Planned |
@@ -656,7 +664,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0074](0074-extendible-hashing.md) | Extendible hashing for the page directories (a page over target splits at once; ℓ and a 10-bit size code in the descriptor) | Implemented |
 | [0075](0075-secondary-indexes-as-chains.md) | Secondary indexes as chains (`#[wavedb::pivot]` and fuzzy postings over `Chain<()>`; the B+tree deleted; a list also answers `by_f`) | Implemented |
 | [0076](0076-zero-copy-views-WIP.md) | Zero-copy views over the wire (a derived `NameRef<'a>` built in one pass, `Wire<T>` one `Send` buffer, `to_owned()` back; the format unchanged — steps 1–2, the codec and both derives, then `SlotPage` as one buffer, landed) | In progress |
-| [0078](0078-ordered-lanes-over-a-quantized-page-index-WIP.md) | Ordered lanes over a quantized page index (pages by key order, one `u32` per page in RAM under sorted sub-headers; replaces the hashed directories and the chain's segments and sparse index) | In progress (phases 1–3 and 6 landed: every value in ordered pages, the header, the object store; phase 4, chains on ordered lanes, next) |
+| [0078](0078-ordered-lanes-over-a-quantized-page-index-WIP.md) | Ordered lanes over a quantized page index (pages by key order, one `u32` per page in RAM under sorted sub-headers; replaces the hashed directories and the chain's segments and sparse index) | In progress (phases 1–4 and 6 landed: every value in ordered pages, the header, the object store, chains as key ranges of ordered lanes with a list's pages counted; phase 5, the density hint, and phase 7, measuring, remain) |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
@@ -680,6 +688,8 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0048](0048-chained-addressing-log-DEPRECATED.md) | The addressing log as a chain | [0072](0072-the-settle-is-the-durability-point.md) (the header every window ends with) |
 | [0061](0061-relaxed-durability-window-DEPRECATED.md) | Relaxed durability: a group-commit window | [0072](0072-the-settle-is-the-durability-point.md) (durability per write: `_durable`) |
 | [0062](0062-relaxed-mode-refinements-DEPRECATED.md) | Relaxed mode refinements | [0072](0072-the-settle-is-the-durability-point.md) |
+| [0052](0052-segment-size-as-the-pagination-unit-DEPRECATED.md) | Segment size as the pagination unit (`page = N`) | [0078](0078-ordered-lanes-over-a-quantized-page-index-WIP.md) §7 (no segments; a page of a list is a skip and a limit, the skip by page counts) |
+| [0055](0055-sparse-index-merge-DEPRECATED.md) | Sparse-index merge and root collapse | [0078](0078-ordered-lanes-over-a-quantized-page-index-WIP.md) §7 (no sparse index left to merge) |
 
 ## Status vocabulary
 

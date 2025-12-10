@@ -3,8 +3,11 @@
 - **Status:** In progress. Opened 2026-10-30. Phases 1–3 and 6 landed
   2026-10-30: the index (`wavedb-storage::ordered`), every stored value in
   ordered pages keyed by its `Id`, the header and reconstruction, and the
-  object store on the same index (see "As built"). Phase 4, chains on
-  ordered lanes, is next.
+  object store on the same index. Phase 4 landed 2026-10-31: chains are key
+  ranges of ordered lanes, the segments, the sparse index and the Pivot's
+  roots are gone, and a declared list's pages are counted (see "As built").
+  Phase 5 (the macro seed and the density hint) and phase 7 (measuring)
+  remain.
 - **Revises:**
   - [RFC 0074](0074-extendible-hashing.md): the hashed page directories go,
     anchors included.
@@ -517,6 +520,9 @@ Binary search stays for long vectors.
   - segment ids, `prev`/`next` links;
   - `Lane::Index` and the sparse-index nodes;
   - `ChainRoots` and `LogRoots` in the Pivot.
+- `page = N` (RFC 0052), on the struct and on a list: a page of a list is a
+  skip and a limit on its range, so no capacity is the declaration's to
+  choose.
 
 ## Phases
 
@@ -599,6 +605,63 @@ neighbours lands far from its range's base, and its range isolates it: a
 workload of scattered rewrites drifts toward one range per page. Merging
 adjacent ranges whose pages fit one window, and the regroup (§12), are
 what would bound it.
+
+## As built (phase 4)
+
+**The store seam.** Every value is stored under bytes. `Store` gained
+`Write::Set(lane, key, value)` and `Write::Unset(lane, key)`, `scan(lane,
+&Span)` — `Span { lo, hi, rev, skip, limit }` — and `count(lane, lo, hi)`;
+`read_span` and `read_count` answer them for a sorted map, which is how
+`MemStore`, the overlay of a batch being planned and the tests model a
+lane.
+- **`PageStore`.** A lane is a registered slot of its own. A `SlotPage`
+  holds its keys in a column, back to back: one width when every key has
+  it, else their ends. The record cache logs `[klen u16][key][len
+  u32][bytes]`, and keeps an ordered lane's keys in a `BTreeSet` per slot.
+  A scan (`lane_read`, `lane_walk`) walks the index from the span's edge,
+  one coverage at a time, and merges each page with the cache's keys over
+  it; it stops at an evicted page, restores it and walks again.
+- **`IdbStore`.** One more object store, `lanes`, keyed
+  `[lane BE][key]`, read by cursor (`DB_VERSION` 2).
+- **`CacheStore`** forwards scans and counts to the cache's carrier.
+
+**Chains.** A chain is the range `[pivot Id 16 B][declaration u8]` of its
+lane, then each entry's field bytes and its anchor's 10 bytes
+(`index::chain`). An insert is one blind `Set`; a removal one `Unset`,
+`plan_remove` reading first where a caller gates on the verdict. A stream
+(`chain_scan`) reads 256 entries a scan, from a key, past a skip, or back
+from the end. Five lanes per NonUnique type: records (the declared lists),
+recency, dead, secondary and fuzzy; each declaration is its own range.
+- **The Pivot** holds only `permission`. Creating a collection is one
+  `Put`; a collection op checks the Pivot exists (`check_pivot`) and
+  writes nothing to it.
+- **Concurrent inserts** from one state no longer clobber each other: both
+  are blind writes to different keys (`concurrent_chain_inserts`).
+
+**Counts.** A declared list's lane is registered counted
+(`StructStorage::counted`). Its index keeps a third column beside each
+page's entry and flags, how many entries the page holds; no other lane
+pays the byte. The round sets a page's count when it installs a page it
+built; a page moved (compaction) or restored keeps its count. The counts
+ride the headers with the entries — `WholeRange::counts`, and `counts` in
+`RangeRecord::Entries` — and come back with them.
+- **Passing a page.** A walk passes a page without reading it when the
+  span covers its whole coverage, its count is known, and every key the
+  record cache holds in that coverage is settled (`RecordCache::settled_in`
+  — a settled entry's page holds it). A list's length and a skip into it
+  read their edge pages only (`a_counted_lane_counts_and_skips_reading_only
+  _its_edges`).
+- **A saturating byte, not a split at 255.** A count of 255 means "255 or
+  more": that page is read. A count is never a guess, and a list of tiny
+  records needs no extra pages for it.
+- **No split at a collection's edge.** Pages are still cut at their middle
+  or the nearest quantum boundary. A collection's first and last pages are
+  then shared with its neighbours, and a count reads them — two pages at
+  most — where a split at the edge would read none.
+
+**`page = N` retired.** It no longer laid anything out, so it was a knob in
+the identity that changed nothing on disk. `_at_page(page, page_size)` and
+`listed_page(offset, limit)` take the size from the caller.
 
 ## Alternatives
 
