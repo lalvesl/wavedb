@@ -590,6 +590,17 @@ Each phase leaves the suite green.
      The compaction's own moves go in key order for the same reason. Pages
      merged into fewer, larger ones are left for §12.
    - Decided 2026-10-31.
+   - **As built.** `PageIndex::fold_around` (`ordered/fold.rs`) folds on
+     every isolation, both ways for as long as it can, so the piece of an
+     old range left holding only a hole between two moved pages goes too.
+     `PageIndex::scattered` names the runs: consecutive ranges of one
+     prefix and quantization, each under 8 pages (`SCATTERED`), as many as
+     one window addresses — blocks, 1024 entries, a round's 128 pages —
+     and at least two. Compaction gains a `Regrouping` phase between the
+     moves and the sealing (`regroup.rs`): the runs are queued once, each
+     moved as one round through the compaction's own `move_round`, which
+     now orders every round by key. A store through a storage thread with
+     no file to empty still regroups, since no header moves.
 
 ## As built (phases 1–3 and 6)
 

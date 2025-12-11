@@ -208,9 +208,6 @@ where
         let first = keys[0].clone();
         let image = encode(&mut page)?;
         let blocks = blocks_for(image.len());
-        if index.seed().unit_for(blocks) > u64::from(u8::MAX) {
-            return Err(StorageError::PageTooLarge(image.len() as u64));
-        }
         let fits = index.canonical(blocks) <= rules.target_blocks;
         let parts = if fits || keys.len() < 2 {
             None
@@ -218,6 +215,10 @@ where
             cut_at(index, &first, &keys)?
         };
         let Some(at) = parts else {
+            // Only a page that cannot be cut is refused for its size.
+            if index.seed().unit_for(blocks) > u64::from(u8::MAX) {
+                return Err(StorageError::PageTooLarge(image.len() as u64));
+            }
             shaped.pages.push(PlannedPage {
                 key: first,
                 image,
