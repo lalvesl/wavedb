@@ -110,6 +110,10 @@ pub struct PageStore {
     /// Through a storage thread: the files the running compaction empties
     /// (RFC 0073 §7).
     pub(crate) victims: RefCell<Vec<(u64, u64)>>,
+    /// The runs of scattered ranges the running compaction still regroups:
+    /// a type's slot and its pages' keys ([`crate::regroup`]).
+    pub(crate) regroup:
+        RefCell<std::collections::VecDeque<(usize, Vec<Vec<u8>>)>>,
     /// Blocks cut off the data files since open ([`reclaim`](Self::reclaim)).
     pub(crate) reclaimed: std::cell::Cell<u64>,
     /// The free share that makes a data file worth emptying (RFC 0071 §7).
@@ -257,6 +261,7 @@ impl PageStore {
             barrier: None,
             compaction: std::cell::Cell::default(),
             victims: RefCell::default(),
+            regroup: RefCell::default(),
             reclaimed: std::cell::Cell::default(),
             victim_free_percent: options.victim_free_percent,
             object: options.remote.map(crate::remote::ObjectState::new),

@@ -124,6 +124,13 @@ impl Shape {
         Self::new(bytes[0], bytes[1], bytes[2], bytes[3])
     }
 
+    /// Blocks a range can address from its base: pages laid end to end in
+    /// that many fit under one sub-header.
+    #[must_use]
+    pub const fn window(self) -> u64 {
+        self.hole() as u64 * self.address_factor as u64
+    }
+
     /// The address field's hole marker, all ones.
     const fn hole(self) -> u32 {
         (1 << self.address_bits) - 1
