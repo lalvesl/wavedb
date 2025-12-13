@@ -70,7 +70,8 @@ impl<T: NonUniqueStruct> Collection<T> {
         // One read decides all three cases and hands back the bytes the
         // living branch compares — where a `current` descent, a "is it merely
         // dead?" fetch and a re-read of the same record used to sit.
-        match self.anchor(store, id).await? {
+        let (anchor, current) = self.anchor_read(store, id).await?;
+        match anchor {
             // No `PartialEq` bound on record types — unchanged is decided on
             // the wire bytes, the identity the store actually holds.
             Anchor::Living(_, existing)
@@ -78,13 +79,16 @@ impl<T: NonUniqueStruct> Collection<T> {
             {
                 Ok(())
             }
-            Anchor::Living(..) => self.save(store, id, value).await,
+            Anchor::Living(..) => {
+                self.save_over(store, id, value, None, current).await
+            }
             // A dead anchor still holding bytes is a locally-dead record
             // coming back — only a keyed type's anchor can recur. Revive it
             // as a chained version so the dead copy archives instead of
             // being overwritten.
             Anchor::Dead => {
-                self.chain_into_living(store, id, None, value).await
+                self.chain_into_living(store, id, None, value, current)
+                    .await
             }
             Anchor::Vacant => self.insert_at(store, id, value).await,
         }
@@ -108,19 +112,21 @@ impl<T: NonUniqueStruct> Collection<T> {
         value: &T,
     ) -> Result<()> {
         self.check_pivot(store).await?;
-        match self.anchor(store, id).await? {
+        let (anchor, current) = self.anchor_read(store, id).await?;
+        match anchor {
             Anchor::Living(existing, body)
                 if existing == meta && to_wire(&body) == to_wire(value) =>
             {
                 Ok(())
             }
             Anchor::Living(..) => {
-                self.save_with_meta(store, id, meta, value).await
+                self.save_over(store, id, value, Some(meta), current).await
             }
             // A revived keyed anchor: chain the node's version onto the
             // locally-dead copy, archiving it at the node's derived slot.
             Anchor::Dead => {
-                self.chain_into_living(store, id, Some(meta), value).await
+                self.chain_into_living(store, id, Some(meta), value, current)
+                    .await
             }
             Anchor::Vacant => {
                 self.insert_with_meta(store, id, meta, value).await

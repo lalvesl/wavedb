@@ -28,7 +28,7 @@ use crate::id::Id;
 use crate::local_id::LocalId;
 use crate::metadata::{Metadata, Succession};
 use crate::notify::{Mutation, MutationKind};
-use crate::record::{SavePlan, keyed_id, plan_chained_save};
+use crate::record::{SavePlan, keyed_id, plan_chained_save_over};
 use crate::store::Store;
 use crate::traits::NonUniqueStruct;
 use crate::wire::to_wire;
@@ -51,11 +51,14 @@ impl<T: NonUniqueStruct> Collection<T> {
         id: Id,
         value: &T,
     ) -> Result<()> {
-        // Liveness reads off the anchor (RFC 0050): one record read.
-        if matches!(self.anchor(store, id).await?, Anchor::Living(..)) {
-            return self.save_planned(store, id, value, None).await;
+        // Liveness reads off the anchor (RFC 0050): one record read, which
+        // the write then plans over and guards against.
+        let (anchor, current) = self.anchor_read(store, id).await?;
+        if matches!(anchor, Anchor::Living(..)) {
+            return self.save_over(store, id, value, None, current).await;
         }
-        self.chain_into_living(store, id, None, value).await
+        self.chain_into_living(store, id, None, value, current)
+            .await
     }
 
     /// Write `value` at a **non-living** anchor (vacant or dead) as a
@@ -65,12 +68,14 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// [`adopt_with`](Collection::adopt_with) passes the node's
     /// [`Metadata`] as `imposed`, so a revived mirror archives its dead
     /// version at the node's own derived slot instead of overwriting it.
+    /// `current` is the anchor's bytes as the caller read them.
     pub(crate) async fn chain_into_living<S: Store>(
         &self,
         store: &S,
         id: Id,
         imposed: Option<Metadata>,
         value: &T,
+        current: Option<Vec<u8>>,
     ) -> Result<()> {
         let floor = self.instant_floor(store).await?;
         let plan = SavePlan {
@@ -85,7 +90,7 @@ impl<T: NonUniqueStruct> Collection<T> {
             revives: true,
         };
         let (mut batch, _superseded, live_meta) =
-            plan_chained_save::<T, S>(store, &plan, value).await?;
+            plan_chained_save_over::<T>(&plan, current, value)?;
         let Succession::CreatedAt(instant) = live_meta.succession else {
             return Err(crate::Error::ChainCorrupt(id));
         };
@@ -413,6 +418,69 @@ mod tests {
                 &changes[2],
                 crate::expose::Change::Saved(sid, _, _) if *sid == id
             ));
+        });
+    }
+
+    /// A store counting the reads of one record.
+    struct Counting {
+        inner: MemStore,
+        watched: std::cell::Cell<Option<Id>>,
+        reads: std::cell::Cell<usize>,
+    }
+
+    impl crate::store::Store for Counting {
+        async fn get(&self, id: Id) -> crate::error::Result<Option<Vec<u8>>> {
+            if self.watched.get() == Some(id) {
+                self.reads.set(self.reads.get() + 1);
+            }
+            self.inner.get(id).await
+        }
+
+        async fn scan(
+            &self,
+            lane: u64,
+            span: &crate::store::Span,
+        ) -> crate::error::Result<Vec<crate::store::Entry>> {
+            self.inner.scan(lane, span).await
+        }
+
+        async fn count(
+            &self,
+            lane: u64,
+            lo: &[u8],
+            hi: Option<&[u8]>,
+        ) -> crate::error::Result<u64> {
+            self.inner.count(lane, lo, hi).await
+        }
+
+        async fn apply(
+            &self,
+            batch: &[crate::store::Write],
+        ) -> crate::error::Result<()> {
+            self.inner.apply(batch).await
+        }
+    }
+
+    // The write plans over the read that classified the anchor: a vacant
+    // anchor and a living one are each read once by the operation (the
+    // store's own check of the guard is the store's).
+    #[test]
+    fn a_keyed_insert_reads_its_anchor_once() {
+        block_on(async {
+            let tenant = U48::from(8u32);
+            let store = Counting {
+                inner: MemStore::default(),
+                watched: std::cell::Cell::new(None),
+                reads: std::cell::Cell::new(0),
+            };
+            let pivot =
+                Collection::<Cred>::create(&store, tenant).await.unwrap();
+            let col = Collection::<Cred>::at(pivot, tenant);
+            store.watched.set(col.keyed_anchor(&cred("ada", "x")));
+            col.insert(&store, &cred("ada", "x")).await.unwrap();
+            assert_eq!(store.reads.get(), 1, "vacant");
+            col.insert(&store, &cred("ada", "y")).await.unwrap();
+            assert_eq!(store.reads.get(), 2, "living");
         });
     }
 }
