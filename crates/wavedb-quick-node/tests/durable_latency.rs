@@ -6,9 +6,12 @@
 //! of its `fsync`. Now the worker wakes BG on every job, and BG opens a batch
 //! for a durable write the moment it is wanted.
 //!
-//! Thirty durable inserts one after another: waiting for the tick, they take
-//! about fifteen ticks between them (three seconds); opening their batch at
-//! once, about thirty `fsync`s of a small window.
+//! Thirty durable inserts one after another. Waiting for the tick, every one
+//! of them waits for the next — issued just after the last one's batch
+//! ended, most of a period. Opening their batch at once, each is one `fsync`
+//! of a small window. So the check is on the **fastest** of them, against
+//! half a period: a total over a fixed bound measured the disk's `fsync`
+//! under whatever else the machine ran, and failed under load.
 
 #![allow(clippy::future_not_send)]
 
@@ -17,7 +20,7 @@ use std::time::{Duration, Instant};
 use schema_smoke::{Note, REGISTRY};
 use wavedb_core::{RouteHandle, U48};
 use wavedb_quick_node::Maintenance;
-use wavedb_quick_node::shard::Router;
+use wavedb_quick_node::shard::{Router, UPKEEP_PERIOD};
 use wavedb_storage::{StorageRegistry, StoreOptions, open_shards};
 
 #[test]
@@ -41,18 +44,20 @@ fn a_durable_write_opens_its_batch_without_waiting_for_the_tick() {
         let pivot = Note::create_pivot_durable(&db).await.expect("pivot");
         let col = Note::collection(pivot);
 
-        let started = Instant::now();
+        let mut fastest = Duration::MAX;
         for n in 0..30u32 {
             let note = Note {
                 body: format!("durable {n}"),
                 pinned: false,
             };
+            let started = Instant::now();
             col.insert_durable(&db, &note).await.expect("insert");
+            fastest = fastest.min(started.elapsed());
         }
-        let took = started.elapsed();
         assert!(
-            took < Duration::from_millis(1500),
-            "30 durable inserts took {took:?}: they waited for the tick"
+            fastest < UPKEEP_PERIOD / 2,
+            "the fastest of 30 durable inserts took {fastest:?}: every one \
+             waited for the tick"
         );
 
         drop(router);

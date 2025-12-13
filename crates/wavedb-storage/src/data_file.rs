@@ -5,8 +5,9 @@
 //! [RFC 0071]: ../../../rfcs/0071-data-files-by-address.md
 
 use std::cell::Cell;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::backing::{Backing, Memory};
 use crate::block::{BLOCK_SIZE, Run};
@@ -95,6 +96,9 @@ pub fn start_of(name: &str) -> Option<u64> {
     hex.then(|| u64::from_str_radix(name, 16).ok()).flatten()
 }
 
+/// How long an open waits out a lock held only for a moment ([`lock`]).
+const LOCK_PATIENCE: Duration = Duration::from_millis(200);
+
 /// Open `path` read-write and lock it — creating it, when `create`, and
 /// refusing one already there.
 pub fn open_locked(path: &Path, create: bool) -> StorageResult<File> {
@@ -103,6 +107,27 @@ pub fn open_locked(path: &Path, create: bool) -> StorageResult<File> {
         .write(true)
         .create_new(create)
         .open(path)?;
-    file.try_lock()?; // one open store per directory, in any process
+    lock(&file)?; // one open store per directory, in any process
     Ok(file)
+}
+
+/// Lock `file`, waiting out a holder that lets go within
+/// [`LOCK_PATIENCE`]. A lock belongs to the open file, and a child process
+/// this process is starting holds a copy of every descriptor until its
+/// `exec` closes them: a store just dropped can find its own lock still
+/// held for that moment. A store open elsewhere holds it past the
+/// patience, and the open is
+/// [`EngineBusy`](crate::StorageError::EngineBusy).
+fn lock(file: &File) -> StorageResult<()> {
+    let deadline = Instant::now() + LOCK_PATIENCE;
+    let mut pause = Duration::from_millis(1);
+    loop {
+        match file.try_lock() {
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_millis(20));
+            }
+            locked => return Ok(locked?),
+        }
+    }
 }
