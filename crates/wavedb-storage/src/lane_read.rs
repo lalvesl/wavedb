@@ -247,4 +247,40 @@ mod tests {
             assert_eq!(got[0].0, key(1, 1_501));
         }
     }
+
+    /// A page holding more than one collection is cut at their edge. Two
+    /// lists of one owner differ in their declaration byte alone, so a
+    /// range refines to that depth before it parts them, and there the
+    /// large one spreads over many quanta: a cut at the middle would leave
+    /// the small one sharing its page with the large one's head.
+    #[test]
+    fn a_page_is_cut_at_the_edge_between_collections() {
+        let list = |declaration: u8, at: u64| {
+            let mut key = vec![7; 16];
+            key.push(declaration);
+            key.extend_from_slice(&(at << 52).to_be_bytes());
+            key
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            PageStore::open(dir.path(), &[&PLAIN_SLOT, &COUNTED_SLOT]).unwrap();
+        let mut writes = Vec::new();
+        for at in 0..10 {
+            writes.push(Write::Set(COUNTED, list(0, at), value(at)));
+        }
+        for at in 0..ROWS {
+            writes.push(Write::Set(COUNTED, list(1, at), value(at)));
+        }
+        block_on(store.apply(&writes)).unwrap();
+        block_on(store.apply_durable(&[])).unwrap();
+        let types = &store.types;
+        let slot = types.iter().position(|t| t.struct_hash() == COUNTED);
+        let index = types[slot.unwrap()].directory().borrow();
+        let index = index.as_ref().unwrap();
+        let crate::ordered::Found::Page { at, .. } = index.find(&list(0, 0))
+        else {
+            panic!("the small list has a page");
+        };
+        assert_eq!(index.count_at(at), Some(10));
+    }
 }
