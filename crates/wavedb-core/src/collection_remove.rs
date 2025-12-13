@@ -34,12 +34,12 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// The batch opens with a [`Write::Expect`] guard on the anchor's bytes
     /// as read: two removals of one record planned from one read would both
     /// log it. The loser finds the record gone and answers `false`; one that
-    /// lost to a save answers [`Error::Conflict`](crate::Error::Conflict),
+    /// lost to a save answers [`Error::Conflict`],
     /// as a save would.
     ///
     /// # Errors
-    /// Propagates a [`Store`] failure, [`Error::PivotMissing`](crate::Error::PivotMissing)
-    /// on a stale handle, [`Error::RecordMissing`](crate::Error::RecordMissing) if a
+    /// Propagates a [`Store`] failure, [`Error::PivotMissing`]
+    /// on a stale handle, [`Error::RecordMissing`] if a
     /// living record's bytes are gone (index out of sync), or a decode fault on
     /// a corrupt pivot.
     pub async fn remove<S: Store>(&self, store: &S, id: Id) -> Result<bool> {
