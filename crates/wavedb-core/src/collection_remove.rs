@@ -14,12 +14,12 @@
 
 use crate::collection::Collection;
 use crate::collection_read::Anchor;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::id::Id;
 use crate::local_id::LocalId;
 use crate::metadata::{Metadata, Succession};
 use crate::notify::{Mutation, MutationKind};
-use crate::record::{encode_record, mint_instant};
+use crate::record::{decode_record, encode_record, mint_instant};
 use crate::store::{Store, Write};
 use crate::traits::NonUniqueStruct;
 
@@ -31,6 +31,12 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// only `remove` ever writes the removal log. Returns whether the record
     /// was living.
     ///
+    /// The batch opens with a [`Write::Expect`] guard on the anchor's bytes
+    /// as read: two removals of one record planned from one read would both
+    /// log it. The loser finds the record gone and answers `false`; one that
+    /// lost to a save answers [`Error::Conflict`](crate::Error::Conflict),
+    /// as a save would.
+    ///
     /// # Errors
     /// Propagates a [`Store`] failure, [`Error::PivotMissing`](crate::Error::PivotMissing)
     /// on a stale handle, [`Error::RecordMissing`](crate::Error::RecordMissing) if a
@@ -38,13 +44,18 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// a corrupt pivot.
     pub async fn remove<S: Store>(&self, store: &S, id: Id) -> Result<bool> {
         self.check_pivot(store).await?;
-        let Anchor::Living(meta, value) = self.anchor(store, id).await? else {
+        let Some(bytes) = store.get_of(T::STRUCT_HASH, id).await? else {
             return Ok(false);
         };
+        let (meta, value) = decode_record::<T>(T::STRUCT_HASH, &bytes)?;
+        if !meta.is_live() {
+            return Ok(false);
+        }
         let floor = self.instant_floor(store).await?;
         let removed_at = mint_instant(floor);
         let anchor = LocalId::from_id(id);
-        let mut batch = vec![Write::Put(
+        let mut batch = vec![Write::Expect(T::STRUCT_HASH, id, Some(bytes))];
+        batch.push(Write::Put(
             id,
             encode_record(
                 T::STRUCT_HASH,
@@ -54,7 +65,7 @@ impl<T: NonUniqueStruct> Collection<T> {
                 },
                 &value,
             ),
-        )];
+        ));
         if let Succession::CreatedAt(instant) = meta.succession {
             let key = Self::instant_key(instant, anchor);
             batch.push(self.recency_chain().remove(&key));
@@ -66,7 +77,17 @@ impl<T: NonUniqueStruct> Collection<T> {
             batch.push(chain.remove(&Self::sec_key(&value, i, id)));
         }
         self.plan_fuzzy_removes(&mut batch, id, &value);
-        store.apply(&batch).await?;
+        match store.apply(&batch).await {
+            Err(Error::Conflict(_))
+                if !matches!(
+                    self.anchor(store, id).await?,
+                    Anchor::Living(..)
+                ) =>
+            {
+                return Ok(false); // another removal took it first
+            }
+            done => done?,
+        }
         store.note_mutation(|| Mutation {
             struct_hash: T::STRUCT_HASH,
             tenant: self.tenant(),

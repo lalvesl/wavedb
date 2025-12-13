@@ -1115,4 +1115,79 @@ mod tests {
             ));
         });
     }
+
+    /// A store whose reads suspend once after reading — what lets two
+    /// operations planned from one state interleave, as on a node whose
+    /// barrier suspends or in a browser.
+    struct Yielding(MemStore);
+
+    async fn yield_once() {
+        let mut yielded = false;
+        std::future::poll_fn(|cx| {
+            if std::mem::replace(&mut yielded, true) {
+                std::task::Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    impl crate::store::Store for Yielding {
+        async fn get(
+            &self,
+            id: crate::id::Id,
+        ) -> crate::error::Result<Option<Vec<u8>>> {
+            let found = self.0.get(id).await;
+            yield_once().await;
+            found
+        }
+
+        async fn scan(
+            &self,
+            lane: u64,
+            span: &crate::store::Span,
+        ) -> crate::error::Result<Vec<crate::store::Entry>> {
+            self.0.scan(lane, span).await
+        }
+
+        async fn count(
+            &self,
+            lane: u64,
+            lo: &[u8],
+            hi: Option<&[u8]>,
+        ) -> crate::error::Result<u64> {
+            self.0.count(lane, lo, hi).await
+        }
+
+        async fn apply(
+            &self,
+            batch: &[crate::store::Write],
+        ) -> crate::error::Result<()> {
+            self.0.apply(batch).await
+        }
+    }
+
+    // Two removals planned from one read: without the guard both logged
+    // the record, so the dead log named one removal twice.
+    #[test]
+    fn concurrent_removals_of_one_record_log_it_once() {
+        block_on(async {
+            let store = Yielding(MemStore::default());
+            let pivot =
+                Collection::<Doc>::create(&store, tenant()).await.unwrap();
+            let col = Collection::<Doc>::at(pivot, tenant());
+            let id = col.insert(&store, &Doc { n: 1 }).await.unwrap();
+            let (a, b) = futures::future::join(
+                col.remove(&store, id),
+                col.remove(&store, id),
+            )
+            .await;
+            let mut answers = [a.unwrap(), b.unwrap()];
+            answers.sort_unstable();
+            assert_eq!(answers, [false, true], "one removal takes it");
+            assert_eq!(col.dead_log().len(&store).await.unwrap(), 1);
+        });
+    }
 }

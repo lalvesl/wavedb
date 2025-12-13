@@ -8,9 +8,11 @@
 > removal of an entry is one blind `Write::Set` / `Write::Unset`, so two
 > inserts planned from one state both survive (`concurrent_chain_inserts`).
 > A save still reads before it writes, and its `Write::Expect` on the
-> record's anchor turns a lost race into `Error::Conflict`. A removal still
-> reads its liveness gate (`plan_remove`) and carries no guard: two removals
-> of one record racing would both log it. The sections below describe the
+> record's anchor turns a lost race into `Error::Conflict`. A removal reads
+> its liveness gate and carries the same guard on the bytes it read: of two
+> removals of one record racing, the loser finds it gone and answers
+> `false`, and the record is logged once
+> (`concurrent_removals_of_one_record_log_it_once`). The sections below describe the
 > engine before phase 4 — segments, the B+tree before them — and why.
 
 ## The hazard
