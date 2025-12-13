@@ -58,15 +58,30 @@ impl<T: NonUniqueStruct> Collection<T> {
         store: &S,
         id: Id,
     ) -> Result<Anchor<T>> {
+        Ok(self.anchor_read(store, id).await?.0)
+    }
+
+    /// [`anchor`](Self::anchor), and the bytes it was read from — what a
+    /// write that follows plans over and guards against, so the anchor is
+    /// read once.
+    ///
+    /// # Errors
+    /// As [`anchor`](Self::anchor).
+    pub(crate) async fn anchor_read<S: Store>(
+        &self,
+        store: &S,
+        id: Id,
+    ) -> Result<(Anchor<T>, Option<Vec<u8>>)> {
         let Some(bytes) = store.get_of(T::STRUCT_HASH, id).await? else {
-            return Ok(Anchor::Vacant);
+            return Ok((Anchor::Vacant, None));
         };
         let (meta, value) = decode_record::<T>(T::STRUCT_HASH, &bytes)?;
-        Ok(if meta.is_live() {
+        let anchor = if meta.is_live() {
             Anchor::Living(meta, value)
         } else {
             Anchor::Dead
-        })
+        };
+        Ok((anchor, Some(bytes)))
     }
 }
 

@@ -16,7 +16,7 @@ use crate::local_id::LocalId;
 use crate::metadata::{Metadata, Succession};
 use crate::notify::{Mutation, MutationKind};
 use crate::record::{
-    Overlay, encode_record, mint_floored_id, plan_chained_save,
+    Overlay, encode_record, mint_floored_id, plan_chained_save_over,
 };
 use crate::store::{Store, Write};
 use crate::traits::NonUniqueStruct;
@@ -137,29 +137,20 @@ impl<T: NonUniqueStruct> Collection<T> {
         id: Id,
         value: &T,
     ) -> Result<()> {
-        self.save_planned(store, id, value, None).await
+        let current = store.get_of(T::STRUCT_HASH, id).await?;
+        self.save_over(store, id, value, None, current).await
     }
 
-    /// [`save`](Self::save) with the node's [`Metadata`] written verbatim —
-    /// [`adopt_with`](Self::adopt_with)'s update half.
-    pub(crate) async fn save_with_meta<S: Store>(
-        &self,
-        store: &S,
-        id: Id,
-        meta: Metadata,
-        value: &T,
-    ) -> Result<()> {
-        self.save_planned(store, id, value, Some(meta)).await
-    }
-
-    /// The body of [`save`](Self::save), with `imposed` metadata when a
-    /// mirror writes the node's verbatim.
-    pub(crate) async fn save_planned<S: Store>(
+    /// The body of [`save`](Self::save), over the anchor's bytes as the
+    /// caller read them (`current`) — with `imposed` metadata when a mirror
+    /// writes the node's verbatim.
+    pub(crate) async fn save_over<S: Store>(
         &self,
         store: &S,
         id: Id,
         value: &T,
         imposed: Option<Metadata>,
+        current: Option<Vec<u8>>,
     ) -> Result<()> {
         // A keyed value may never be saved under a foreign anchor — the
         // key fields ARE the identity ("renaming" = remove + insert).
@@ -182,7 +173,7 @@ impl<T: NonUniqueStruct> Collection<T> {
             revives: false,
         };
         let (mut batch, old, live_meta) =
-            plan_chained_save::<T, S>(store, &plan, value).await?;
+            plan_chained_save_over::<T>(&plan, current, value)?;
         // The moves are gated on reads of the chains; each reads through the
         // overlay of what the batch already writes.
         let mut view = Overlay::new(store);

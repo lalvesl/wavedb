@@ -204,6 +204,11 @@ pub(crate) struct SavePlan {
     pub revives: bool,
 }
 
+/// A chained save planned: its writes, the superseded version's authoring
+/// instant and value (`None` on a first save), and the new live version's
+/// [`Metadata`].
+pub(crate) type Planned<V> = (Vec<Write>, Option<(u64, V)>, Metadata);
+
 /// Plan a chained save of `value` at the shape's anchor: archive the
 /// superseded version (when one exists) at its **derived slot**, stamp
 /// its forward link, and write the new live record — all as `Write`s for
@@ -226,8 +231,23 @@ pub(crate) async fn plan_chained_save<V: WaveWire, S: Store>(
     store: &S,
     plan: &SavePlan,
     value: &V,
-) -> Result<(Vec<Write>, Option<(u64, V)>, Metadata)> {
-    let Some(old_bytes) = store.get_of(plan.hash, plan.live_id).await? else {
+) -> Result<Planned<V>> {
+    let current = store.get_of(plan.hash, plan.live_id).await?;
+    plan_chained_save_over(plan, current, value)
+}
+
+/// [`plan_chained_save`] over the anchor's bytes as the caller already
+/// read them — one read of the anchor per write, the guard comparing
+/// against exactly what was planned from.
+///
+/// # Errors
+/// As [`plan_chained_save`], but for the store's.
+pub(crate) fn plan_chained_save_over<V: WaveWire>(
+    plan: &SavePlan,
+    current: Option<Vec<u8>>,
+    value: &V,
+) -> Result<Planned<V>> {
+    let Some(old_bytes) = current else {
         // First version: nothing to archive. The guard still rides along —
         // a concurrent first save must conflict, not silently supersede.
         let meta = plan.imposed.clone().unwrap_or_else(|| Metadata {
@@ -243,7 +263,6 @@ pub(crate) async fn plan_chained_save<V: WaveWire, S: Store>(
         return Ok((writes, None, meta));
     };
     let (old_meta, old_body) = split_record(plan.hash, &old_bytes)?;
-    let old_value = from_wire::<V>(old_body)?;
     let Succession::CreatedAt(authored) = old_meta.succession else {
         return Err(Error::ChainCorrupt(plan.live_id));
     };
@@ -269,11 +288,7 @@ pub(crate) async fn plan_chained_save<V: WaveWire, S: Store>(
         return Err(Error::ChainCorrupt(plan.live_id));
     };
 
-    let mut writes = vec![Write::Expect(
-        plan.hash,
-        plan.live_id,
-        Some(old_bytes.clone()),
-    )];
+    let mut writes = Vec::with_capacity(3);
     // Archive the superseded version byte-for-byte at its derived slot,
     // its forward link stamped with the successor's instant — written once,
     // correct forever (the successor's own archival derives the same slot
@@ -295,6 +310,8 @@ pub(crate) async fn plan_chained_save<V: WaveWire, S: Store>(
         plan.live_id,
         encode_record(plan.hash, &live_meta, value),
     ));
+    let old_value = from_wire::<V>(old_body)?;
+    writes.insert(0, Write::Expect(plan.hash, plan.live_id, Some(old_bytes)));
     Ok((writes, Some((authored, old_value)), live_meta))
 }
 
