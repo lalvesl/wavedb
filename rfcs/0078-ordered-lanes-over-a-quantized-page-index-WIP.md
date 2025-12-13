@@ -342,7 +342,15 @@ As built (`wavedb-storage::ordered`):
   its range cannot address it; the isolated range folds into a neighbour
   that can (`fold_around`, `ordered/fold.rs`).
 - `cut` splits a page on a quantum boundary, refining when the page lies in
-  one quantum.
+  one quantum. The round's shaping (`shape::cut_at`) tries the edges
+  between collections first — a chain's 17-byte prefix, nearest the middle
+  — and the middle only for a page of one collection. While a collection
+  lies in one quantum the boundaries are its edges anyway; the rule tells
+  where a range has refined past the prefix's start and a collection
+  spreads over quanta beside another (two lists of one owner). A count
+  still reads a collection's first and last pages: a quantum boundary
+  falls on a collection's bounds only at a depth of 17 bytes
+  (`docs/improvements.md`).
 - `remove` hands a page's quanta to the entry before it.
 
 ### 5. Writes

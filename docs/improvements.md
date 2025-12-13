@@ -191,17 +191,25 @@ order of cost:
 ### A list's count reads the pages at its edges
 
 - **Now.** A declared list's lane counts each page's entries, and a count
-  or a skip passes a page the span covers whole by its count. Pages are cut
-  at their middle, so a collection's first and last pages are usually
-  shared with its neighbours, and a count reads them — two pages at most.
-  A page the record cache holds anything unsettled of is read too.
-- **Instead.** RFC 0078 §4's split at a collection's edge: a page holding
-  more than one collection is cut between two of them, so a collection
-  spanning pages owns them and its count reads none. A per-page tally of
-  the cache's unsettled inserts and removals would also spare the read of
-  a page with writes pending.
-- **Decided** 2026-10-31, in RFC 0078 phase 4: the counts are exact
-  without either; the edge reads are what is left.
+  or a skip passes a page the span covers whole by its count. A page is cut
+  at the edge between two collections when it holds more than one (RFC
+  0078 §4, since 2026-10-31), so a collection spanning pages owns them —
+  but a page's coverage runs from one quantum boundary to the next, and a
+  boundary falls on a collection's bounds (its 17-byte prefix, then zeros)
+  only at a depth of 17 bytes. So the walk cannot tell its first and last
+  pages hold nothing past the span, and a count reads them: two pages at
+  most. A page the record cache holds anything unsettled of is read too.
+- **Instead.** Either needs something the index does not hold:
+  - each page's last key's collection, or a range refined at a
+    collection's bounds (a sub-header per edge) — so a page's coverage can
+    be proven inside the span;
+  - for a page with writes pending, a tally of the cache's inserts and
+    removals over it — exact only if a lane write said whether its key was
+    new, which a blind `Write::Set` does not (a save rewrites a list entry
+    in place).
+- **Decided** 2026-10-31, in RFC 0078 phase 4 and again with the edge
+  split: the counts are exact without either; two edge reads are what is
+  left.
 
 ## Benchmarks
 
