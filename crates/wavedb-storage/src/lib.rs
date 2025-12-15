@@ -57,6 +57,7 @@ mod record_segment;
 mod recover;
 mod recover_headers;
 mod regroup;
+mod regroup_merge;
 pub mod remote;
 mod remote_compact;
 mod remote_link;

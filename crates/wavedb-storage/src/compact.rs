@@ -20,18 +20,23 @@
 //!    victim. The compaction first has every address restated
 //!    (`record_all`): once that batch, and the one after it, have ended,
 //!    no header older than the restatement is live.
-//! 2. **Moving.** Bounded passes, each a few rounds of one window write —
+//! 2. **Merging.** Runs of neighbouring pages that removals left small —
+//!    of one range and one collection, together at most half a page — are
+//!    rewritten as one, as a settle round would (RFC 0078 §12,
+//!    [`crate::regroup_merge`]) — before the moves, so what they free is
+//!    not carried forward first.
+//! 3. **Moving.** Bounded passes, each a few rounds of one window write —
 //!    the same write a settle round makes, ending with its header.
-//! 3. **Regrouping.** Runs of scattered ranges in every type's index —
+//! 4. **Regrouping.** Runs of scattered ranges in every type's index —
 //!    neighbours of a few pages each — are moved the same way, a run per
 //!    round, side by side in key order, so each folds into one range
 //!    (RFC 0078 §12, [`crate::regroup`]). No header moves, so a store
 //!    through a storage thread with no file to empty regroups too.
-//! 4. **Sealing.** The vacated runs are still named by the newest durable
+//! 5. **Sealing.** The vacated runs are still named by the newest durable
 //!    batch — a crash would reopen from it — so they are only deferred
 //!    frees. The next batch to end names the moved state; once it is
 //!    durable they are holes ([RFC 0072] §8).
-//! 5. **Reclaiming.** Every file's free tail is cut off, and a file left
+//! 6. **Reclaiming.** Every file's free tail is cut off, and a file left
 //!    empty is deleted ([`reclaim`](PageStore::reclaim)).
 //!
 //! Safety is the batch's: a moved run is written before any header names
@@ -86,6 +91,9 @@ pub enum Phase {
         since: u64,
     },
     Moving {
+        since: u64,
+    },
+    Merging {
         since: u64,
     },
     Regrouping {
@@ -156,13 +164,13 @@ impl PageStore {
                         let percent = self.victim_free_percent;
                         let victims = self.shared_victims(percent).await?;
                         if victims.is_empty() {
-                            self.plan_regroup();
-                            if self.regroup.borrow().is_empty() {
+                            // No file to empty, so no header to restate.
+                            let Some(phase) = self.reorganizing(since) else {
                                 return Ok(Compacting::Done {
                                     reclaimed_blocks: 0,
                                 });
-                            }
-                            self.compaction.set(Phase::Regrouping { since });
+                            };
+                            self.compaction.set(phase);
                             continue;
                         }
                         *self.victims.borrow_mut() = victims;
@@ -179,7 +187,8 @@ impl PageStore {
                     if !restated {
                         return Ok(Compacting::Sealing);
                     }
-                    self.compaction.set(Phase::Moving { since });
+                    self.plan_merges();
+                    self.compaction.set(Phase::Merging { since });
                 }
                 Phase::Moving { since } => {
                     let (images, blocks, finished) =
@@ -189,6 +198,16 @@ impl PageStore {
                         self.compaction.set(Phase::Regrouping { since });
                     }
                     return Ok(Compacting::Moved { images, blocks });
+                }
+                Phase::Merging { since } => {
+                    let (images, blocks, finished) =
+                        self.merge_pass(budget_blocks).await?;
+                    if finished {
+                        self.compaction.set(Phase::Moving { since });
+                    }
+                    if images > 0 {
+                        return Ok(Compacting::Moved { images, blocks });
+                    }
                 }
                 Phase::Regrouping { since } => {
                     let (images, blocks, finished) =

@@ -53,6 +53,7 @@ durability point. This is where most of WaveDB's engineering energy lives.
 | `compact`         | Compaction's phases and surface (`compact_step`, `compact`, `reclaim`, `space`): move, drop the old addressing, seal, cut and delete.              |
 | `defrag`          | Compaction's moves: the emptiest data file's runs, highest first, verbatim, into the active file — one window write per round, in key order.      |
 | `regroup`         | Compaction's regroup (RFC 0078 §12): runs of scattered ranges' pages moved side by side in key order, so each folds into one sub-header.           |
+| `regroup_merge`   | Compaction's merge: neighbouring pages of one collection that removals left small, together at most half a page, rewritten as one.                |
 | `remote_compact`  | The object store's compaction (RFC 0070 §8): a survey run like a recovery, blind DELETEs below the horizon, mostly free files carried forward. |
 | `convert`         | Converting a database from or to disk mode, offline: the pages flagged for upload, or brought back from the object store.          |
 | `page`            | `SlotPage` — the homogeneous record page: `[len][to_wire_checked(PageEnvelope)]`, body raw or zstd.                                                  |
@@ -383,11 +384,15 @@ mutation → the type's record log (RAM) → (client confirmed)
    cut and the emptied files deleted
    ([RFC 0071](../../rfcs/0071-data-files-by-address.md), superseding
    [RFC 0069](../../rfcs/0069-compaction-into-the-holes-DEPRECATED.md)'s holes).
-   Before the sealing it **regroups**: a page rewritten far from its range's
+   Before the moves it **merges** neighbouring pages that removals left
+   small (of one collection, together at most half a page), and before
+   the sealing it **regroups**: a page rewritten far from its range's
    base gets a range of its own, and runs of neighbouring ranges of a few
    pages each have their pages moved the same way, side by side in key
    order, so the index folds each run into one sub-header
    ([RFC 0078](../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md) §12).
+   The object store's compaction regroups its own index the same way, its
+   uploads carrying the scattered runs' pages forward side by side.
    It is stepped, a bounded pass at a time; the node starts one on a daily
    UTC time, a disk ceiling, or a free-space share.
 
