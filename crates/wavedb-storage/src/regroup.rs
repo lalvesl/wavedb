@@ -14,6 +14,7 @@
 //!
 //! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
+use crate::compact::Phase;
 use crate::defrag::{Movable, ROUND_IMAGES};
 use crate::error::StorageResult;
 use crate::ordered::Found;
@@ -22,6 +23,20 @@ use crate::pages::{EVICTED, run_of};
 use crate::plan::blocks_for;
 
 impl PageStore {
+    /// Where a compaction with no file to empty starts: the merges (the
+    /// moves after them find nothing), or the regroup when there is
+    /// nothing to merge — `None` when neither has work, so it ends with
+    /// nothing to seal.
+    pub(crate) fn reorganizing(&self, since: u64) -> Option<Phase> {
+        self.plan_merges();
+        if !self.regroup.borrow().is_empty() {
+            return Some(Phase::Merging { since });
+        }
+        self.plan_regroup();
+        let none = self.regroup.borrow().is_empty();
+        (!none).then_some(Phase::Regrouping { since })
+    }
+
     /// Queue every type's scattered runs for the passes to move: once per
     /// compaction, so a run whose fold did not take is not moved again.
     pub(crate) fn plan_regroup(&self) {
@@ -34,6 +49,64 @@ impl PageStore {
             if let Some(index) = ts.directory().borrow().as_ref() {
                 let runs = index.scattered(ROUND_IMAGES);
                 queue.extend(runs.into_iter().map(|keys| (slot, keys)));
+            }
+        }
+    }
+
+    /// Queue the remote indexes' scattered runs for the uploads of an
+    /// object-store compaction to carry forward side by side
+    /// (`crate::remote_compact`), so the fold makes each one range there
+    /// too.
+    pub(crate) fn plan_remote_regroup(&self) {
+        let Some(object) = &self.object else {
+            return;
+        };
+        let mut queue = object.regroup.borrow_mut();
+        queue.clear();
+        for (slot, ts) in self.types.iter().enumerate() {
+            if let Some(index) = ts.remote_directory().borrow().as_ref() {
+                let runs = index.scattered(ROUND_IMAGES);
+                queue.extend(runs.into_iter().map(|keys| (slot, keys)));
+            }
+        }
+    }
+
+    /// The remote pages of slot `idx`'s queued runs an upload carries
+    /// forward, whole runs while `budget` blocks last, which they spend.
+    pub(crate) fn regroup_moves(
+        &self,
+        idx: usize,
+        budget: &mut u64,
+        moved: &mut Vec<(Vec<u8>, crate::block::Run)>,
+    ) {
+        let Some(object) = &self.object else {
+            return;
+        };
+        let directory = self.types[idx].remote_directory().borrow();
+        let Some(index) = directory.as_ref() else {
+            return;
+        };
+        let mut queue = object.regroup.borrow_mut();
+        while let Some(at) = queue.iter().position(|(slot, _)| *slot == idx) {
+            let pages: Vec<(Vec<u8>, crate::ordered::Placed<u8>)> = queue[at]
+                .1
+                .iter()
+                .filter_map(|key| match index.find(key) {
+                    Found::Page { page, .. } => Some((key.clone(), page)),
+                    _ => None,
+                })
+                .collect();
+            let blocks: u64 = pages.iter().map(|p| p.1.blocks).sum();
+            if blocks > *budget && !moved.is_empty() {
+                return; // the next upload takes it
+            }
+            queue.remove(at);
+            *budget = budget.saturating_sub(blocks);
+            for (key, page) in pages {
+                let run = run_of(page);
+                if !moved.iter().any(|m| m.1.start == run.start) {
+                    moved.push((key, run));
+                }
             }
         }
     }
