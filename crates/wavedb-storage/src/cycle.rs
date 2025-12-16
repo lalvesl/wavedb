@@ -31,6 +31,17 @@ use crate::page_store::PageStore;
 use crate::settle::Progress;
 use crate::wait::park_on;
 
+/// Records one round of a [`drain`](PageStore::drain) or a
+/// [`settle_all`](PageStore::settle_all) takes at most.
+///
+/// A round holds what it settles several times over while it builds —
+/// the records, the pages they land in read and rebuilt, their images, the
+/// window — so one unbounded round over a burst is a peak of several times
+/// the burst, and the allocator keeps what it freed. A bounded round's
+/// fixed cost is a window and its header, small beside a few thousand
+/// records. The same bound a node's worker steps with.
+pub const ROUND_RECORDS: usize = 4096;
+
 /// Where a store's batches stand.
 #[derive(Debug, Default)]
 pub struct Cycle {
@@ -259,7 +270,7 @@ impl PageStore {
     pub fn drain(&self) -> StorageResult<()> {
         if !self.has_disk() {
             loop {
-                let mut round = self.cache.borrow().round(usize::MAX);
+                let mut round = self.cache.borrow().round(ROUND_RECORDS);
                 if round.is_empty() {
                     return Ok(());
                 }
@@ -273,7 +284,7 @@ impl PageStore {
         }
         loop {
             self.hurry();
-            while self.cycle_step(usize::MAX)? == Progress::Settled {}
+            while self.cycle_step(ROUND_RECORDS)? == Progress::Settled {}
             self.cycle.borrow_mut().syncs.wait();
             self.settle_durable();
             if !self.begin_cycle()? {
@@ -299,7 +310,7 @@ impl PageStore {
         }
         loop {
             self.hurry();
-            while self.settle_step(usize::MAX).await? == Progress::Settled {}
+            while self.settle_step(ROUND_RECORDS).await? == Progress::Settled {}
             self.settle_durable();
             let durable = {
                 let mut cycle = self.cycle.borrow_mut();

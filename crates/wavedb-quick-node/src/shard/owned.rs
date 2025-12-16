@@ -24,8 +24,9 @@ use super::object_policy::{evict_past_ceiling, upload_due};
 /// This is what makes maintenance share the thread in practice: without a
 /// bound, one burst becomes one round. Unmeasured — small enough that a round
 /// is short, large enough that a round's fixed cost (one window allocation,
-/// one positioned write) is not paid per handful of records.
-pub const SETTLE_BUDGET_IDS: usize = 4096;
+/// one positioned write) is not paid per handful of records. The store's
+/// own bound on a round of a drain, so a worker and a drain step alike.
+pub const SETTLE_BUDGET_IDS: usize = wavedb_storage::ROUND_RECORDS;
 
 /// Evicted buckets one upkeep tick brings back to disk at most — each is a
 /// request or two to the object store and one window write.

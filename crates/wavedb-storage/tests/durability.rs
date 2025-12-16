@@ -251,3 +251,24 @@ fn a_type_written_once_survives_many_batches() {
         assert_eq!(read(&s, SH, k), Some(record(SH, k, 49)), "{k}");
     }
 }
+
+/// A drain settles a burst in bounded rounds, `ROUND_RECORDS` records
+/// each, so its peak is a round's and not the burst's several times over;
+/// the rounds are one batch, durable and whole on a reopen.
+#[test]
+fn a_drain_past_one_round_is_one_whole_batch() {
+    let d = tempfile::tempdir().unwrap();
+    let n = wavedb_storage::ROUND_RECORDS as u64 * 3 + 7;
+    {
+        let s = open(d.path());
+        for k in 0..n {
+            block_on(s.apply(&[put(k, 1)])).unwrap();
+        }
+        s.drain().unwrap();
+        assert!(!s.has_pending(), "every round settled");
+    }
+    let s = open(d.path());
+    for k in (0..n).step_by(97).chain([n - 1]) {
+        assert_eq!(read(&s, SH, k), Some(record(SH, k, 1)), "record {k}");
+    }
+}

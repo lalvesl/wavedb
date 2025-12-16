@@ -93,6 +93,7 @@ pub use block::{BLOCK_SIZE, BlockAllocator, BlockDescriptor, Run};
 pub use block_file::{BlockFile, IoCounts};
 pub use compact::{Compacted, Compacting, Space};
 pub use convert::{Backend, convert};
+pub use cycle::ROUND_RECORDS;
 pub use dictionary::{DictState, Dictionary};
 pub use error::{StorageError, StorageResult};
 pub use manifest::{MANIFEST, Manifest};
