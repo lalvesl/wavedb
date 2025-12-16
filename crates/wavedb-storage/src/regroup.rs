@@ -286,4 +286,81 @@ mod tests {
         assert_eq!(ranges_of_keys(&s), regrouped);
         assert_records(&s);
     }
+
+    /// ~100 KiB that do not compress: one to an object-store page.
+    fn big(k: u64, version: u64) -> Vec<u8> {
+        let mut bytes = SH.to_le_bytes().to_vec();
+        let mut x = k.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ version ^ 1;
+        for _ in 0..12_800 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            bytes.extend_from_slice(&x.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn remote_ranges(s: &PageStore) -> usize {
+        s.types[0]
+            .remote_directory()
+            .borrow()
+            .as_ref()
+            .map_or(0, crate::ordered::PageIndex::range_count)
+    }
+
+    /// The object store's index fragments the same way, every other page
+    /// uploaded again in a later file; its compaction carries the runs
+    /// forward side by side, and they fold — through a recovery from the
+    /// object store too.
+    #[test]
+    fn an_object_store_compaction_regroups_its_scattered_ranges() {
+        use wavedb_platform::carrier::block_on;
+        use wavedb_platform::s3::test_server::TestServer;
+
+        const BIG: u64 = 24;
+        let dir = tempfile::tempdir().unwrap();
+        let server = TestServer::start(&dir.path().join("objects"));
+        let open = || {
+            let options = crate::StoreOptions {
+                remote: Some(crate::remote::Remote::new(
+                    server.bucket(),
+                    "db/",
+                )),
+                ..crate::StoreOptions::default()
+            };
+            PageStore::open_object(&[&SLOT], options).unwrap()
+        };
+        let reads = |s: &PageStore| {
+            s.evict_cold(0).unwrap();
+            block_on(async {
+                for k in 0..BIG {
+                    let got = s.get_of(SH, id(k)).await.unwrap();
+                    assert_eq!(got, Some(big(k, k % 2)), "record {k}");
+                }
+            });
+        };
+        let s = open();
+        block_on(async {
+            for k in 0..BIG {
+                s.apply(&[Write::Put(id(k), big(k, 1))]).await.unwrap();
+            }
+            s.upload_all().await.unwrap();
+            for k in (0..BIG).step_by(2) {
+                s.apply(&[Write::Put(id(k), big(k, 0))]).await.unwrap();
+            }
+            s.upload_all().await.unwrap();
+        });
+        let before = remote_ranges(&s);
+        assert!(before > BIG as usize / 2, "scattered: {before} ranges");
+
+        block_on(s.compact_remote()).unwrap();
+        let after = remote_ranges(&s);
+        assert!(after * 4 < before, "{before} ranges → {after}");
+        reads(&s);
+
+        drop(s);
+        let s = open();
+        assert_eq!(remote_ranges(&s), after);
+        reads(&s);
+    }
 }
