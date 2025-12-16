@@ -131,6 +131,10 @@ pub(crate) struct ObjectState {
     /// The files a compaction is emptying: uploads carry their pages
     /// forward meanwhile (`crate::remote_compact`).
     pub(crate) moving: RefCell<BTreeSet<u64>>,
+    /// The runs of scattered remote ranges a compaction still regroups: a
+    /// type's slot and its pages' keys (`crate::regroup`).
+    pub(crate) regroup:
+        RefCell<std::collections::VecDeque<(usize, Vec<Vec<u8>>)>>,
     /// Files deleted above the chain's oldest live one — not deleted
     /// again. RAM only: after a reopen they are deleted once more.
     pub(crate) deleted: RefCell<BTreeSet<u64>>,
@@ -160,6 +164,7 @@ impl ObjectState {
             oldest_write: Cell::new(None),
             fenced: Cell::new(false),
             moving: RefCell::default(),
+            regroup: RefCell::default(),
             deleted: RefCell::default(),
             rooted: RefCell::default(),
             link: None,

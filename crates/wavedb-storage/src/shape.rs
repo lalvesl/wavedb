@@ -266,7 +266,7 @@ fn cut_at(
 
 /// The collection a lane key belongs to: a chain's prefix, the owner's
 /// `Id` and the declaration. An anchor, shorter, belongs to none.
-fn collection(key: &[u8]) -> Option<&[u8]> {
+pub fn collection(key: &[u8]) -> Option<&[u8]> {
     key.get(..wavedb_core::index::PREFIX)
 }
 

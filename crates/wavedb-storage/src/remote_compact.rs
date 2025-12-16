@@ -35,7 +35,6 @@
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
-use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use futures::stream::{self, StreamExt, TryStreamExt};
@@ -73,13 +72,14 @@ struct Survey {
     named: BTreeSet<u64>,
 }
 
-/// Empties the set of files being carried forward, however the compaction
-/// ends.
-struct Clear<'a>(&'a RefCell<BTreeSet<u64>>);
+/// Empties the set of files being carried forward, and the runs being
+/// regrouped, however the compaction ends.
+struct Clear<'a>(&'a crate::remote::ObjectState);
 
 impl Drop for Clear<'_> {
     fn drop(&mut self) {
-        self.0.borrow_mut().clear();
+        self.0.moving.borrow_mut().clear();
+        self.0.regroup.borrow_mut().clear();
     }
 }
 
@@ -108,12 +108,13 @@ impl PageStore {
             return Ok(done);
         };
         let victims = self.victims_below(horizon);
-        if victims.is_empty() {
+        self.plan_remote_regroup();
+        if victims.is_empty() && object.regroup.borrow().is_empty() {
             return Ok(done);
         }
         *object.moving.borrow_mut() = victims;
-        let clear = Clear(&object.moving);
-        while self.moving_left() {
+        let clear = Clear(object);
+        while self.moving_left() || !object.regroup.borrow().is_empty() {
             let up = self.upload_turn().await?;
             done.moved_pages += up.moved;
             if up.files == 0 {
@@ -253,6 +254,7 @@ impl PageStore {
         let Some(object) = &self.object else {
             return (moved, false);
         };
+        self.regroup_moves(idx, budget, &mut moved);
         let moving = object.moving.borrow();
         if moving.is_empty() {
             return (moved, false);
@@ -266,7 +268,9 @@ impl PageStore {
                 if *budget == 0 {
                     break;
                 }
+                let regrouped = moved.iter().any(|m| m.1.start == page.address);
                 if moving.contains(&file_of(page.address))
+                    && !regrouped
                     && let Some(key) = index.key_of(at)
                 {
                     moved.push((key, run_of(page)));

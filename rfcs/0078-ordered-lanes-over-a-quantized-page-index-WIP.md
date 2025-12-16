@@ -530,8 +530,8 @@ Binary search stays for long vectors.
 - **Regroup.** Its first step is taken here (phase 8): a phase of
   compaction rewrites a stretch of fragmented ranges' pages verbatim, side
   by side in key order, and the fold (§4) makes them one sub-header.
-  Beyond that, a pass reopens a range's pages and rewrites them as fewer,
-  larger pages:
+  So does the merge of neighbouring pages removals left small. Beyond
+  that, a pass could rewrite a range's pages as fewer, larger ones:
   - larger factors and fewer sub-headers;
   - less RAM and better compression;
   - long sequential runs for analytical scans.
@@ -595,8 +595,12 @@ Each phase leaves the suite green.
    - The regroup, as a phase of compaction: on the same triggers, budget
      and sealing, the pages of a stretch of fragmented ranges are rewritten
      verbatim, side by side in key order, so the fold makes them one range.
-     The compaction's own moves go in key order for the same reason. Pages
-     merged into fewer, larger ones are left for §12.
+     The compaction's own moves go in key order for the same reason.
+   - The merge, before the moves (what it frees is not carried forward
+     first): runs of neighbouring pages of one
+     range and one collection that removals left small — together at most
+     half a page, so a cut's two halves are not merged back only to be cut
+     again — are rewritten as one, as a settle round would.
    - Decided 2026-10-31.
    - **As built.** `PageIndex::fold_around` (`ordered/fold.rs`) folds on
      every isolation, both ways for as long as it can, so the piece of an
@@ -609,6 +613,17 @@ Each phase leaves the suite green.
      moved as one round through the compaction's own `move_round`, which
      now orders every round by key. A store through a storage thread with
      no file to empty still regroups, since no header moves.
+     `regroup_merge.rs` adds a `Merging` phase right after the
+     restatement, before the moves: `small_runs`
+     names the runs, and a round per type's batch of them removes the later
+     pages' entries in the plan's index — their quanta handed to the
+     first's — and shapes their records into the first page
+     (`crate::shape`), counted and encoded like any round's.
+     The object store regroups in its own compaction (`compact_remote`):
+     the remote indexes' scattered runs are queued with the files being
+     emptied, and its uploads carry their pages forward side by side
+     (`regroup_moves`, ahead of the files' own pages in `moves_of`) —
+     the fold in `install_remote` makes each one range.
 
 ## As built (phases 1–3 and 6)
 
