@@ -44,14 +44,23 @@ pub fn preload(cfg: &ShopCfg, dir: &Path, shards: usize) -> Result<(), String> {
         // size depends on the data. In the micro adapter a 5 000-op trigger
         // never fired once while 649 MB accumulated.
         //
-        // NOT shared with the seed fill, which wants a threshold three orders
-        // of magnitude larger: this preload runs inside the cage and against
-        // a nesting shape, that one runs in a builder against a flat one. The
-        // number that is right here is measurably wrong there (see
-        // `PROGRESS.md`, "checkpointing often makes a fill worse").
-        if store.unsettled_bytes() > SETTLE_AFTER_BYTES {
+        // The store's own pressure line, per data shard: a threshold of the
+        // fill's own (64 MB each) let three shards hold 192 MB unsettled at
+        // once inside the cage. NOT shared with the seed fill, which wants
+        // a threshold three orders of magnitude larger: this preload runs
+        // inside the cage and against a nesting shape, that one runs in a
+        // builder against a flat one (see `PROGRESS.md`, "checkpointing
+        // often makes a fill worse").
+        if store.under_pressure() {
             store.drain().map_err(|e| format!("settle: {e}"))?;
-            store.evict_settled(FILL_CACHE_BYTES / stores.len().max(1));
+            // Down to the store's own budget — its data shard's share of
+            // the database's, the one the measured row evicts to — not to
+            // zero: that drops what the next insert reads with everything
+            // else, and a fill that took 11 s at 4 000 users took 164 s at
+            // 8 000. A larger budget of the fill's own once sat here (192
+            // MB): with the retained transients of the rounds it ran the
+            // three-shard row out of its 500 MB cage.
+            store.evict_to_budget();
         }
     }
     for store in &stores {
@@ -147,24 +156,6 @@ pub fn open_measured(
 ) -> Result<Vec<PageStore>, String> {
     open_db(dir, shards)
 }
-
-/// What the fill's write cache is evicted **down to** — not to zero.
-///
-/// Evicting to zero costs far more than it saves: it drops the hot index
-/// interior nodes with everything else, so the next insert descends through
-/// the page store instead of RAM, and a fill that took 11 s at 4 000 users
-/// took 164 s at 8 000. Cold reads are this engine's known weak path; a fill
-/// is the last place to force them.
-///
-/// 192 MB: comfortably inside the 500 MB cage the fill also runs in (see
-/// [`crate::cage`] — there is one configuration and the fill is not an
-/// exception to it), and still a bound, since an unbounded write cache would
-/// simply move the failure to whatever ceiling is in force.
-const FILL_CACHE_BYTES: usize = 192 << 20;
-
-/// Unsettled bytes that trigger a settle during **this** preload — small
-/// because the preload shares a 500 MB cage with the row that follows it.
-const SETTLE_AFTER_BYTES: u64 = 64 << 20;
 
 /// The shop database: `shards` data shards (`MANIFEST` + `storage/xx`, RFC
 /// 0067), all of them writing through **one** storage shard (RFC 0073) — a

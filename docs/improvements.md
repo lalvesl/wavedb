@@ -210,14 +210,3 @@ order of cost:
 - **Decided** 2026-10-31, in RFC 0078 phase 4 and again with the edge
   split: the counts are exact without either; two edge reads are what is
   left.
-
-## Benchmarks
-
-### Shop rows do not fit the 500 MB cage
-
-- **Now.** All four WaveDB shop rows are OOM-killed at `smoke` and
-  `small`, before and after RFC 0066 (`benches/PROGRESS.md`). They cannot be
-  recorded on the 4c-500m lane.
-- **Instead.** Find which part of the cgroup's memory crosses 500 MB
-  (process RSS or dirtied page cache), then shrink the fixture or give shop
-  its own lane.

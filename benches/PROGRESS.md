@@ -452,6 +452,17 @@ The reason this file matters more than the checklist above.
   Until the shop fixture shrinks or the lane grows, shop rows cannot be
   recorded on the 4c-500m lane; RFC 0066 compared them in a 4 GB cage with
   the results kept out of the corpus.
+  **Resolved 2026-10-31** (RFC 0078 engine): it was the process, not the
+  page cache. Sampled per second in the cage, the killed rows held
+  430–490 MB anonymous against 10–60 MB of page cache, none dirty; a
+  `malloc_trim` probe showed ~290 MB live and the rest freed but retained
+  by the allocator — the transients of `drain`, which settled a whole
+  burst (64 MB of records) as one round. `drain`/`settle_all` now step in
+  rounds of `ROUND_RECORDS` (4096, the node worker's bound), and the shop
+  preload evicts to the store's own budget and settles on its pressure
+  line instead of a 192 MB cache and a 64 MB threshold of its own per
+  shard. All four rows then ran in the cage at 262–316 MB anonymous peak
+  (`--force`, clock unpinned: memory only, not a timing).
 
 - **The `large` rebuild (2026-10-07/08) is pinned, and its WaveDB seed is
   already a baseline.** Started through `scripts/bench_seeds.sh large
