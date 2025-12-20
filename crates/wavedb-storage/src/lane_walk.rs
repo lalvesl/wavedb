@@ -310,11 +310,74 @@ where
             ahead,
             held: None,
         }
-        if page.peek().is_some_and(|(k, _)| k.as_slice() == key) {
-            page.next();
+    }
+}
+
+impl<'a, P, O> Iterator for Merge<'a, P, O>
+where
+    P: Iterator<Item = (&'a [u8], &'a [u8])>,
+    O: Iterator<Item = (&'a [u8], Lookup)>,
+{
+    type Item = (&'a [u8], Value<'a>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.held.is_none() {
+                // Not cached after all: the page is the truth for it.
+                self.held =
+                    self.over.by_ref().find(|(_, l)| *l != Lookup::Miss);
+            }
+            let Some(&(key, _)) = self.held.as_ref() else {
+                return self.page.next().map(|(k, v)| (k, Value::Page(v)));
+            };
+            match self.page.peek().map(|&(k, _)| k.cmp(key)) {
+                Some(order) if order == self.ahead => {
+                    return self.page.next().map(|(k, v)| (k, Value::Page(v)));
+                }
+                Some(Ordering::Equal) => {
+                    self.page.next();
+                }
+                _ => {}
+            }
+            if let Some((key, Lookup::Hit(bytes))) = self.held.take() {
+                return Some((key, Value::Cached(bytes)));
+            }
         }
-        if let Lookup::Hit(value) = lookup {
-            out.push((key.to_vec(), value));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cmp::Ordering;
+
+    use super::{Merge, Value};
+    use crate::record_cache::Lookup;
+
+    fn run(rev: bool) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let page: Vec<(&[u8], &[u8])> =
+            vec![(b"a", b"1"), (b"b", b"1"), (b"c", b"1"), (b"e", b"1")];
+        let over: Vec<(&[u8], Lookup)> = vec![
+            (b"b", Lookup::Removed),
+            (b"c", Lookup::Hit(b"2".to_vec())),
+            (b"d", Lookup::Hit(b"2".to_vec())),
+            (b"e", Lookup::Miss),
+        ];
+        let take = |(k, v): (&[u8], Value<'_>)| {
+            let v = match v {
+                Value::Page(b) => b.to_vec(),
+                Value::Cached(b) => b,
+            };
+            (k.to_vec(), v)
+        };
+        if rev {
+            let it = page.into_iter().rev();
+            Merge::new(it, over.into_iter().rev(), Ordering::Greater)
+                .map(take)
+                .collect()
+        } else {
+            Merge::new(page.into_iter(), over.into_iter(), Ordering::Less)
+                .map(take)
+                .collect()
         }
     }
     out.extend(page);
