@@ -249,33 +249,66 @@ impl Walk<'_> {
         } else {
             self.hold(Merge::new(page, over, Ordering::Less), need);
         }
-        let pass = usize::try_from(self.skip)
-            .unwrap_or(usize::MAX)
-            .min(merged.len());
-        self.skip -= pass as u64;
-        self.skipped += pass as u64;
-        self.out.extend(merged.into_iter().skip(pass));
-        Ok(None)
+    }
+
+    /// Pass what is still to skip of `entries`, then hold them until `need`.
+    fn hold<'e>(
+        &mut self,
+        mut entries: impl Iterator<Item = (&'e [u8], Value<'e>)>,
+        need: usize,
+    ) {
+        while self.skip > 0 || self.out.len() < need {
+            let Some((key, value)) = entries.next() else {
+                return;
+            };
+            if self.skip > 0 {
+                self.skip -= 1;
+                self.skipped += 1;
+                continue;
+            }
+            let value = match value {
+                Value::Page(bytes) => bytes.to_vec(),
+                Value::Cached(bytes) => bytes,
+            };
+            self.out.push((key.to_vec(), value));
+        }
     }
 }
 
-/// `page`'s entries with the cache's `over` them, both ascending: a hit
-/// replaces or adds, a removal drops.
-fn merge<'a>(
-    page: Vec<Entry>,
-    over: impl Iterator<Item = (&'a [u8], Lookup)>,
-) -> Vec<Entry> {
-    let mut out = Vec::with_capacity(page.len());
-    let mut page = page.into_iter().peekable();
-    for (key, lookup) in over {
-        // Not cached after all: the page is the truth for it.
-        if lookup == Lookup::Miss {
-            continue;
-        }
-        while let Some((k, _)) = page.peek()
-            && k.as_slice() < key
-        {
-            out.extend(page.next());
+/// An entry's bytes, as the merge found them.
+enum Value<'a> {
+    /// Its page's, borrowed.
+    Page(&'a [u8]),
+    /// The cache's newest.
+    Cached(Vec<u8>),
+}
+
+/// A page's entries with the cache's over them, both in the walk's order:
+/// a hit replaces or adds, a removal drops — lazily, one entry a step.
+struct Merge<'a, P, O>
+where
+    P: Iterator<Item = (&'a [u8], &'a [u8])>,
+    O: Iterator<Item = (&'a [u8], Lookup)>,
+{
+    page: std::iter::Peekable<P>,
+    over: O,
+    /// How a key ahead of another compares to it: `Less` ascending.
+    ahead: Ordering,
+    /// The cache's next key, not yet passed.
+    held: Option<(&'a [u8], Lookup)>,
+}
+
+impl<'a, P, O> Merge<'a, P, O>
+where
+    P: Iterator<Item = (&'a [u8], &'a [u8])>,
+    O: Iterator<Item = (&'a [u8], Lookup)>,
+{
+    fn new(page: P, over: O, ahead: Ordering) -> Self {
+        Self {
+            page: page.peekable(),
+            over,
+            ahead,
+            held: None,
         }
         if page.peek().is_some_and(|(k, _)| k.as_slice() == key) {
             page.next();
