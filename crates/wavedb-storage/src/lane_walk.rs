@@ -380,6 +380,22 @@ mod tests {
                 .collect()
         }
     }
-    out.extend(page);
-    out
+
+    fn entry(k: &[u8], v: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        (k.to_vec(), v.to_vec())
+    }
+
+    #[test]
+    fn the_cache_replaces_adds_and_removes_over_the_page_either_way() {
+        let forth = vec![
+            entry(b"a", b"1"),
+            entry(b"c", b"2"),
+            entry(b"d", b"2"),
+            entry(b"e", b"1"),
+        ];
+        assert_eq!(run(false), forth);
+        let mut back = forth;
+        back.reverse();
+        assert_eq!(run(true), back);
+    }
 }
