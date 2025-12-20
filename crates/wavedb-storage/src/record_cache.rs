@@ -8,8 +8,8 @@
 //! mostly empty segment per type per shard.
 //!
 //! An ordered lane's slot ([RFC 0078] §7) also keeps the keys its log
-//! holds, sorted: a scan of the lane merges them with its pages, and the
-//! index, a hash table, cannot list them in order.
+//! holds, sorted ([`OrderedKeys`]): a scan of the lane merges them with its
+//! pages, and the index, a hash table, cannot list them in order.
 //!
 //! Everything here is memory work, never borrowed across a page read or
 //! write.
@@ -17,9 +17,8 @@
 //! [RFC 0068]: ../../../rfcs/0068-record-cache-as-a-log-WIP.md
 //! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
-use std::collections::BTreeSet;
-
 use crate::record_index::{Loc, RecordIndex, hash_of};
+use crate::record_keys::OrderedKeys;
 use crate::record_log::TypeLog;
 
 /// What the cache knows about one record.
@@ -41,9 +40,8 @@ pub type Records = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 pub struct RecordCache {
     pub(crate) index: RecordIndex,
     pub(crate) logs: Vec<TypeLog>,
-    /// Per slot, the keys of an ordered lane the index names; empty for a
-    /// slot of anchors.
-    pub(crate) ordered: Vec<BTreeSet<Vec<u8>>>,
+    /// Per slot, the keys of an ordered lane the index names.
+    pub(crate) ordered: OrderedKeys,
     /// Stamps chunks with their age, across every log.
     clock: u64,
 }
@@ -63,7 +61,7 @@ impl RecordCache {
         Self {
             index: RecordIndex::new(seed),
             logs: (0..types).map(|slot| TypeLog::new(slot as u16)).collect(),
-            ordered: vec![BTreeSet::new(); types],
+            ordered: OrderedKeys::new(types),
             clock: 0,
         }
     }
@@ -103,11 +101,7 @@ impl RecordCache {
         bytes: Option<&[u8]>,
     ) {
         self.put(slot, key, bytes);
-        if let Some(keys) = self.ordered.get_mut(slot)
-            && !keys.contains(key)
-        {
-            keys.insert(key.to_vec());
-        }
+        self.ordered.insert(slot, key);
     }
 
     /// An ordered lane's keys the cache holds in `range`, in order, with
@@ -118,10 +112,10 @@ impl RecordCache {
         range: (std::ops::Bound<&'a [u8]>, std::ops::Bound<&'a [u8]>),
     ) -> impl DoubleEndedIterator<Item = (&'a [u8], Lookup)> + 'a {
         self.ordered
-            .get(slot)
+            .of(slot)
             .into_iter()
             .flat_map(move |keys| keys.range::<[u8], _>(range))
-            .map(move |key| (key.as_slice(), self.get(slot, key)))
+            .map(move |key| (&**key, self.get(slot, key)))
     }
 
     /// Whether every key of `slot` the cache holds in `range` is settled —
@@ -133,7 +127,7 @@ impl RecordCache {
         range: (std::ops::Bound<&'a [u8]>, std::ops::Bound<&'a [u8]>),
     ) -> bool {
         let (Some(keys), Some(log)) =
-            (self.ordered.get(slot), self.logs.get(slot))
+            (self.ordered.of(slot), self.logs.get(slot))
         else {
             return true;
         };
@@ -145,17 +139,6 @@ impl RecordCache {
                 })
                 .is_none_or(|at| log.settled(at))
         })
-    }
-
-    /// The index forgot `key` in `slot`: so does its ordered set.
-    pub(crate) fn forget(
-        ordered: &mut [BTreeSet<Vec<u8>>],
-        slot: usize,
-        key: &[u8],
-    ) {
-        if let Some(keys) = ordered.get_mut(slot) {
-            keys.remove(key);
-        }
     }
 
     /// What the cache knows about `key` in `slot`.
@@ -192,18 +175,11 @@ impl RecordCache {
         self.index.len()
     }
 
-    /// Bytes the cache holds: the index and every log.
+    /// Bytes the cache holds: the index, every log and the ordered keys.
     pub fn footprint(&self) -> usize {
-        /// A key's `Vec` and its share of a B-tree node, about.
-        const PER_KEY: usize = 40;
         self.index.footprint()
             + self.logs.iter().map(TypeLog::footprint).sum::<usize>()
-            + self
-                .ordered
-                .iter()
-                .flatten()
-                .map(|k| k.capacity() + PER_KEY)
-                .sum::<usize>()
+            + self.ordered.footprint()
     }
 
     /// The probe's census: footprint, records indexed, and per head (the
@@ -314,7 +290,7 @@ impl RecordCache {
             if let Some(log) = self.logs.get_mut(slot) {
                 log.drop_oldest(|at, key| {
                     if index.remove(hash_of(key, seed), |l| l == at).is_some() {
-                        Self::forget(ordered, slot, key);
+                        ordered.remove(slot, key);
                     }
                 });
             }

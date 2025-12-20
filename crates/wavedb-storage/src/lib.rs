@@ -50,6 +50,7 @@ mod reader;
 mod record_cache;
 mod record_compact;
 mod record_index;
+mod record_keys;
 mod record_log;
 mod record_round;
 mod record_scan;
