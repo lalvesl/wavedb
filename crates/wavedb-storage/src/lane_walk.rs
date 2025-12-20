@@ -61,19 +61,19 @@ impl Walk<'_> {
         let mut at = self.index.and_then(|ix| ix.slot_from(&cursor));
         while self.out.len() < need && below(&cursor, hi.as_deref()) {
             let Some((slot, start, next)) = self.cover(at) else {
-                self.merged(None, &cursor, hi.as_deref(), false, false)?;
+                self.merged(None, &cursor, hi.as_deref(), false, false, need)?;
                 break;
             };
             if below(&cursor, Some(&start)) {
                 let gap = min_hi(Some(&start), hi.as_deref());
-                self.merged(None, &cursor, gap, false, false)?;
+                self.merged(None, &cursor, gap, false, false, need)?;
                 cursor = start;
                 continue;
             }
             let end = min_hi(next.as_deref(), hi.as_deref());
             let whole = cursor == start && end == next.as_deref();
             if let Some(key) =
-                self.merged(Some(slot), &cursor, end, false, whole)?
+                self.merged(Some(slot), &cursor, end, false, whole, need)?
             {
                 return Ok(Some(key));
             }
@@ -108,14 +108,14 @@ impl Walk<'_> {
         });
         while self.out.len() < need && below(&lo, cursor.as_deref()) {
             let Some((slot, start, next)) = self.cover(at) else {
-                self.merged(None, &lo, cursor.as_deref(), true, false)?;
+                self.merged(None, &lo, cursor.as_deref(), true, false, need)?;
                 break;
             };
             // Keys past this entry's coverage, below the cursor: no page.
             if let Some(next) = next.as_deref()
                 && below(next, cursor.as_deref())
             {
-                self.merged(None, next, cursor.as_deref(), true, false)?;
+                self.merged(None, next, cursor.as_deref(), true, false, need)?;
                 cursor = Some(next.to_vec());
                 continue;
             }
@@ -125,9 +125,14 @@ impl Walk<'_> {
             } else {
                 start
             };
-            if let Some(key) =
-                self.merged(Some(slot), &from, cursor.as_deref(), true, whole)?
-            {
+            if let Some(key) = self.merged(
+                Some(slot),
+                &from,
+                cursor.as_deref(),
+                true,
+                whole,
+                need,
+            )? {
                 return Ok(Some(key));
             }
             if !below(&lo, Some(&from)) {
@@ -171,7 +176,8 @@ impl Walk<'_> {
     /// Take the entries in `[lo, hi)` — `slot`'s page's, when it has one,
     /// with the cache's over them — in the walk's order, passing what is
     /// still to skip; when the range is the page's `whole` coverage and its
-    /// count is [`known`](Self::known) within the skip, without reading it.
+    /// count is [`known`](Self::known) within the skip, without reading it
+    /// — until the walk holds `need`.
     /// The key of `slot` when its page is evicted, and nothing taken.
     fn merged(
         &mut self,
@@ -180,6 +186,7 @@ impl Walk<'_> {
         hi: Option<&[u8]>,
         rev: bool,
         whole: bool,
+        need: usize,
     ) -> StorageResult<Option<Vec<u8>>> {
         if whole
             && self.skip > 0
@@ -190,7 +197,6 @@ impl Walk<'_> {
             self.skipped += n;
             return Ok(None);
         }
-        let inside = |key: &[u8]| !below(key, Some(lo)) && below(key, hi);
         let placed = slot.zip(self.index).and_then(|(slot, index)| match index
             .at(
             slot,
@@ -198,30 +204,50 @@ impl Walk<'_> {
             Found::Page { page, .. } => Some((slot, index, page)),
             Found::Hole(_) | Found::Uncovered => None,
         });
-        let page: Vec<Entry> = match placed {
+        match placed {
             Some((slot, index, placed)) if placed.meta & EVICTED != 0 => {
                 return Ok(index.key_of(slot));
             }
             Some((_, _, placed)) => {
+                let store = self.store;
                 let run = run_of(placed);
-                self.store.touch(self.idx, run.start);
-                let dict = self.store.types[self.idx].dictionary().borrow();
-                with_page(&self.store.file, run, &dict, |p| {
-                    p.iter()
-                        .filter(|(k, _)| inside(k))
-                        .map(|(k, v)| (k.to_vec(), v.to_vec()))
-                        .collect()
-                })?
+                store.touch(self.idx, run.start);
+                let dict = store.types[self.idx].dictionary().borrow();
+                with_page(&store.file, run, &dict, |p| {
+                    self.take(p.iter().collect(), lo, hi, rev, need);
+                })?;
             }
-            None => Vec::new(),
-        };
-        let cache = self.store.cache.borrow();
+            None => self.take(Vec::new(), lo, hi, rev, need),
+        }
+        Ok(None)
+    }
+
+    /// `page`'s entries in `[lo, hi)` with the cache's over them, in the
+    /// walk's order, passing what is still to skip and holding until `need`
+    /// are: nothing past that is looked up or copied — a walk for the
+    /// lane's last entry meets one, not the whole unsettled range.
+    fn take(
+        &mut self,
+        page: Vec<(&[u8], &[u8])>,
+        lo: &[u8],
+        hi: Option<&[u8]>,
+        rev: bool,
+        need: usize,
+    ) {
+        let inside = |key: &[u8]| !below(key, Some(lo)) && below(key, hi);
+        let store = self.store;
+        let cache = store.cache.borrow();
         let over = cache
             .ordered(self.idx, bounds(lo, hi))
             .filter(|(k, _)| inside(k));
-        let mut merged = merge(page, over);
+        let page = page.into_iter().filter(|(k, _)| inside(k));
         if rev {
-            merged.reverse();
+            self.hold(
+                Merge::new(page.rev(), over.rev(), Ordering::Greater),
+                need,
+            );
+        } else {
+            self.hold(Merge::new(page, over, Ordering::Less), need);
         }
         let pass = usize::try_from(self.skip)
             .unwrap_or(usize::MAX)
