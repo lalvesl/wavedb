@@ -40,7 +40,7 @@ use crate::barrier::{Answer, Waiter};
 use crate::block::{BlockAllocator, Run};
 use crate::block_file::BlockFile;
 use crate::compact::Space;
-use crate::header::NO_FILE;
+use crate::header::{HeaderLink, NO_FILE};
 use crate::storage_write::{Flight, sync_files};
 
 /// How often the gathered writes go down.
@@ -102,7 +102,7 @@ pub struct Reserved {
 pub struct Seal {
     pub position: usize,
     /// The header that ends the batch: the data shard's root from now.
-    pub root: u64,
+    pub root: HeaderLink,
     pub batch: u64,
     /// The runs the batch stopped naming.
     pub frees: Vec<Run>,
@@ -122,7 +122,7 @@ pub struct StorageShard {
     pub(crate) file: BlockFile,
     pub(crate) alloc: BlockAllocator,
     /// Per data shard, by position: its root.
-    pub(crate) by_shard: Vec<u64>,
+    pub(crate) by_shard: Vec<HeaderLink>,
     /// The newest roots block written.
     pub(crate) newest: Option<u64>,
     pub(crate) gathered: Vec<(Run, Vec<u8>)>,
@@ -148,7 +148,7 @@ impl StorageShard {
     pub fn new(
         file: BlockFile,
         alloc: BlockAllocator,
-        by_shard: Vec<u64>,
+        by_shard: Vec<HeaderLink>,
         newest: Option<u64>,
     ) -> (Self, mpsc::Receiver<(u64, Vec<File>)>) {
         let (syncs, jobs) = mpsc::channel();

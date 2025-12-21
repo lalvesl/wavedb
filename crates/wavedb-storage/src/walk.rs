@@ -19,15 +19,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
-use crate::header::{Header, NO_FILE, TypeEntry};
+use crate::header::{Header, HeaderLink, TypeEntry};
 use crate::ordered::{Rebuild, Shape};
 use crate::pages::Pages;
 
 /// Where a walk reads its headers from: the object store's files
 /// (`crate::recover_headers`) or the disk's windows (`crate::reopen`).
 pub trait HeaderSource {
-    /// The header at `at`, or `None` when nothing there is one.
-    async fn get(&mut self, at: u64) -> StorageResult<Option<Header>>;
+    /// The header `link` leads to, or `None` when nothing there is one.
+    async fn get(&mut self, link: HeaderLink) -> StorageResult<Option<Header>>;
 }
 
 /// Which directories of a header a walk rebuilds.
@@ -52,11 +52,11 @@ impl Lane {
 struct Gathering {
     rebuild: Rebuild,
     dict: Option<u64>,
-    /// The next header with entries for it ([`NO_FILE`] once the chain
-    /// ends).
-    next: u64,
+    /// The next header with entries for it ([`HeaderLink::NONE`] once the
+    /// chain ends).
+    next: HeaderLink,
     /// The newest header naming it — the first read that did.
-    newest: u64,
+    newest: HeaderLink,
 }
 
 impl Gathering {
@@ -73,7 +73,7 @@ pub struct Walked {
     pub index: Option<Pages>,
     pub dict: Option<BlockDescriptor>,
     /// The newest header naming it.
-    pub newest: u64,
+    pub newest: HeaderLink,
 }
 
 /// Every type's directory and dictionary descriptor, gathered from `top`
@@ -88,31 +88,31 @@ pub struct Walked {
 /// only below every header naming a type.
 pub async fn walk<S: HeaderSource>(
     headers: &mut S,
-    top: &Header,
+    (top, root): (&Header, HeaderLink),
     registered: &[u64],
     lane: Lane,
     seed: Shape,
 ) -> StorageResult<Vec<Walked>> {
     let mut types: BTreeMap<u64, Gathering> = BTreeMap::new();
     let mut unnamed: BTreeSet<u64> = registered.iter().copied().collect();
-    gather(&mut types, &mut unnamed, top, lane)?;
+    gather(&mut types, &mut unnamed, top, root, lane)?;
     // The next header the way down reads.
     let mut below = top.prev;
     loop {
         let chained = types
             .values()
-            .filter(|t| t.missing() && t.next != NO_FILE)
+            .filter(|t| t.missing() && t.next.is_some())
             .map(|t| t.next)
             .max();
         let down =
-            (!unnamed.is_empty() && below != NO_FILE && below >= top.horizon)
+            (!unnamed.is_empty() && below.is_some() && below.at >= top.horizon)
                 .then_some(below);
-        let Some(file) = chained.max(down) else { break };
-        let Some(header) = headers.get(file).await? else {
-            if chained == Some(file) {
+        let Some(link) = chained.max(down) else { break };
+        let Some(header) = headers.get(link).await? else {
+            if chained == Some(link) {
                 return Err(StorageError::Corrupt("a chained file is missing"));
             }
-            below = NO_FILE;
+            below = HeaderLink::NONE;
             continue;
         };
         if header.shard != top.shard {
@@ -122,17 +122,17 @@ pub async fn walk<S: HeaderSource>(
                 "a link lands on another data shard's header",
             ));
         }
-        if file == below {
+        if link == below {
             // Only ever down: a block a dead header was freed from may hold
             // a newer one since, whose `prev` leads back up.
-            below = if header.prev < file {
+            below = if header.prev.at < link.at {
                 header.prev
             } else {
-                NO_FILE
+                HeaderLink::NONE
             };
         }
-        gather(&mut types, &mut unnamed, &header, lane)?;
-        if types.values().any(|t| t.missing() && t.next == file) {
+        gather(&mut types, &mut unnamed, &header, link, lane)?;
+        if types.values().any(|t| t.missing() && t.next.at == link.at) {
             return Err(StorageError::Corrupt(
                 "a chain names a file without it",
             ));
@@ -159,11 +159,12 @@ fn gather(
     types: &mut BTreeMap<u64, Gathering>,
     unnamed: &mut BTreeSet<u64>,
     header: &Header,
+    here: HeaderLink,
     lane: Lane,
 ) -> StorageResult<()> {
     for entry in lane.of(header) {
         if let Some(t) = types.get_mut(&entry.struct_hash) {
-            if t.next == header.at {
+            if t.next.at == header.at {
                 t.rebuild.take(&entry.changed)?;
                 t.next = entry.last;
             }
@@ -173,7 +174,7 @@ fn gather(
             rebuild: Rebuild::new(entry.ranges),
             dict: entry.dict,
             next: entry.last,
-            newest: header.at,
+            newest: here,
         };
         t.rebuild.take(&entry.changed)?;
         types.insert(entry.struct_hash, t);

@@ -26,9 +26,13 @@ use std::collections::BTreeMap;
 
 use crate::block::{BLOCK_SIZE, BlockDescriptor, Run};
 use crate::error::{StorageError, StorageResult};
-use crate::header::{Chain, ENTRY_BYTES, Header, NO_FILE, TypeEntry};
+use crate::header::{
+    Chain, ENTRY_BYTES, Header, HeaderLink, NO_FILE, TypeEntry,
+};
 use crate::pages::Pages;
-use crate::remote::{FILE_BLOCKS, HEADER_BLOCKS, HEADER_BYTES};
+use crate::remote::{
+    FILE_BLOCKS, HEADER_BLOCKS, HEADER_BYTES, HEADER_LINK_BLOCKS,
+};
 use crate::restate::{TypeView, horizon, restate};
 use crate::roots::{ROOTS_BLOCKS, Roots};
 use crate::shape::blocks_for;
@@ -162,7 +166,7 @@ pub fn finish(
         let base = file.number * FILE_BLOCKS;
         let mut header = Header {
             at: file.base,
-            prev: chain.tail.unwrap_or(NO_FILE),
+            prev: chain.tail.unwrap_or(HeaderLink::NONE),
             horizon: 0,
             shard: position,
             roots: chain.roots.unwrap_or(NO_FILE),
@@ -196,8 +200,9 @@ pub fn finish(
             &mut chain.types,
             header.at,
         );
+        let link = HeaderLink::new(header.at, HEADER_LINK_BLOCKS);
         for entry in &header.types {
-            chain.types.entry(entry.struct_hash).or_default().last = header.at;
+            chain.types.entry(entry.struct_hash).or_default().last = link;
         }
         header.horizon = horizon(&views, &chain.types, chain.floor);
         chain.floor = header.horizon;
@@ -211,9 +216,9 @@ pub fn finish(
             0
         };
         file.bytes[from..from + encoded.len()].copy_from_slice(&encoded);
-        chain.tail = Some(header.at);
+        chain.tail = Some(link);
         if header.end_of_batch {
-            chain.cut = Some(header.at);
+            chain.cut = Some(link);
         }
         if !file.roots {
             continue; // the storage shard heads the file it lands in
@@ -221,7 +226,7 @@ pub fn finish(
         let roots = Roots::new(
             base,
             chain.roots.unwrap_or(NO_FILE),
-            vec![chain.cut.unwrap_or(NO_FILE)],
+            vec![chain.cut.unwrap_or(HeaderLink::NONE)],
         )
         .with_chain(chain.start, packed.end)
         .encode()?;
