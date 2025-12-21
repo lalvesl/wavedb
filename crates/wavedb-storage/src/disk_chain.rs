@@ -5,6 +5,7 @@
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use crate::block::BlockDescriptor;
 
@@ -60,6 +61,15 @@ pub struct DiskChain {
     pub(crate) restated: Option<u64>,
     /// The roots blocks this store wrote (RFC 0073 §5).
     pub(crate) roots: RootsChain,
+    /// The newest header's horizon: the walk a reconstruction rooted at
+    /// the next one makes is the live headers at or above it
+    /// (`crate::header_room`).
+    pub(crate) horizon: u64,
+    /// Headers written since the last restating header.
+    pub(crate) since_restate: usize,
+    /// When the last restating header was written — or the first header
+    /// since the store opened.
+    pub(crate) restated_at: Option<Instant>,
 }
 
 /// Where the roots blocks stand: the newest, and those a reconstruction

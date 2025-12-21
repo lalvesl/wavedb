@@ -6,36 +6,30 @@
 //! What a window changes is **unrecorded** until a header names it: every
 //! index journals its own changes — the pages a window placed, emptied,
 //! evicted, or whose flag an upload cleared — and a dictionary moved is
-//! noted beside them. A header names as much of it as its 32 KiB hold; what
-//! does not fit waits for the next header, and only a header that leaves
-//! nothing unrecorded may end a batch.
+//! noted beside them. A header is sized to name all of it, in whole blocks
+//! up to a cap ([RFC 0079], `crate::header_room`); what does not fit waits
+//! for the next header, and only a header that leaves nothing unrecorded
+//! may end a batch. Its last block ends with a trailer saying how long it
+//! is (`crate::trailer`).
 //!
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 //! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
+//! [RFC 0079]: ../../../rfcs/0079-headers-sized-to-their-change-WIP.md
 
-use std::cell::Ref;
 use std::collections::BTreeMap;
 
-use crate::block::{BlockDescriptor, Run};
-use crate::disk_chain::DiskChain;
+use crate::block::{BLOCK_SIZE, BlockDescriptor, Run};
 use crate::error::{StorageError, StorageResult};
 use crate::header::{ENTRY_BYTES, Header, HeaderLink, NO_FILE, TypeEntry};
+use crate::header_room::{HeaderSize, Side, coverage};
 use crate::page_store::PageStore;
-use crate::pages::Pages;
 use crate::plan::SlotPlan;
-use crate::remote::{HEADER_BYTES, HEADER_LINK_BLOCKS};
-use crate::restate::{TypeView, horizon, restate};
+use crate::restate::restate;
 use crate::roots::{ROOTS_BLOCKS, Roots};
-
-/// Which indexes a header entry is of.
-#[derive(Clone, Copy)]
-enum Side {
-    Disk,
-    Remote,
-}
+use crate::trailer;
 
 impl PageStore {
-    /// The header at block `at`, padded to its 32 KiB, and whether it ends
+    /// The header at block `at`, `size` long, and whether it ends
     /// the batch: it does when `end` asks and it left nothing unrecorded.
     /// `plans` and `dicts` are the window's, not yet published: their
     /// indexes and dictionaries are what it names.
@@ -45,7 +39,7 @@ impl PageStore {
     /// (unreachable: every entry and record is budgeted).
     pub(crate) fn header_at(
         &self,
-        at: u64,
+        (at, size): (u64, HeaderSize),
         plans: &mut [SlotPlan],
         dicts: &BTreeMap<usize, BlockDescriptor>,
         end: bool,
@@ -67,8 +61,8 @@ impl PageStore {
                 chain: self.object.as_ref().map(|o| o.chain.borrow().record()),
             }
         };
-        let link = HeaderLink::new(at, HEADER_LINK_BLOCKS);
-        let mut room = HEADER_BYTES.saturating_sub(header.encoded_len());
+        let link = HeaderLink::new(at, size.blocks);
+        let mut room = size.room().saturating_sub(header.encoded_len());
         let dict_of = self.dicts_after(plans, dicts);
         for idx in 0..self.types.len() {
             for side in [Side::Disk, Side::Remote] {
@@ -116,11 +110,13 @@ impl PageStore {
             coverage(&views, &remote_views, &chain, self.object.is_some());
         chain.tail = Some(link);
         chain.live.insert(at, link.blocks);
+        chain.wrote(header.horizon, size.restating);
         let mut bytes = header.encode();
-        if bytes.len() > HEADER_BYTES {
+        if bytes.len() > size.room() {
             return Err(StorageError::Corrupt("a header outgrew its room"));
         }
-        bytes.resize(HEADER_BYTES, 0);
+        bytes.resize(usize::from(size.blocks) * BLOCK_SIZE, 0);
+        trailer::close(&mut bytes, size.blocks);
         Ok((bytes, header.end_of_batch))
     }
 
@@ -273,66 +269,4 @@ impl PageStore {
             }
         }
     }
-
-    /// Every type's disk index as the window leaves it.
-    fn views_of<'a>(
-        &self,
-        disk: &'a [Ref<'_, Option<Pages>>],
-        plans: &'a [SlotPlan],
-        dict_of: &[Option<u64>],
-    ) -> Vec<TypeView<'a>> {
-        self.types
-            .iter()
-            .enumerate()
-            .map(|(idx, slot)| {
-                let plan = plans.iter().find(|p| p.idx == idx);
-                let index =
-                    plan.map_or_else(|| disk[idx].as_ref(), |p| Some(&p.index));
-                TypeView {
-                    struct_hash: slot.struct_hash(),
-                    index,
-                    dict: dict_of[idx],
-                }
-            })
-            .collect()
-    }
-
-    /// Every type's remote index, none in a disk-only store.
-    fn remote_views_of<'a>(
-        &self,
-        remote: &'a [Ref<'_, Option<Pages>>],
-    ) -> Vec<TypeView<'a>> {
-        if self.object.is_none() {
-            return Vec::new();
-        }
-        self.types
-            .iter()
-            .enumerate()
-            .map(|(idx, slot)| {
-                let dict = slot.remote_dict().get();
-                TypeView {
-                    struct_hash: slot.struct_hash(),
-                    index: remote[idx].as_ref(),
-                    dict: dict.is_allocated().then_some(dict.raw()),
-                }
-            })
-            .collect()
-    }
-}
-
-/// The lowest header a reconstruction from the newest one reads
-/// ([`Header::horizon`]): where the rotations of the disk's indexes — and
-/// in disk + object mode the object store's — last came round, or the last
-/// full restatement, whichever is higher.
-fn coverage(
-    views: &[TypeView<'_>],
-    remote_views: &[TypeView<'_>],
-    chain: &DiskChain,
-    object_backed: bool,
-) -> u64 {
-    let mut line = horizon(views, &chain.types, chain.floor);
-    if object_backed {
-        line = line.min(horizon(remote_views, &chain.remote, chain.floor));
-    }
-    line.max(chain.restated.unwrap_or(0))
 }
