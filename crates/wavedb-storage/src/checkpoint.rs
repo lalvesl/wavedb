@@ -249,45 +249,35 @@ impl PageStore {
             runs,
             flags,
             end,
+            body,
+            marks,
+            added,
+            dicts,
         } = round;
-        let logged = self.has_disk();
-        let runs = window
-            .map_or_else(|| vec![None; targets.len()], |w| carve(w, sizes));
-        // A settle writes what the object store has not seen; a move does
-        // not change what it moves.
-        let flags = match placement {
-            Placement::Settle if self.object.is_some() => Some(PENDING),
-            Placement::Settle | Placement::Restore => Some(0),
-            Placement::Move => None,
-        };
-        let added = install(&mut plans, &targets, &runs, flags)?;
         if let Some(object) = &self.object {
             let punched: u64 = plans.iter().map(|p| p.punched).sum();
             let unpended: u64 = plans.iter().map(|p| p.unpended).sum();
             object.adjust_pending(added + punched, unpended);
         }
-        let dicts = dict_descriptors(&plans, &targets, &runs);
         let mut ended = false;
-        let (mut header, mut roots) = (Vec::new(), Vec::new());
-        if logged {
-            self.note_dicts(dicts.keys().map(|&p| plans[p].idx));
-            if let Some(at) = mark_run(&targets, &runs, false) {
-                (header, ended) =
-                    self.header_at(at.start, &mut plans, &dicts, end)?;
-                if let Some(block) = mark_run(&targets, &runs, true) {
-                    let link = HeaderLink::new(at.start, HEADER_LINK_BLOCKS);
-                    roots = self.roots_at(block.start, link, ended)?;
-                }
+        let marked = if let Some((run, size)) = marks {
+            let (mut bytes, e) =
+                self.header_at((run.start, size), &mut plans, &dicts, end)?;
+            ended = e;
+            let header = u64::from(size.blocks);
+            if run.count > header {
+                let link = HeaderLink::new(run.start, size.blocks);
+                let roots = self.roots_at(run.start + header, link, ended)?;
+                bytes.extend_from_slice(&roots);
             }
-        }
-        if let Some(window) = window {
-            let marks = (header.as_slice(), roots.as_slice());
-            let buf = assemble(window, &plans, &targets, &runs, marks);
-            let written = self.write_window(window, buf);
-            if let Err(e) = written {
-                self.fail();
-                return Err(e); // the round's one write
-            }
+            Some((run, bytes))
+        } else {
+            None
+        };
+        let body = body.map(|w| (w, assemble(w, &plans, &targets, &runs)));
+        if let Err(e) = self.write_windows(body, marked) {
+            self.fail();
+            return Err(e); // the round's one write
         }
         // The pages just written are the ones read next: held decoded under
         // their new runs (RFC 0044) — after the write, which forgot the
