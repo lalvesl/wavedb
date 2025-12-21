@@ -96,7 +96,7 @@ impl RecordCache {
                     && let Some(log) = self.logs.get_mut(at.slot as usize)
                 {
                     if let Some(entry) = log.entry(at) {
-                        Self::forget(&mut self.ordered, mark.slot, entry.key);
+                        self.ordered.remove(mark.slot, entry.key);
                     }
                     log.mark_dead(at);
                 }
