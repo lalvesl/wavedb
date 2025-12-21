@@ -4,9 +4,10 @@
 //! Every image [`crate::plan`] produced — the rewritten pages and a grown
 //! dictionary — is placed inside **one contiguous window** at the end of the
 //! active data file (writing only ever appends, [RFC 0071]), and on disk the
-//! window ends with its **header**: 32 KiB naming the addresses it changed
-//! (`crate::disk_header`). The window reaches the disk as a single
-//! positioned write. Only afterwards are the descriptor vectors swapped — so
+//! window ends with its **header**, whole blocks naming the addresses it
+//! changed (`crate::disk_header`), reserved once its pages are placed —
+//! when its size is known (RFC 0079 §4) — right after them. The window
+//! reaches the disk as a single positioned write. Only afterwards are the descriptor vectors swapped — so
 //! a reader either sees the previous pages (still allocated, still valid:
 //! page writes are copy-on-write) or the new ones, never a half-written run.
 //!
@@ -28,9 +29,9 @@ use crate::page_store::PageStore;
 use crate::pages::PENDING;
 use crate::plan::SlotPlan;
 use crate::record_cache::Records;
-use crate::remote::HEADER_LINK_BLOCKS;
+use crate::roots::ROOTS_BLOCKS;
 use crate::window::{
-    Target, assemble, carve, dict_descriptors, install, mark_run, size_of,
+    Round, Target, assemble, carve, dict_descriptors, install, size_of,
     targets_of,
 };
 
@@ -46,15 +47,6 @@ pub enum Placement {
     /// A page brought back from the object store (RFC 0070 §7): what it
     /// holds is what the object store holds, so no flag.
     Restore,
-}
-
-/// A round's plans and what its window holds, between its reservation and
-/// its build.
-struct Round {
-    plans: Vec<SlotPlan>,
-    targets: Vec<Target>,
-    placement: Placement,
-    end: bool,
 }
 
 impl PageStore {
@@ -134,13 +126,16 @@ impl PageStore {
         self.place_in(Vec::new(), Placement::Settle, end).await
     }
 
-    /// One round through the storage shard ([RFC 0073] §3): size the window
-    /// — every planned image and, on disk, the header — **reserve** it, then
-    /// build it at its real addresses, write it, swap the descriptors in and
-    /// release the superseded runs. Whether the header ended the batch.
+    /// One round through the storage shard ([RFC 0073] §3): size the
+    /// window's pages and dictionaries, **reserve** them, place them; on
+    /// disk, size the header naming them and reserve it, with the roots
+    /// block after it when the round ends a batch of a store writing its
+    /// own files ([RFC 0079] §4); then build the header at its real
+    /// address, write it all, swap the descriptors in and release the
+    /// superseded runs. Whether the header ended the batch.
     ///
-    /// The reservation is the one wait; the caller holds the store's
-    /// [`Gate`](crate::wait::Gate) across it.
+    /// The reservations are the waits; the caller holds the store's
+    /// [`Gate`](crate::wait::Gate) across them.
     ///
     /// # Errors
     /// The window write's fault. Nothing is published then — but the
@@ -149,6 +144,7 @@ impl PageStore {
     /// reconstructs it from what is on disk.
     ///
     /// [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
+    /// [RFC 0079]: ../../../rfcs/0079-headers-sized-to-their-change-WIP.md
     async fn place_in(
         &self,
         plans: Vec<SlotPlan>,
@@ -158,36 +154,32 @@ impl PageStore {
         // Object mode keeps no header: nothing reopens from RAM (RFC 0070
         // §9), so a window holds its images and nothing else.
         let logged = self.has_disk();
-        let mut targets = targets_of(&plans);
+        let targets = targets_of(&plans);
         if targets.is_empty() && !(logged && (end || self.has_unrecorded())) {
             return Ok(false);
         }
-        if logged {
-            targets.push(Target::Header);
-            // A storage thread ends its own writes with one (RFC 0073 §4).
-            if end && self.own().is_some() {
-                targets.push(Target::Roots);
-            }
-        }
         let sizes: Vec<u64> =
             targets.iter().map(|t| size_of(&plans, t)).collect();
-        #[cfg(feature = "probe")]
-        crate::probe::round(
-            self.position,
-            &self.types,
-            &plans,
-            &targets,
-            &sizes,
-        );
         let total: u64 = sizes.iter().sum();
-        let window = match total {
+        let body = match total {
             0 => None,
             blocks => Some(self.reserve(blocks).await?),
         };
-        let round = Round {
+        // A settle writes what the object store has not seen; a move does
+        // not change what it moves.
+        let flags = match placement {
+            Placement::Settle if self.object.is_some() => Some(PENDING),
+            Placement::Settle | Placement::Restore => Some(0),
+            Placement::Move => None,
+        };
+        let mut round = Round {
             plans,
+            runs: body.map_or_else(
+                || vec![None; targets.len()],
+                |w| carve(w, &sizes),
+            ),
             targets,
-            placement,
+            flags,
             end,
         };
         let built = self.build(round, &sizes, window);
