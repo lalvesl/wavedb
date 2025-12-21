@@ -34,7 +34,7 @@ use futures::future::try_join_all;
 use crate::block::BlockDescriptor;
 use crate::dictionary::Dictionary;
 use crate::error::{StorageError, StorageResult};
-use crate::header::{Chain, Header, Rotation};
+use crate::header::{Chain, Header, HeaderLink, Rotation};
 use crate::ordered::Shape;
 use crate::page_store::{PageStore, StoreOptions};
 use crate::pages::{EVICTED, Pages};
@@ -95,7 +95,8 @@ pub async fn recover(
     // is never written again.
     let past = (newest + 1) * FILE_BLOCKS;
     let mut headers = Headers::new(remote);
-    let Some((roots, top)) = newest_cut(&mut headers, newest, position).await?
+    let Some((roots, top, link)) =
+        newest_cut(&mut headers, newest, position).await?
     else {
         // Files, but no batch end among them: the first uploads never
         // finished one, so nothing was ever recoverable.
@@ -111,15 +112,20 @@ pub async fn recover(
     let mut chain = Chain {
         end: roots.end.max(past),
         start: roots.start,
-        tail: Some(top.at),
-        cut: Some(top.at),
+        tail: Some(link),
+        cut: Some(link),
         roots: Some(roots.at),
         floor: top.horizon,
         ..Chain::default()
     };
-    let walked =
-        walk(&mut headers, &top, registered, Lane::Types, Shape::REMOTE)
-            .await?;
+    let walked = walk(
+        &mut headers,
+        (&top, link),
+        registered,
+        Lane::Types,
+        Shape::REMOTE,
+    )
+    .await?;
     for w in &walked {
         let rotation = Rotation {
             last: w.newest,
@@ -153,22 +159,22 @@ pub async fn newest_cut(
     headers: &mut Headers<'_>,
     newest: u64,
     position: u32,
-) -> StorageResult<Option<(Roots, Header)>> {
+) -> StorageResult<Option<(Roots, Header, HeaderLink)>> {
     let mut file = Some(newest);
     while let Some(n) = file {
         file = n.checked_sub(1);
         let Some(roots) = headers.roots(n).await? else {
             continue;
         };
-        let Some(at) = roots.root(position as usize) else {
+        let Some(link) = roots.root(position as usize) else {
             return Ok(None);
         };
-        if let Some(header) = headers.get(at).await?
+        if let Some(header) = headers.get(link).await?
             && header.end_of_batch
             && header.shard == position
             && headers.whole(&header).await?
         {
-            return Ok(Some((roots, header)));
+            return Ok(Some((roots, header, link)));
         }
     }
     Ok(None)
@@ -275,10 +281,10 @@ mod tests {
     use wavedb_platform::s3::test_server::TestServer;
 
     use super::{FoundType, recover};
-    use crate::header::{Header, NO_FILE, TypeEntry};
+    use crate::header::{Header, HeaderLink, NO_FILE, TypeEntry};
     use crate::ordered::{RangeRecord, Shape, WholeRange};
     use crate::recover_headers::file_bytes;
-    use crate::remote::{FILE_BLOCKS, Remote, file_of};
+    use crate::remote::{FILE_BLOCKS, HEADER_LINK_BLOCKS, Remote, file_of};
     use crate::upload_file::{FIRST_PAGE, SECTION};
 
     const SH: u64 = 7;
@@ -288,6 +294,11 @@ mod tests {
     /// Where file `file`'s header starts.
     const fn at(file: u64) -> u64 {
         file * FILE_BLOCKS + SECTION
+    }
+
+    /// The link to file `file`'s header.
+    const fn link(file: u64) -> HeaderLink {
+        HeaderLink::new(at(file), HEADER_LINK_BLOCKS)
     }
 
     /// Where a one-block page at the head of file `file` starts.
@@ -316,7 +327,7 @@ mod tests {
     /// A header for file `file`, following file `prev`'s, naming a
     /// one-range type whole in itself — its previous entries in `prev`.
     fn header(file: u64, prev: Option<u64>, end_of_batch: bool) -> Header {
-        let prev = prev.map_or(NO_FILE, at);
+        let prev = prev.map_or(HeaderLink::NONE, link);
         Header {
             at: at(file),
             prev,
@@ -340,7 +351,7 @@ mod tests {
     fn put(remote: &Remote, header: &Header, root: u64) {
         block_on(remote.bucket().put(
             &remote.file_key(file_of(header.at)),
-            &file_bytes(header, at(root)),
+            &file_bytes(header, link(root)),
             When::Always,
         ))
         .unwrap();
@@ -365,8 +376,8 @@ mod tests {
         let (_dir, _server, remote) = fixture();
         two_batches(&remote);
         let found = block_on(recover(&remote, &[SH], 0)).unwrap().unwrap();
-        assert_eq!(found.chain.tail, Some(at(2)));
-        assert_eq!(found.chain.last(SH), at(2));
+        assert_eq!(found.chain.tail, Some(link(2)));
+        assert_eq!(found.chain.last(SH), link(2));
         let t = &found.types[0];
         assert_eq!(first(t), Some(page(2)), "the newest entry wins");
         assert!(found.chain.end >= 3 * FILE_BLOCKS, "past every file");
@@ -378,7 +389,7 @@ mod tests {
         two_batches(&remote);
         block_on(remote.bucket().delete(&remote.file_key(1))).unwrap();
         let found = block_on(recover(&remote, &[SH], 0)).unwrap().unwrap();
-        assert_eq!(found.chain.tail, Some(at(0)));
+        assert_eq!(found.chain.tail, Some(link(0)));
         assert_eq!(first(&found.types[0]), Some(page(0)));
         assert!(found.chain.end >= 3 * FILE_BLOCKS, "past the leftover too");
     }
@@ -392,13 +403,13 @@ mod tests {
         two_batches(&remote);
         put(&remote, &header(3, Some(2), false), 2);
         let found = block_on(recover(&remote, &[SH], 0)).unwrap().unwrap();
-        assert_eq!(found.chain.tail, Some(at(2)));
+        assert_eq!(found.chain.tail, Some(link(2)));
 
-        let copy = file_bytes(&header(2, Some(1), true), at(2));
+        let copy = file_bytes(&header(2, Some(1), true), link(2));
         let key = remote.file_key(4);
         block_on(remote.bucket().put(&key, &copy, When::Always)).unwrap();
         let found = block_on(recover(&remote, &[SH], 0)).unwrap().unwrap();
-        assert_eq!(found.chain.tail, Some(at(2)), "file 4 holds file 2");
+        assert_eq!(found.chain.tail, Some(link(2)), "file 4 holds file 2");
     }
 
     /// A registered type the newest header does not name is found by going
@@ -412,7 +423,7 @@ mod tests {
         named.types.push(TypeEntry {
             struct_hash: LATE,
             ranges: 1,
-            last: NO_FILE,
+            last: HeaderLink::NONE,
             dict: None,
             changed: vec![whole(3)],
         });
@@ -423,7 +434,7 @@ mod tests {
         let found = found.unwrap();
         let late = found.types.iter().find(|t| t.struct_hash == LATE);
         assert_eq!(late.and_then(first), Some(page(3)));
-        assert_eq!(found.chain.last(LATE), at(3), "its newest header");
+        assert_eq!(found.chain.last(LATE), link(3), "its newest header");
         assert!(found.types.iter().all(|t| t.struct_hash != 9), "unnamed");
     }
 

@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 
 use crate::block::BLOCK_SIZE;
 use crate::error::StorageResult;
-use crate::header::{Header, NO_FILE};
-use crate::remote::{FILE_BLOCKS, HEADER_BYTES, Remote, file_of};
+use crate::header::{Header, HeaderLink};
+use crate::remote::{FILE_BLOCKS, Remote, file_of};
 use crate::roots::Roots;
 use crate::walk::HeaderSource;
 
@@ -37,11 +37,16 @@ impl<'a> Headers<'a> {
         }
     }
 
-    /// The header starting at block `at`, read if it was not yet.
+    /// The header `link` leads to, read — one ranged GET of exactly its
+    /// blocks — if it was not yet.
     ///
     /// # Errors
     /// Object-store faults.
-    pub async fn get(&mut self, at: u64) -> StorageResult<Option<Header>> {
+    pub async fn get(
+        &mut self,
+        link: HeaderLink,
+    ) -> StorageResult<Option<Header>> {
+        let at = link.at;
         self.lowest = self.lowest.min(at);
         if let Some(header) = self.seen.get(&at) {
             return Ok(header.clone());
@@ -52,7 +57,7 @@ impl<'a> Headers<'a> {
             .bucket()
             .get(
                 &self.remote.file_key(file_of(at)),
-                Some(offset..offset + HEADER_BYTES as u64),
+                Some(offset..offset + link.byte_len()),
             )
             .await?;
         let header = bytes
@@ -92,8 +97,8 @@ impl<'a> Headers<'a> {
     /// Object-store faults.
     pub async fn whole(&mut self, top: &Header) -> StorageResult<bool> {
         let (mut at, mut prev) = (top.at, top.prev);
-        while prev != NO_FILE {
-            if prev >= at {
+        while prev.is_some() {
+            if prev.at >= at {
                 return Ok(false);
             }
             let Some(header) = self.get(prev).await? else {
@@ -109,8 +114,8 @@ impl<'a> Headers<'a> {
 }
 
 impl HeaderSource for Headers<'_> {
-    async fn get(&mut self, at: u64) -> StorageResult<Option<Header>> {
-        Headers::get(self, at).await
+    async fn get(&mut self, link: HeaderLink) -> StorageResult<Option<Header>> {
+        Headers::get(self, link).await
     }
 }
 
@@ -119,7 +124,9 @@ impl HeaderSource for Headers<'_> {
 /// write them by hand.
 #[cfg(test)]
 #[must_use]
-pub fn file_bytes(header: &Header, root: u64) -> Vec<u8> {
+pub fn file_bytes(header: &Header, root: HeaderLink) -> Vec<u8> {
+    use crate::header::NO_FILE;
+    use crate::remote::HEADER_BYTES;
     use crate::upload_file::SECTION;
     let base = header.at - SECTION;
     let roots = Roots::new(base, NO_FILE, vec![root])

@@ -24,6 +24,7 @@ use crate::barrier::Waiter;
 use crate::block::{BlockAllocator, Run};
 use crate::compact::Space;
 use crate::error::{StorageError, StorageResult};
+use crate::header::HeaderLink;
 use crate::page_store::PageStore;
 use crate::storage_shard::{Msg, Seal};
 
@@ -230,7 +231,7 @@ impl PageStore {
     pub(crate) fn seal(
         &self,
         batch: u64,
-        root: u64,
+        root: HeaderLink,
         waiters: Vec<Waiter>,
     ) -> StorageResult<()> {
         let Storage::Shared(link) = &self.storage else {
