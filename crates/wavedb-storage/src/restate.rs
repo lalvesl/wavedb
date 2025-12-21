@@ -1,7 +1,8 @@
 //! The spare room of a header ([RFC 0072] §5, [RFC 0078] §6): what is left
-//! of its 32 KiB after the ranges its batch changed restates old ones,
-//! whole — on disk and in the object store alike — and the horizon that
-//! restating moves.
+//! of it after the ranges its batch changed — the rest of its last block,
+//! or a restating header's room (RFC 0079 §5, `crate::header_room`) —
+//! restates old ones, whole, on disk and in the object store alike, and
+//! the horizon that restating moves.
 //!
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 //! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
