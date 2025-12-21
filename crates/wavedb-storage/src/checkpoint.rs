@@ -181,28 +181,73 @@ impl PageStore {
             targets,
             flags,
             end,
+            body,
+            marks: None,
+            added: 0,
+            dicts: BTreeMap::new(),
         };
-        let built = self.build(round, &sizes, window);
-        if built.is_err()
-            && let Some(window) = window
-        {
-            self.abandon(window);
+        let marked = self.mark(&mut round, total).await;
+        #[cfg(feature = "probe")]
+        crate::probe::round(
+            self.position,
+            &self.types,
+            &round.plans,
+            (&round.targets, &sizes),
+            round.marks.map_or((0, 0), |(run, size)| {
+                (u64::from(size.blocks), run.count - u64::from(size.blocks))
+            }),
+        );
+        let windows = (round.body, round.marks.map(|(run, _)| run));
+        let built = marked.and_then(|()| self.build(round));
+        if built.is_err() {
+            for window in
+                <[Option<Run>; 2]>::from(windows).into_iter().flatten()
+            {
+                self.abandon(window);
+            }
         }
         built
     }
 
-    /// Build the round at its reserved `window`, write it and publish it
+    /// Point the round's pages at the runs they were given and, on disk,
+    /// size its header — what they leave unrecorded is known now — and
+    /// reserve it.
+    ///
+    /// # Errors
+    /// A page whose entry the plan lost; a storage thread gone.
+    async fn mark(&self, round: &mut Round, body: u64) -> StorageResult<()> {
+        round.added = install(
+            &mut round.plans,
+            &round.targets,
+            &round.runs,
+            round.flags,
+        )?;
+        round.dicts =
+            dict_descriptors(&round.plans, &round.targets, &round.runs);
+        if !self.has_disk() {
+            return Ok(());
+        }
+        self.note_dicts(round.dicts.keys().map(|&p| round.plans[p].idx));
+        let size = self.header_size(&round.plans, &round.dicts, body);
+        // A storage thread ends its own writes with one (RFC 0073 §4).
+        let roots = if round.end && self.own().is_some() {
+            ROOTS_BLOCKS
+        } else {
+            0
+        };
+        let run = self.reserve(u64::from(size.blocks) + roots).await?;
+        round.marks = Some((run, size));
+        Ok(())
+    }
+
+    /// Build the round at its reserved windows, write it and publish it
     /// (see [`place_in`](Self::place_in)).
-    fn build(
-        &self,
-        round: Round,
-        sizes: &[u64],
-        window: Option<Run>,
-    ) -> StorageResult<bool> {
+    fn build(&self, round: Round) -> StorageResult<bool> {
         let Round {
             mut plans,
             targets,
-            placement,
+            runs,
+            flags,
             end,
         } = round;
         let logged = self.has_disk();
