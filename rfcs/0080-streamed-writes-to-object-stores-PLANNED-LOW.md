@@ -5,7 +5,7 @@
   design starts from it.
 - **Related:** [0070](0070-object-storage-backend.md) (object storage as a
   page backend; no journal, no lease, every PUT create-only),
-  [0079](0079-headers-sized-to-their-change-PLANNED.md) (header at a file's
+  [0079](0079-headers-sized-to-their-change-WIP.md) (header at a file's
   end, read by one suffix GET)
 - **Crates:** `wavedb-platform` (`s3`), `wavedb-storage` (`remote*`,
   `upload*`, `object_mode`)
