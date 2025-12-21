@@ -40,15 +40,16 @@ use crate::window::Target;
 const DESTINATION: &str = "WAVEDB_PROBE";
 
 /// Record one round of the data shard at `shard`: its `targets`, sized
-/// `sizes`, from `plans` over `types`.
+/// `sizes`, from `plans` over `types`, then its header and roots block,
+/// `marks` blocks long (zero: none).
 pub fn round(
     shard: u32,
     types: &[TypeSlot],
     plans: &[SlotPlan],
-    targets: &[Target],
-    sizes: &[u64],
+    (targets, sizes): (&[Target], &[u64]),
+    (header, roots): (u64, u64),
 ) {
-    let total: u64 = sizes.iter().sum();
+    let total: u64 = sizes.iter().sum::<u64>() + header + roots;
     let mut line = format!("round shard={shard} blocks={total}");
     for (target, &blocks) in targets.iter().zip(sizes) {
         match target {
@@ -58,13 +59,13 @@ pub fn round(
             Target::Dict { .. } => {
                 let _ = write!(line, " | dict blocks={blocks}");
             }
-            Target::Header => {
-                let _ = write!(line, " | header blocks={blocks}");
-            }
-            Target::Roots => {
-                let _ = write!(line, " | roots blocks={blocks}");
-            }
         }
+    }
+    if header > 0 {
+        let _ = write!(line, " | header blocks={header}");
+    }
+    if roots > 0 {
+        let _ = write!(line, " | roots blocks={roots}");
     }
     emit(&line);
 }

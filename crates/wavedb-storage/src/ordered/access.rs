@@ -7,7 +7,7 @@ use super::index::{Found, PageIndex, Placed, Range, Slot};
 use super::journal::Journal;
 
 /// Entries a range holds at most: one range, restated whole, takes ~5 KiB
-/// of a 32 KiB header.
+/// of a header (at most 128 KiB, RFC 0079).
 pub const MAX_RANGE_ENTRIES: usize = 1024;
 
 /// A page's count from here up says only "this many or more": its entries

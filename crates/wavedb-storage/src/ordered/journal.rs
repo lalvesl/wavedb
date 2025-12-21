@@ -149,6 +149,17 @@ impl PageIndex<u8> {
         drained
     }
 
+    /// Bytes the records naming what `journal` holds take — what a header
+    /// draining all of it spends.
+    #[must_use]
+    pub fn pending_len_from(&self, journal: &Journal) -> usize {
+        journal
+            .ranges
+            .keys()
+            .map(|start| self.record_for(journal, start).wire_len())
+            .sum()
+    }
+
     /// [`drain`](Self::drain), from a journal kept outside the index — a
     /// second reader of its changes.
     pub fn drain_from(

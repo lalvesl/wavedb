@@ -179,6 +179,7 @@ pub fn rebuild(
         tail: Some(link),
         last_end: Some(link),
         floor: headers.lowest,
+        horizon: root.horizon,
         ..DiskChain::default()
     };
     let mut used = Vec::new();

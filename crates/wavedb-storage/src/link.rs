@@ -196,6 +196,39 @@ impl PageStore {
         link.send(Msg::Write { window, bytes: buf })
     }
 
+    /// Write a round's two windows — its pages, then its header and roots
+    /// block — as one write when they lie end to end in one of the store's
+    /// own files, as they do but across a file's end; a storage thread
+    /// joins them itself, with every other window it gathered.
+    ///
+    /// # Errors
+    /// As [`write_window`](Self::write_window).
+    pub(crate) fn write_windows(
+        &self,
+        body: Option<(Run, Vec<u8>)>,
+        marks: Option<(Run, Vec<u8>)>,
+    ) -> StorageResult<()> {
+        let joined = |a: Run, b: Run| {
+            self.own().is_some_and(|alloc| {
+                let alloc = alloc.borrow();
+                a.end() == b.start
+                    && alloc.file_of(a.start) == alloc.file_of(b.start)
+            })
+        };
+        match (body, marks) {
+            (Some((a, mut bytes)), Some((b, more))) if joined(a, b) => {
+                bytes.extend_from_slice(&more);
+                self.write_window(Run::new(a.start, a.count + b.count), bytes)
+            }
+            (body, marks) => {
+                for (window, bytes) in body.into_iter().chain(marks) {
+                    self.write_window(window, bytes)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// A reserved window that will never be written: a storage thread
     /// makes it a hole (a store's own files are failed by then).
     pub(crate) fn abandon(&self, window: Run) {
