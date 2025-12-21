@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::block::BlockDescriptor;
 
-use crate::header::Rotation;
+use crate::header::{HeaderLink, Rotation};
 use crate::page_store::PageStore;
 use crate::pages::Pages;
 use crate::plan::SlotPlan;
@@ -39,9 +39,9 @@ impl Touched {
 #[derive(Debug, Default)]
 pub struct DiskChain {
     /// The newest header written.
-    pub(crate) tail: Option<u64>,
+    pub(crate) tail: Option<HeaderLink>,
     /// The header ending the batch before the newest one ended.
-    pub(crate) last_end: Option<u64>,
+    pub(crate) last_end: Option<HeaderLink>,
     /// Per type, the disk indexes' rotation.
     pub(crate) types: BTreeMap<u64, Rotation>,
     /// Per type, the object store indexes' rotation.
@@ -49,8 +49,8 @@ pub struct DiskChain {
     /// The lowest header the open read: the horizon stays there until the
     /// rotations pass it.
     pub(crate) floor: u64,
-    /// The headers a reconstruction may still read.
-    pub(crate) live: BTreeSet<u64>,
+    /// The headers a reconstruction may still read, each with its blocks.
+    pub(crate) live: BTreeMap<u64, u16>,
     /// A full restatement is under way (`record_all`).
     pub(crate) restating: bool,
     /// The header it began in, once one is written.

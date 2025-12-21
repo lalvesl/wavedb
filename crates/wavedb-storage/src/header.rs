@@ -34,11 +34,63 @@ use wavedb_core::wire::{
     CRC_PREFIX_LEN, WaveWire, from_wire_checked, to_wire_checked,
 };
 
+use crate::block::{BLOCK_SIZE, Run};
 use crate::error::{StorageError, StorageResult};
 use crate::ordered::RangeRecord;
 
 /// "No such header" in a link.
 pub const NO_FILE: u64 = u64::MAX;
+
+/// Where a header is and how many blocks it takes ([RFC 0079] §1): every
+/// link to a header carries its length, so following one is one read of
+/// exactly the header.
+///
+/// [RFC 0079]: ../../../rfcs/0079-headers-sized-to-their-change-WIP.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, WaveWire)]
+pub struct HeaderLink {
+    /// The block it starts at ([`NO_FILE`]: no header).
+    pub at: u64,
+    /// Its length in 4 KiB blocks.
+    pub blocks: u16,
+}
+
+impl HeaderLink {
+    /// No header.
+    pub const NONE: Self = Self {
+        at: NO_FILE,
+        blocks: 0,
+    };
+
+    /// The header of `blocks` blocks at `at`.
+    #[must_use]
+    pub const fn new(at: u64, blocks: u16) -> Self {
+        Self { at, blocks }
+    }
+
+    /// This link, if it leads anywhere.
+    #[must_use]
+    pub const fn some(self) -> Option<Self> {
+        if self.at == NO_FILE { None } else { Some(self) }
+    }
+
+    /// Whether it leads anywhere.
+    #[must_use]
+    pub const fn is_some(self) -> bool {
+        self.at != NO_FILE
+    }
+
+    /// The blocks it takes.
+    #[must_use]
+    pub const fn run(self) -> Run {
+        Run::new(self.at, self.blocks as u64)
+    }
+
+    /// The bytes it takes.
+    #[must_use]
+    pub const fn byte_len(self) -> u64 {
+        self.blocks as u64 * BLOCK_SIZE as u64
+    }
+}
 
 /// The header closing a batch, or a part of one.
 #[derive(Debug, Clone, PartialEq, Eq, WaveWire)]
@@ -46,8 +98,8 @@ pub struct Header {
     /// Where this header is — the file's own number: a copy of it under
     /// another key is not it.
     pub at: u64,
-    /// The header before this one ([`NO_FILE`] for the first).
-    pub prev: u64,
+    /// The header before this one ([`HeaderLink::NONE`] for the first).
+    pub prev: HeaderLink,
     /// The lowest header a walk rooted here reads: every type that existed
     /// when this one was written is named at or above it.
     pub horizon: u64,
@@ -84,8 +136,8 @@ pub struct TypeEntry {
     /// [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
     pub ranges: u32,
     /// The header before this one with entries for this type
-    /// ([`NO_FILE`]).
-    pub last: u64,
+    /// ([`HeaderLink::NONE`]).
+    pub last: HeaderLink,
     /// The type's dictionary image, if any.
     pub dict: Option<u64>,
     /// The ranges the batch changed, then those the spare room restates.
@@ -137,7 +189,7 @@ impl Header {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rotation {
     /// The newest header with entries for the type.
-    pub last: u64,
+    pub last: HeaderLink,
     /// The start of the range restated last: the next restates from the
     /// one after it (`None`: from the first).
     pub cursor: Option<Vec<u8>>,
@@ -155,7 +207,7 @@ pub struct Rotation {
 impl Default for Rotation {
     fn default() -> Self {
         Self {
-            last: NO_FILE,
+            last: HeaderLink::NONE,
             cursor: None,
             shifted: None,
             began: None,
@@ -173,10 +225,10 @@ pub struct Chain {
     /// The oldest live file.
     pub start: u64,
     /// The newest section header uploaded, once anything was.
-    pub tail: Option<u64>,
+    pub tail: Option<HeaderLink>,
     /// The newest one ending a batch — this data shard's root in the object
     /// store's roots blocks (RFC 0073 §8).
-    pub cut: Option<u64>,
+    pub cut: Option<HeaderLink>,
     /// The newest roots block written at a file's head.
     pub roots: Option<u64>,
     /// The newest section's horizon ([`Header::horizon`]): where the next
@@ -191,25 +243,27 @@ pub struct Chain {
 pub struct ChainRecord {
     pub end: u64,
     pub start: u64,
-    pub tail: u64,
-    pub cut: u64,
+    pub tail: HeaderLink,
+    pub cut: HeaderLink,
     pub roots: u64,
     pub floor: u64,
-    pub last: Vec<(u64, u64)>,
+    pub last: Vec<(u64, HeaderLink)>,
 }
 
 impl Chain {
     /// The newest header with entries for `struct_hash`.
-    pub fn last(&self, struct_hash: u64) -> u64 {
-        self.types.get(&struct_hash).map_or(NO_FILE, |r| r.last)
+    pub fn last(&self, struct_hash: u64) -> HeaderLink {
+        self.types
+            .get(&struct_hash)
+            .map_or(HeaderLink::NONE, |r| r.last)
     }
 
     pub fn record(&self) -> ChainRecord {
         ChainRecord {
             end: self.end,
             start: self.start,
-            tail: self.tail.unwrap_or(NO_FILE),
-            cut: self.cut.unwrap_or(NO_FILE),
+            tail: self.tail.unwrap_or(HeaderLink::NONE),
+            cut: self.cut.unwrap_or(HeaderLink::NONE),
             roots: self.roots.unwrap_or(NO_FILE),
             floor: self.floor,
             last: self.types.iter().map(|(&h, r)| (h, r.last)).collect(),
@@ -220,8 +274,8 @@ impl Chain {
         Self {
             end: record.end,
             start: record.start,
-            tail: (record.tail != NO_FILE).then_some(record.tail),
-            cut: (record.cut != NO_FILE).then_some(record.cut),
+            tail: record.tail.some(),
+            cut: record.cut.some(),
             roots: (record.roots != NO_FILE).then_some(record.roots),
             floor: record.floor,
             types: record
@@ -241,13 +295,15 @@ impl Chain {
 
 #[cfg(test)]
 mod tests {
-    use super::{BARE_BYTES, ENTRY_BYTES, Header, NO_FILE, TypeEntry};
+    use super::{
+        BARE_BYTES, ENTRY_BYTES, Header, HeaderLink, NO_FILE, TypeEntry,
+    };
     use crate::ordered::RangeRecord;
 
     fn header() -> Header {
         Header {
             at: 7,
-            prev: 6,
+            prev: HeaderLink::new(6, 8),
             horizon: 0,
             shard: 0,
             roots: NO_FILE,
@@ -255,7 +311,7 @@ mod tests {
             types: vec![TypeEntry {
                 struct_hash: 5,
                 ranges: 1,
-                last: NO_FILE,
+                last: HeaderLink::NONE,
                 dict: Some(42),
                 changed: vec![RangeRecord::Entries {
                     start: vec![1, 2],
@@ -290,7 +346,7 @@ mod tests {
         h.types.push(TypeEntry {
             struct_hash: 1,
             ranges: 0,
-            last: NO_FILE,
+            last: HeaderLink::NONE,
             dict: Some(0),
             changed: Vec::new(),
         });
@@ -300,6 +356,17 @@ mod tests {
         h.types[0].changed.push(record);
         assert_eq!(h.encoded_len(), BARE_BYTES + ENTRY_BYTES + len);
         assert_eq!(h.encode().len(), h.encoded_len());
+    }
+
+    /// A link names the blocks a header takes; no link leads nowhere.
+    #[test]
+    fn a_link_names_the_run_of_its_header() {
+        let link = HeaderLink::new(40, 3);
+        assert_eq!(link.some(), Some(link));
+        assert_eq!((link.run().start, link.run().count), (40, 3));
+        assert_eq!(link.byte_len(), 3 * 4096);
+        assert_eq!(HeaderLink::NONE.some(), None);
+        assert!(!HeaderLink::NONE.is_some());
     }
 
     #[test]

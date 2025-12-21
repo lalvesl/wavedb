@@ -19,11 +19,11 @@ use std::collections::BTreeMap;
 use crate::block::{BlockDescriptor, Run};
 use crate::disk_chain::DiskChain;
 use crate::error::{StorageError, StorageResult};
-use crate::header::{ENTRY_BYTES, Header, NO_FILE, TypeEntry};
+use crate::header::{ENTRY_BYTES, Header, HeaderLink, NO_FILE, TypeEntry};
 use crate::page_store::PageStore;
 use crate::pages::Pages;
 use crate::plan::SlotPlan;
-use crate::remote::{HEADER_BLOCKS, HEADER_BYTES};
+use crate::remote::{HEADER_BYTES, HEADER_LINK_BLOCKS};
 use crate::restate::{TypeView, horizon, restate};
 use crate::roots::{ROOTS_BLOCKS, Roots};
 
@@ -57,7 +57,7 @@ impl PageStore {
             }
             Header {
                 at,
-                prev: chain.tail.unwrap_or(NO_FILE),
+                prev: chain.tail.unwrap_or(HeaderLink::NONE),
                 horizon: 0,
                 shard: self.position,
                 roots: chain.roots.newest.unwrap_or(NO_FILE),
@@ -67,6 +67,7 @@ impl PageStore {
                 chain: self.object.as_ref().map(|o| o.chain.borrow().record()),
             }
         };
+        let link = HeaderLink::new(at, HEADER_LINK_BLOCKS);
         let mut room = HEADER_BYTES.saturating_sub(header.encoded_len());
         let dict_of = self.dicts_after(plans, dicts);
         for idx in 0..self.types.len() {
@@ -106,15 +107,15 @@ impl PageStore {
         }
         restate(&mut header.types, room, &views, &mut chain.types, at);
         for e in &header.types {
-            chain.types.entry(e.struct_hash).or_default().last = at;
+            chain.types.entry(e.struct_hash).or_default().last = link;
         }
         for e in &header.remote {
-            chain.remote.entry(e.struct_hash).or_default().last = at;
+            chain.remote.entry(e.struct_hash).or_default().last = link;
         }
         header.horizon =
             coverage(&views, &remote_views, &chain, self.object.is_some());
-        chain.tail = Some(at);
-        chain.live.insert(at);
+        chain.tail = Some(link);
+        chain.live.insert(at, link.blocks);
         let mut bytes = header.encode();
         if bytes.len() > HEADER_BYTES {
             return Err(StorageError::Corrupt("a header outgrew its room"));
@@ -149,7 +150,7 @@ impl PageStore {
             };
             rotations
                 .get(&slot.struct_hash())
-                .map_or(NO_FILE, |r| r.last)
+                .map_or(HeaderLink::NONE, |r| r.last)
         };
         let (dict, cell, entries) = match side {
             Side::Disk => (dict_of[idx], slot.directory(), &mut header.types),
@@ -216,13 +217,13 @@ impl PageStore {
     pub(crate) fn roots_at(
         &self,
         at: u64,
-        header: u64,
+        header: HeaderLink,
         ended: bool,
     ) -> StorageResult<Vec<u8>> {
         let mut chain = self.chain.borrow_mut();
         let root = if ended { Some(header) } else { chain.last_end };
-        let mut roots = vec![NO_FILE; self.position as usize + 1];
-        roots[self.position as usize] = root.unwrap_or(NO_FILE);
+        let mut roots = vec![HeaderLink::NONE; self.position as usize + 1];
+        roots[self.position as usize] = root.unwrap_or(HeaderLink::NONE);
         let prev = chain.roots.newest.unwrap_or(NO_FILE);
         chain.roots.newest = Some(at);
         chain.roots.live.insert(at);
@@ -232,7 +233,7 @@ impl PageStore {
     /// The batch just ended at header `at`: every header below the horizon
     /// — what a reconstruction from it still reads — is dead, and its run
     /// freed once this batch is durable.
-    pub(crate) fn drop_dead_headers(&self, at: u64) {
+    pub(crate) fn drop_dead_headers(&self, at: HeaderLink) {
         let disk: Vec<_> =
             self.types.iter().map(|s| s.directory().borrow()).collect();
         let remote: Vec<_> = self
@@ -249,13 +250,17 @@ impl PageStore {
         // A reconstruction checks the batch it roots in back to the header
         // ending the batch before.
         if let Some(before) = chain.last_end {
-            line = line.min(before);
+            line = line.min(before.at);
         }
         chain.last_end = Some(at);
-        let dead: Vec<u64> = chain.live.range(..line).copied().collect();
+        let dead: Vec<HeaderLink> = chain
+            .live
+            .range(..line)
+            .map(|(&at, &blocks)| HeaderLink::new(at, blocks))
+            .collect();
         for header in dead {
-            chain.live.remove(&header);
-            self.retire_run(Run::new(header, HEADER_BLOCKS));
+            chain.live.remove(&header.at);
+            self.retire_run(header.run());
         }
         // Every roots block but the newest is dead once this batch is
         // durable: the newest names every root.

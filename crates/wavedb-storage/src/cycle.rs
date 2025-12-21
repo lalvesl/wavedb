@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use crate::barrier::{Durable, Syncs, Waiter};
 use crate::error::{StorageError, StorageResult};
-use crate::header::NO_FILE;
+use crate::header::HeaderLink;
 use crate::page_store::PageStore;
 use crate::settle::Progress;
 use crate::wait::park_on;
@@ -174,7 +174,8 @@ impl PageStore {
         };
         if self.own().is_none() {
             // The storage thread takes the barrier (RFC 0073 §4).
-            let sealed = self.seal(batch, tail.unwrap_or(NO_FILE), waiters);
+            let sealed =
+                self.seal(batch, tail.unwrap_or(HeaderLink::NONE), waiters);
             if sealed.is_err() {
                 self.fail();
             }

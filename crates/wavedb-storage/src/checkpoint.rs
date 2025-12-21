@@ -22,11 +22,13 @@ use std::collections::BTreeMap;
 
 use crate::block::{BlockDescriptor, Run};
 use crate::error::StorageResult;
+use crate::header::HeaderLink;
 use crate::page_cache::Lane;
 use crate::page_store::PageStore;
 use crate::pages::PENDING;
 use crate::plan::SlotPlan;
 use crate::record_cache::Records;
+use crate::remote::HEADER_LINK_BLOCKS;
 use crate::window::{
     Target, assemble, carve, dict_descriptors, install, mark_run, size_of,
     targets_of,
@@ -236,7 +238,8 @@ impl PageStore {
                 (header, ended) =
                     self.header_at(at.start, &mut plans, &dicts, end)?;
                 if let Some(block) = mark_run(&targets, &runs, true) {
-                    roots = self.roots_at(block.start, at.start, ended)?;
+                    let link = HeaderLink::new(at.start, HEADER_LINK_BLOCKS);
+                    roots = self.roots_at(block.start, link, ended)?;
                 }
             }
         }
