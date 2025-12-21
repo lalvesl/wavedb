@@ -363,8 +363,9 @@ mutation → the type's record log (RAM) → (client confirmed)
 4. **Cuts are part of that plan.** They are decided in RAM, before anything
    is serialised, so an over-sized page is cut and both halves are written
    once — never a page written twice in one round.
-5. **The window ends with its header** — 32 KiB naming the addresses it
-   changed, type by type, and `last`, the header before with entries for that
+5. **The window ends with its header** — whole blocks naming the
+   addresses it changed (sized once its pages are placed, a trailer in its
+   last block saying how long it is; RFC 0079), type by type, and `last`, the header before with entries for that
    type; its spare room restates the addresses of the type restated longest
    ago, so every type keeps appearing near the newest header. The round that
    settles the last of the batch marks its header `end_of_batch`, and the
@@ -433,8 +434,8 @@ mutation → the type's record log (RAM) → (client confirmed)
    object store's files kept.
 
 On startup the directories and the block allocator are **reconstructed from the
-headers**: the newest whole batch's — the last 8 blocks of the newest data
-file — roots a walk back along each type's `last`, and down by `prev` while a
+headers**: the newest whole batch's — found from the newest data file's
+last block, a roots block or a header's trailer — roots a walk back along each type's `last`, and down by `prev` while a
 registered type is still unnamed — never below the root's `horizon`, where
 every type that existed is named, so one unnamed there is new and empty.
 Only the newest batch can be cut by a crash
@@ -509,7 +510,7 @@ Nothing reaches the disk on that path.
 
 **Per settle round: one write.** The round's keys are routed to their pages,
 each touched page is read **once** (or not at all: a new or cached one), and every resulting image is placed in **one
-contiguous window**, ending with its 32 KiB header, written with a single
+contiguous window**, ending with its header, written with a single
 positioned write ([RFC 0041](../../rfcs/0041-single-barrier-checkpoint.md)).
 Reads are the floor: one per page the round modifies.
 

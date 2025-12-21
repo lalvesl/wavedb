@@ -220,17 +220,19 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   **no journal** (RFC 0072): `apply` commits a batch to the record cache
   and returns; a **settle cycle** (every 200 ms on a node — a tick with
   nothing written opens none) marks the logs' ends and settles them in
-  bounded rounds, each one window `[pages][32 KiB header]` at the end of the
-  active file, the header naming the addresses the round changed (and in
+  bounded rounds, each one window `[pages][header]` at the end of the active
+  file, the header — whole blocks, sized to what it names, a trailer in
+  its last block saying how long it is (RFC 0079) — naming the addresses the round changed (and in
   its spare room restating those of the type restated longest ago); the
   round that ends the batch says so, and **one barrier** makes the batch
   durable — inline, or on the worker's helper thread (`use_barrier`,
   RFC 0067 §4). `apply_durable` waits for it (a store nobody ticks settles
   inline); everything committed before a durable write on the same store is
   durable with it — on a node, the same shard.
-  On open, nothing is replayed: the newest whole batch's header — the last
-  8 blocks of the newest data file — roots a walk back along each type's
-  `last` and down by `prev` while a registered type is unnamed, never
+  On open, nothing is replayed: the newest whole batch's header — found from
+  the newest data file's last block, a roots block or a header's trailer —
+  roots a walk back along each type's `last` and down by `prev` (every link
+  to a header carries its size: one read each) while a registered type is unnamed, never
   below the root's `horizon` (a type unnamed there is new, and empty); only
   the newest batch can be cut by a crash, its pages checked by crc. A store
   dropped settles what it holds. The same header and walk serve the object
