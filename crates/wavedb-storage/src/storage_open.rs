@@ -15,7 +15,7 @@ use std::sync::mpsc;
 use crate::block::{BlockAllocator, Run};
 use crate::block_file::BlockFile;
 use crate::error::{StorageError, StorageResult};
-use crate::header::{Chain, NO_FILE};
+use crate::header::{Chain, HeaderLink};
 use crate::link::{Link, Storage};
 use crate::manifest::Manifest;
 use crate::page_store::{PageStore, StoreOptions};
@@ -58,8 +58,13 @@ pub fn open_storage_shard(
     let file = BlockFile::open(dir, facts.seed(), facts.object_backed(), 0)?;
     let had_files = file.has_files();
     let found = find_roots(&mut DiskHeaders::new(&file), per)?;
-    let by_shard: Vec<u64> = (0..per)
-        .map(|i| found.as_ref().and_then(|r| r.root(i)).unwrap_or(NO_FILE))
+    let by_shard: Vec<HeaderLink> = (0..per)
+        .map(|i| {
+            found
+                .as_ref()
+                .and_then(|r| r.root(i))
+                .unwrap_or(HeaderLink::NONE)
+        })
         .collect();
     let mut used: Vec<Run> =
         found.iter().map(|r| Run::new(r.at, ROOTS_BLOCKS)).collect();
@@ -74,7 +79,9 @@ pub fn open_storage_shard(
         let slots = slots_of(types);
         let rebuilt = {
             let mut headers = DiskHeaders::new(&reader);
-            let root = (root != NO_FILE).then(|| headers.read(root)).flatten();
+            let root = root
+                .some()
+                .and_then(|link| Some((headers.read(link)?, link)));
             rebuild(&mut headers, &slots, remote.is_some(), root)?
         };
         used.extend_from_slice(&rebuilt.used);
@@ -208,7 +215,7 @@ fn start_remote(
     let start = chains.iter().flatten().map(|c| c.start).max().unwrap_or(0);
     let by_shard = chains
         .iter()
-        .map(|c| c.and_then(|c| c.cut).unwrap_or(NO_FILE))
+        .map(|c| c.and_then(|c| c.cut).unwrap_or(HeaderLink::NONE))
         .collect();
     let roots = chains.iter().flatten().filter_map(|c| c.roots).max();
     let shard = RemoteShard::new(remote.clone(), (start, end), by_shard, roots);

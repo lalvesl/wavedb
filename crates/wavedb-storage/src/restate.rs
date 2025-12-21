@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::header::{ENTRY_BYTES, NO_FILE, Rotation, TypeEntry};
+use crate::header::{ENTRY_BYTES, Rotation, TypeEntry};
 use crate::pages::Pages;
 
 /// A type's index as a header names it, and restates from. Every
@@ -143,9 +143,8 @@ pub fn horizon(
             let rotation = rotations.get(&v.struct_hash);
             if v.ranges() == 0 {
                 rotation
-                    .map(|r| r.last)
-                    .filter(|&last| last != NO_FILE)
-                    .unwrap_or(floor)
+                    .and_then(|r| r.last.some())
+                    .map_or(floor, |last| last.at)
             } else {
                 rotation.and_then(|r| r.covered).unwrap_or(floor)
             }

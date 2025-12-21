@@ -120,14 +120,13 @@ fn whole(
         let Some(last) = batch.last() else {
             return Ok(Err(end.at));
         };
-        if last.prev == NO_FILE {
+        let prev = last.prev;
+        if !prev.is_some() {
             break 0;
         }
-        match headers.read(last.prev) {
-            None => return Ok(Err(last.prev)),
-            Some(before) if before.end_of_batch => {
-                break before.at + HEADER_BLOCKS;
-            }
+        match headers.read(prev) {
+            None => return Ok(Err(prev.at)),
+            Some(before) if before.end_of_batch => break prev.run().end(),
             Some(before) => batch.push(before),
         }
     };
