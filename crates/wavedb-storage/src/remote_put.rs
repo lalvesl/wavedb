@@ -57,7 +57,7 @@ impl RemoteShard {
         let mut by_shard = self.by_shard.clone();
         for w in &self.waiting {
             if let Some(cut) = w.cut
-                && crate::remote::file_of(cut) == file.number
+                && crate::remote::file_of(cut.at) == file.number
                 && w.failed.is_none()
                 && let Some(root) = by_shard.get_mut(w.position)
             {

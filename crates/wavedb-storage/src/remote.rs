@@ -41,6 +41,9 @@ pub const HEADER_BYTES: usize = 32 * 1024;
 /// Blocks the header takes at the head of each file.
 pub const HEADER_BLOCKS: u64 = (HEADER_BYTES / BLOCK_SIZE) as u64;
 
+/// The same, as a link to a header names it.
+pub const HEADER_LINK_BLOCKS: u16 = 8;
+
 /// Where an object-backed store keeps its objects: a bucket, and the key
 /// prefix every one of its objects is under.
 #[derive(Debug, Clone)]

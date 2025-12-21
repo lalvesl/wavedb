@@ -26,10 +26,9 @@ use crate::block_file::BlockFile;
 use crate::dictionary::Dictionary;
 use crate::disk_chain::DiskChain;
 use crate::error::{StorageError, StorageResult};
-use crate::header::{ChainRecord, Header, Rotation};
+use crate::header::{ChainRecord, Header, HeaderLink, Rotation};
 use crate::ordered::Shape;
 use crate::pages::{EVICTED, run_of};
-use crate::remote::HEADER_BLOCKS;
 use crate::roots::ROOTS_BLOCKS;
 use crate::roots_find::find_roots;
 use crate::struct_storage::TypeSlot;
@@ -53,10 +52,11 @@ pub struct Rebuilt {
     pub remote_chain: Option<ChainRecord>,
 }
 
-/// The headers read from the data files, by where they start.
+/// The headers read from the data files, by where they start, each with
+/// the blocks read for it.
 pub struct DiskHeaders<'a> {
     pub file: &'a BlockFile,
-    seen: BTreeMap<u64, Option<Header>>,
+    seen: BTreeMap<u64, (u16, Option<Header>)>,
     lowest: u64,
 }
 
@@ -70,18 +70,29 @@ impl<'a> DiskHeaders<'a> {
         }
     }
 
-    /// The header at block `at`, if the 8 blocks there hold one that says
-    /// it is there.
-    pub fn read(&mut self, at: u64) -> Option<Header> {
-        self.lowest = self.lowest.min(at);
+    /// The header `link` leads to, if the blocks it names hold one that
+    /// says it is there — one read of exactly them.
+    pub fn read(&mut self, link: HeaderLink) -> Option<Header> {
+        self.lowest = self.lowest.min(link.at);
         let file = self.file;
         self.seen
-            .entry(at)
+            .entry(link.at)
             .or_insert_with(|| {
-                let bytes = file.read_run(Run::new(at, HEADER_BLOCKS)).ok()?;
-                Header::decode(&bytes).ok().filter(|h| h.at == at)
+                let bytes = file.read_run(link.run()).ok();
+                let header = bytes
+                    .and_then(|b| Header::decode(&b).ok())
+                    .filter(|h| h.at == link.at);
+                (link.blocks, header)
             })
+            .1
             .clone()
+    }
+
+    /// A header found without a link — a reconstruction's root — kept as
+    /// if read through one.
+    pub fn keep(&mut self, link: HeaderLink, header: Header) {
+        self.lowest = self.lowest.min(link.at);
+        self.seen.insert(link.at, (link.blocks, Some(header)));
     }
 }
 
@@ -89,9 +100,9 @@ impl HeaderSource for DiskHeaders<'_> {
     // The disk is read on the spot: the future is ready at once.
     fn get(
         &mut self,
-        at: u64,
+        link: HeaderLink,
     ) -> impl Future<Output = StorageResult<Option<Header>>> {
-        std::future::ready(Ok(self.read(at)))
+        std::future::ready(Ok(self.read(link)))
     }
 }
 
@@ -111,7 +122,7 @@ pub fn reopen(
     let root = found
         .as_ref()
         .and_then(|r| r.root(0))
-        .and_then(|at| headers.read(at));
+        .and_then(|link| Some((headers.read(link)?, link)));
     let mut rebuilt = rebuild(&mut headers, types, object_backed, root)?;
     if let Some(roots) = found {
         rebuilt.used.push(Run::new(roots.at, ROOTS_BLOCKS));
@@ -136,23 +147,27 @@ pub fn rebuild(
     headers: &mut DiskHeaders<'_>,
     types: &[TypeSlot],
     object_backed: bool,
-    root: Option<Header>,
+    root: Option<(Header, HeaderLink)>,
 ) -> StorageResult<Rebuilt> {
-    let Some(root) = root else {
+    let Some((root, link)) = root else {
         return Ok(Rebuilt::default()); // nothing durable
     };
     let file = headers.file;
     // The root itself, read where it was found, is one of the headers kept.
-    headers.seen.insert(root.at, Some(root.clone()));
-    headers.lowest = headers.lowest.min(root.at);
+    headers.keep(link, root.clone());
     let registered: Vec<u64> =
         types.iter().map(TypeSlot::struct_hash).collect();
-    let disk =
-        on_disk(walk(headers, &root, &registered, Lane::Types, Shape::DISK))?;
+    let disk = on_disk(walk(
+        headers,
+        (&root, link),
+        &registered,
+        Lane::Types,
+        Shape::DISK,
+    ))?;
     let remote = if object_backed {
         on_disk(walk(
             headers,
-            &root,
+            (&root, link),
             &registered,
             Lane::Remote,
             Shape::REMOTE,
@@ -161,8 +176,8 @@ pub fn rebuild(
         Vec::new()
     };
     let mut chain = DiskChain {
-        tail: Some(root.at),
-        last_end: Some(root.at),
+        tail: Some(link),
+        last_end: Some(link),
         floor: headers.lowest,
         ..DiskChain::default()
     };
@@ -193,10 +208,11 @@ pub fn rebuild(
         slot.remote_dict()
             .set(w.dict.unwrap_or(BlockDescriptor::EMPTY));
     }
-    for (&at, header) in &headers.seen {
+    for (&at, &(blocks, ref header)) in &headers.seen {
         if header.is_some() && at <= root.at {
-            used.push(Run::new(at, HEADER_BLOCKS));
-            chain.live.insert(at);
+            let kept = HeaderLink::new(at, blocks);
+            used.push(kept.run());
+            chain.live.insert(at, blocks);
         }
     }
     Ok(Rebuilt {
@@ -207,7 +223,7 @@ pub fn rebuild(
 }
 
 /// A type's rotation as an open starts it: named last in `newest`.
-fn rotation(newest: u64) -> Rotation {
+fn rotation(newest: HeaderLink) -> Rotation {
     Rotation {
         last: newest,
         ..Rotation::default()

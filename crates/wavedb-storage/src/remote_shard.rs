@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 use futures::channel::oneshot;
 
 use crate::error::{StorageError, StorageResult};
-use crate::header::NO_FILE;
-use crate::remote::{FILE_BLOCKS, Remote};
+use crate::header::{HeaderLink, NO_FILE};
+use crate::remote::{FILE_BLOCKS, HEADER_LINK_BLOCKS, Remote};
 use crate::remote_shard_compact::{CompactAnswer, Report};
 use crate::roots::ROOTS_BLOCKS;
 
@@ -110,7 +110,7 @@ pub struct Waiting {
     pub(crate) position: usize,
     pub(crate) files: BTreeSet<u64>,
     /// The header ending its batch, if it is a cut.
-    pub(crate) cut: Option<u64>,
+    pub(crate) cut: Option<HeaderLink>,
     pub(crate) failed: Option<StorageError>,
     pub(crate) reply: oneshot::Sender<StorageResult<()>>,
 }
@@ -121,7 +121,7 @@ pub struct RemoteShard {
     pub(crate) end: u64,
     pub(crate) start: u64,
     /// Per data shard, by position: its newest cut in the object store.
-    pub(crate) by_shard: Vec<u64>,
+    pub(crate) by_shard: Vec<HeaderLink>,
     /// The newest roots block PUT.
     pub(crate) newest: Option<u64>,
     pub(crate) files: VecDeque<File>,
@@ -141,7 +141,7 @@ impl RemoteShard {
     pub const fn new(
         remote: Remote,
         (start, end): (u64, u64),
-        by_shard: Vec<u64>,
+        by_shard: Vec<HeaderLink>,
         newest: Option<u64>,
     ) -> Self {
         Self {
@@ -309,7 +309,10 @@ impl RemoteShard {
             )));
             return;
         }
-        let cut = sections.last().filter(|_| cut).map(|(base, _)| *base);
+        let cut = sections
+            .last()
+            .filter(|_| cut)
+            .map(|(base, _)| HeaderLink::new(*base, HEADER_LINK_BLOCKS));
         for (base, bytes) in sections {
             self.fill(base, bytes);
         }

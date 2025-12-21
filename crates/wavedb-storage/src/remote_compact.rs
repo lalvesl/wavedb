@@ -293,13 +293,19 @@ async fn survey(
         return Ok(None);
     };
     let mut headers = Headers::new(remote);
-    let Some((_, top)) = newest_cut(&mut headers, newest, position).await?
+    let Some((_, top, link)) =
+        newest_cut(&mut headers, newest, position).await?
     else {
         return Ok(None);
     };
-    let walked =
-        walk(&mut headers, &top, registered, Lane::Types, Shape::REMOTE)
-            .await?;
+    let walked = walk(
+        &mut headers,
+        (&top, link),
+        registered,
+        Lane::Types,
+        Shape::REMOTE,
+    )
+    .await?;
     let mut named = BTreeSet::new();
     for w in walked {
         if let Some(index) = &w.index {
@@ -322,10 +328,10 @@ mod tests {
     use wavedb_platform::s3::test_server::TestServer;
 
     use super::survey;
-    use crate::header::{Header, NO_FILE, TypeEntry};
+    use crate::header::{Header, HeaderLink, NO_FILE, TypeEntry};
     use crate::ordered::{RangeRecord, Shape, WholeRange};
     use crate::recover_headers::file_bytes;
-    use crate::remote::{FILE_BLOCKS, Remote};
+    use crate::remote::{FILE_BLOCKS, HEADER_LINK_BLOCKS, Remote};
     use crate::upload_file::{FIRST_PAGE, SECTION};
 
     const SH: u64 = 7;
@@ -333,6 +339,11 @@ mod tests {
     /// Where file `file`'s header starts.
     const fn at(file: u64) -> u64 {
         file * FILE_BLOCKS + SECTION
+    }
+
+    /// The link to file `file`'s header.
+    const fn link(file: u64) -> HeaderLink {
+        HeaderLink::new(at(file), HEADER_LINK_BLOCKS)
     }
 
     /// Range `range` (0 or 1) of a two-range index, whole: one page of one
@@ -359,7 +370,7 @@ mod tests {
     ) {
         let header = Header {
             at: at(file),
-            prev: file.checked_sub(1).map_or(NO_FILE, at),
+            prev: file.checked_sub(1).map_or(HeaderLink::NONE, link),
             horizon: 0,
             shard: 0,
             roots: NO_FILE,
@@ -367,7 +378,7 @@ mod tests {
             types: vec![TypeEntry {
                 struct_hash: SH,
                 ranges: 2,
-                last: last.map_or(NO_FILE, at),
+                last: last.map_or(HeaderLink::NONE, link),
                 dict: None,
                 changed,
             }],
@@ -376,7 +387,7 @@ mod tests {
         };
         block_on(remote.bucket().put(
             &remote.file_key(file),
-            &file_bytes(&header, at(file)),
+            &file_bytes(&header, link(file)),
             When::Always,
         ))
         .unwrap();
