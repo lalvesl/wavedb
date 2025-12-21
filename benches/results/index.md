@@ -274,3 +274,47 @@ the barrier.
 
 Rows `873ba15255870fa9`, `a78ee165b302c1c9`, `974caf2ecc391932`,
 `d67b6af9a022d936`.
+
+## `2026-10-31T22-14Z` · intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-btrfs-cee3 · `404a19b`
+
+`micro`, `small` tier (200 000 records, 50.8 MB logical), caged, WaveDB only,
+clock pinned at 2.3 GHz, same lane as the `5fc77d4` run above. Clean tree, but
+every row records `forced`: the run bypassed a bench precondition, so read it
+as provisional. The first run with the RFC 0078 engine (quantized page index,
+ordered lanes, folding, regrouping and merging in compaction), the bounded
+drain (`778f502e`) and the shop preload fix (`404a19b`).
+
+| system | durability | consumers | insert/s | read_hot/s | read_cold/s | update/s | insert p99 | KiB written/insert | KiB written/update | peak MB | compacted MB | log MB |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| wavedb/single | durable | 1 | 63.7 | 328 489.8 | 105 630.9 | 98.3 | 80.2 ms | 190.3 | 185.4 | 28 525.0 | 24.5 | 0 |
+| wavedb/single | relaxed | 1 | 185.8 | 464 105.0 | 231 525.0 | 503.7 | 4.0 ms | 1.4 | 15.8 | 1 050.7 | 36.7 | 0 |
+| wavedb/multi | durable | 3 | 159.0 | 903 727.2 | 314 403.1 | 157.1 | 85.2 ms | 186.2 | 179.3 | 6 697.4 | — | 0 |
+| wavedb/multi | relaxed | 3 | 820.8 | 1 571 846.3 | 760 263.1 | 805.6 | 4.2 ms | 1.0 | 14.3 | 915.7 | — | 0 |
+
+Against `5fc77d4`:
+
+- **Cold reads**: ×4.8 (single durable, 21 963.0 → 105 630.9), ×9.7 (single
+  relaxed, 23 846.4 → 231 525.0), ×3.1 (multi durable) and ×7.1 (multi
+  relaxed).
+- **Bytes written**: per update 238.8 → 185.4 KiB (single durable, −22%) and
+  215.4 → 179.3 (multi durable, −17%); per insert 201.2 → 190.3 (−5%) and
+  188.1 → 186.2. Relaxed per insert 7.5 → 1.4 (single) and 5.0 → 1.0 (multi).
+- **Peak footprint**: single durable 33 191.5 → 28 525.0 MB, multi durable
+  9 405.3 → 6 697.4, single relaxed 2 477.5 → 1 050.7, multi relaxed
+  1 705.7 → 915.7.
+- **Compacted footprint**: single durable 25.5 → 24.5 MB, single relaxed
+  24.5 → 36.7 MB (larger).
+- **Hot reads** are mixed: single relaxed 52 674.0 → 464 105.0 and multi
+  relaxed 204 311.3 → 1 571 846.3, but single durable 616 707.2 → 328 489.8
+  and multi durable 2 102 350.8 → 903 727.2.
+- **Insert rates fell** in all four rows: single durable 115.2 → 63.7
+  (−45%), single relaxed 1 376.0 → 185.8 (−87%), multi durable 208.5 → 159.0
+  (−24%), multi relaxed 5 463.5 → 820.8 (−85%). Updates: single durable
+  87.5 → 98.3 (+12%), single relaxed 671.0 → 503.7 (−25%), multi durable
+  165.7 → 157.1, multi relaxed 2 379.1 → 805.6 (−66%). The cause is not
+  measured here; the relaxed insert drop is the first thing to profile.
+
+The `multi` rows take no compacted footprint (never seeded, RFC 0065).
+
+Rows `ff5ea958a153ece6`, `8d824e079bbc2c06`, `60130dccb750ffc1`,
+`6706afb63db423b5`.
