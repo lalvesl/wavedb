@@ -24,8 +24,9 @@ store alike. Only the newest header is found without a pointer. It is placed
 last, and a trailer in its last block says how long it is, so finding it is
 one read of the final block: whole in that read when it fits a block, the
 common case, and one more read otherwise. The spare room keeps restating old
-ranges, into the free end of the last block, and grows a header only when
-the walk back to the horizon would pass a bound.
+ranges, into the free end of the last block. When the walk back to the
+horizon passes `K` headers, a **restating header** of 32–128 KiB carries the
+rotation forward in one jump, preferably in a round that writes a lot anyway.
 
 ## Motivation
 
@@ -138,33 +139,73 @@ PUTs are unchanged: one per file, create-only (`Fenced`).
 - **Only a header that leaves nothing unrecorded ends a batch.** This rule is
   unchanged (`disk_header.rs`).
 
-### 5. The spare room
+### 5. The spare room, and restating headers
 
 Today the spare room is whatever the changes leave of 32 KiB, and it is
-free. Now it is:
+free. A reopen reads every header between its root and the `horizon`, so the
+spare room is what bounds a reopen: the faster the rotation, the shorter the
+walk. Small headers alone would slow the rotation, and the walk would grow
+long in small headers. So the spare room becomes two things:
 
 1. **The rest of the last block.** It is free: the block is written anyway.
    The rotation (`restate.rs`) fills it as today, the type restated longest
    ago first, and a large sub-header in slices.
-2. **More, only when the walk would grow too long.** If the horizon this
-   header would carry is more than `MAX_WALK` headers behind it, the header
-   grows by the blocks it needs to restate until it is within the bound
-   again. A durable stream of small batches thus pays an extra block now and
-   then, not 28 KiB every time.
+2. **A restating header, when the walk grows past `K`.** The store counts
+   the headers between the newest and the horizon it carries, which is the
+   walk a reopen rooted there would make. When that passes `K`, the next
+   header is a **restating header**:
+   - it restates, from the rotation's cursor, as much as brings the walk
+     back under `K`;
+   - its size follows what that takes, at least 32 KiB and at most
+     `MAX_RESTATE` (128 KiB);
+   - at 4–8 bytes a page, 128 KiB restates ~16 000–32 000 pages in one jump.
+
+   **The trigger is the walk's length, not a count of windows.** The walk is
+   what a reopen pays. Windows come by the thousand a minute in a durable
+   stream and almost never in an idle store, so a count of them would fire
+   too often in one case and never in the other. A time ceiling beside `K`
+   covers an idle store whose few headers are old.
+
+   **It rides a large round when it can.** A relaxed settle, a round under
+   pressure or a compaction already writes a lot. When the walk is near `K`
+   (say past `K / 2`) and such a round comes, the restating header goes
+   there, where it costs least in proportion. Only when the walk reaches `K`
+   without one does a durable round carry it.
+
+**Amortised.** With `K = 64`, a 128 KiB restating header every 64 windows is
+~2 KiB a window, against the ~28 KiB of zeros and restatements a durable
+window pays today.
+
+**A full rotation is the index's size.** An index of 1 TiB in 64 KiB pages is
+~16.8 M pages, ~100 MB of entries: about 800 restating headers of 128 KiB.
+That size is inherent; the restating header only keeps it from spreading
+over tens of thousands of small headers.
 
 The horizon keeps its meaning: every type that existed when the header was
-written is named at or above it. A reconstruction reads at most `MAX_WALK`
+written is named at or above it. A reconstruction reads at most about `K`
 headers past the root. Compaction's rule ("after restating every address, so
 no header in them is live", RFC 0071) is unchanged. A file's headers stop
-being live once the horizon passes them, which the bound keeps moving.
+being live once the horizon passes them, which the restating headers keep
+moving.
+
+### 5a. Reading the walk back in large reads (disk)
+
+On disk, a durable stream's windows lie end to end in the active file:
+`[pages][header][pages][header]…`. A walk going back by `prev` can read the
+file backwards in large chunks, 1 MiB for instance, and find several headers
+in one read: each header's `HeaderRef` says where the previous one is, and
+when that falls inside the chunk already read, it needs no read of its own.
+This is an optimisation of the open and changes no format. The object store
+does not need it: a file there is an upload (8 MiB or 10 s) with one header
+per data shard's section, so there are no small headers per insert.
 
 ### 6. What it saves
 
 | | today | here |
 |---|---:|---:|
-| header of a durable insert's round | 32 KiB | 4 KiB (one block) |
-| a durable insert, logical | ~110 KiB | ~82 KiB |
-| a reconstruction | 1 read per header, 32 KiB each | 1 read per header, its size |
+| header of a durable insert's round | 32 KiB | 4 KiB (one block), plus ~2 KiB of restating headers amortised |
+| a durable insert, logical | ~110 KiB | ~84 KiB |
+| a reconstruction | 1 read per header, 32 KiB each | 1 read per header, its size; ~`K` headers past the root; on disk, several per read (§5a) |
 | finding the root | last 8 blocks | last block (+1 read if larger) |
 
 The tail pages (~74 KiB of the 82) are the larger part of what is left. They
@@ -175,11 +216,13 @@ are out of scope here.
 1. **`HeaderRef`.** Pointers carry the size, and every header is still 32 KiB
    (`blocks = 8`). The format and the walks change, the sizes do not.
 2. **Disk.** The trailer, headers sized to their change, the rest of the last
-   block as spare room, and the `MAX_WALK` bound.
+   block as spare room, and restating headers on the walk's length (`K`),
+   riding large rounds.
 3. **Object store.** The `[pages][header][roots]` layout and the suffix GET.
-4. **Measure.** The `micro` suite on the bench host, with KiB written per
-   insert and per update for the durable rows, and the time to open a
-   database written by the durable rows.
+4. **The walk read back in large reads** (§5a), on disk.
+5. **Measure.** The `micro` suite on the bench host, with KiB written per
+   insert and per update for the durable rows, and the time and reads to
+   open a database written by the durable rows.
 
 Every phase keeps a durability test: reopen after a crash at every point
 of a window, and a torn last block.
@@ -194,14 +237,20 @@ of a window, and a torn last block.
 - **Smaller fixed headers** (4 or 8 KiB). Large rounds chain more headers,
   and the restatement rotation slows for everyone.
 - **Restating only in relaxed rounds.** A store that only writes durably
-  would never move its horizon. The `MAX_WALK` bound covers it instead.
+  would never move its horizon. The walk's bound `K` covers it instead.
+- **Growing every header a little past a bound.** It keeps the walk at the
+  bound all the time, in small headers. A restating header moves the horizon
+  in one jump and lets the walk shrink again.
+- **A restating header every N windows.** Windows say nothing about the
+  walk: thousands a minute in a durable stream, almost none when idle.
 
 ## Open questions
 
 1. `MAX_HEADER_BLOCKS`: 8 (today's size, as a cap) or larger, so a big
    relaxed round chains fewer headers.
-2. `MAX_WALK`: what a reopen may read past its root. Today's rotation gives a
-   number to start from.
-3. Whether the disk's window should also end with the roots block in `Own`
+2. `K`, and the share of it past which a large round takes the restating
+   header (`K / 2` above). Today's rotation gives a number to start from.
+3. `MAX_RESTATE`: 128 KiB, or the same cap as question 1.
+4. Whether the disk's window should also end with the roots block in `Own`
    storage, so that both storages and the object store end every write the
    same way.
