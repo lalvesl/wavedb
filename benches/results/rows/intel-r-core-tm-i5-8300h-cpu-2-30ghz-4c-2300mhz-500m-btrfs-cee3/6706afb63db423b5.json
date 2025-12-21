@@ -1,0 +1,121 @@
+
+{
+  "schema": "wavedb-bench/2",
+  "digest": "6706afb63db423b5",
+  "timestamp": "2026-10-31T22-14Z",
+  "key": {
+    "system": "wavedb",
+    "system_version": "0.1.0",
+    "variant": "multi",
+    "durability": "relaxed",
+    "workload": "micro",
+    "tier": "small",
+    "dataset_revision": 1,
+    "generator_seed": 42,
+    "consumers": 3,
+    "host_key": "intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-btrfs-cee3",
+    "cage_revision": 1,
+    "wavedb_git_sha": "404a19b",
+    "seeded": false
+  },
+  "provenance": {
+    "dirty": false,
+    "caged": true,
+    "forced": true
+  },
+  "bracket": "embedded",
+  "compression": "zstd (per-type dictionaries)",
+  "retains_history": true,
+  "live_records": 200000,
+  "logical_bytes": 50800000,
+  "materialise_ms": 0,
+  "seed_path": "",
+  "settings": {
+    "mode": "one PageStore per consumer thread (RFC 0067)",
+    "consumers": "3",
+    "threads": "one consumer per data shard, each its own thread",
+    "barrier": "standard writes: a settle per elapsed 1s or past half the record budget (pressure), its fsync on a helper, never awaited",
+    "block_size": "4096"
+  },
+  "phases": [
+    {
+      "name": "insert",
+      "count": 200000,
+      "wall_ns": 243677486161,
+      "total_ns": 496830918950,
+      "p50_ns": 2533836,
+      "p95_ns": 3794374,
+      "p99_ns": 4212881,
+      "max_ns": 6112203,
+      "bytes_written": 211283968,
+      "read_bytes": 0,
+      "rchar": 12393,
+      "ops_per_sec": 820.757
+    },
+    {
+      "name": "read_hot",
+      "count": 50000,
+      "wall_ns": 31809725,
+      "total_ns": 67401418,
+      "p50_ns": 898,
+      "p95_ns": 1436,
+      "p99_ns": 1745,
+      "max_ns": 318093,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 1941618,
+      "ops_per_sec": 1571846.346
+    },
+    {
+      "name": "read_cold",
+      "count": 50000,
+      "wall_ns": 65766706,
+      "total_ns": 89351097,
+      "p50_ns": 1092,
+      "p95_ns": 1625,
+      "p99_ns": 2117,
+      "max_ns": 507744,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 3514484,
+      "ops_per_sec": 760263.103
+    },
+    {
+      "name": "update",
+      "count": 50000,
+      "wall_ns": 62063970747,
+      "total_ns": 71010776535,
+      "p50_ns": 1364006,
+      "p95_ns": 2130710,
+      "p99_ns": 2689410,
+      "max_ns": 39966332,
+      "bytes_written": 730533888,
+      "read_bytes": 8192,
+      "rchar": 158171252,
+      "ops_per_sec": 805.620
+    }
+  ],
+  "footprints": [
+    {
+      "point": "hot",
+      "apparent_bytes": 915742777,
+      "allocated_bytes": 915746816,
+      "log_bytes": 0,
+      "files": 2
+    },
+    {
+      "point": "settled",
+      "apparent_bytes": 928034873,
+      "allocated_bytes": 928038912,
+      "log_bytes": 0,
+      "files": 2
+    }
+  ],
+  "notes": [
+    "Every collection op is one apply batch. The durable row writes through the `_durable` operations, one fsync per batch; the relaxed row through the standard ones, one fsync per elapsed window (RFC 0072), the counterpart of the others' relaxed knobs.",
+    "Retains every superseded version; the other systems retain none. Read the update row beside the footprint, never alone.",
+    "Barrier count is not recorded: PageStore exposes no public IoCounts accessor and RFC 0060 forbids changing a shipped crate.",
+    "Multi: 3 consumers, each its own thread owning one data shard and one `Thing` collection on it; row n is consumer n % 3's. A collection is indivisible (its chains belong to its owner), so the dataset is split by owner, as a node splits its owners across workers. Every data shard writes through one storage shard (RFC 0073).",
+    "Measured on the RFC 0065 producer/consumer harness: `wall_ns` is the phase's wall clock, `total_ns` is the sum of the timed windows, and the percentiles are pooled across every consumer. Read counters are absent (phase 4)."
+  ]
+}
