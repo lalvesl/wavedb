@@ -251,6 +251,10 @@ are out of scope here.
      chunks by `MAX_HEADER_BLOCKS - 1` blocks.
 3. **Object store.** The `[pages][header][roots]` layout and the suffix GET.
 4. **The walk read back in large reads** (§5a), on disk.
+   **Landed 2026-11-07** (`reopen.rs`): adaptive — a header found within
+   1 MiB below the one read before it is read with the 1 MiB ending at it,
+   and the headers below it in that chunk need no read; a sparse walk reads
+   each header alone, exactly its blocks, rather than 1 MiB a header.
 5. **Measure.** The `micro` suite on the bench host, with KiB written per
    insert and per update for the durable rows, and the time and reads to
    open a database written by the durable rows.
