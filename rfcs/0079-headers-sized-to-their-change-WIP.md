@@ -227,6 +227,28 @@ are out of scope here.
 2. **Disk.** The trailer, headers sized to their change, the rest of the last
    block as spare room, and restating headers on the walk's length (`K`),
    riding large rounds.
+   **Landed 2026-11-07** (`header_room.rs`, `trailer.rs`), with these
+   choices:
+   - **The header is reserved after the pages are placed.** Its size is
+     only known then: placing a page far from its range's base isolates
+     it, and the range is named whole. So a round reserves its pages and
+     dictionaries, places them, sizes the header from the journals exactly
+     as it will drain them, and reserves the header (and the roots block
+     after it) — a second reservation, arithmetic for a store's own files,
+     a message for a storage thread. The two lie end to end; a store's own
+     files write them as one positioned write, and a storage thread joins
+     them with every window it gathered.
+   - **A restating header spends what one pass over the indexes takes, up
+     to 128 KiB**, with no 32 KiB floor: a pass smaller than that would be
+     padded with zeros that restate nothing.
+   - **Restating headers are spaced by `K / 2`.** An index whose one pass
+     takes many restating headers would otherwise keep its walk past `K`
+     and restate in every window; spaced, it costs one every `K / 2`
+     windows, like the rotation today but in fewer, larger headers.
+   - **Values:** `MAX_HEADER_BLOCKS` = 32 (128 KiB, the same as
+     `MAX_RESTATE`), `K` = 64, a round is large from 256 blocks of pages
+     (1 MiB), and the time ceiling is 300 s. The torn-end scan overlaps its
+     chunks by `MAX_HEADER_BLOCKS - 1` blocks.
 3. **Object store.** The `[pages][header][roots]` layout and the suffix GET.
 4. **The walk read back in large reads** (§5a), on disk.
 5. **Measure.** The `micro` suite on the bench host, with KiB written per
@@ -255,11 +277,11 @@ of a window, and a torn last block.
 
 ## Open questions
 
-1. `MAX_HEADER_BLOCKS`: 8 (today's size, as a cap) or larger, so a big
-   relaxed round chains fewer headers.
-2. `K`, and the share of it past which a large round takes the restating
-   header (`K / 2` above). Today's rotation gives a number to start from.
-3. `MAX_RESTATE`: 128 KiB, or the same cap as question 1.
+1. `MAX_HEADER_BLOCKS`: 32 for now (phase 2), so a big relaxed round chains
+   fewer headers. To revisit with phase 5's numbers.
+2. `K` = 64 and the `K / 2` share for now (phase 2). To revisit with
+   phase 5's open times.
+3. `MAX_RESTATE`: 128 KiB, the same as question 1 (phase 2).
 4. Whether the disk's window should also end with the roots block in `Own`
    storage, so that both storages and the object store end every write the
    same way.

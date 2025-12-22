@@ -174,4 +174,16 @@ fn a_crashed_uploads_leftover_files_are_not_the_newest() {
             assert_eq!(got, want, "big record {k}");
         }
     });
+    // The adoption named the whole addressing in one batch, its header
+    // longer than a block (RFC 0079 §4): a reopen from the disk reads it by
+    // the link its roots block holds.
+    drop(s);
+    let s = fx.open();
+    block_on(async {
+        for k in 0..200 {
+            let want = (k < 20).then(|| big(k, 0));
+            let got = s.get_of(SH, big_id(k)).await.unwrap();
+            assert_eq!(got, want, "big record {k}, reopened");
+        }
+    });
 }
