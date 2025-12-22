@@ -204,7 +204,9 @@ fn a_torn_header_is_read_past() {
     s.drain().unwrap();
     let crashed = crash(&db);
     let file = data_file(&crashed);
-    zero(&file, len(&file) - 8 * 4096, 8);
+    // The newest header's last block, before the roots block ending the
+    // write: its trailer and its envelope's end.
+    zero(&file, len(&file) - 2 * 4096, 1);
     assert_eq!(read(&open(&crashed), SH, 1), Some(record(SH, 1, 1)));
 }
 

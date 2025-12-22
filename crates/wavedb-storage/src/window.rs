@@ -8,30 +8,40 @@ use std::collections::BTreeMap;
 
 use crate::block::{BLOCK_SIZE, BlockDescriptor, Run};
 use crate::error::{StorageError, StorageResult};
+use crate::header_room::HeaderSize;
 use crate::ordered::{Found, Placed};
 use crate::plan::{SlotPlan, blocks_for};
-use crate::remote::HEADER_BLOCKS;
-use crate::roots::ROOTS_BLOCKS;
 use crate::shape::weight;
 
 /// What a placed image becomes once the window is written.
 pub enum Target {
-    Page {
-        plan: usize,
-        page: usize,
-    },
-    Dict {
-        plan: usize,
-    },
-    /// The window's header — last on disk but for the roots.
-    Header,
-    /// The roots block (RFC 0073 §5), after the header of a window that
-    /// asks to end its batch.
-    Roots,
+    Page { plan: usize, page: usize },
+    Dict { plan: usize },
 }
 
-/// Everything this round places, in window order (the header is appended by
-/// the caller on disk).
+/// A round's plans and what its window holds, between its reservations and
+/// its build.
+pub struct Round {
+    pub(crate) plans: Vec<SlotPlan>,
+    pub(crate) targets: Vec<Target>,
+    /// Where each target landed in `body`.
+    pub(crate) runs: Vec<Option<Run>>,
+    /// The flag the pages it places take; `None` keeps theirs (a move).
+    pub(crate) flags: Option<u8>,
+    pub(crate) end: bool,
+    /// The window's pages and dictionaries.
+    pub(crate) body: Option<Run>,
+    /// On disk, its header and, ending a batch of a store writing its own
+    /// files, the roots block after it — reserved once the pages are
+    /// placed, which is when the header's size is known (RFC 0079 §4).
+    pub(crate) marks: Option<(Run, HeaderSize)>,
+    /// The pending blocks its pages add.
+    pub(crate) added: u64,
+    pub(crate) dicts: BTreeMap<usize, BlockDescriptor>,
+}
+
+/// Everything this round places, in window order — on disk the header and
+/// the roots block follow, in a run of their own (`crate::checkpoint`).
 pub fn targets_of(plans: &[SlotPlan]) -> Vec<Target> {
     let mut targets = Vec::new();
     for (plan, work) in plans.iter().enumerate() {
@@ -58,8 +68,6 @@ pub fn size_of(plans: &[SlotPlan], target: &Target) -> u64 {
             .dict
             .as_deref()
             .map_or(0, |d| blocks_for(d.len())),
-        Target::Header => HEADER_BLOCKS,
-        Target::Roots => ROOTS_BLOCKS,
     }
 }
 
@@ -145,32 +153,12 @@ pub fn dict_descriptors(
     out
 }
 
-/// The run a window's header or roots block was carved, if it has one.
-pub fn mark_run(
-    targets: &[Target],
-    runs: &[Option<Run>],
-    roots: bool,
-) -> Option<Run> {
-    targets
-        .iter()
-        .zip(runs)
-        .find(|(t, _)| {
-            if roots {
-                matches!(t, Target::Roots)
-            } else {
-                matches!(t, Target::Header)
-            }
-        })
-        .and_then(|(_, run)| *run)
-}
-
 /// Fill the window: every image at its carved offset, zero-padded between.
 pub fn assemble(
     window: Run,
     plans: &[SlotPlan],
     targets: &[Target],
     runs: &[Option<Run>],
-    (header, roots): (&[u8], &[u8]),
 ) -> Vec<u8> {
     let mut buf = vec![0u8; window.byte_len() as usize];
     for (target, run) in targets.iter().zip(runs) {
@@ -180,8 +168,6 @@ pub fn assemble(
             Target::Dict { plan } => {
                 plans[*plan].dict.as_deref().unwrap_or(&[])
             }
-            Target::Header => header,
-            Target::Roots => roots,
         };
         let at = ((run.start - window.start) * BLOCK_SIZE as u64) as usize;
         buf[at..at + bytes.len()].copy_from_slice(bytes);
