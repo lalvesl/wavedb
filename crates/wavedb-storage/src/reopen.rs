@@ -141,6 +141,7 @@ impl<'a> DiskHeaders<'a> {
     /// if read through one.
     pub fn keep(&mut self, link: HeaderLink, header: Header) {
         self.lowest = self.lowest.min(link.at);
+        self.last = Some(link.at);
         self.seen.insert(link.at, (link.blocks, Some(header)));
     }
 }
@@ -313,4 +314,74 @@ fn on_disk<T>(
 ) -> StorageResult<T> {
     walk.now_or_never()
         .unwrap_or(Err(StorageError::Corrupt("a walk over the disk waited")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DiskHeaders;
+    use crate::block::{BLOCK_SIZE, Run};
+    use crate::block_file::BlockFile;
+    use crate::header::{Header, HeaderLink, NO_FILE};
+
+    /// A one-block header at `at`, after the one at `at - 1`.
+    fn header(at: u64) -> Header {
+        Header {
+            at,
+            prev: at
+                .checked_sub(1)
+                .map_or(HeaderLink::NONE, |p| HeaderLink::new(p, 1)),
+            horizon: 0,
+            shard: 0,
+            roots: NO_FILE,
+            end_of_batch: true,
+            types: Vec::new(),
+            remote: Vec::new(),
+            chain: None,
+        }
+    }
+
+    fn reads(file: &BlockFile) -> u64 {
+        file.io().snapshot().0
+    }
+
+    /// Headers lying close together are read back a chunk at a time: the
+    /// first alone, the one after it with the chunk ending there, the rest
+    /// from that chunk. Each comes back as it was written.
+    #[test]
+    fn a_dense_walk_reads_its_headers_a_chunk_at_a_time() {
+        let d = tempfile::tempdir().unwrap();
+        let file = BlockFile::open(d.path(), [1, 2, 3, 4], false, 0).unwrap();
+        for at in 0..6 {
+            let mut bytes = header(at).encode();
+            bytes.resize(BLOCK_SIZE, 0);
+            file.write_run(0, Run::new(at, 1), &bytes).unwrap();
+        }
+        let mut headers = DiskHeaders::new(&file);
+        let before = reads(&file);
+        for at in (0..6).rev() {
+            let got = headers.read(HeaderLink::new(at, 1));
+            assert_eq!(got, Some(header(at)), "header {at}");
+        }
+        assert_eq!(reads(&file) - before, 2, "one alone, then one chunk");
+    }
+
+    /// A sparse walk reads each header alone.
+    #[test]
+    fn a_sparse_walk_reads_each_header_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let file = BlockFile::open(d.path(), [1, 2, 3, 4], false, 0).unwrap();
+        let far = [0, 600, 1200];
+        for &at in &far {
+            let mut bytes = header(at).encode();
+            bytes.resize(BLOCK_SIZE, 0);
+            file.write_run(0, Run::new(at, 1), &bytes).unwrap();
+        }
+        let mut headers = DiskHeaders::new(&file);
+        let before = reads(&file);
+        for &at in far.iter().rev() {
+            let got = headers.read(HeaderLink::new(at, 1)).map(|h| h.at);
+            assert_eq!(got, Some(at));
+        }
+        assert_eq!(reads(&file) - before, 3, "one block each");
+    }
 }
