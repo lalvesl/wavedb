@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use futures::FutureExt;
 
-use crate::block::{BlockAllocator, BlockDescriptor, Run};
+use crate::block::{BLOCK_SIZE, BlockAllocator, BlockDescriptor, Run};
 use crate::block_file::BlockFile;
 use crate::dictionary::Dictionary;
 use crate::disk_chain::DiskChain;
@@ -52,12 +52,28 @@ pub struct Rebuilt {
     pub remote_chain: Option<ChainRecord>,
 }
 
+/// Blocks a walk reads back at a time once its headers lie close together
+/// (1 MiB, [RFC 0079] §5a).
+///
+/// [RFC 0079]: ../../../rfcs/0079-headers-sized-to-their-change-WIP.md
+const CHUNK_BLOCKS: u64 = 256;
+
 /// The headers read from the data files, by where they start, each with
 /// the blocks read for it.
+///
+/// A walk goes down: a durable stream's windows lie end to end, its
+/// headers a few blocks apart. Once a header is found within a chunk of
+/// the one read before it, the read takes the chunk ending at it, and the
+/// headers below it in that chunk need no read of their own. A sparse
+/// walk reads each header alone, exactly its blocks.
 pub struct DiskHeaders<'a> {
     pub file: &'a BlockFile,
     seen: BTreeMap<u64, (u16, Option<Header>)>,
     lowest: u64,
+    /// The last chunk read, and where.
+    chunk: Option<(Run, Vec<u8>)>,
+    /// The last header read from the file.
+    last: Option<u64>,
 }
 
 impl<'a> DiskHeaders<'a> {
@@ -67,25 +83,58 @@ impl<'a> DiskHeaders<'a> {
             file,
             seen: BTreeMap::new(),
             lowest: u64::MAX,
+            chunk: None,
+            last: None,
         }
     }
 
     /// The header `link` leads to, if the blocks it names hold one that
-    /// says it is there — one read of exactly them.
+    /// says it is there — read with them, or from a chunk read before.
     pub fn read(&mut self, link: HeaderLink) -> Option<Header> {
         self.lowest = self.lowest.min(link.at);
-        let file = self.file;
-        self.seen
-            .entry(link.at)
-            .or_insert_with(|| {
-                let bytes = file.read_run(link.run()).ok();
-                let header = bytes
-                    .and_then(|b| Header::decode(&b).ok())
-                    .filter(|h| h.at == link.at);
-                (link.blocks, header)
-            })
-            .1
-            .clone()
+        if let Some((_, header)) = self.seen.get(&link.at) {
+            return header.clone();
+        }
+        let header = self
+            .bytes_of(link.run())
+            .and_then(|b| Header::decode(&b).ok())
+            .filter(|h| h.at == link.at);
+        self.seen.insert(link.at, (link.blocks, header.clone()));
+        header
+    }
+
+    /// The bytes of `run`: from the chunk in hand, or read — with the chunk
+    /// ending at it when the last header read lies close above it.
+    fn bytes_of(&mut self, run: Run) -> Option<Vec<u8>> {
+        let close = self
+            .last
+            .replace(run.start)
+            .is_some_and(|at| at >= run.end() && at - run.end() < CHUNK_BLOCKS);
+        if let Some((chunk, bytes)) = &self.chunk
+            && chunk.start <= run.start
+            && run.end() <= chunk.end()
+        {
+            let from = ((run.start - chunk.start) as usize) * BLOCK_SIZE;
+            return bytes
+                .get(from..from + run.byte_len() as usize)
+                .map(<[u8]>::to_vec);
+        }
+        let floor = self
+            .file
+            .layout()
+            .into_iter()
+            .find(|&(start, end)| start <= run.start && run.start < end)
+            .map_or(run.start, |(start, _)| start);
+        let lo = run.end().saturating_sub(CHUNK_BLOCKS).max(floor);
+        if !close || lo >= run.start {
+            return self.file.read_run(run).ok();
+        }
+        let chunk = Run::new(lo, run.end() - lo);
+        let bytes = self.file.read_run(chunk).ok()?;
+        let from = ((run.start - lo) as usize) * BLOCK_SIZE;
+        let out = bytes.get(from..).map(<[u8]>::to_vec);
+        self.chunk = Some((chunk, bytes));
+        out
     }
 
     /// A header found without a link — a reconstruction's root — kept as
