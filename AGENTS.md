@@ -254,7 +254,8 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   them (RFC 0070 phase 3): settle rounds flag the pages they write, `upload`
   rebuilds the object store's pages meeting each flagged page's key range
   (its own ordered index over the same keys, 128 KiB pages, files of
-  `[roots block][32 KiB header][pages]` under `storage/<n>/`), and the
+  `[roots block][header][pages]` under `storage/<n>/`, the header whole
+  blocks sized to what it names), and the
   remote indexes ride the disk's headers; the mode is fixed in the
   `MANIFEST`. Past the compaction ceiling the least recently used uploaded
   pages leave the disk (phase 4): a read of one goes to the object store, a

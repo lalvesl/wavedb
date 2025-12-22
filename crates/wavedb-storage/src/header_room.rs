@@ -103,7 +103,7 @@ impl PageStore {
         }
         let restating = self.restate_due(body);
         if restating {
-            need += self.pass_len(plans, &dict_of);
+            need += self.restate_len(plans, &dict_of);
         }
         let blocks = need.div_ceil(BLOCK_SIZE).max(1);
         HeaderSize {
@@ -163,7 +163,11 @@ impl PageStore {
 
     /// Bytes a restating header spends: a pass over every index, whole, up
     /// to its ceiling.
-    fn pass_len(&self, plans: &[SlotPlan], dict_of: &[Option<u64>]) -> usize {
+    fn restate_len(
+        &self,
+        plans: &[SlotPlan],
+        dict_of: &[Option<u64>],
+    ) -> usize {
         let disk: Vec<_> =
             self.types.iter().map(|s| s.directory().borrow()).collect();
         let remote: Vec<_> = self
@@ -173,17 +177,7 @@ impl PageStore {
             .collect();
         let views = self.views_of(&disk, plans, dict_of);
         let remote_views = self.remote_views_of(&remote);
-        let mut pass = 0;
-        for index in views.iter().chain(&remote_views).filter_map(|v| v.index) {
-            pass += ENTRY_BYTES;
-            for range in 0..index.range_count() {
-                if pass >= MAX_RESTATE {
-                    return MAX_RESTATE;
-                }
-                pass += index.whole_record(range).1.wire_len();
-            }
-        }
-        pass.min(MAX_RESTATE)
+        pass_len(views.iter().chain(&remote_views).filter_map(|v| v.index))
     }
 
     /// Every type's disk index as the window leaves it.
@@ -232,11 +226,32 @@ impl PageStore {
     }
 }
 
+/// Bytes a pass over `indexes`, every range whole, takes, up to a
+/// restating header's ceiling.
+pub fn pass_len<'a>(indexes: impl Iterator<Item = &'a Pages>) -> usize {
+    let mut pass = 0;
+    for index in indexes {
+        pass += ENTRY_BYTES;
+        for range in 0..index.range_count() {
+            if pass >= MAX_RESTATE {
+                return MAX_RESTATE;
+            }
+            pass += index.whole_record(range).1.wire_len();
+        }
+    }
+    pass.min(MAX_RESTATE)
+}
+
 /// Whether a header from which a reconstruction walks `walk` headers,
 /// `since` headers after the last restating one, in a round of `body`
 /// blocks of pages, restates — `stale` once [`RESTATE_AFTER`] has passed
 /// since one did (see the module docs).
-const fn restates(walk: usize, since: usize, body: u64, stale: bool) -> bool {
+pub const fn restates(
+    walk: usize,
+    since: usize,
+    body: u64,
+    stale: bool,
+) -> bool {
     let spaced = since >= WALK_BOUND / 2;
     (spaced && walk >= WALK_BOUND)
         || (spaced && walk >= WALK_BOUND / 2 && body >= RIDE_BLOCKS)

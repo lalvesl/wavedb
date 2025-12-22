@@ -402,8 +402,8 @@ mutation → the type's record log (RAM) → (client confirmed)
    in an object store, the disk caching them. Settle rounds flag what they
    write; `upload` reassembles the flagged pages, record by record, into the
    object store's own ordered index of 128 KiB pages over the same keys, packed into files of
-   `[roots block][32 KiB header][pages…]` (every page starts within the
-   file's first 8 MiB; the roots block names the newest header ending a
+   `[roots block][header][pages…]` (the header whole blocks sized to what
+   it names, RFC 0079; every page starts within the file's first 8 MiB; the roots block names the newest header ending a
    batch and where the chain of files stands, RFC 0073 §8), and clears the
    flags. The remote directories ride the disk's
    headers (their own lane, and the object store's chain), so a reopen

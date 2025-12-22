@@ -28,7 +28,8 @@
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use wavedb_core::wire::{
     CRC_PREFIX_LEN, WaveWire, from_wire_checked, to_wire_checked,
@@ -236,6 +237,14 @@ pub struct Chain {
     pub floor: u64,
     /// Per type: where it stands in the chain.
     pub types: BTreeMap<u64, Rotation>,
+    /// RAM only: the section headers written since the store opened at or
+    /// above the floor — the walk a recovery from the newest makes, as far
+    /// as this store knows it (RFC 0079 §5).
+    pub walk: BTreeSet<u64>,
+    /// RAM only: headers written since the last restating one, and when
+    /// that was (or the first header since the store opened).
+    pub since_restate: usize,
+    pub restated_at: Option<Instant>,
 }
 
 /// A [`Chain`] as an addressing chunk records it.
@@ -278,6 +287,9 @@ impl Chain {
             cut: record.cut.some(),
             roots: (record.roots != NO_FILE).then_some(record.roots),
             floor: record.floor,
+            walk: BTreeSet::new(),
+            since_restate: 0,
+            restated_at: None,
             types: record
                 .last
                 .iter()

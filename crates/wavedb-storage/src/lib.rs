@@ -84,6 +84,8 @@ pub mod struct_storage;
 mod trailer;
 mod upload;
 mod upload_file;
+mod upload_header;
+mod upload_pack;
 mod upload_plan;
 mod upload_publish;
 mod wait;

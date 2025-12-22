@@ -126,7 +126,6 @@ impl HeaderSource for Headers<'_> {
 #[must_use]
 pub fn file_bytes(header: &Header, root: HeaderLink) -> Vec<u8> {
     use crate::header::NO_FILE;
-    use crate::remote::HEADER_BYTES;
     use crate::upload_file::SECTION;
     let base = header.at - SECTION;
     let roots = Roots::new(base, NO_FILE, vec![root])
@@ -135,7 +134,7 @@ pub fn file_bytes(header: &Header, root: HeaderLink) -> Vec<u8> {
         .unwrap_or_default();
     let mut bytes = roots;
     let mut encoded = header.encode();
-    encoded.resize(HEADER_BYTES, 0);
+    encoded.resize(BLOCK_SIZE, 0); // a one-block header
     bytes.extend_from_slice(&encoded);
     bytes.resize(bytes.len() + BLOCK_SIZE, 0); // one page's block
     bytes
