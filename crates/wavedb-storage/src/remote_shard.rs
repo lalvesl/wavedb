@@ -32,7 +32,7 @@ use futures::channel::oneshot;
 
 use crate::error::{StorageError, StorageResult};
 use crate::header::{HeaderLink, NO_FILE};
-use crate::remote::{FILE_BLOCKS, HEADER_LINK_BLOCKS, Remote};
+use crate::remote::{FILE_BLOCKS, Remote};
 use crate::remote_shard_compact::{CompactAnswer, Report};
 use crate::roots::ROOTS_BLOCKS;
 
@@ -47,12 +47,12 @@ pub enum RemoteMsg {
         sizes: Vec<u64>,
         reply: oneshot::Sender<RemoteReserved>,
     },
-    /// An upload's sections, built at their bases, in order — the last
-    /// one's header ending a batch when `cut`.
+    /// An upload's sections, built at their bases, in order — `cut` the
+    /// last one's header, when it ends a batch.
     Write {
         position: usize,
         sections: Vec<(u64, Vec<u8>)>,
-        cut: bool,
+        cut: Option<HeaderLink>,
         urgent: bool,
         reply: oneshot::Sender<StorageResult<()>>,
     },
@@ -287,7 +287,7 @@ impl RemoteShard {
         &mut self,
         position: usize,
         sections: Vec<(u64, Vec<u8>)>,
-        cut: bool,
+        cut: Option<HeaderLink>,
         urgent: bool,
         reply: oneshot::Sender<StorageResult<()>>,
     ) {
@@ -309,10 +309,6 @@ impl RemoteShard {
             )));
             return;
         }
-        let cut = sections
-            .last()
-            .filter(|_| cut)
-            .map(|(base, _)| HeaderLink::new(*base, HEADER_LINK_BLOCKS));
         for (base, bytes) in sections {
             self.fill(base, bytes);
         }

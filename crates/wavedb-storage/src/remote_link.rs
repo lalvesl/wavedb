@@ -68,7 +68,7 @@ impl RemoteLink {
         &self,
         position: usize,
         sections: Vec<(u64, Vec<u8>)>,
-        (cut, urgent): (bool, bool),
+        (cut, urgent): (Option<crate::header::HeaderLink>, bool),
     ) -> StorageResult<()> {
         let (reply, answer) = oneshot::channel();
         self.inbox

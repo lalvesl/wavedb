@@ -14,9 +14,9 @@
 //! offset = (start % 2048) · 4096  → range offset .. offset + count · 4096
 //! ```
 //!
-//! Each file opens with a [`HEADER_BYTES`] header (its addressing delta,
-//! `crate::upload_file`), so a file's first page starts at block
-//! [`HEADER_BLOCKS`] of it.
+//! Each file opens with a roots block and a header of whole blocks, as many
+//! as it names (its addressing delta, `crate::upload_file`, RFC 0079 §3),
+//! so a file's first page starts past them.
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
@@ -34,15 +34,6 @@ use crate::shape::weight;
 
 /// Blocks of address space a file starts pages in (8 MiB).
 pub const FILE_BLOCKS: u64 = 2048;
-
-/// Bytes of every file's header — always this many, whatever it holds.
-pub const HEADER_BYTES: usize = 32 * 1024;
-
-/// Blocks the header takes at the head of each file.
-pub const HEADER_BLOCKS: u64 = (HEADER_BYTES / BLOCK_SIZE) as u64;
-
-/// The same, as a link to a header names it.
-pub const HEADER_LINK_BLOCKS: u16 = 8;
 
 /// Where an object-backed store keeps its objects: a bucket, and the key
 /// prefix every one of its objects is under.
@@ -285,7 +276,7 @@ impl Remote {
 
 #[cfg(test)]
 mod tests {
-    use super::{FILE_BLOCKS, HEADER_BLOCKS, byte_range, file_of};
+    use super::{FILE_BLOCKS, byte_range, file_of};
     use crate::block::Run;
     use crate::pages::PENDING;
     use crate::shape::weight;
@@ -294,9 +285,9 @@ mod tests {
     /// page running past the file's 8 MiB still reads from that one file.
     #[test]
     fn a_descriptor_is_a_file_and_a_range() {
-        let first = Run::new(HEADER_BLOCKS, 3);
+        let first = Run::new(2, 3);
         assert_eq!(file_of(first.start), 0);
-        assert_eq!(byte_range(first), 32_768..32_768 + 3 * 4096);
+        assert_eq!(byte_range(first), 8192..8192 + 3 * 4096);
 
         let late = Run::new(5 * FILE_BLOCKS + 2047, 4096);
         assert_eq!(file_of(late.start), 5);

@@ -331,7 +331,7 @@ mod tests {
     use crate::header::{Header, HeaderLink, NO_FILE, TypeEntry};
     use crate::ordered::{RangeRecord, Shape, WholeRange};
     use crate::recover_headers::file_bytes;
-    use crate::remote::{FILE_BLOCKS, HEADER_LINK_BLOCKS, Remote};
+    use crate::remote::{FILE_BLOCKS, Remote};
     use crate::upload_file::{FIRST_PAGE, SECTION};
 
     const SH: u64 = 7;
@@ -343,7 +343,7 @@ mod tests {
 
     /// The link to file `file`'s header.
     const fn link(file: u64) -> HeaderLink {
-        HeaderLink::new(at(file), HEADER_LINK_BLOCKS)
+        HeaderLink::new(at(file), 1)
     }
 
     /// Range `range` (0 or 1) of a two-range index, whole: one page of one
