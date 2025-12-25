@@ -194,7 +194,7 @@ mod tests {
     /// Pages follow the header, each at the blocks its entry names.
     #[test]
     fn pages_follow_the_header_at_the_blocks_they_are_given() {
-        let packed = layout(0, &[images(&[2, 1])]);
+        let packed = layout(0, &[images(&[2, 1])], &[]);
         assert_eq!(packed.files.len(), 1);
         assert_eq!(packed.files[0].base, SECTION);
         let runs: Vec<Run> = packed
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn a_page_starting_before_the_mark_runs_past_it() {
         let first = FILE_BLOCKS - FIRST_PAGE - 1;
-        let packed = layout(0, &[images(&[first, 4, 1])]);
+        let packed = layout(0, &[images(&[first, 4, 1])], &[]);
         assert_eq!(packed.files.len(), 2);
         assert_eq!(packed.files[1].number, 2, "file 1's numbers were run over");
     }
@@ -226,7 +226,7 @@ mod tests {
     /// An upload starts on the first file boundary at or after the end.
     #[test]
     fn an_upload_starts_on_the_next_file_boundary() {
-        let packed = layout(FILE_BLOCKS + 5, &[images(&[1])]);
+        let packed = layout(FILE_BLOCKS + 5, &[images(&[1])], &[]);
         assert_eq!(packed.files[0].number, 2);
     }
 }
