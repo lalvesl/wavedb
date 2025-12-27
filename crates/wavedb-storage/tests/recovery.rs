@@ -187,3 +187,28 @@ fn a_crashed_uploads_leftover_files_are_not_the_newest() {
         }
     });
 }
+
+/// A small upload's file carries a header sized to what it names — a block,
+/// not 32 KiB (RFC 0079 §3) — and a recovery reads it by its link.
+#[test]
+fn a_small_uploads_header_is_its_size_and_recovers() {
+    let fx = Fixture::new();
+    {
+        let s = fx.open();
+        fill(&s, 0..10, 0);
+        upload_all(&s);
+    }
+    let key = fx.newest_file().unwrap();
+    let file = block_on(fx.remote().bucket().get(&key, None)).unwrap();
+    let blocks = file.unwrap().len() / 4096;
+    // Smaller than a roots block and a 32 KiB header alone were.
+    assert!(blocks < 1 + 8, "{blocks} blocks");
+    fx.lose_the_disk();
+    let s = fx.open();
+    block_on(async {
+        for k in 0..10 {
+            let got = s.get_of(SH, id(k)).await.unwrap();
+            assert_eq!(got, Some(record(k, 0)), "record {k}");
+        }
+    });
+}

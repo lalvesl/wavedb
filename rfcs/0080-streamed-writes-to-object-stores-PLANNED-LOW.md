@@ -5,8 +5,9 @@
   design starts from it.
 - **Related:** [0070](0070-object-storage-backend.md) (object storage as a
   page backend; no journal, no lease, every PUT create-only),
-  [0079](0079-headers-sized-to-their-change-WIP.md) (header at a file's
-  end, read by one suffix GET)
+  [0079](0079-headers-sized-to-their-change-WIP.md) (headers sized to
+  their change; its §3 weighed a header at a file's end, read by one
+  suffix GET, which a stream would need)
 - **Crates:** `wavedb-platform` (`s3`), `wavedb-storage` (`remote*`,
   `upload*`, `object_mode`)
 
@@ -57,8 +58,8 @@ with a file still split into a few pieces.
   piece carrying it is accepted. With an append mechanism, that is per piece,
   not per 8 MiB.
 - **Graceful shutdown** sends the last piece and closes the object.
-- **Crash.** A reopen reads the stream object's end, a suffix GET as in
-  RFC 0079, and roots in the newest whole window it finds. A torn last piece
+- **Crash.** A reopen reads the stream object's end, a suffix GET (as
+  RFC 0079 §3 weighed it), and roots in the newest whole window it finds. A torn last piece
   is discarded like a torn disk window. For a resumable upload, the session
   is resumed or finished first.
 - **Fencing.** An append at a stated position fails when the object has

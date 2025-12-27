@@ -133,6 +133,24 @@ encoded, it cannot come first. The file becomes:
 
 PUTs are unchanged: one per file, create-only (`Fenced`).
 
+**As built (phase 3): the header stays at the head, sized in two passes.**
+With storage shards a file holds one section per data shard, each with its
+own header, and a remote header is addressed by the block it starts at
+inside the file's 8 MiB window. Placed after its pages, it could start past
+that window — the last page may run past 8 MiB — and the address would name
+the wrong file. An upload is built whole in RAM before its PUT, so the file
+keeps `[roots block][header][pages]` (sections `[header][pages]`), and the
+header is sized instead: the pages are laid out with the header rooms the
+last try asked for, placed, and the headers measured from the journals as
+they will drain them; when they do not fit, the layout is redone with the
+rooms they ask for (through a storage shard, its sections given back and
+reserved again), at most three tries, past which what does not fit waits
+for the next upload. The link already carries the size, so a header is one
+ranged GET, and the roots block at the head is one more for the newest
+file: no suffix GET, no change to the addressing. A restating header heads
+the upload's first file on the disk's rule (§5), the walk counted from the
+section headers this store wrote since it opened.
+
 ### 4. Size, cap and chaining
 
 - A header is the bytes of what it names, rounded up to whole blocks.
@@ -250,6 +268,8 @@ are out of scope here.
      (1 MiB), and the time ceiling is 300 s. The torn-end scan overlaps its
      chunks by `MAX_HEADER_BLOCKS - 1` blocks.
 3. **Object store.** The `[pages][header][roots]` layout and the suffix GET.
+   **Landed 2026-11-08** the other way (§3, "As built"): the header stays at
+   the head and is sized in two passes (`upload_header.rs`).
 4. **The walk read back in large reads** (§5a), on disk.
    **Landed 2026-11-07** (`reopen.rs`): adaptive — a header found within
    1 MiB below the one read before it is read with the 1 MiB ending at it,
