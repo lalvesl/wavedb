@@ -318,3 +318,61 @@ The `multi` rows take no compacted footprint (never seeded, RFC 0065).
 
 Rows `ff5ea958a153ece6`, `8d824e079bbc2c06`, `60130dccb750ffc1`,
 `6706afb63db423b5`.
+
+## `2026-11-08T03-45Z` · intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-btrfs-afab · `32f83e5` **(dirty tree)**
+
+`micro` and `shop`, `small` tier, caged, WaveDB only, clock pinned at 2.3 GHz,
+not forced. The tree was dirty only by the run's own log file, untracked in
+the repository root; the code is `32f83e5`. The first run with the lane-walk
+fix (`af53801d`) and RFC 0079 phases 1–4 (headers sized to their change).
+
+The host fingerprint changed since the `404a19b` run, so this is the `-afab`
+lane, not `-cee3`: same CPU, clock and cage. The comparisons below cross
+the two lanes and are indicative, not a trend line.
+
+| system | durability | consumers | insert/s | read_hot/s | read_cold/s | update/s | insert p99 | KiB written/insert | KiB written/update | peak MB | compacted MB | log MB |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| wavedb/single | durable | 1 | 129.0 | 354 807.5 | 141 817.3 | 142.4 | 70.6 ms | 159.1 | 163.6 | 20 721.2 | 33.1 | 0 |
+| wavedb/single | relaxed | 1 | 11 609.1 | 551 705.1 | 223 936.8 | 2 654.4 | 0.2 ms | 0.1 | 3.0 | 174.1 | 17.9 | 0 |
+| wavedb/multi | durable | 3 | 232.3 | 1 215 736.7 | 428 672.8 | 217.3 | 81.8 ms | 156.7 | 155.5 | 9 979.6 | — | 0 |
+| wavedb/multi | relaxed | 3 | 41 078.0 | 1 865 164.2 | 715 342.9 | 8 473.3 | 0.1 ms | 0.1 | 1.4 | 87.0 | — | 0 |
+
+Against `404a19b`:
+
+- **Bytes written, durable** (RFC 0079): per insert 190.3 → 159.1 KiB
+  (single, −16%) and 186.2 → 156.7 (multi, −16%); per update 185.4 → 163.6
+  (−12%) and 179.3 → 155.5 (−13%). About 30 KiB a durable round, the 32 KiB
+  header become one block plus its share of restating headers.
+- **Bytes written, relaxed**: per insert 1.4 → 0.1 KiB (single) and 1.0 →
+  0.1 (multi); per update 15.8 → 3.0 and 14.3 → 1.4.
+- **Insert rates**: single durable 63.7 → 129.0 (×2.0), multi durable
+  159.0 → 232.3 (+46%), single relaxed 185.8 → 11 609.1 (×62), multi
+  relaxed 820.8 → 41 078.0 (×50). The relaxed regression of the `404a19b`
+  run is gone: it was the lane walk (`af53801d`).
+- **Updates**: single durable 98.3 → 142.4 (+45%), multi durable 157.1 →
+  217.3 (+38%), single relaxed 503.7 → 2 654.4 (×5.3), multi relaxed
+  805.6 → 8 473.3 (×10.5).
+- **Reads**: cold +34% (single durable), −3% (single relaxed), +36% (multi
+  durable), −6% (multi relaxed); hot +8%, +19%, +35%, +19%.
+- **Peak footprint**: single durable 28 525.0 → 20 721.2 MB, multi durable
+  6 697.4 → 9 979.6 (larger), single relaxed 1 050.7 → 174.1, multi relaxed
+  915.7 → 87.0. Compacted: single durable 24.5 → 33.1 MB (larger), single
+  relaxed 36.7 → 17.9.
+
+The first WaveDB `shop` rows recorded: every earlier attempt was OOM-killed
+in the preload (the `da2ce57` run). The other systems' rows are in that run,
+on the `-104a` lane.
+
+| system | durability | consumers | signup/s | checkout/s | profile/s | order_page/s | order_detail/s | checkout p99 | peak MB | compacted MB |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| wavedb/single | durable | 1 | 214.6 | 116.1 | 528 723.9 | 14 783.5 | 3 325.1 | 15.9 ms | 98.6 | — |
+| wavedb/single | relaxed | 1 | 101 442.0 | 1 184.1 | 529 378.2 | 14 851.7 | 3 428.2 | 2.0 ms | 75.9 | — |
+| wavedb/multi | durable | 3 | 193.8 | 119.4 | 1 219 419.4 | 46 278.6 | 9 021.0 | 102.7 ms | 114.8 | — |
+| wavedb/multi | relaxed | 3 | 140 882.0 | 4 028.9 | 1 765 117.9 | 27 481.4 | 9 234.4 | 1.9 ms | 77.7 | — |
+
+The `multi` micro rows take no compacted footprint (never seeded, RFC 0065);
+no `shop` row recorded one.
+
+Rows `3b16318e0152eaf1`, `43a1243fb8608f11`, `d68c7324f15ef342`,
+`9efa278f0718f566`, `46b4c0986de612b1`, `913c247891b70d51`,
+`5ede10e2c99d02e4`, `b070b078a2aa2638`.
