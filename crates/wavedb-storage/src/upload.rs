@@ -30,18 +30,14 @@
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
 
-use crate::block::{BLOCK_SIZE, BlockDescriptor};
+use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
-use crate::header::{Chain, NO_FILE};
 use crate::ordered::{Found, Placed as Entry};
 use crate::page_store::PageStore;
-use crate::roots::ROOTS_BLOCKS;
 use crate::shape::blocks_for;
-use crate::upload_file::{
-    Named, Packed, Placed, SlotImages, finish, layout, rebase,
-};
+use crate::upload_file::{Packed, Placed, SlotImages};
+use crate::upload_header::finish;
 use crate::upload_plan::SlotUpload;
 use crate::upload_publish::Carried;
 /// Blocks of flagged disk pages one upload takes (8 MiB) — a pacing bound,
@@ -165,32 +161,13 @@ impl PageStore {
         // Through a storage shard, the files are laid out from block 0 and
         // moved to the sections it reserves (RFC 0073 §8).
         let link = object.link.as_ref();
-        let end = link.map_or_else(|| object.chain.borrow().end, |_| 0);
-        let mut packed = layout(end, &slots);
-        packed.cut = cut;
-        let mut chain = object.chain.borrow().clone();
-        if let Some(link) = link {
-            let sizes = packed
-                .files
-                .iter()
-                .map(|f| {
-                    f.bytes.len().div_ceil(BLOCK_SIZE) as u64 - ROOTS_BLOCKS
-                })
-                .collect();
-            let reserved = link.reserve(sizes).await?;
-            rebase(&mut packed, &reserved.bases);
-            chain.roots = (reserved.roots != NO_FILE).then_some(reserved.roots);
-            chain.start = chain.start.max(reserved.start);
-            chain.end = reserved.end;
-        }
-        let placed_dicts = install_remote(&mut work, &packed)?;
-        let headers = self.write_headers(
-            &mut packed,
-            &mut work,
-            &placed_dicts,
-            &mut chain,
-        );
+        let (mut packed, mut chain, placed_dicts, restating) =
+            self.pack(&mut work, &slots, cut).await?;
+        let headers = self.with_named(&mut work, &placed_dicts, |named| {
+            finish(&mut packed, named, &mut chain, (self.position, restating))
+        });
         let ended = headers.as_ref().is_ok_and(|&named| named && cut);
+        let root = chain.cut.filter(|_| ended);
         let delivered = match (headers, link) {
             (Err(e), Some(link)) => {
                 link.abandon(packed.files.iter().map(|f| f.base).collect());
@@ -209,7 +186,7 @@ impl PageStore {
                     .iter()
                     .map(|f| (f.base, f.bytes.clone()))
                     .collect();
-                let hurry = (cut, object.hurry.get());
+                let hurry = (root, object.hurry.get());
                 link.write(self.position as usize, sections, hurry).await
             }
         };
@@ -221,58 +198,12 @@ impl PageStore {
         let done = self.publish_upload(work, &carried, &packed, chain);
         Ok((done, ended))
     }
-
-    /// Write every file's header ([`finish`]) over every registered type's
-    /// index in the object store as this upload leaves it — the work's, the
-    /// others as they stand, a type never uploaded with none. Whether the
-    /// headers named everything.
-    fn write_headers(
-        &self,
-        packed: &mut Packed,
-        work: &mut [SlotUpload],
-        placed_dicts: &[Option<BlockDescriptor>],
-        chain: &mut Chain,
-    ) -> StorageResult<bool> {
-        let mut guards: Vec<_> = self
-            .types
-            .iter()
-            .map(|slot| slot.remote_directory().borrow_mut())
-            .collect();
-        let mut by_idx: BTreeMap<
-            usize,
-            (&mut SlotUpload, Option<BlockDescriptor>),
-        > = work
-            .iter_mut()
-            .zip(placed_dicts)
-            .map(|(w, &d)| (w.idx, (w, d)))
-            .collect();
-        let mut named = Vec::with_capacity(self.types.len());
-        for ((idx, slot), guard) in
-            self.types.iter().enumerate().zip(&mut guards)
-        {
-            let (index, desc, moved) = match by_idx.remove(&idx) {
-                Some((w, placed)) => (
-                    Some(&mut w.remote),
-                    placed.unwrap_or_else(|| slot.remote_dict().get()),
-                    placed.is_some(),
-                ),
-                None => (guard.as_mut(), slot.remote_dict().get(), false),
-            };
-            named.push(Named {
-                struct_hash: slot.struct_hash(),
-                index,
-                dict: desc.is_allocated().then_some(desc.raw()),
-                dict_moved: moved,
-            });
-        }
-        finish(packed, &mut named, chain, self.position)
-    }
 }
 
 /// Point every placed page's entry in the work's remote index at its run,
 /// and keep each copy of what changed for the disk's headers. The
 /// dictionary each work item's upload placed, if it placed one.
-fn install_remote(
+pub fn install_remote(
     work: &mut [SlotUpload],
     packed: &Packed,
 ) -> StorageResult<Vec<Option<BlockDescriptor>>> {
