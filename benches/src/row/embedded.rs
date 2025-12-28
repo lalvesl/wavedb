@@ -10,6 +10,10 @@
 //!    differently.
 //! 3. `compacted` — after a rewrite the system does not do on its own.
 //!
+//! WaveDB's row also times its store's **opens** ([`super::opens`]): as the
+//! workload left it, before anything else touches it, and after the
+//! compaction — cold and warm each.
+//!
 //! There is no `baseline`: an empty SQLite file and an empty WaveDB store are
 //! a few kilobytes, and a point that is always ~0 is a column of noise. The
 //! server rows take one because a running, empty PostgreSQL is ~40 MB.
@@ -160,12 +164,17 @@ where
         })?;
     let mut points = points.into_inner();
     drop(factory);
+    let mut opens = Vec::new();
     if multi {
         // Every consumer drained and closed its shard. Compaction of a
         // sharded database is the storage shard's to direct (RFC 0073), so
-        // the multi row takes `settled` and no `compacted` — as the shop's.
+        // the multi row takes `settled` and no `compacted` — as the shop's —
+        // and times its opens as written only.
         points.take(Point::Settled)?;
-        return Ok(record(
+        drop(super::opens::timed("written", &data, &mut opens, || {
+            wavedb_adapter::open_shards(&data, consumers)
+        })?);
+        let mut row = record(
             run,
             phases,
             Meta {
@@ -178,22 +187,33 @@ where
                 materialise_ms,
                 footprints: points.into_vec(),
             },
-        ));
+        );
+        row.opens = opens;
+        return Ok(row);
     }
 
     // Reopened as a plain `PageStore`, whichever seam the row measured. The
     // footprint is bytes on disk, and the actor changes none of them — while
     // going back through it would ask a second engine to exist for work that
-    // is not being timed. The reopen also proves the store reconstructs.
-    let engine_after = wavedb_adapter::open(&data)?;
+    // is not being timed. The reopen also proves the store reconstructs,
+    // and it is the open timed as written.
+    let engine_after =
+        super::opens::timed("written", &data, &mut opens, || {
+            wavedb_adapter::open(&data)
+        })?;
     quiesce(&engine_after, &points)?;
     points.take(Point::Settled)?;
     Engineish::compact(&engine_after)?;
     quiesce(&engine_after, &points)?;
     points.take(Point::Compacted)?;
     Engineish::close(engine_after);
+    let compacted =
+        super::opens::timed("compacted", &data, &mut opens, || {
+            wavedb_adapter::open(&data)
+        })?;
+    Engineish::close(compacted);
 
-    Ok(record(
+    let mut row = record(
         run,
         phases,
         Meta {
@@ -206,7 +226,9 @@ where
             materialise_ms,
             footprints: points.into_vec(),
         },
-    ))
+    );
+    row.opens = opens;
+    Ok(row)
 }
 
 /// Settle **until the footprint stops moving**.

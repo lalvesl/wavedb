@@ -25,6 +25,7 @@
 
 pub mod embedded;
 pub mod micro;
+pub mod opens;
 pub mod points;
 #[cfg(feature = "servers")]
 pub mod server;

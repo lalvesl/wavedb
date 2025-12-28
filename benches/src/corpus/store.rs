@@ -254,6 +254,7 @@ mod tests {
             settings: Vec::new(),
             phases: Vec::new(),
             footprints: Vec::new(),
+            opens: Vec::new(),
             live_records: 200_000,
             logical_bytes: 27_500_000,
             notes: Vec::new(),

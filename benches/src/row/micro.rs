@@ -135,6 +135,7 @@ pub(super) fn record(
         settings: meta.settings,
         phases: phases.into_iter().map(phase_record).collect(),
         footprints: meta.footprints,
+        opens: Vec::new(),
         live_records: run.cfg.rows,
         logical_bytes: logical_bytes(run.cfg.rows, run.cfg.seed),
         notes,
@@ -197,6 +198,7 @@ mod tests {
                 read_bytes: 8192,
                 rchar: 2048,
                 write_bytes: 4096,
+                ..Io::default()
             },
         });
         assert_eq!(rec.wall_ns, 1_000);

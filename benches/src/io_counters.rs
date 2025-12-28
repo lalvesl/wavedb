@@ -1,6 +1,6 @@
 //! The `/proc/<pid>/io` counters a phase brackets ([RFC 0065] §8, phase 4).
 //!
-//! ## Why three counters and not one
+//! ## Why four counters and not one
 //!
 //! `write_bytes` alone answers "what did this cost the disk to store". It says
 //! nothing about what the disk was asked to *serve*, which is the other half
@@ -10,6 +10,8 @@
 //!
 //! - `read_bytes` — bytes the block layer actually served.
 //! - `rchar` — bytes the process asked for, cache hit or not.
+//! - `syscr` — the read calls that asked for them: what a store's open costs
+//!   in reads, beside the bytes (`read_calls`).
 //!
 //! Their ratio is the number worth reading. Above 1, the engine fetched more
 //! than it used: page-granular reads of small records, a B+tree descent, a
@@ -21,7 +23,7 @@
 //!
 //! `/proc/<pid>/io` is a snapshot. Reading it three times gives three answers
 //! that never coexisted, and an amplification computed from mismatched samples
-//! is worse than no amplification at all. So: one read, one parse, three
+//! is worse than no amplification at all. So: one read, one parse, four
 //! fields.
 //!
 //! [RFC 0065]: ../../../rfcs/0065-benchmark-suite-ii-the-row-as-the-unit.md
@@ -39,6 +41,9 @@ pub struct Io {
     /// Bytes sent to the block layer. Not `wchar`, which counts writes the
     /// page cache absorbed and the disk may never see.
     pub write_bytes: u64,
+    /// Read calls the process made (`syscr`), cache hit or not: what a
+    /// store's open costs in reads, beside the bytes they brought.
+    pub read_calls: u64,
 }
 
 impl Io {
@@ -90,6 +95,7 @@ impl Io {
             read_bytes: self.read_bytes.saturating_sub(before.read_bytes),
             rchar: self.rchar.saturating_sub(before.rchar),
             write_bytes: self.write_bytes.saturating_sub(before.write_bytes),
+            read_calls: self.read_calls.saturating_sub(before.read_calls),
         }
     }
 
@@ -112,6 +118,7 @@ impl Io {
             read_bytes: self.read_bytes.saturating_add(other.read_bytes),
             rchar: self.rchar.saturating_add(other.rchar),
             write_bytes: self.write_bytes.saturating_add(other.write_bytes),
+            read_calls: self.read_calls.saturating_add(other.read_calls),
         }
     }
 
@@ -129,6 +136,8 @@ impl Io {
                 io.read_bytes = num(v);
             } else if let Some(v) = line.strip_prefix("write_bytes:") {
                 io.write_bytes = num(v);
+            } else if let Some(v) = line.strip_prefix("syscr:") {
+                io.read_calls = num(v);
             }
         }
         io
@@ -242,8 +251,9 @@ cancelled_write_bytes: 4096
 ";
 
     #[test]
-    fn parse_takes_three_counters_and_no_neighbours() {
+    fn parse_takes_four_counters_and_no_neighbours() {
         let io = Io::parse(SAMPLE);
+        assert_eq!(io.read_calls, 42);
         assert_eq!(io.rchar, 2_097_152);
         assert_eq!(io.read_bytes, 8192);
         assert_eq!(
@@ -273,12 +283,14 @@ cancelled_write_bytes: 4096
             read_bytes: 4096,
             rchar: 1024,
             write_bytes: 0,
+            ..Io::default()
         };
         assert!((io.read_amplification() - 4.0).abs() < f64::EPSILON);
         let cached = Io {
             read_bytes: 0,
             rchar: 1024,
             write_bytes: 0,
+            ..Io::default()
         };
         assert!(cached.read_amplification().abs() < f64::EPSILON);
         assert!(
