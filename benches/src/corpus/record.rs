@@ -162,6 +162,26 @@ pub struct FootprintRecord {
     pub files: u64,
 }
 
+/// One open of a row's store, timed: what a reconstruction costs at one point
+/// of the run (RFC 0079 phase 5).
+///
+/// `point` is when — `written`, the store as the workload left it, or
+/// `compacted`, after the row's own compaction; `cache` whether the OS page
+/// cache held the store's files (`warm`) or had been told to drop them first
+/// (`cold`), so the open's reads reached the disk.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OpenRecord {
+    pub point: String,
+    pub cache: String,
+    pub wall_ns: u64,
+    /// Bytes the block layer served the open.
+    pub read_bytes: u64,
+    /// Bytes the open asked for, cache hit or not.
+    pub rchar: u64,
+    /// Read calls the open made.
+    pub read_calls: u64,
+}
+
 /// One row: its identity, how it was taken, and what it measured.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RowRecord {
@@ -180,6 +200,8 @@ pub struct RowRecord {
     pub settings: Vec<(String, String)>,
     pub phases: Vec<PhaseRecord>,
     pub footprints: Vec<(String, FootprintRecord)>,
+    /// The store's opens, timed — WaveDB's rows only, empty elsewhere.
+    pub opens: Vec<OpenRecord>,
     pub live_records: u64,
     pub logical_bytes: u64,
     pub notes: Vec<String>,
@@ -242,6 +264,18 @@ impl RowRecord {
                         j.num("allocated_bytes", f.allocated_bytes);
                         j.num("log_bytes", f.log_bytes);
                         j.num("files", f.files);
+                    });
+                }
+            });
+            j.arr(Some("opens"), |j| {
+                for o in &self.opens {
+                    j.obj(None, |j| {
+                        j.str("point", &o.point);
+                        j.str("cache", &o.cache);
+                        j.num("wall_ns", o.wall_ns);
+                        j.num("read_bytes", o.read_bytes);
+                        j.num("rchar", o.rchar);
+                        j.num("read_calls", o.read_calls);
                     });
                 }
             });

@@ -10,7 +10,9 @@
 //! digest disagrees with the key it contains has been edited or was written by
 //! something else, and serving it as a measurement would launder that.
 
-use super::record::{FootprintRecord, PhaseRecord, RowKey, RowRecord, SCHEMA};
+use super::record::{
+    FootprintRecord, OpenRecord, PhaseRecord, RowKey, RowRecord, SCHEMA,
+};
 use crate::json::{Value, parse};
 
 /// Decode a stored row.
@@ -64,6 +66,13 @@ pub fn from_json(text: &str) -> Result<RowRecord, String> {
             .unwrap_or_default()
             .iter()
             .map(footprint_from)
+            .collect(),
+        opens: v
+            .get("opens")
+            .and_then(Value::as_arr)
+            .unwrap_or_default()
+            .iter()
+            .map(open_from)
             .collect(),
         live_records: num_at(&v, "live_records"),
         logical_bytes: num_at(&v, "logical_bytes"),
@@ -133,6 +142,17 @@ fn footprint_from(v: &Value) -> (String, FootprintRecord) {
     )
 }
 
+fn open_from(v: &Value) -> OpenRecord {
+    OpenRecord {
+        point: str_at(v, "point"),
+        cache: str_at(v, "cache"),
+        wall_ns: num_at(v, "wall_ns"),
+        read_bytes: num_at(v, "read_bytes"),
+        rchar: num_at(v, "rchar"),
+        read_calls: num_at(v, "read_calls"),
+    }
+}
+
 fn settings_from(v: Option<&Value>) -> Vec<(String, String)> {
     match v {
         Some(Value::Obj(pairs)) => pairs
@@ -165,7 +185,9 @@ fn bool_at(v: Option<&Value>, key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::from_json;
-    use crate::corpus::{FootprintRecord, PhaseRecord, RowKey, RowRecord};
+    use crate::corpus::{
+        FootprintRecord, OpenRecord, PhaseRecord, RowKey, RowRecord,
+    };
 
     fn wavedb_key() -> RowKey {
         RowKey {
@@ -229,6 +251,14 @@ mod tests {
                     files: 3,
                 },
             )],
+            opens: vec![OpenRecord {
+                point: "compacted".into(),
+                cache: "cold".into(),
+                wall_ns: 41_000_000,
+                read_bytes: 1_048_576,
+                rchar: 1_052_672,
+                read_calls: 17,
+            }],
             live_records: 860_384,
             logical_bytes: 27_500_000,
             notes: vec!["retains every superseded version".into()],

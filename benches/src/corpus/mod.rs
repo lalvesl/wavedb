@@ -14,5 +14,7 @@ mod record;
 mod store;
 
 pub use decode::from_json;
-pub use record::{FootprintRecord, PhaseRecord, RowKey, RowRecord, SCHEMA};
+pub use record::{
+    FootprintRecord, OpenRecord, PhaseRecord, RowKey, RowRecord, SCHEMA,
+};
 pub use store::{Corpus, Unreadable};
