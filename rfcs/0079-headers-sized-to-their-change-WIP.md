@@ -278,6 +278,13 @@ are out of scope here.
 5. **Measure.** The `micro` suite on the bench host, with KiB written per
    insert and per update for the durable rows, and the time and reads to
    open a database written by the durable rows.
+   **Bytes measured 2026-11-08** (`32f83e5`, `benches/results/index.md`,
+   on a new host lane, so against `404a19b` indicatively): per durable
+   insert 190.3 → 159.1 KiB (single) and 186.2 → 156.7 (multi), −16%; per
+   durable update 185.4 → 163.6 and 179.3 → 155.5, −12% and −13%. That is
+   ~30 KiB a round, the 32 KiB header become one block plus its share of
+   restating headers, as §6 predicted. The open's time and reads are not
+   measured yet: the suite does not time a reopen.
 
 Every phase keeps a durability test: reopen after a crash at every point
 of a window, and a torn last block.
