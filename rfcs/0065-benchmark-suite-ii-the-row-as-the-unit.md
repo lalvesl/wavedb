@@ -529,6 +529,27 @@ driver's `debug_assert` both still state. The `micro` sharded engine is
 gone; `micro` never had a `multi` row. The single row opens one data shard,
 so its directory gains a `MANIFEST`.
 
+### 12. Timed opens (added 2026-11-08)
+
+A WaveDB store replays nothing on open: it walks its headers back from the
+newest to rebuild every index (RFC 0072, RFC 0079), so what a restart costs
+depends on what the files hold. WaveDB's `micro` rows time it
+(`row/opens.rs`) and record each open under `opens` — `point`, `cache`,
+`wall_ns`, `read_bytes`, `rchar` and `read_calls` (`/proc` `syscr`, a fourth
+counter beside §8's):
+
+- **`written`** — the store as the workload left it, the reopen that takes
+  `settled`, before anything else touches it;
+- **`compacted`** — after the row's compaction, which restates every
+  address and so leaves the shortest walk. The multi row has no
+  compaction (§11), so it has `written` only.
+
+Each point is opened **cold**, after `posix_fadvise(DONTNEED)` dropped the
+store's files from the OS page cache (they are synced, so their pages are
+clean and go), and then **warm**, over the pages the cold open brought in:
+the first is a restart's cost, the second the reconstruction's CPU. Older
+rows have no `opens`, and every peer's is empty.
+
 ## Alternatives
 
 - **Keep the run as the unit and add a peer-result cache beside it.** Rejected:

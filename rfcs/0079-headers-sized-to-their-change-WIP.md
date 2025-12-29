@@ -283,8 +283,9 @@ are out of scope here.
    insert 190.3 → 159.1 KiB (single) and 186.2 → 156.7 (multi), −16%; per
    durable update 185.4 → 163.6 and 179.3 → 155.5, −12% and −13%. That is
    ~30 KiB a round, the 32 KiB header become one block plus its share of
-   restating headers, as §6 predicted. The open's time and reads are not
-   measured yet: the suite does not time a reopen.
+   restating headers, as §6 predicted. The open's time and reads: the
+   suite times them since 2026-11-08 (RFC 0065 §12) — as written and
+   compacted, cold and warm; the next run records them.
 
 Every phase keeps a durability test: reopen after a crash at every point
 of a window, and a torn last block.
