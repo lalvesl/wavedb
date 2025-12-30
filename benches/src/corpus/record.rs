@@ -168,7 +168,11 @@ pub struct FootprintRecord {
 /// `point` is when — `written`, the store as the workload left it, or
 /// `compacted`, after the row's own compaction; `cache` whether the OS page
 /// cache held the store's files (`warm`) or had been told to drop them first
-/// (`cold`), so the open's reads reached the disk.
+/// (`cold`), so the open's reads reached the disk; `from` what the store
+/// was opened from — `disk` (a disk-only store, or an object-backed one with
+/// its disk) or `object store` (object mode: no disk, recovered from the
+/// object store's files). The requests are the object store's, zero for a
+/// disk-only store.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OpenRecord {
     pub point: String,
@@ -178,8 +182,14 @@ pub struct OpenRecord {
     pub read_bytes: u64,
     /// Bytes the open asked for, cache hit or not.
     pub rchar: u64,
+    pub from: String,
     /// Read calls the open made.
     pub read_calls: u64,
+    /// Object-store `GET`s and `HEAD`s the open made.
+    pub gets: u64,
+    pub puts: u64,
+    pub lists: u64,
+    pub deletes: u64,
 }
 
 /// One row: its identity, how it was taken, and what it measured.
@@ -272,10 +282,15 @@ impl RowRecord {
                     j.obj(None, |j| {
                         j.str("point", &o.point);
                         j.str("cache", &o.cache);
+                        j.str("from", &o.from);
                         j.num("wall_ns", o.wall_ns);
                         j.num("read_bytes", o.read_bytes);
                         j.num("rchar", o.rchar);
                         j.num("read_calls", o.read_calls);
+                        j.num("gets", o.gets);
+                        j.num("puts", o.puts);
+                        j.num("lists", o.lists);
+                        j.num("deletes", o.deletes);
                     });
                 }
             });

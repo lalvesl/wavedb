@@ -29,6 +29,7 @@ with pkgs;
   mysql84 # mysqld, mysqladmin
   mongodb-ce # mongod
   valkey # valkey-server, valkey-cli
+  versitygw # the object store of the `wavedb/object` row (S3 over a directory)
 
   # The cage (see ./cage.nix).
   bubblewrap

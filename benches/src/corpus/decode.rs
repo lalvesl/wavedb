@@ -146,10 +146,15 @@ fn open_from(v: &Value) -> OpenRecord {
     OpenRecord {
         point: str_at(v, "point"),
         cache: str_at(v, "cache"),
+        from: str_at(v, "from"),
         wall_ns: num_at(v, "wall_ns"),
         read_bytes: num_at(v, "read_bytes"),
         rchar: num_at(v, "rchar"),
         read_calls: num_at(v, "read_calls"),
+        gets: num_at(v, "gets"),
+        puts: num_at(v, "puts"),
+        lists: num_at(v, "lists"),
+        deletes: num_at(v, "deletes"),
     }
 }
 
@@ -258,6 +263,11 @@ mod tests {
                 read_bytes: 1_048_576,
                 rchar: 1_052_672,
                 read_calls: 17,
+                from: "object store".into(),
+                gets: 23,
+                puts: 0,
+                lists: 2,
+                deletes: 0,
             }],
             live_records: 860_384,
             logical_bytes: 27_500_000,

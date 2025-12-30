@@ -37,6 +37,9 @@ wavedb-bench-gen = { path = "gen" }
 wavedb-core = { path = "../crates/wavedb-core" }
 wavedb-macros = { path = "../crates/wavedb-macros" }
 wavedb-storage = { path = "../crates/wavedb-storage" }
+# The object-store client the `wavedb/object` row hands its store
+# (`systems::object_store`).
+wavedb-platform = { path = "../crates/wavedb-platform" }
 # block_on for the engine's non-Send futures (current-thread model), and the
 # one-shot reply the disk actor answers on.
 futures = "0.3"

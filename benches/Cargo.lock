@@ -2789,6 +2789,7 @@ dependencies = [
  "wavedb-bench-gen",
  "wavedb-core",
  "wavedb-macros",
+ "wavedb-platform",
  "wavedb-storage",
 ]
 

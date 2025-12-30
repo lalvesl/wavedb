@@ -24,11 +24,13 @@ use std::collections::BTreeMap;
 
 use crate::corpus::{Corpus, RowKey, RowRecord, Unreadable};
 
-/// The systems in report order. `wavedb` twice, because its two engine seams
-/// are two rows rather than one row with a footnote.
-pub const SYSTEMS: [(&str, &str); 7] = [
+/// The systems in report order. `wavedb` three times, because its two engine
+/// seams are two rows rather than one row with a footnote, and its store
+/// kept in an object store (`object`, `micro` only — [`runs`]) a third.
+pub const SYSTEMS: [(&str, &str); 8] = [
     ("wavedb", "single"),
     ("wavedb", "multi"),
+    ("wavedb", "object"),
     ("sqlite", "-"),
     ("postgres", "-"),
     ("mysql", "-"),
@@ -161,6 +163,9 @@ pub fn resolve(req: &Request, corpus: &Corpus) -> Result<Plan, String> {
             {
                 continue;
             }
+            if !runs(variant, workload) {
+                continue;
+            }
             for durability in DURABILITIES {
                 let key = req.key(system, variant, workload, durability);
                 classify(req, corpus, key, system, &mut plan)?;
@@ -168,6 +173,13 @@ pub fn resolve(req: &Request, corpus: &Corpus) -> Result<Plan, String> {
         }
     }
     Ok(plan)
+}
+
+/// Whether `variant` has a `workload` row: the object-store row measures
+/// `micro` alone (RFC 0065 §12).
+#[must_use]
+pub fn runs(variant: &str, workload: &str) -> bool {
+    variant != "object" || workload == "micro"
 }
 
 fn classify(
@@ -229,8 +241,9 @@ impl Request {
             wavedb_git_sha: (system == "wavedb")
                 .then(|| self.wavedb_git_sha.clone()),
             // A seed is one collection on one store, so the multi row
-            // fills itself.
-            seeded: variant != "multi"
+            // fills itself, and the object row fills its object store as it
+            // goes.
+            seeded: variant == "single"
                 && seeded(
                     workload,
                     self.seeded_systems.iter().any(|s| s == system),
@@ -323,17 +336,17 @@ mod tests {
         resolve(req, &Corpus::at(&scratch.0)).expect("resolve")
     }
 
-    /// 14 micro rows + 14 shop rows: every system on both workloads, WaveDB
-    /// single and multi.
+    /// 16 micro rows + 14 shop rows: every system on both workloads, WaveDB
+    /// single and multi, and its object row on `micro` alone.
     #[test]
-    fn the_full_matrix_is_twenty_eight_rows() {
+    fn the_full_matrix_is_thirty_rows() {
         let scratch = Scratch::new();
         let plan = plan_of(&request(), &scratch);
-        assert_eq!(plan.measure.len(), 28);
+        assert_eq!(plan.measure.len(), 30);
         assert!(plan.reuse.is_empty());
 
         let micro = plan.measure.iter().filter(|k| k.workload == "micro");
-        assert_eq!(micro.count(), 14);
+        assert_eq!(micro.count(), 16);
     }
 
     /// Only sharded WaveDB gets three consumers — on both workloads, since
@@ -353,6 +366,21 @@ mod tests {
                 ("wavedb", "multi")
             );
         }
+    }
+
+    /// The object row measures `micro` alone, durable and relaxed, on one
+    /// consumer.
+    #[test]
+    fn the_object_row_is_micro_only() {
+        let scratch = Scratch::new();
+        let object: Vec<_> = plan_of(&request(), &scratch)
+            .measure
+            .into_iter()
+            .filter(|k| k.variant == "object")
+            .collect();
+        assert_eq!(object.len(), 2);
+        assert!(object.iter().all(|k| k.workload == "micro"));
+        assert!(object.iter().all(|k| k.consumers == 1 && !k.seeded));
     }
 
     /// A seed is one collection on one store: the multi micro row fills
@@ -389,7 +417,7 @@ mod tests {
 
         assert_eq!(plan.reused(), 4, "postgres should have been reused");
         assert!(!plan.measure.iter().any(|k| k.system == "postgres"));
-        assert_eq!(plan.measure.len(), 24);
+        assert_eq!(plan.measure.len(), 26);
     }
 
     /// And the other half: a WaveDB row is *not* reusable across commits.
@@ -441,7 +469,7 @@ mod tests {
         let mut forced = request();
         forced.refresh = Refresh::All;
         let plan = plan_of(&forced, &scratch);
-        assert_eq!(plan.measure.len(), 28);
+        assert_eq!(plan.measure.len(), 30);
         assert_eq!(plan.reused(), 0);
     }
 
@@ -459,7 +487,7 @@ mod tests {
 
         assert_eq!(plan.measure.len(), 4, "mysql: 2 workloads × 2 rows");
         assert!(plan.measure.iter().all(|k| k.system == "mysql"));
-        assert_eq!(plan.reused(), 24);
+        assert_eq!(plan.reused(), 26);
     }
 
     #[test]
