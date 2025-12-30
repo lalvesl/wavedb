@@ -39,6 +39,13 @@ pub fn settle_unwaited(store: &PageStore) -> Result<(), String> {
     Ok(())
 }
 
+/// A node's upload policy (`wavedb-quick-node`'s `Maintenance` defaults):
+/// an object-backed store uploads once it holds back this much…
+pub const UPLOAD_AFTER_BYTES: u64 = 8 << 20;
+/// …or once its oldest write no upload carried has waited this long.
+pub const UPLOAD_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
 /// The axis. Named for what differs — where the engine lives — rather than for
 /// a thread count, because the thread count is a consequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +109,12 @@ pub trait Engineish {
     /// forward, what they leave cut off and deleted (RFC 0071).
     fn compact(&self) -> Result<(), String>;
 
+    /// Upload what an object-backed store holds back while a node's
+    /// policy says it is due — its 8 MiB, or its oldest write's 10 s
+    /// (`wavedb-quick-node`'s `Maintenance` defaults); nothing on a
+    /// disk-only store.
+    fn upload_due(&self) -> Result<(), String>;
+
     /// Close the storage probe's read counters at a phase boundary,
     /// naming the phase that just ended (the `probe` feature; a no-op
     /// otherwise).
@@ -150,6 +163,21 @@ impl Engineish for PageStore {
 
     fn has_pending(&self) -> bool {
         Self::has_pending(self)
+    }
+
+    fn upload_due(&self) -> Result<(), String> {
+        let due = |s: &Self| {
+            s.pending_upload_bytes() >= UPLOAD_AFTER_BYTES
+                || s.unuploaded_for().is_some_and(|w| w >= UPLOAD_INTERVAL)
+        };
+        while due(self) {
+            let done = futures::executor::block_on(self.upload())
+                .map_err(|e| format!("upload: {e}"))?;
+            if done.pages == 0 {
+                break; // nothing moved: the next write tries again
+            }
+        }
+        Ok(())
     }
 
     #[cfg(feature = "probe")]

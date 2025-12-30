@@ -257,7 +257,9 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
             self.settled = Instant::now();
         }
         self.engine.evict_to_budget();
-        Ok(())
+        // An object-backed store uploads as a node's upkeep would; a
+        // disk-only one has nothing to.
+        self.engine.upload_due()
     }
 
     /// Quiesce before the reads, and empty the cache before the cold ones.

@@ -16,6 +16,13 @@
 //! in: the reconstruction's CPU alone. Read calls are counted for both;
 //! they are what the walk costs in IOps whichever cache serves them.
 //!
+//! ## Over an object store
+//!
+//! The `wavedb/object` row (`super::object`) opens its store cold only, from
+//! its disk and in object mode, each on a fork of its own with a gateway of
+//! its own ([`cold`]): the gateway's files are dropped from the page cache
+//! too, and its requests are counted with the open's.
+//!
 //! [RFC 0079]: ../../../rfcs/0079-headers-sized-to-their-change-WIP.md
 
 use std::fs::File;
@@ -26,6 +33,7 @@ use rustix::fs::{Advice, fadvise};
 
 use crate::corpus::OpenRecord;
 use crate::io_counters::Io;
+use crate::systems::object_store::ObjectStore;
 
 /// Open the store at `dir` cold and then warm, recording both under
 /// `point` into `opens`; returns the warm open's store.
@@ -38,35 +46,64 @@ pub fn timed<T>(
     opens: &mut Vec<OpenRecord>,
     open: impl Fn() -> Result<T, String>,
 ) -> Result<T, String> {
-    drop_cache(dir)?;
-    let (cold, record) = once(point, "cold", &open)?;
+    let (first, record) = cold(point, "disk", &[dir], None, &open)?;
     opens.push(record);
-    drop(cold);
-    let (warm, record) = once(point, "warm", &open)?;
+    drop(first);
+    let (warm, record) = once(point, "warm", "disk", None, &open)?;
     opens.push(record);
     Ok(warm)
+}
+
+/// One open from `from`, after every file under `dirs` was dropped from the
+/// page cache, measured — `server`'s requests counted with it.
+///
+/// # Errors
+/// The store could not be opened, or the files could not be walked.
+pub fn cold<T>(
+    point: &str,
+    from: &str,
+    dirs: &[&Path],
+    server: Option<&ObjectStore>,
+    open: impl Fn() -> Result<T, String>,
+) -> Result<(T, OpenRecord), String> {
+    for dir in dirs {
+        drop_cache(dir)?;
+    }
+    once(point, "cold", from, server, open)
 }
 
 /// One open, measured.
 fn once<T>(
     point: &str,
     cache: &str,
+    from: &str,
+    server: Option<&ObjectStore>,
     open: impl Fn() -> Result<T, String>,
 ) -> Result<(T, OpenRecord), String> {
+    let asked = server.map(ObjectStore::requests).unwrap_or_default();
     let before = Io::current();
     let start = Instant::now();
     let store = open()?;
     let wall_ns = start.elapsed().as_nanos() as u64;
     let io = Io::current().since(before);
+    let r = server
+        .map(ObjectStore::requests)
+        .unwrap_or_default()
+        .since(asked);
     Ok((
         store,
         OpenRecord {
             point: point.into(),
             cache: cache.into(),
+            from: from.into(),
             wall_ns,
             read_bytes: io.read_bytes,
             rchar: io.rchar,
             read_calls: io.read_calls,
+            gets: r.gets,
+            puts: r.puts,
+            lists: r.lists,
+            deletes: r.deletes,
         },
     ))
 }
