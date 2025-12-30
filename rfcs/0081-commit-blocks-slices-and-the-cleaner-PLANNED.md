@@ -332,8 +332,9 @@ adds two phases to it:
 - on space, as today.
 
 **What it takes first:** the log-structured filesystem's question, answered
-by cost and benefit. The benefit of a range is the RAM it frees (sub-headers
-and entries) and the space (dead versions held in shared pages). Its cost is
+by cost and benefit. The benefit of a range is the RAM it frees (slices and
+fragments) and the space (dead versions in the pages its slices lie over and
+in shared commit blocks). Its cost is
 the bytes to rewrite. Ranges with the most benefit per byte go first; hot
 ranges, still being written, can wait.
 
@@ -408,18 +409,21 @@ a torn last block.
    per block, by lane). The compacted point of the multi and shop rows. The
    compression experiment of §9.
 1. **The rightmost split** (§8). Independent and small.
-2. **Clipped reads and the range start** (§3). Every reader clips to its
-   entry's interval; `SubHeader` and `SubHeaderRecord` gain `start`. No
-   behaviour changes yet.
-3. **Counted references** (§5). Two entries may name one run; the counts
-   are derived at open and kept at install.
-4. **The commit block** (§1, §2). The format, sections inline, fragments
+2. **The sub-header in bits** (§3a). `prefix_bits` and `start` replace
+   `first_key` and `key_shift`, in RAM and in `SubHeaderRecord`; the refine
+   has one case. No behaviour changes.
+3. **Clipped reads** (§3). Every reader clips a page to its entry's
+   interval less its slices; `SubHeader` gains `slices`, empty. No behaviour
+   changes yet.
+4. **Counted references** (§5). Several entries and slices may name one
+   run; the counts are derived at open and kept at install.
+5. **The commit block** (§1, §2). The format, sections inline, fragments
    for appends, the header and the `Roots` of `Own` folded in.
-5. **Slices** (§3, §4). Updates, middle inserts, removals.
-6. **The index budget and inline consolidation** (§6).
-7. **The cleaner's phases and triggers** (§7, §8).
-8. **Compression** (§9), as phase 0 decides.
-9. **Measure.** The micro and shop suites, the opens, the census.
+6. **Slices** (§3, §4). Updates, middle inserts, removals, with their counts.
+7. **The index budget and inline consolidation** (§6).
+8. **The cleaner's phases and triggers** (§7, §8).
+9. **Compression** (§9), as phase 0 decides.
+10. **Measure.** The micro and shop suites, the opens, the census.
 
 ## Alternatives
 
@@ -458,3 +462,7 @@ a torn last block.
 7. Torn writes of one block: atomic on a disk with 4 KiB sectors, caught by
    the crc otherwise. Whether a device with 512 B sectors needs anything
    more than the crc.
+8. How a range's prefix is held. It stays a `Box<[u8]>` per range (§3a);
+   neighbouring ranges of one collection repeat the same bytes, ~32 B each.
+9. How many slices a range may hold before it is consolidated, so its
+   search stays short.
