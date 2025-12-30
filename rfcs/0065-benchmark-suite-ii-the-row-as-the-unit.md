@@ -474,6 +474,19 @@ read_bytes ≪ rchar` is a working cache and costs no IOps. A `read amp` column
 joins `amp` in the tables. This is the smallest change in the RFC and probably
 the highest information per line of it.
 
+**Deferred writes are the phase's (2026-11-08).** The counters bracket the
+phase, and the untimed hooks after it — the boundary, and after the last
+phase the drivers' close — ran outside every bracket. A relaxed WaveDB row
+settles there for the last time, so up to a window of its inserts' and
+updates' bytes (about one round in 18 at `small`) was in no phase. What a
+hook **writes** is now charged to the newest phase that wrote: the
+deferred work of that phase (a relaxed store's last settle, a checkpoint
+at shutdown), never of the read phases in between. What a hook reads stays
+uncounted — a server restart's replay is the next phase's setup. Neither
+enters `wall_ns`. Rows recorded before this, including every stored peer
+row, carry the old bracket: their `bytes_written` can be short by what
+their hooks wrote, until refreshed.
+
 ### 9. Carried over from 0060 unchanged
 
 Stated explicitly so the deprecation does not read as a repudiation:
