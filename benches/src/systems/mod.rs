@@ -12,6 +12,7 @@
 
 pub mod drivers;
 pub mod engine;
+pub mod object_store;
 pub mod server;
 pub mod shop;
 pub mod wavedb;
