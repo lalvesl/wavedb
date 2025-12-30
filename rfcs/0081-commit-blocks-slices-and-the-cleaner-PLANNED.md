@@ -216,11 +216,50 @@ walks a page's records clips them so:
   slices plus their `count`, in RAM; only a `replaced` the round did not know
   (`COUNT_SATURATED`) makes the page be read;
 - the upload, which rebuilds the object store's pages by key range;
-- the merge, the regroup and the moves of compaction;
-- the `Rebuild`, which already reads entries, not pages.
+- the merge, the regroup and the moves of compaction.
 
-A point lookup needs no change: it never reaches a key its entry does not
-cover.
+A point lookup needs no clipping: a slice routes it before its entry does.
+
+### 3a. The sub-header in bits
+
+Today a range is quantized by two numbers that move at different steps
+(RFC 0078 §3): its `prefix` in whole bytes (the depth), and `key_shift` in
+steps of 16 bits within the 8 bytes after it, from a `first_key` the range
+starts at. Refining past a shift of 0 sinks the range 8 bytes deeper, a case
+of its own (`reshape.rs`, `refine`).
+
+The same quantization, normalized:
+- **The prefix is a string of bits:** every bit the range's keys share.
+- **The quantum is the 16 bits after it.**
+- **`start: u16`** is the quantum the range begins at.
+
+```rust
+struct SubHeader {
+    base_block: u64,
+    /// The bits every key of the range shares, padded to whole bytes.
+    prefix: Box<[u8]>,
+    /// The prefix's length in bits; the quantum is the 16 bits after it.
+    prefix_bits: u16,
+    /// The quantum the range begins at.
+    start: u16,
+    address_bits: u8,
+    address_factor: u8,
+    size_factor: u8,
+    slices: Option<Box<[Slice]>>,
+}
+```
+
+`first_key` and `key_shift` go: `q` is the 16 bits of the key at
+`prefix_bits`, and a refine adds 16 to `prefix_bits`, always. The forms are
+the same quantization (`prefix_bits = 8·depth + 48 − key_shift`, for a
+`first_key` aligned to its quantum). One thing changes: a range no longer
+crosses the edge of its prefix. A stream running past it opens the sibling
+range, once every 65 536 quanta.
+
+Ranges of every prefix length sit in one sorted list, found by one binary
+search over their starts (`prefix` then `start`): an adaptive radix tree,
+flattened. The prefix's storage stays a `Box<[u8]>` per range; a better
+model is left open (question 8).
 
 ### 4. What a round writes
 
@@ -237,27 +276,28 @@ few, plus the filesystem's barrier.
 
 ### 5. Counted references, derived
 
-A run can be named by several entries: the halves of a slice, and a commit
-block named by the fragments and slices of several lanes. The allocator
-frees a run when nothing names it any more.
+A run can be named several times: a commit block, by the fragments and slices
+of every lane whose section it holds. A page a slice lies over is still named
+once, by its entry. The allocator frees a run when nothing names it any
+more.
 
 **The count lives in RAM and is never written.** The indexes are rebuilt
-from the commit blocks at every open (RFC 0072 §6), and a run's count is the
-number of entries naming it. The walk counts them as it rebuilds, so the
-count costs no write. The extent tree a filesystem like btrfs keeps on disk
+from the commit blocks at every open (RFC 0072 §6), and a run's count is
+the number of entries and slices naming it. The walk counts them as it
+rebuilds, so the count costs no write. The extent tree a filesystem like btrfs keeps on disk
 for this, and the writes that update it, have no counterpart here.
 
 - Runs named once — nearly all of them in a cleaned store — carry no
   counter: a map holds the counts of the runs named more than once.
 - The install of a round increments the count of every run its new entries
-  name and decrements those its retired entries named.
+  and slices name, and decrements those its retired ones named.
 - A run whose count reaches zero is retired: a deferred free, a hole once
   the next batch is durable (RFC 0072 §8), as any run now.
 
 ### 6. The index budget
 
-Fragments, slices and the sub-headers they create are RAM per write. They
-are bounded by an **index budget** (`StoreOptions::index_budget_bytes`),
+Fragments (an entry, 4–5 bytes) and slices (~12 bytes) are RAM per write.
+They are bounded by an **index budget** (`StoreOptions::index_budget_bytes`),
 accounted beside the caches:
 - **Under the budget,** they accumulate. The cleaner (§7) pays them back
   when it runs.
@@ -270,10 +310,10 @@ The budget makes the bound explicit: the index is never more than the
 budget plus the clean index of the data. A store under a write burst with no
 idle time behaves as today; one with idle time does better.
 
-**Consolidating a range** reads the pages its entries name — its fragments,
-its slices, the shared pages behind them — and writes the range's live keys
-as full pages of one type (§8). Its extra sub-headers fold away, and its
-references drop to one each.
+**Consolidating a range** reads the pages its entries and slices name — its
+pages, its fragments, the commit blocks behind them — and writes the range's
+live keys as full pages of one type (§8). Its slices clear, its fragments
+fold into the new pages' entries, and its references drop to one each.
 
 ### 7. The cleaner
 
