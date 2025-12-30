@@ -82,9 +82,9 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   the next write-path design. A round writes one commit block — its new
   data a section per type, the index diff, the trailer — and the index
   points into it: appends become fragments, changes inside a page slices
-  that share the old page, references counted in RAM. An index budget and
-  an idle-time cleaner consolidate into full pages of one type. Phase 0
-  measures first: a page census and compression with and without
+  laid over the range that names it, references counted in RAM. An index
+  budget and an idle-time cleaner consolidate into full pages of one type.
+  Phase 0 measures first: a page census and compression with and without
   dictionaries.
 - **The storage write path (2026-07-28 → 07-29):**
   [0041](0041-single-barrier-checkpoint.md) *(Implemented)* replaced the per-id
@@ -677,7 +677,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0078](0078-ordered-lanes-over-a-quantized-page-index-WIP.md) | Ordered lanes over a quantized page index (pages by key order, one `u32` per page in RAM under sorted sub-headers; replaces the hashed directories and the chain's segments and sparse index) | In progress (phases 1–4 and 6 landed: every value in ordered pages, the header, the object store, chains as key ranges of ordered lanes with a list's pages counted; phase 5, the density hint, measured and dropped; phase 7, measuring, remains) |
 | [0079](0079-headers-sized-to-their-change-WIP.md) | Headers sized to their change (whole blocks instead of 32 KiB; every pointer to a header carries its size, so each is one read; a trailer finds the newest; a 32–128 KiB restating header when the walk passes K) | WIP (phases 1–4 landed: links carry the size; disk and object-store headers sized, trailer, restating headers; the walk read back a chunk at a time — phase 5: bytes measured, −16% per durable insert; the open timed by the suite from the next run) |
 | [0080](0080-streamed-writes-to-object-stores-PLANNED-LOW.md) | Streamed writes to object stores (draft: append, resumable and multipart uploads surveyed; a stream file per storage shard, the mechanism fixed in the `MANIFEST`) | Planned (low) |
-| [0081](0081-commit-blocks-slices-and-the-cleaner-PLANNED.md) | Commit blocks, slices and the cleaner (a round writes one commit block — its new data a section per type, the index diff, the trailer — and the index points into it: appends become fragments, changes in the middle become slices sharing the old page; references counted in RAM, derived at open; an index budget and an idle-time cleaner consolidate into full pages of one type; the rightmost split; compression without dictionaries, decided by measurement) | Planned |
+| [0081](0081-commit-blocks-slices-and-the-cleaner-PLANNED.md) | Commit blocks, slices and the cleaner (a round writes one commit block — its new data a section per type, the index diff, the trailer — and the index points into it: appends become fragments, changes in the middle become slices laid over the range (~12 B each, the old page untouched); references counted in RAM, derived at open; the sub-header in bits; an index budget and an idle-time cleaner consolidate into full pages of one type; the rightmost split; compression without dictionaries, decided by measurement) | Planned |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
