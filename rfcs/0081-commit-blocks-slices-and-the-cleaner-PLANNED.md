@@ -34,17 +34,17 @@ Two index mechanisms make that possible without rewriting old pages:
 - **Fragments.** What a round appends to a lane is a new entry pointing at
   the lane's section of the commit block.
 - **Slices.** What a round changes in the middle of a page — an update, an
-  insert, a removal — becomes a new sub-header covering just the changed
-  quanta, pointing at the commit block, between two sub-headers that both
-  still point at the old page. The old page is not rewritten; it is shared.
+  insert, a removal — becomes a slice laid over the range that names the
+  page: the changed quanta, routed to the commit block, about 12 bytes in
+  RAM. The old page is not rewritten, and the range keeps its entries.
 
-A run may then be named by several entries, so the allocator **counts
+A commit block is then named by several lanes, so the allocator **counts
 references** — derived in RAM from the indexes at open, never stored.
 
 Fragments, slices and shared runs cost RAM and spoil compression and scans.
 The **cleaner** pays that back: in idle time, on a schedule, or when an
 index budget is passed, it consolidates each range into full pages of one
-type, which drops the extra sub-headers, the shared references and the
+type, which clears its slices and fragments, the shared references and the
 small sections. The engine is write-optimised while it is busy and
 read- and memory-optimised once it has rested.
 
@@ -148,54 +148,73 @@ is RAM per write, and is bounded by §6.
 ### 3. Slices: changing the middle of a page without rewriting it
 
 A round that changes keys inside a page `P` — an update of a record, an
-insert into a secondary or a list, a removal — does not rewrite `P`. It
-splits the sub-header `R` that holds `P`'s entry, by reference:
+insert into a secondary or a list, a removal — does not rewrite `P`, and does
+not split the sub-header `R` that names it. `R` keeps its entries, its
+quantization and its prefix; it gains a short list of **slices** laid over
+its entries:
 
 ```
-before:   R  [a ─────────────────── c)    … → P → …
+before:   R [a ──────────────── c)    … → P → …
 
-after:    R1 [a ─── k)      … → P                  (R's entries up to P)
-          Rk [k ─ k′)       → C                    (the round's commit block)
-          R2 [k′ ─── c)     P → …                  (P again, then R's rest)
+after:    R [a ──────────────── c)    … → P → …      (entries unchanged)
+            slices: [ q(k)..q(k′) → C ]               (the round's commit block)
 ```
 
-- `Rk` covers the quanta that hold the changed keys, and points at the
-  slot's section in the commit block `C`.
-- `R1` keeps `R`'s entries up to and including `P`'s.
-- `R2` takes `P`'s entry again and `R`'s entries after it.
-- `P` is named twice, so its run's count is two (§5). `P` still holds the
-  old versions of the changed keys; nothing routes to them.
+```rust
+struct SubHeader {
+    // … its fields (§3a) …
+    /// Quanta that no longer read from their entry's page. `None` in a
+    /// clean range: 8 bytes, no allocation.
+    slices: Option<Box<[Slice]>>,
+}
 
-Point lookups stay one read: a key in `[k, k′)` reaches `C`, any other key
-of `P` reaches `P` through `R1` or `R2`.
+/// Quanta `[from, to)` of the range, and where they read from now.
+struct Slice {
+    from: u16,
+    to: u16,
+    /// Blocks past the range's `base_block`. A commit block is always newer
+    /// than the range's pages, so it lies ahead; `u32::MAX` is a hole.
+    offset: u32,
+    /// The run's length in blocks (a commit block is at most 32).
+    blocks: u8,
+    /// In a counted lane: the keys the slice holds, and the keys of the
+    /// entry's page it hides (`COUNT_SATURATED` when the round does not
+    /// know).
+    count: u8,
+    replaced: u8,
+}
+```
 
-**A removal** is a slice whose entry is a hole: the quanta hold no key. It
-writes no data, only its diff.
+A slice costs about 12 bytes. Splitting `R` into three sub-headers instead —
+the halves before and after the change, both still naming `P`, and one for
+the change — would cost two sub-headers, ~400 bytes, and a second reference
+to `P`.
 
-**Quantization.** `q = (slice(key, depth) − first_key) >> key_shift`
-(RFC 0078 §3). For `R2` to keep `R`'s entries without re-encoding them, a
-sub-header's **quantization base is separated from its start**:
-- `first_key` stays the base the entries count from;
-- a new `start: u16` is the quantum the range begins at. Today every range
-  begins at 0;
-- an entry may start before `start` (`P`'s, in `R2`), and is clipped by it.
+- **A point lookup** finds `R`, then searches its slices by the key's
+  quantum: a slice routes the key to its run (the slot's section in the
+  commit block), and a key in no slice reads its entry's page, as today.
+  One read either way.
+- **A new slice over older ones** trims or replaces them, so a range's
+  slices stay sorted and disjoint.
+- **A removal** is a hole slice. It writes no data, only its diff.
+- **Coarse quanta.** On a finely quantized lane — keys by instant — a quantum
+  isolates one key. On a coarse one, a quantum may hold neighbours of the
+  changed key; the slice then carries them too, copied from `P`, so it covers
+  whole quanta. That needs `P`'s records, which the round reads anyway when
+  it plans an update against the stored version.
+- **On disk,** a range's slices ride the commit block's diff: the
+  `SubHeaderRecord` names the slices it adds or drops, ~9–12 bytes each, and
+  the `Rebuild` lays them back.
+- **The cleaner** rewrites `P` with its slices applied and clears the list
+  (§7). The range is clean again; nothing about it is rebuilt.
 
-The invariant "a range starts at quantum 0" becomes "a range's entries
-cover its quanta from `start`". `SubHeaderRecord` carries `start`.
-
-On a finely quantized lane — keys by instant — a quantum isolates one key.
-On a coarse one, a quantum may hold neighbours of the changed key. The
-slice then carries them too, copied from `P`, so `Rk` covers whole quanta.
-That needs `P`'s records, which the round reads anyway when it plans an
-update against the stored version.
-
-**Clipped reads.** A page can now be named by entries whose intervals are
-narrower than its keys. Every reader that walks a page's records clips them
-to its entry's interval `[this entry's quantum, the next entry's)`:
-- scans and counts (`lane_read.rs`, `lane_walk.rs`);
-- the lists' counts: an entry's `u8` counts its interval. A slice on a
-  counted lane writes `COUNT_SATURATED` (255, "read it") until the cleaner
-  consolidates it;
+**Clipped reads.** A page is now read through an interval narrower than its
+keys: its entry's quanta, minus the slices over them. Every reader that
+walks a page's records clips them so:
+- scans (`lane_read.rs`, `lane_walk.rs`);
+- the lists' counts: a page covered whole counts `count − replaced` of its
+  slices plus their `count`, in RAM; only a `replaced` the round did not know
+  (`COUNT_SATURATED`) makes the page be read;
 - the upload, which rebuilds the object store's pages by key range;
 - the merge, the regroup and the moves of compaction;
 - the `Rebuild`, which already reads entries, not pages.
