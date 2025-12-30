@@ -550,6 +550,29 @@ clean and go), and then **warm**, over the pages the cold open brought in:
 the first is a restart's cost, the second the reconstruction's CPU. Older
 rows have no `opens`, and every peer's is empty.
 
+**Over an object store: the `wavedb/object` row.** A third WaveDB variant,
+`micro` only, durable and relaxed: the single row's store kept in an object
+store, its disk caching it (RFC 0070 phase 3). The object store is a local
+versitygw over the row's scratch disk (`systems/object_store.rs`), and the
+driver uploads as a node's upkeep does (8 MiB held back, or the oldest write
+10 s old), so its phases are the single row's with the uploads in them, and
+the object store fills as a node's does. Its two points are `written`
+(everything committed uploaded) and `compacted` (the disk's compaction, then
+`compact_remote`), and at each it is opened cold twice — `from` its `disk`,
+the object store beside it (a node's restart), and from the `object store`
+alone, in object mode (a node whose disk is gone). Each open runs on a
+**fork** of the point's state — the data directory and the gateway's,
+copied (a reflink on btrfs) — with a gateway of its own, so both start from
+the same files, neither changes what the next sees, and the gateway's access
+log holds that open's requests alone: `gets` (`GetObject`, `HeadObject`),
+`puts`, `lists` and `deletes` join the record. The requests are what S3
+would be asked; the times are a local disk's, a floor for a real object
+store, and the gateway's own reads are its process's, outside `read_bytes`.
+
+Sixteen opens a run, then: the single row's eight (two points, cold and
+warm, two durabilities) and the object row's eight (two points, two
+sources, two durabilities), with the multi row's `written` beside them.
+
 ## Alternatives
 
 - **Keep the run as the unit and add a peer-result cache beside it.** Rejected:

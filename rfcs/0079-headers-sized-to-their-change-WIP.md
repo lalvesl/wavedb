@@ -285,7 +285,9 @@ are out of scope here.
    ~30 KiB a round, the 32 KiB header become one block plus its share of
    restating headers, as §6 predicted. The open's time and reads: the
    suite times them since 2026-11-08 (RFC 0065 §12) — as written and
-   compacted, cold and warm; the next run records them.
+   compacted, cold and warm, and over an object store (the `wavedb/object`
+   row: from the disk and from the object store alone, with the requests
+   each makes); the next run records them.
 
 Every phase keeps a durability test: reopen after a crash at every point
 of a window, and a torn last block.
