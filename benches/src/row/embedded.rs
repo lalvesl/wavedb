@@ -236,7 +236,10 @@ where
 /// One settle is not quiescence: what a batch frees becomes a hole only once
 /// the next one is durable (RFC 0072 §8), so the footprint can still move
 /// after the first.
-fn quiesce<E: Engineish>(engine: &E, points: &Points) -> Result<(), String> {
+pub(super) fn quiesce<E: Engineish>(
+    engine: &E,
+    points: &Points,
+) -> Result<(), String> {
     const MAX_ROUNDS: usize = 6;
     // `u64::MAX` forces at least two rounds, so a size that merely failed to
     // grow proves nothing yet.
@@ -266,7 +269,7 @@ fn multi_notes(consumers: usize) -> Vec<String> {
     notes
 }
 
-fn settings(
+pub(super) fn settings(
     engine: Engine,
     d: Durability,
     consumers: usize,

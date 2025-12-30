@@ -50,6 +50,10 @@ pub fn measure(
         "sqlite" => embedded::sqlite(run, d).map(Some),
         // Both seams hand each consumer a `PageStore`; the multi row opens
         // one data shard per consumer (`embedded::wavedb`).
+        // The single row kept in an object store (`object`), opens and all.
+        "wavedb" if run.key.variant == "object" => {
+            super::object::wavedb(run, d).map(Some)
+        }
         "wavedb" => embedded::wavedb::<PageStore>(run, d).map(Some),
         #[cfg(feature = "servers")]
         "postgres" => super::server::postgres(run, d).map(Some),
