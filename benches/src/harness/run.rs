@@ -49,7 +49,10 @@ pub struct PhaseResult {
     /// What the phase cost the disk in both directions, from
     /// [`DriverFactory::meter`]. It spans the whole phase rather than the
     /// timed windows, which is right: bytes an untimed hook moved are still
-    /// bytes moved.
+    /// bytes moved. For the same reason its `write_bytes` include the
+    /// deferred work it left behind: what a later boundary or the close
+    /// wrote, when it is the newest phase that wrote (`charge`). Neither is
+    /// in `wall_ns`.
     pub io: crate::io_counters::Io,
 }
 
@@ -121,17 +124,25 @@ where
 
         let phases = workload.phases();
         let mut results = Vec::with_capacity(phases.len());
+        let meter = factory.meter();
         for (i, phase) in phases.iter().enumerate() {
-            let result =
-                one_phase(factory, &mut workload, phase, &inboxes, &outboxes)?;
-            results.push(result);
+            results.push(one_phase(
+                factory,
+                &mut workload,
+                phase,
+                &inboxes,
+                &outboxes,
+            )?);
             if let Some(next) = phases.get(i + 1) {
+                let before = meter.io();
                 boundary(&inboxes, &outboxes, phase, next)?;
+                charge(&mut results, meter.io().since(before));
             }
         }
 
         at_hot()?;
 
+        let before = meter.io();
         for tx in &inboxes {
             let _ = tx.send(Message::Shutdown);
         }
@@ -140,8 +151,25 @@ where
                 return Err(format!("consumer {shard}: close: {e}"));
             }
         }
+        charge(&mut results, meter.io().since(before));
         Ok(results)
     })
+}
+
+/// Charge the bytes an untimed hook — a boundary, the close — **wrote** to
+/// the newest phase that wrote anything: they are its deferred work (a
+/// relaxed store's last settle, a checkpoint at shutdown), and the read
+/// phases in between asked for none of it. The hook's reads stay
+/// uncounted: a restart's replay is the next phase's setup, not any phase's
+/// cost.
+fn charge(results: &mut [PhaseResult], hook: crate::io_counters::Io) {
+    let writer = results
+        .iter()
+        .rposition(|r| r.io.write_bytes > 0)
+        .or_else(|| results.len().checked_sub(1));
+    if let Some(phase) = writer.and_then(|i| results.get_mut(i)) {
+        phase.io.write_bytes += hook.write_bytes;
+    }
 }
 
 fn one_phase<F, W>(
@@ -262,8 +290,9 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Mutex;
 
-    use super::{percentiles, run, throughput};
+    use super::{PhaseResult, charge, percentiles, run, throughput};
     use crate::harness::{Driver, DriverFactory, Workload};
+    use crate::io_counters::Io;
 
     /// Records what it saw, on a shared log so the test can read it back.
     /// Holds an `Rc` deliberately: a `Send` driver would not exercise the
@@ -367,6 +396,41 @@ mod tests {
 
     fn log() -> &'static Mutex<Vec<String>> {
         Box::leak(Box::new(Mutex::new(Vec::new())))
+    }
+
+    fn wrote(name: &str, write_bytes: u64) -> PhaseResult {
+        PhaseResult {
+            name: name.into(),
+            samples: Vec::new(),
+            wall_ns: 0,
+            io: Io {
+                write_bytes,
+                ..Io::default()
+            },
+        }
+    }
+
+    /// A hook's writes go to the newest phase that wrote — past the read
+    /// phases in between — and its reads to none.
+    #[test]
+    fn a_hooks_writes_are_the_newest_writers_deferred_work() {
+        let mut phases = vec![wrote("insert", 100), wrote("read_hot", 0)];
+        let hook = Io {
+            write_bytes: 7,
+            read_bytes: 4096,
+            rchar: 4096,
+            ..Io::default()
+        };
+        charge(&mut phases, hook);
+        assert_eq!(phases[0].io.write_bytes, 107);
+        assert_eq!(phases[0].io.read_bytes, 0, "the reads are no phase's");
+        assert_eq!(phases[1].io, Io::default());
+
+        // No phase wrote: the newest one takes it.
+        let mut quiet = vec![wrote("read_hot", 0), wrote("read_cold", 0)];
+        charge(&mut quiet, hook);
+        assert_eq!(quiet[1].io.write_bytes, 7);
+        charge(&mut [], hook); // nothing to charge, and no panic
     }
 
     #[test]
