@@ -82,6 +82,15 @@ been measured pinned at 2.3 GHz and at 2.0 GHz, and a lower clock is a slower
 machine for every CPU-bound row, so the two are lanes
 (`…-4c-2300mhz-500m-btrfs-…`), never a trend.
 
+So is the disk under the work directory (`src/host_disk.rs`): its model,
+and the layers between it and the filesystem — an encryption layer with its
+sector size, LVM, md — read by walking sysfs from the mount's device down to
+the physical disk. A durable row is bound by its device's flush, so the
+system NVMe and a dedicated SATA disk are two lanes even under one
+filesystem (`…-500m-kingston-sa400s3-crypt4096-xfs-…`,
+`…-500m-adata-legend-850-lite-crypt512-btrfs-…`). The work directory follows
+`TMPDIR`; point it at the disk to measure.
+
 ### One configuration, no exceptions
 
 There is exactly one measured configuration, and both of the ways out of it are
