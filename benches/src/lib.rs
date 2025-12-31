@@ -61,6 +61,7 @@ pub mod footprint;
 pub mod guard;
 pub mod harness;
 pub mod host;
+pub mod host_disk;
 pub mod io_counters;
 pub mod json;
 pub mod plan;
