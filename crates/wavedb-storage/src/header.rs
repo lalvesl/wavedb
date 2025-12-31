@@ -328,7 +328,7 @@ mod tests {
                 changed: vec![RangeRecord::Entries {
                     start: vec![1, 2],
                     base_block: 9,
-                    shape: 0x0101_0c30,
+                    shape: [12, 1, 1],
                     entries: vec![(3, 0), (4, 1)],
                     counts: vec![7, 255],
                 }],

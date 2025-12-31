@@ -2,7 +2,7 @@
 //! its pages, naming a page by a key, sizing a page, and keeping a range
 //! within what one header can restate.
 
-use super::head::{Shape, SubHeader, q_of};
+use super::head::{Shape, q_of};
 use super::index::{Found, PageIndex, Placed, Range, Slot};
 use super::journal::Journal;
 
@@ -98,11 +98,7 @@ impl<M: Copy + Default> PageIndex<M> {
     pub fn key_of(&self, at: Slot) -> Option<Vec<u8>> {
         let r = self.ranges.get(at.range)?;
         let q = q_of(*r.entries.pages.get(at.entry)?);
-        let mut key = r.head.prefix.to_vec();
-        key.extend_from_slice(
-            &r.head.quantum_start(u32::from(q))?.to_be_bytes(),
-        );
-        Some(key)
+        Some(r.head.key_at(q))
     }
 
     /// Every entry — page or hole — in key order: its slot, its page if it
@@ -230,17 +226,9 @@ impl<M: Copy + Default> PageIndex<M> {
             }
             let r = &self.ranges[range];
             let cut = r.entries.len() / 2;
-            let from = u32::from(q_of(r.entries.pages[cut]));
-            let Some(first_key) = r.head.quantum_start(from) else {
-                range += 1;
-                continue;
-            };
             let right = Range {
-                head: SubHeader {
-                    first_key,
-                    ..r.head.clone()
-                },
-                entries: r.entries.tail(cut, from),
+                head: r.head.from_quantum(q_of(r.entries.pages[cut])),
+                entries: r.entries.tail(cut),
             };
             let left = r.entries.head(cut);
             self.ranges[range].entries = left;

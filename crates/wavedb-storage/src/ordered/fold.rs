@@ -5,16 +5,14 @@
 //! two halves of a cut, and neighbours in key order rewritten together,
 //! fold back as they are isolated.
 //!
-//! A fold keeps every entry's start, so every key finds the page it found
-//! before; quanta between the two ranges that no entry covered become a
-//! hole.
+//! A fold keeps every entry's quantum, so every key finds the page it
+//! found before: two ranges fold only under one prefix, which quantizes
+//! them alike.
 //!
 //! [RFC 0078]: ../../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
-use std::cmp::Ordering;
-
 use super::access::MAX_RANGE_ENTRIES;
-use super::head::{QUANTA, Shape, SubHeader, q_of};
+use super::head::{Shape, SubHeader, q_of};
 use super::index::{Entries, PageIndex, Range, Slot};
 
 impl<M: Copy + Default> PageIndex<M> {
@@ -63,7 +61,7 @@ impl<M: Copy + Default> PageIndex<M> {
             let joins = run.head.is_some_and(|h| {
                 let (a, b) = (h.shape, r.head.shape);
                 h.prefix == r.head.prefix
-                    && a.key_shift() == b.key_shift()
+                    && h.prefix_bits == r.head.prefix_bits
                     && a.address_bits() == b.address_bits()
                     && a.address_factor() == b.address_factor()
                     && run.blocks + blocks <= a.window()
@@ -96,16 +94,20 @@ impl<M: Copy + Default> PageIndex<M> {
     }
 
     /// Ranges `i` and `i + 1` as one, and where the second's entries start
-    /// in it: the same prefix, the finer of the two quantizations, based at
-    /// the lowest page, every page addressable from there — and reaching as
-    /// far as the second range did, or to the range after it.
+    /// in it: the same prefix — so the same quanta — based at the lowest
+    /// page, the larger size unit, every page addressable from there.
+    ///
+    /// The first range's last entry covered every quantum up to the
+    /// second's start, and the folded range reaches as far as the second
+    /// did — to the end of their prefix, or the range after — so every key
+    /// finds the entry it found before.
     fn folded(&self, i: usize) -> Option<(Range<M>, usize)> {
         let (a, b) = (self.ranges.get(i)?, self.ranges.get(i + 1)?);
         let (ha, hb) = (&a.head, &b.head);
         let (sa, sb) = (ha.shape, hb.shape);
-        // One more for a hole between them.
-        let len = a.entries.len() + b.entries.len() + 1;
-        if ha.prefix != hb.prefix
+        let len = a.entries.len() + b.entries.len();
+        if ha.prefix_bits != hb.prefix_bits
+            || ha.prefix != hb.prefix
             || sa.address_bits() != sb.address_bits()
             || sa.address_factor() != sb.address_factor()
             || len > MAX_RANGE_ENTRIES
@@ -113,7 +115,6 @@ impl<M: Copy + Default> PageIndex<M> {
             return None;
         }
         let shape = Shape::new(
-            sa.key_shift().min(sb.key_shift()),
             sa.address_bits(),
             sa.address_factor(),
             sa.size_factor().max(sb.size_factor()),
@@ -127,52 +128,19 @@ impl<M: Copy + Default> PageIndex<M> {
             .unwrap_or(ha.base_block);
         let head = SubHeader {
             base_block: base,
-            first_key: ha.first_key,
-            prefix: ha.prefix.clone(),
             shape,
+            ..ha.clone()
         };
-        if !self.reaches(i, &head) {
-            return None;
-        }
         let mut out = Entries {
             pages: Vec::with_capacity(len),
             meta: Vec::with_capacity(len),
             counts: self.counted.then(|| Vec::with_capacity(len)),
         };
         moved(&head, a, &mut out)?;
-        // Quanta past the first range's end and short of the second's start
-        // held no key: a hole, not the first range's last page.
-        if let Some(end) = ha.quantum_start(QUANTA)
-            && end < hb.first_key
-        {
-            let q = requantized(&head, end)?;
-            push(&mut out, head.hole(q), M::default(), 0);
-        }
         let offset = out.len();
         moved(&head, b, &mut out)?;
         let ascending = out.pages.windows(2).all(|w| q_of(w[0]) < q_of(w[1]));
         ascending.then_some((Range { head, entries: out }, offset))
-    }
-
-    /// Whether `head`, folding ranges `i` and `i + 1`, still holds every
-    /// key the second one did: its quanta reach as far, or past the start
-    /// of the range after it.
-    fn reaches(&self, i: usize, head: &SubHeader) -> bool {
-        let Some(end) = head.quantum_start(QUANTA) else {
-            return true; // to the end of keys
-        };
-        let second = &self.ranges[i + 1].head;
-        if second.quantum_start(QUANTA).is_some_and(|e| e <= end) {
-            return true;
-        }
-        let end = SubHeader {
-            first_key: end,
-            ..head.clone()
-        }
-        .start();
-        self.ranges
-            .get(i + 2)
-            .is_some_and(|next| next.head.start_cmp(&end) != Ordering::Greater)
     }
 }
 
@@ -207,8 +175,7 @@ fn moved<M: Copy>(
     out: &mut Entries<M>,
 ) -> Option<()> {
     for (i, &entry) in range.entries.pages.iter().enumerate() {
-        let q =
-            requantized(head, range.head.quantum_start(q_of(entry).into())?)?;
+        let q = q_of(entry);
         let encoded = match range.head.decode(entry) {
             Some((address, blocks)) => head.encode(q, address, blocks)?,
             None => head.hole(q),
@@ -217,16 +184,6 @@ fn moved<M: Copy>(
         push(out, encoded, range.entries.meta[i], count);
     }
     Some(())
-}
-
-/// The quantum of `head` starting at `slice`, if one does.
-fn requantized(head: &SubHeader, slice: u64) -> Option<u16> {
-    let offset = slice.checked_sub(head.first_key)?;
-    let shift = head.shape.key_shift();
-    if offset & ((1u64 << shift) - 1) != 0 {
-        return None;
-    }
-    u16::try_from(offset >> shift).ok()
 }
 
 fn push<M>(out: &mut Entries<M>, entry: u32, meta: M, count: u8) {
@@ -256,7 +213,7 @@ mod tests {
 
     /// Three pages of one range, side by side, a quantum each.
     fn three() -> PageIndex<u8> {
-        let mut ix = PageIndex::new(Shape::new(48, 4, 1, 1).unwrap());
+        let mut ix = PageIndex::new(Shape::new(4, 1, 1).unwrap());
         let mut at = ix.place(&key(0), page(10)).unwrap();
         for n in 1..3 {
             let cut = Cut {
@@ -334,7 +291,8 @@ mod tests {
         rewrite(&mut ix, 2, 2000);
         assert_eq!(ix.sub_headers().count(), 3);
         let runs = ix.scattered(128);
-        let want: Vec<Vec<u8>> = (0..3).map(|n| key(n).to_vec()).collect();
+        // A page is named by its quantum's first key, the prefix and 16 bits.
+        let want: Vec<Vec<u8>> = (0..3).map(|n| key(n)[..2].to_vec()).collect();
         assert_eq!(runs, std::slice::from_ref(&want));
         // A round moves two pages at most: the run stops short.
         assert_eq!(ix.scattered(2), [want[..2].to_vec()]);
