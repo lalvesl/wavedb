@@ -205,6 +205,15 @@ to `P`.
 - **On disk,** a range's slices ride the commit block's diff: the
   `SubHeaderRecord` names the slices it adds or drops, ~9–12 bytes each, and
   the `Rebuild` lays them back.
+- **Restated with their range.** A range's slices are part of its state, so
+  the rotation that restates the range (RFC 0072 §5, RFC 0079 §5) restates
+  its slices with it, whole, in the same record. A restatement that carried
+  the entries alone would let the walk's horizon pass the commit block that
+  made a slice: the open would rebuild the range without it, and read the
+  old version still held in `P`. So a range's restatement grows with its
+  slices, and a restating header that cannot hold a range and all its slices
+  skips the range rather than splitting them. That is one more reason a
+  range's slices are bounded (question 9).
 - **The cleaner** rewrites `P` with its slices applied and clears the list
   (§7). The range is clean again; nothing about it is rebuilt.
 
