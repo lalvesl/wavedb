@@ -1,73 +1,67 @@
 //! A sub-header: one range of a lane's keys, and how the `u32` entries under
-//! it are read ([RFC 0078] §3).
+//! it are read ([RFC 0078] §3, as [RFC 0081] §3a states it in bits).
+//!
+//! A range's keys share a **prefix of bits**, `prefix_bits` long; the
+//! **quantum** of a key is the 16 bits after it. A range starts at quantum
+//! `start` and reaches to the end of its prefix, or to the next range's
+//! start, whichever comes first.
 //!
 //! An entry is `q << 16 | address << size_bits | size`:
-//! - `q` is the quantum the page's coverage starts at,
-//!   `(slice(key, depth) − first_key) >> key_shift`;
+//! - `q` is the quantum the page's coverage starts at;
 //! - `address` counts `address_factor` blocks from `base_block`, the all-ones
 //!   value of the field marking a **hole** — quanta no page covers, which hold
 //!   no key;
 //! - `size` is the page's length less one, in units of `size_factor` blocks.
 //!
 //! [RFC 0078]: ../../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
+//! [RFC 0081]: ../../../../rfcs/0081-commit-blocks-slices-and-the-cleaner-PLANNED.md
 
 use std::cmp::Ordering;
 
-use super::key::{cmp_padded, slice};
+use super::key::{bits_at, cmp_joined, has_prefix, join};
 
-/// The coarsest quantization: a quantum of `2^48`, so 65 536 of them span
-/// every slice.
-pub const MAX_SHIFT: u8 = 48;
-
-/// Quanta in one sub-header's range.
+/// Quanta under one prefix.
 pub const QUANTA: u32 = 1 << 16;
 
-/// How a sub-header reads its entries.
+/// How a sub-header reads the address and size of its entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shape {
-    key_shift: u8,
     address_bits: u8,
     address_factor: u8,
     size_factor: u8,
 }
 
 impl Shape {
-    /// A disk lane's seed: the coarsest quantization, refined where pages
-    /// crowd; 12 address bits, a 16 MiB window of 4 KiB blocks; 4 size
-    /// bits, a page of up to 16 blocks to a unit.
+    /// A disk lane's: 12 address bits, a 16 MiB window of 4 KiB blocks; 4
+    /// size bits, a page of up to 16 blocks to a unit.
     pub const DISK: Self = Self {
-        key_shift: MAX_SHIFT,
         address_bits: 12,
         address_factor: 1,
         size_factor: 1,
     };
 
-    /// The object store's seed: pages around 128 KiB, so 6 size bits —
-    /// up to 64 blocks to a unit — and a 4 MiB window.
+    /// The object store's: pages around 128 KiB, so 6 size bits — up to 64
+    /// blocks to a unit — and a 4 MiB window.
     pub const REMOTE: Self = Self {
-        key_shift: MAX_SHIFT,
         address_bits: 10,
         address_factor: 1,
         size_factor: 1,
     };
 
-    /// A shape, if it is one: `key_shift ≤ 48`, `address_bits` in `1..=15`
-    /// (the size field takes the rest of 16), both factors at least 1.
+    /// A shape, if it is one: `address_bits` in `1..=15` (the size field
+    /// takes the rest of 16), both factors at least 1.
     #[must_use]
     pub const fn new(
-        key_shift: u8,
         address_bits: u8,
         address_factor: u8,
         size_factor: u8,
     ) -> Option<Self> {
-        let valid = key_shift <= MAX_SHIFT
-            && address_bits >= 1
+        let valid = address_bits >= 1
             && address_bits <= 15
             && address_factor >= 1
             && size_factor >= 1;
         if valid {
             Some(Self {
-                key_shift,
                 address_bits,
                 address_factor,
                 size_factor,
@@ -75,12 +69,6 @@ impl Shape {
         } else {
             None
         }
-    }
-
-    /// `q = (slice − first_key) >> key_shift`.
-    #[must_use]
-    pub const fn key_shift(self) -> u8 {
-        self.key_shift
     }
 
     /// Width of the address field.
@@ -107,21 +95,16 @@ impl Shape {
         16 - self.address_bits
     }
 
-    /// The four bytes a header records the shape as.
+    /// The bytes a header records the shape as.
     #[must_use]
-    pub const fn to_bytes(self) -> [u8; 4] {
-        [
-            self.key_shift,
-            self.address_bits,
-            self.address_factor,
-            self.size_factor,
-        ]
+    pub const fn to_bytes(self) -> [u8; 3] {
+        [self.address_bits, self.address_factor, self.size_factor]
     }
 
     /// The shape `bytes` record, if they are one.
     #[must_use]
-    pub const fn from_bytes(bytes: [u8; 4]) -> Option<Self> {
-        Self::new(bytes[0], bytes[1], bytes[2], bytes[3])
+    pub const fn from_bytes(bytes: [u8; 3]) -> Option<Self> {
+        Self::new(bytes[0], bytes[1], bytes[2])
     }
 
     /// Blocks a range can address from its base: pages laid end to end in
@@ -134,11 +117,6 @@ impl Shape {
     /// The address field's hole marker, all ones.
     const fn hole(self) -> u32 {
         (1 << self.address_bits) - 1
-    }
-
-    /// The same shape quantizing by `key_shift`.
-    pub(crate) const fn with_shift(self, key_shift: u8) -> Self {
-        Self { key_shift, ..self }
     }
 
     /// The size unit a page of `blocks` takes: one block while the size
@@ -171,9 +149,9 @@ impl Shape {
     }
 }
 
-/// One range of a lane's keys. Its start is `prefix ++ first_key` (big-endian),
-/// and the ranges of a lane are disjoint and sorted by it; a key belongs to
-/// the last range starting at or before it.
+/// One range of a lane's keys. Its start is its prefix's bits, then
+/// `start`'s 16; the ranges of a lane are disjoint and sorted by it, and a
+/// key belongs to the last range starting at or before it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubHeader {
     /// First block the entries' addresses count from.
