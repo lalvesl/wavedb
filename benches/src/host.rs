@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
+use crate::host_disk::{self, Disk, major, minor};
 use crate::json::fnv1a;
 
 pub struct Host {
@@ -25,7 +26,10 @@ pub struct Host {
     pub mem_budget: u64,
     pub kernel: String,
     pub filesystem: String,
-    pub rotational: Option<bool>,
+    /// The disk under `data_dir`: its model, the layers above it (an
+    /// encryption layer and its sector size), whether it spins
+    /// (`crate::host_disk`).
+    pub disk: Disk,
     pub virtualised: bool,
     /// The CPU's frequency ceiling in MHz (cpufreq's `scaling_max_freq`), or
     /// `None` where the kernel exposes no cpufreq. A clock pinned lower runs
@@ -40,11 +44,12 @@ pub struct Host {
     /// wherever this is displayed or recorded; the first version of this probe
     /// failed exactly that way and the guard never fired.
     pub btrfs: Option<BtrfsSpace>,
-    /// `<cpu-slug>-<budget>c-<clock>mhz-<budget>m-<fs>-<hash4>` — the lane
-    /// identity. The budgets and the clock are in it on purpose: a caged run
-    /// and an uncaged one on the same machine, or one at 2.0 GHz and one at
-    /// 2.3 GHz, are different lanes, because they are different machines as
-    /// far as any number here is concerned.
+    /// `<cpu-slug>-<budget>c-<clock>mhz-<budget>m-<disk>-<layers>-<fs>-<hash4>`
+    /// — the lane identity. The budgets, the clock and the disk are in it on
+    /// purpose: a caged run and an uncaged one on the same machine, one at
+    /// 2.0 GHz and one at 2.3 GHz, or one on the system NVMe and one on a
+    /// dedicated SATA disk, are different lanes, because they are different
+    /// machines as far as any number here is concerned.
     pub key: String,
 }
 
@@ -82,8 +87,9 @@ impl Host {
         let cores = num_cpus();
         let mem_bytes = mem_total();
         let kernel = read_trim("/proc/sys/kernel/osrelease");
-        let filesystem = fs_type(data_dir);
-        let rotational = rotational(data_dir);
+        let (device, filesystem) = mount_of(data_dir)
+            .unwrap_or_else(|| (String::new(), "unknown".into()));
+        let disk = host_disk::of(&device, Path::new("/sys"));
         let virtualised = cpu_flag("hypervisor");
         let clock_mhz = clock_mhz();
         // Megabytes, not gigabytes: the cage is 500 MB and integer-dividing
@@ -93,14 +99,21 @@ impl Host {
         // cannot read is a key nobody checks.
         let clock =
             clock_mhz.map_or_else(String::new, |mhz| format!("-{mhz}mhz"));
+        let model = disk
+            .model
+            .as_deref()
+            .map_or_else(String::new, |m| format!("-{}", slug(m)));
+        let layers: String =
+            disk.layers.iter().map(|l| format!("-{l}")).collect();
         let mut key = format!(
-            "{}-{cpu_budget}c{clock}-{}m-{filesystem}",
+            "{}-{cpu_budget}c{clock}-{}m{model}{layers}-{filesystem}",
             slug(&cpu),
             mem_budget / (1 << 20)
         );
         let fingerprint = format!(
             "{cpu}|{cores}|{cpu_budget}|{mem_bytes}|{mem_budget}|{kernel}|\
-             {filesystem}|{rotational:?}|{virtualised}|{clock_mhz:?}"
+             {filesystem}|{:?}|{:?}|{:?}|{virtualised}|{clock_mhz:?}",
+            disk.model, disk.layers, disk.rotational
         );
         let _ = write!(key, "-{:04x}", fnv1a(fingerprint.as_bytes()) & 0xffff);
         Self {
@@ -111,7 +124,7 @@ impl Host {
             mem_budget,
             kernel,
             filesystem,
-            rotational,
+            disk,
             virtualised,
             clock_mhz,
             btrfs: btrfs_space(data_dir),
@@ -209,12 +222,8 @@ fn mem_total() -> u64 {
     0
 }
 
-/// The mount whose path is the longest prefix of `dir` owns it.
-fn fs_type(dir: &Path) -> String {
-    mount_of(dir).map_or_else(|| "unknown".into(), |(_, kind)| kind)
-}
-
-/// `(device, fstype)` of the mount owning `dir`.
+/// `(device, fstype)` of the mount owning `dir`: the mount whose path is the
+/// longest prefix of `dir`.
 fn mount_of(dir: &Path) -> Option<(String, String)> {
     let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let mounts = read_trim("/proc/mounts");
@@ -275,7 +284,7 @@ fn btrfs_space(dir: &Path) -> Option<BtrfsSpace> {
     let rdev = std::fs::metadata(Path::new(&dev).canonicalize().ok()?)
         .ok()?
         .rdev();
-    let want = format!("{}:{}", libc_major(rdev), libc_minor(rdev));
+    let want = format!("{}:{}", major(rdev), minor(rdev));
     for entry in std::fs::read_dir("/sys/fs/btrfs").ok()?.flatten() {
         let fs = entry.path();
         // `/sys/fs/btrfs` holds a `features/` directory beside the per-uuid
@@ -318,34 +327,6 @@ fn btrfs_space(dir: &Path) -> Option<BtrfsSpace> {
         });
     }
     None
-}
-
-/// `/sys/dev/block/<major>:<minor>/queue/rotational`, falling back to the
-/// parent device when `dir` sits on a partition.
-fn rotational(dir: &Path) -> Option<bool> {
-    let meta = std::fs::metadata(dir).ok()?;
-    let dev = meta.dev();
-    let (major, minor) = (libc_major(dev), libc_minor(dev));
-    let base = format!("/sys/dev/block/{major}:{minor}");
-    for path in [
-        format!("{base}/queue/rotational"),
-        format!("{base}/../queue/rotational"),
-    ] {
-        if let Ok(v) = std::fs::read_to_string(&path) {
-            return Some(v.trim() == "1");
-        }
-    }
-    None
-}
-
-// glibc's major/minor are macros; the encoding is stable enough to inline
-// rather than take a `libc` dependency for two shifts.
-const fn libc_major(dev: u64) -> u64 {
-    ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff)
-}
-
-const fn libc_minor(dev: u64) -> u64 {
-    (dev & 0xff) | ((dev >> 12) & !0xff)
 }
 
 fn slug(s: &str) -> String {
