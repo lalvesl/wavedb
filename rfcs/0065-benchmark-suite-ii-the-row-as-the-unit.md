@@ -251,9 +251,12 @@ partition chosen by the benchmark, its `all()` is N recency orders, and it
 is comparable with `wavedb/single` only as "the same dataset, split by
 owner", which is what a node does with many owners. `wavedb/single` stays
 the micro row the corpus compares across commits. The multi row is never
-seeded (a seed is one collection on one store), and takes `settled` but no
-`compacted` footprint, as the shop's multi row: compacting a sharded
-database is the storage shard's to direct (RFC 0073).
+seeded (a seed is one collection on one store). It takes every footprint
+point the single row does, as the shop's rows do: compacting a sharded
+database is each data shard's `compact`, one after another, the storage
+shard directing the evacuation (RFC 0073) and cutting its files with the
+durable write over each shard's moves — nothing written to get the space
+back. Both time their opens written and compacted.
 
 The generator builds `thing(n, seed)` / the shop's operation stream and pushes
 descriptors down a bounded channel; consumers pop, execute, and time only the

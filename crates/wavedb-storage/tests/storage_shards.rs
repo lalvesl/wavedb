@@ -158,8 +158,9 @@ fn a_durable_write_survives_a_crash() {
     assert_eq!(read(&crashed[3], 3), None, "never settled");
 }
 
-/// Every data shard of a storage shard compacts: the evacuated files go,
-/// and every record reads back, then and after a reopen.
+/// Every data shard of a storage shard compacts: the evacuated files go
+/// with the compaction itself, and every record reads back, then and after
+/// a reopen.
 #[test]
 fn data_shards_evacuate_their_storage_shards_files() {
     let d = tempfile::tempdir().unwrap();
@@ -183,11 +184,9 @@ fn data_shards_evacuate_their_storage_shards_files() {
         for s in &stores {
             s.compact().unwrap();
         }
-        // The storage threads reclaim with their next durable write.
-        for s in &stores {
-            put(s, 9_999, 1);
-            s.drain().unwrap();
-        }
+        // No write after: the batch over each shard's moves is the durable
+        // write the storage thread reclaims with — a caller measuring a
+        // compacted database (a benchmark) writes nothing to get its space.
         let after = disk_blocks(&db);
         assert!(after < before, "the files shrank: {before} → {after}");
         for s in &stores {
