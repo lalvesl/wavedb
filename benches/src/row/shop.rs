@@ -205,11 +205,16 @@ where
     )?;
     let mut points = points.into_inner();
     // Every consumer has closed and dropped its store; whatever the factory
-    // still holds goes with it.
+    // still holds goes with it. The reopen is the open timed as written, and
+    // its stores are the ones compacted — the micro rows' order.
     drop(factory);
-    points.take(Point::Settled)?;
+    let mut opens = Vec::new();
+    let open = || crate::systems::shop::wavedb::open_measured(&dir, shards);
+    let stores = super::opens::timed("written", &dir, &mut opens, open)?;
+    super::embedded::compact_all(stores, &mut points)?;
+    drop(super::opens::timed("compacted", &dir, &mut opens, open)?);
 
-    Ok(record(
+    let mut row = record(
         run,
         phases,
         Meta {
@@ -263,7 +268,9 @@ where
             materialise_ms: 0,
             footprints: points.into_vec(),
         },
-    ))
+    );
+    row.opens = opens;
+    Ok(row)
 }
 
 /// `ShopCfg` is not `Clone` and the workload wants it by value.

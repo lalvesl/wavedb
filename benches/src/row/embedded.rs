@@ -22,6 +22,8 @@
 
 use std::cell::RefCell;
 
+use wavedb_storage::PageStore;
+
 use super::RowRun;
 use super::micro::{Meta, materialise, path_of, record, workload};
 use super::points::{Points, sqlite_is_log, wavedb_is_log};
@@ -166,12 +168,13 @@ where
     drop(factory);
     let mut opens = Vec::new();
     if multi {
-        // Every consumer drained and closed its shard. Compaction of a
-        // sharded database is the storage shard's to direct (RFC 0073), so
-        // the multi row takes `settled` and no `compacted` — as the shop's —
-        // and times its opens as written only.
-        points.take(Point::Settled)?;
-        drop(super::opens::timed("written", &data, &mut opens, || {
+        // Every consumer drained and closed its shard; the reopen is the
+        // open timed as written, and its stores are the ones compacted.
+        let stores = super::opens::timed("written", &data, &mut opens, || {
+            wavedb_adapter::open_shards(&data, consumers)
+        })?;
+        compact_all(stores, &mut points)?;
+        drop(super::opens::timed("compacted", &data, &mut opens, || {
             wavedb_adapter::open_shards(&data, consumers)
         })?);
         let mut row = record(
@@ -201,12 +204,7 @@ where
         super::opens::timed("written", &data, &mut opens, || {
             wavedb_adapter::open(&data)
         })?;
-    quiesce(&engine_after, &points)?;
-    points.take(Point::Settled)?;
-    Engineish::compact(&engine_after)?;
-    quiesce(&engine_after, &points)?;
-    points.take(Point::Compacted)?;
-    Engineish::close(engine_after);
+    compact_all(vec![engine_after], &mut points)?;
     let compacted =
         super::opens::timed("compacted", &data, &mut opens, || {
             wavedb_adapter::open(&data)
@@ -237,7 +235,7 @@ where
 /// the next one is durable (RFC 0072 §8), so the footprint can still move
 /// after the first.
 pub(super) fn quiesce<E: Engineish>(
-    engine: &E,
+    engines: &[E],
     points: &Points,
 ) -> Result<(), String> {
     const MAX_ROUNDS: usize = 6;
@@ -245,12 +243,38 @@ pub(super) fn quiesce<E: Engineish>(
     // grow proves nothing yet.
     let mut last = u64::MAX;
     for _ in 0..MAX_ROUNDS {
-        engine.drain()?;
+        for engine in engines {
+            engine.drain()?;
+        }
         let now = points.probe()?;
-        if now == last && !engine.has_pending() {
+        if now == last && !engines.iter().any(Engineish::has_pending) {
             return Ok(());
         }
         last = now;
+    }
+    Ok(())
+}
+
+/// `settled`, then `compacted`: every store quiesced, then compacted and
+/// quiesced again, then closed.
+///
+/// A sharded database compacts the same way, one data shard after another:
+/// the storage shard directs the evacuation (RFC 0073 §7) and cuts its files
+/// with the durable write over each shard's moves, so nothing is written to
+/// get the space back.
+pub(super) fn compact_all(
+    stores: Vec<PageStore>,
+    points: &mut Points,
+) -> Result<(), String> {
+    quiesce(&stores, points)?;
+    points.take(Point::Settled)?;
+    for store in &stores {
+        Engineish::compact(store)?;
+    }
+    quiesce(&stores, points)?;
+    points.take(Point::Compacted)?;
+    for store in stores {
+        Engineish::close(store);
     }
     Ok(())
 }

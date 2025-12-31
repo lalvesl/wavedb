@@ -80,7 +80,7 @@ pub fn wavedb(run: &RowRun, d: Durability) -> Result<RowRecord, String> {
     // Written: what the workload committed, all of it uploaded.
     let store = open(&data, server.options())?;
     block_on(store.upload_all()).map_err(|e| format!("upload: {e}"))?;
-    quiesce(&store, &points)?;
+    quiesce(std::slice::from_ref(&store), &points)?;
     points.take(Point::Settled)?;
     Engineish::close(store);
     drop(server);
@@ -94,7 +94,7 @@ pub fn wavedb(run: &RowRun, d: Durability) -> Result<RowRecord, String> {
     block_on(store.compact_remote())
         .map_err(|e| format!("compact_remote: {e}"))?;
     block_on(store.upload_all()).map_err(|e| format!("upload: {e}"))?;
-    quiesce(&store, &points)?;
+    quiesce(std::slice::from_ref(&store), &points)?;
     points.take(Point::Compacted)?;
     Engineish::close(store);
     drop(server);
