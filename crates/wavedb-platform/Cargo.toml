@@ -24,6 +24,10 @@ embassy-time.workspace = true
 # Carrier threads: one Embassy executor each (`carrier`, RFC 0066 step 4).
 embassy-executor.workspace = true
 sha1.workspace = true
+# The object store's request signing (SigV4, RFC 0070 §12): RustCrypto's
+# SHA-256 and HMAC, the same pair `wavedb-net` signs tokens with.
+sha2.workspace = true
+hmac.workspace = true
 # RFC 0066: the socket (`async-io`) and the I/O traits every protocol layer
 # above is generic over (`embedded-io-async`), bridged by the adapter.
 async-io.workspace = true
@@ -59,3 +63,7 @@ web-sys = { workspace = true, features = [
 # balances (`listen`, RFC 0067 §6). Elsewhere a group is one listener.
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 rustix.workspace = true
+
+[dev-dependencies]
+# The object-store tests give each test server its own directory.
+tempfile.workspace = true
