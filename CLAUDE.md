@@ -100,7 +100,9 @@ The schema crate compiles into client and node — the schema IS the protocol; t
 no DTO layer and no query DSL (filtered reads = `#[server]` functions).
 
 - **wavedb-platform** — the native ⇄ browser seam, cfg-switched (no traits): `time`
-  (`SystemTime` / `Date.now()` — `SystemTime::now()` **panics** on wasm32; + `sleep`),
+  (`SystemTime` / `Date.now()` — `SystemTime::now()` **panics** on wasm32; + `sleep`), `s3`
+  (native only: the object-store client half — ranged GET, conditional PUT,
+  DELETE, one-key LIST, SigV4 over RustCrypto; RFC 0070),
   `rand` (`RandomState` keys / `window.crypto`), `http` (the tunnel's **client half**:
   hand-rolled TcpStream POST / `fetch` + streamed body), `ws` (the WebSocket client
   half: hand-rolled RFC 6455 / browser `WebSocket`; `Conn::split()` for reader-task
