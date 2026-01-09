@@ -1,6 +1,6 @@
 # RFC 0070 — Object storage as a page backend
 
-- **Status:** In progress — opened 2026-10-10. Design agreed; phase 1 being built.
+- **Status:** In progress — opened 2026-10-10. Phases 1–2 done (descriptor, test store, S3 client); phase 3 next.
 - **Supersedes:** [RFC 0059](0059-object-storage-capacity-tier-PLANNED.md) §2–§5
   (the remote descriptor bit and the object per bucket). 0059 §1, the archive
   lane, stays and is independent of this.
@@ -310,7 +310,7 @@ and write points — not a registry and not `dyn`.
 | Phase | Content |
 |-------|---------|
 | 1 | The descriptor repacked; the test object store (versitygw) in the dev shell, its behaviour verified — done |
-| 2 | The S3 client half (range GET, PUT, DELETE, LIST, conditional PUT, SigV4) |
+| 2 | The S3 client half (range GET, PUT, DELETE, LIST, conditional PUT, SigV4): `wavedb-platform::s3` — done |
 | 3 | disk + object: the backend `enum`, the asynchronous read chain, the remote directory, the flag, the upload that reassembles flagged pages into files with the header, reopen from disk |
 | 4 | Eviction from disk and the settle that fetches an evicted page |
 | 5 | Recovery from the object store alone; snapshots in `3snap/` |
