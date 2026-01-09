@@ -597,7 +597,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0067](0067-thread-per-core-shards-WIP.md) | Thread per core: the shard as a database, the thread as placement | In progress (steps 1–5, the fsync helper and parallel recovery landed; one executor per thread decided; step 6, measuring, next) |
 | [0068](0068-record-cache-as-a-log-WIP.md) | The record cache as a log | WIP |
 | [0069](0069-compaction-into-the-holes.md) | Compaction into the holes | Implemented |
-| [0070](0070-object-storage-backend-WIP.md) | Object storage as a page backend (three modes) | WIP (phase 1) |
+| [0070](0070-object-storage-backend-WIP.md) | Object storage as a page backend (three modes) | WIP (phases 1–2 done) |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
