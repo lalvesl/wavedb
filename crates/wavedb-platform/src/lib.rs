@@ -20,6 +20,9 @@
 //!   named; every protocol above is generic over `embedded-io-async`;
 //! - [`carrier`] — native only (RFC 0066): an OS thread running one Embassy
 //!   executor, whose tasks come from static pools;
+//! - [`s3`] — native only (RFC 0070): the client half of an S3-compatible
+//!   bucket — ranged GET, conditional PUT, DELETE, a one-key LIST, all
+//!   signed (SigV4);
 //! - [`cpu`] — usable parallelism (the affinity mask and container quota this
 //!   process actually has / a constant 1, the browser having no threads).
 //!
@@ -42,6 +45,8 @@ pub mod io;
 #[cfg(not(target_arch = "wasm32"))]
 mod listen;
 pub mod rand;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod s3;
 #[cfg(target_arch = "wasm32")]
 pub mod task;
 pub mod time;
