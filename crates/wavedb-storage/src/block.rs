@@ -16,7 +16,7 @@ pub const BLOCK_SIZE: usize = 4096;
 
 const START_BITS: u32 = 43;
 const COUNT_BITS: u32 = 20;
-/// Bit 0 is reserved: RFC 0070's "not yet uploaded" flag. Always zero today.
+/// Bit 0: RFC 0070's "not uploaded yet" flag ([`BlockDescriptor::pending_upload`]).
 const FLAG_BITS: u32 = 1;
 
 const START_SHIFT: u32 = COUNT_BITS + FLAG_BITS; // 21
@@ -67,8 +67,12 @@ impl Run {
 
 /// A 64-bit page/dictionary descriptor: `start (u43) · count (u20) · flag (u1)`.
 ///
-/// One format for both pages and dictionary runs. The flag bit is reserved for
-/// the object-store backend (RFC 0070) and is zero today.
+/// One format for both pages and dictionary runs. The flag bit is the
+/// object-store backend's (RFC 0070): set on a disk page the object store has
+/// not received yet. It is no part of the run — [`run`](Self::run) and
+/// [`is_allocated`](Self::is_allocated) ignore it — so an **emptied** bucket
+/// still waiting for its upload is `count 0 · flag 1`: nothing on disk, and a
+/// removal the object store has yet to learn.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct BlockDescriptor(u64);
 
@@ -120,6 +124,19 @@ impl BlockDescriptor {
         (self.0 >> COUNT_SHIFT) & COUNT_MASK
     }
 
+    /// Whether the object store has yet to receive this disk page (RFC 0070
+    /// §1). Always `false` in a disk-only store and in a remote directory.
+    #[must_use]
+    pub const fn pending_upload(self) -> bool {
+        self.0 & 1 == 1
+    }
+
+    /// This descriptor with the "not uploaded yet" flag set to `pending`.
+    #[must_use]
+    pub const fn with_pending_upload(self, pending: bool) -> Self {
+        Self((self.0 & !1) | pending as u64)
+    }
+
     /// `true` if this slot points at a real run (`count > 0`).
     #[must_use]
     pub const fn is_allocated(self) -> bool {
@@ -138,6 +155,7 @@ impl core::fmt::Debug for BlockDescriptor {
         f.debug_struct("BlockDescriptor")
             .field("start", &self.start())
             .field("count", &self.count())
+            .field("pending_upload", &self.pending_upload())
             .finish()
     }
 }
@@ -167,6 +185,7 @@ mod tests {
         assert_eq!(d.start(), 0x0512_3456_789A);
         assert_eq!(d.count(), 0xA_BCDE);
         assert_eq!(d.raw() & 1, 0, "the flag bit stays clear");
+        assert!(!d.pending_upload());
         assert!(d.is_allocated());
         assert_eq!(d.run(), Run::new(0x0512_3456_789A, 0xA_BCDE));
     }
@@ -180,6 +199,21 @@ mod tests {
         assert_eq!(MAX_START, (1 << 43) - 1);
         assert!(!BlockDescriptor::EMPTY.is_allocated());
         assert_eq!(BlockDescriptor::EMPTY.count(), 0);
+    }
+
+    /// The flag rides beside the run and never changes it: an emptied bucket
+    /// can wait for its upload without pointing anywhere.
+    #[test]
+    fn the_upload_flag_is_no_part_of_the_run() {
+        let d = BlockDescriptor::new(777, 9).with_pending_upload(true);
+        assert!(d.pending_upload());
+        assert_eq!(d.run(), Run::new(777, 9));
+        assert_eq!(d.with_pending_upload(false), BlockDescriptor::new(777, 9));
+
+        let emptied = BlockDescriptor::EMPTY.with_pending_upload(true);
+        assert!(emptied.pending_upload());
+        assert!(!emptied.is_allocated());
+        assert_ne!(emptied, BlockDescriptor::EMPTY);
     }
 
     #[test]
