@@ -26,12 +26,16 @@
 
 use std::collections::BTreeMap;
 
-use crate::block::{BLOCK_SIZE, BlockAllocator, BlockDescriptor, Run};
+use crate::block::{BlockAllocator, BlockDescriptor};
 use crate::edit;
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::PageStore;
-use crate::plan::{SlotPlan, blocks_of};
+use crate::plan::SlotPlan;
 use crate::record_cache::Records;
+use crate::window::{
+    Target, assemble, carve, dict_descriptors, install, size_of, superseded,
+    targets_of,
+};
 
 /// Where the window itself is allocated.
 #[derive(Clone, Copy)]
@@ -46,19 +50,6 @@ enum Placement {
     /// A full addressing snapshot even if no page moves, in the lowest hole
     /// that holds it — compaction dropping the chain it has outgrown.
     Snapshot,
-}
-
-/// Where a placed image's descriptor is installed once the window is written.
-enum Target {
-    Page {
-        plan: usize,
-        bucket: usize,
-    },
-    Dict {
-        plan: usize,
-    },
-    /// The round's addressing delta — always last, always exactly one.
-    Edit,
 }
 
 impl PageStore {
@@ -168,7 +159,11 @@ impl PageStore {
         };
         let runs = window
             .map_or_else(|| vec![None; targets.len()], |w| carve(w, &sizes));
-        let freed = install(&mut plans, &targets, &runs);
+        // A settle writes what the object store has not seen; a move does
+        // not change what it moves.
+        let pending = matches!(placement, Placement::BestFit)
+            .then_some(self.object.is_some());
+        let changed = install(&mut plans, &targets, &runs, pending);
 
         // Pass two: the same shape, now naming the runs just handed out.
         let dicts = dict_descriptors(&plans, &targets, &runs);
@@ -182,7 +177,11 @@ impl PageStore {
             let buf = assemble(window, &plans, &targets, &runs, &chunk);
             self.file.write_run(window, &buf)?; // the round's one write
         }
-        for run in freed {
+        if let Some(object) = &self.object {
+            // The chunk just written carries every upload result it had.
+            object.unrecorded.borrow_mut().slots.clear();
+        }
+        for run in superseded(&changed, self.object.as_ref()) {
             // No directory names it any more, so no read will ask for it:
             // its image goes now rather than when the budget pushes it out.
             self.file.page_cache().invalidate(run);
@@ -219,129 +218,4 @@ impl PageStore {
             *self.types[work.idx].directory().borrow_mut() = Some(work.dir);
         }
     }
-}
-
-/// Everything this round places, in window order (the edit chunk is appended
-/// by the caller once its size is known).
-fn targets_of(plans: &[SlotPlan]) -> Vec<Target> {
-    let mut targets = Vec::new();
-    for (plan, work) in plans.iter().enumerate() {
-        for bucket in work.pages.keys() {
-            targets.push(Target::Page {
-                plan,
-                bucket: *bucket,
-            });
-        }
-        if work.dict.is_some() {
-            targets.push(Target::Dict { plan });
-        }
-    }
-    targets
-}
-
-/// Blocks a target occupies. An emptied page occupies none — its bucket
-/// simply becomes vacant.
-fn size_of(plans: &[SlotPlan], target: &Target, chunk: &[u8]) -> u64 {
-    match target {
-        Target::Page { plan, bucket } => {
-            plans[*plan].pages.get(bucket).map_or(0, |b| blocks_of(b))
-        }
-        Target::Dict { plan } => {
-            plans[*plan].dict.as_deref().map_or(0, blocks_of)
-        }
-        Target::Edit => blocks_of(chunk),
-    }
-}
-
-/// Assign each target its run inside `window`, in order (`None` = no space).
-fn carve(window: Run, sizes: &[u64]) -> Vec<Option<Run>> {
-    let mut cursor = window.start;
-    sizes
-        .iter()
-        .map(|&blocks| {
-            (blocks > 0).then(|| {
-                let run = Run::new(cursor, blocks);
-                cursor += blocks;
-                run
-            })
-        })
-        .collect()
-}
-
-/// Point every planned bucket at the run it was just given, returning the
-/// runs those buckets superseded.
-fn install(
-    plans: &mut [SlotPlan],
-    targets: &[Target],
-    runs: &[Option<Run>],
-) -> Vec<Run> {
-    let mut freed = Vec::new();
-    for (target, run) in targets.iter().zip(runs) {
-        let Target::Page { plan, bucket } = target else {
-            continue;
-        };
-        let old = plans[*plan].dir.descriptor(*bucket);
-        if old.is_allocated() {
-            freed.push(old.run());
-        }
-        let desc =
-            run.map_or(BlockDescriptor::EMPTY, BlockDescriptor::from_run);
-        plans[*plan].dir.set_descriptor(*bucket, desc);
-    }
-    freed
-}
-
-/// The dictionary descriptor each plan whose dictionary grew was just given.
-fn dict_descriptors(
-    plans: &[SlotPlan],
-    targets: &[Target],
-    runs: &[Option<Run>],
-) -> BTreeMap<usize, BlockDescriptor> {
-    let mut out = BTreeMap::new();
-    for plan in 0..plans.len() {
-        let Some(run) = dict_run(targets, runs, plan) else {
-            continue;
-        };
-        out.insert(plan, BlockDescriptor::from_run(run));
-    }
-    out
-}
-
-/// Fill the window: every image at its carved offset, zero-padded between.
-fn assemble(
-    window: Run,
-    plans: &[SlotPlan],
-    targets: &[Target],
-    runs: &[Option<Run>],
-    chunk: &[u8],
-) -> Vec<u8> {
-    let mut buf = vec![0u8; window.byte_len() as usize];
-    for (target, run) in targets.iter().zip(runs) {
-        let Some(run) = run else { continue };
-        let bytes: &[u8] = match target {
-            Target::Page { plan, bucket } => {
-                plans[*plan].pages[bucket].as_ref()
-            }
-            Target::Dict { plan } => {
-                plans[*plan].dict.as_deref().unwrap_or(&[])
-            }
-            Target::Edit => chunk,
-        };
-        let at = ((run.start - window.start) * BLOCK_SIZE as u64) as usize;
-        buf[at..at + bytes.len()].copy_from_slice(bytes);
-    }
-    buf
-}
-
-/// The run `plan`'s dictionary image was placed in, if it grew.
-fn dict_run(
-    targets: &[Target],
-    runs: &[Option<Run>],
-    plan: usize,
-) -> Option<Run> {
-    targets
-        .iter()
-        .zip(runs)
-        .find(|(t, _)| matches!(t, Target::Dict { plan: p } if *p == plan))
-        .and_then(|(_, run)| *run)
 }
