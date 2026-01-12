@@ -8,6 +8,11 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `s3::test_server`: a local versitygw for tests (this crate's and the
+# storage engine's). Never on in a deployed build.
+test-server = []
+
 [dependencies]
 thiserror.workspace = true
 # `select` for `time::timeout`, the same on both targets.
@@ -65,5 +70,7 @@ web-sys = { workspace = true, features = [
 rustix.workspace = true
 
 [dev-dependencies]
+# Its own test harness, for its own tests.
+wavedb-platform = { path = ".", features = ["test-server"] }
 # The object-store tests give each test server its own directory.
 tempfile.workspace = true
