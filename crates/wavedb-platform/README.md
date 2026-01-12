@@ -29,7 +29,9 @@ Notes:
   signed with SigV4 over RustCrypto's `sha2` + `hmac`. `404` on a GET is
   `None`, `412` on a conditional PUT is `Put::Refused`, anything else
   unexpected is `Error::Status`. Its tests run a `versitygw` from the dev
-  shell per test (`tests/s3_bucket.rs`).
+  shell per test (`tests/s3_bucket.rs`), through `s3::test_server` — behind
+  the `test-server` feature, which the engine's and the node's tests enable
+  too; no deployed build does.
 - `time::unix_nanos()` has millisecond precision in the browser; same-instant
   id mints stay distinct via the caller's salt counter, exactly as
   same-nanosecond native mints do.
