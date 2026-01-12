@@ -16,6 +16,10 @@ pub struct Maintenance {
     pub cache_budget_bytes: usize,
     /// When `data.bin` is compacted (RFC 0069).
     pub compaction: Compaction,
+    /// Bytes of disk pages an object-backed store holds back before it
+    /// uploads them (RFC 0070 §5) — per store, since each uploads its own
+    /// files. Default 8 MiB: about a file's worth.
+    pub upload_after_bytes: u64,
 }
 
 impl Default for Maintenance {
@@ -24,6 +28,7 @@ impl Default for Maintenance {
             checkpoint_after_bytes: 64 * 1024 * 1024, // 64 MiB of journal
             cache_budget_bytes: 1024 * 1024 * 1024,   // 1 GiB — generous
             compaction: Compaction::default(),
+            upload_after_bytes: 8 << 20, // 8 MiB, about a file
         }
     }
 }
