@@ -146,6 +146,17 @@ where
         self
     }
 
+    /// Keep the pages in an object store, the disk caching them (RFC 0070):
+    /// each shard keeps its objects under `shards/<xx>/` below `remote`'s
+    /// prefix, and uploads what it settled once it holds back
+    /// [`Maintenance::upload_after_bytes`]. The mode is fixed when the
+    /// database is created; opening it the other way is refused.
+    #[must_use]
+    pub fn object_store(mut self, remote: wavedb_storage::Remote) -> Self {
+        self.store.remote = Some(remote);
+        self
+    }
+
     /// Checkpoint (persist the pages' metadata and truncate the journal)
     /// once the journal exceeds `bytes`. Default 64 MiB.
     #[must_use]
