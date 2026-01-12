@@ -27,53 +27,21 @@ use std::hash::{BuildHasher, Hasher};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
-use wavedb_core::wire::{
-    CRC_PREFIX_LEN, WaveWire, from_wire_checked, to_wire_checked,
-};
-
 use crate::block::{BLOCK_SIZE, Run};
 use crate::error::{StorageError, StorageResult};
 use crate::page_cache::{self, PageCache};
-
-/// Magic at the head of every WaveDB `data.bin` superblock.
-const MAGIC: &[u8; 8] = b"WAVEDBIN";
-
-/// On-disk format version.
-///
-/// **Pinned at 1 while WaveDB is pre-release**: the format changes freely with
-/// no bumps, no history, and no migrations — an old `data.bin` is simply not
-/// supported (delete it; the journal replay rebuilds pages). Versioning starts
-/// mattering at the first release.
-const FORMAT_VERSION: u32 = 1;
+use crate::superblock::{self, FORMAT_VERSION, SuperblockBody};
 
 /// Blocks reserved at the head of the file for engine metadata (the superblock).
 /// The allocator must never hand these out.
 pub const RESERVED_BLOCKS: u64 = 1;
-
-// Superblock byte layout within block 0, the rest zero-padded:
-//   [0..8)  magic
-//   [8..)   to_wire_checked(SuperblockBody) = [ crc32 (u32 LE) ][ wire bytes ]
-const OFF_BODY: usize = 8;
-
-/// Everything the superblock persists besides the magic. Stack-only wire value
-/// (fixed size), so its checked encoding has a compile-time length.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, WaveWire)]
-struct SuperblockBody {
-    /// On-disk format version — inside the crc-protected body.
-    version: u32,
-    /// The per-database hash seed every record is routed with.
-    seed: [u64; 4],
-}
-
-/// Byte length of the checked-encoded [`SuperblockBody`] within block 0.
-const BODY_CHECKED_LEN: usize =
-    CRC_PREFIX_LEN + <SuperblockBody as WaveWire>::STACK_SIZE;
 
 /// `data.bin` opened as an array of fixed [`BLOCK_SIZE`]-byte blocks.
 #[derive(Debug)]
 pub struct BlockFile {
     file: File,
     seed: [u64; 4],
+    object_backed: bool,
     io: IoCounts,
     /// Settled page images by run ([RFC 0044]).
     ///
@@ -137,6 +105,21 @@ impl BlockFile {
         path: impl AsRef<Path>,
         page_cache_bytes: usize,
     ) -> StorageResult<Self> {
+        Self::open_as(path, page_cache_bytes, false)
+    }
+
+    /// [`open_with`](Self::open_with), creating a new file object-backed or
+    /// not (RFC 0070). An existing file keeps the mode it was created with —
+    /// [`object_backed`](Self::object_backed) says which; comparing it with
+    /// what the caller expected is the caller's business.
+    ///
+    /// # Errors
+    /// The same faults as [`open`](Self::open).
+    pub fn open_as(
+        path: impl AsRef<Path>,
+        page_cache_bytes: usize,
+        object_backed: bool,
+    ) -> StorageResult<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -151,6 +134,7 @@ impl BlockFile {
             let bf = Self {
                 file,
                 seed,
+                object_backed,
                 io: IoCounts::default(),
                 cache: PageCache::new(page_cache_bytes),
             };
@@ -158,10 +142,11 @@ impl BlockFile {
             bf.file.sync_all()?;
             Ok(bf)
         } else {
-            let body = read_and_check_superblock(&file)?;
+            let body = superblock::read(&file)?;
             Ok(Self {
                 file,
                 seed: body.seed,
+                object_backed: body.object_backed,
                 io: IoCounts::default(),
                 cache: PageCache::new(page_cache_bytes),
             })
@@ -172,6 +157,12 @@ impl BlockFile {
     #[must_use]
     pub const fn seed(&self) -> [u64; 4] {
         self.seed
+    }
+
+    /// Whether this database's pages live in an object store (RFC 0070).
+    #[must_use]
+    pub const fn object_backed(&self) -> bool {
+        self.object_backed
     }
 
     /// Current file length in whole blocks (rounding any partial tail down).
@@ -294,41 +285,15 @@ impl BlockFile {
 
     /// Serialise the superblock into block 0 and persist it.
     fn write_superblock(&self) -> StorageResult<()> {
-        let mut block = vec![0u8; BLOCK_SIZE];
-        block[..MAGIC.len()].copy_from_slice(MAGIC);
-        let body = to_wire_checked(&SuperblockBody {
+        let block = superblock::block_of(&SuperblockBody {
             version: FORMAT_VERSION,
             seed: self.seed,
+            object_backed: self.object_backed,
         });
-        block[OFF_BODY..OFF_BODY + BODY_CHECKED_LEN].copy_from_slice(&body);
         self.ensure_len(BLOCK_SIZE as u64)?;
         self.file.write_all_at(&block, 0)?;
         Ok(())
     }
-}
-
-/// Read block 0, verify magic + crc + version, and return the stored body.
-fn read_and_check_superblock(file: &File) -> StorageResult<SuperblockBody> {
-    let have = file.metadata()?.len();
-    if have < BLOCK_SIZE as u64 {
-        return Err(StorageError::OutOfBounds {
-            need: BLOCK_SIZE as u64,
-            have,
-        });
-    }
-    let mut block = vec![0u8; BLOCK_SIZE];
-    file.read_exact_at(&mut block, 0)?;
-
-    if &block[..MAGIC.len()] != MAGIC {
-        return Err(StorageError::BadMagic);
-    }
-    let body: SuperblockBody =
-        from_wire_checked(&block[OFF_BODY..OFF_BODY + BODY_CHECKED_LEN])
-            .map_err(|_| StorageError::Corrupt("superblock"))?;
-    if body.version != FORMAT_VERSION {
-        return Err(StorageError::BadVersion(body.version));
-    }
-    Ok(body)
 }
 
 /// A per-database random `[u64; 4]` seed, drawn from the OS via the stdlib's
@@ -346,11 +311,10 @@ pub(crate) fn random_seed() -> [u64; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        BlockFile, FORMAT_VERSION, MAGIC, OFF_BODY, SuperblockBody, page_cache,
-    };
+    use super::{BlockFile, page_cache};
     use crate::block::{BLOCK_SIZE, Run};
     use crate::error::StorageError;
+    use crate::superblock::{FORMAT_VERSION, MAGIC, OFF_BODY, SuperblockBody};
     use std::os::unix::fs::FileExt;
     use wavedb_core::wire::to_wire_checked;
 
@@ -514,6 +478,7 @@ mod tests {
             let body = to_wire_checked(&SuperblockBody {
                 version: FORMAT_VERSION + 1,
                 seed: [1, 2, 3, 4],
+                object_backed: false,
             });
             f.write_all_at(&body, OFF_BODY as u64).unwrap();
         }
