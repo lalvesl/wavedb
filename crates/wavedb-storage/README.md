@@ -151,7 +151,7 @@ descriptor — there is no second format:
 | ------ | ------------- | ----- | --------------------------------------------------------------- |
 | 63..21 | `start_block` | `u43` | First 4 KiB block (2⁴³ × 4 KiB ≈ **32 PiB** of address).        |
 | 20..1  | `block_count` | `u20` | Contiguous blocks (1 ≤ n ≤ 2²⁰ ⇒ ≤ **~4 GiB** per page/run).    |
-| 0      | `flag`        | `u1`  | Reserved for the object-store backend (RFC 0070); zero today.   |
+| 0      | `flag`        | `u1`  | Not uploaded yet (RFC 0070): set on a disk page the object store has not received. |
 
 `43 + 20 + 1 = 64` — exact fit. (A 4-bit fill gauge used to sit in the low bits;
 nothing ever read it, so its bits went to the address and the flag.)
@@ -383,6 +383,17 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
    `data.bin` ([RFC 0069](../../rfcs/0069-compaction-into-the-holes.md)). It
    is stepped, a bounded pass at a time; the node starts one on a daily UTC
    time, a disk ceiling, or a free-space share.
+
+7. **The object store** ([RFC 0070](../../rfcs/0070-object-storage-backend-WIP.md),
+   phase 3). A database created with `StoreOptions::remote` keeps its pages
+   in an object store, the disk caching them. Settle rounds flag what they
+   write; `upload` reassembles the flagged pages, record by record, into the
+   object store's own linear hash of 128 KiB pages, packed into files of
+   `[32 KiB header][pages…]` (every page starts within the file's first
+   8 MiB), and clears the flags. The remote directories ride the disk's
+   addressing log, so a reopen restores them from the disk alone. Eviction
+   from disk is phase 4: until then every page is on disk and no read
+   reaches the object store.
 
 On startup the directories and the block allocator rebuild by **journal replay**.
 
