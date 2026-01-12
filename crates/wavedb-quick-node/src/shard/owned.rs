@@ -172,6 +172,26 @@ impl Owned {
         cell.set(armed);
     }
 
+    /// Upload store `i`'s pending disk pages once they pass the policy's
+    /// threshold (RFC 0070 §5), in uploads of a few files each. The jobs
+    /// keep the thread while it awaits the object store; a fault is
+    /// reported, and the flags stay for the next tick to retry.
+    pub async fn upload(&self, i: usize, policy: &Maintenance) {
+        let Some(store) = self.stores.get(i) else {
+            return;
+        };
+        while store.pending_upload_bytes() >= policy.upload_after_bytes.max(1) {
+            match store.upload().await {
+                Ok(done) if done.pages > 0 => {}
+                Ok(_) => return, // another upload has it, or nothing moved
+                Err(e) => {
+                    eprintln!("worker: upload failed: {e}");
+                    return;
+                }
+            }
+        }
+    }
+
     /// How many stores the range holds.
     #[must_use]
     pub const fn len(&self) -> usize {
@@ -368,5 +388,49 @@ mod tests {
         assert!(owned.working());
         drop(busy);
         assert!(!owned.working());
+    }
+    /// An object-backed store uploads what it settled once it holds back
+    /// the policy's threshold, and not before.
+    #[test]
+    fn an_object_backed_store_uploads_past_its_threshold() {
+        let d = tempfile::tempdir().unwrap();
+        let server = wavedb_platform::s3::test_server::TestServer::start(
+            &d.path().join("objects"),
+        );
+        let options = StoreOptions {
+            remote: Some(wavedb_storage::Remote::new(server.bucket(), "")),
+            ..StoreOptions::default()
+        };
+        let stores =
+            open_shards(d.path().join("db"), &[&SLOT], options, 1).unwrap();
+        let owned = Owned::new(0, stores);
+        let store = owned.store(0).unwrap();
+        put(store, 0..200);
+        store.drain().unwrap();
+        let pending = store.pending_upload_bytes();
+        assert!(pending > 0);
+
+        let policy = Maintenance {
+            upload_after_bytes: pending + 1,
+            ..Maintenance::default()
+        };
+        wavedb_platform::carrier::block_on(owned.upload(0, &policy));
+        assert_eq!(
+            store.pending_upload_bytes(),
+            pending,
+            "under the threshold"
+        );
+
+        let policy = Maintenance {
+            upload_after_bytes: pending,
+            ..Maintenance::default()
+        };
+        wavedb_platform::carrier::block_on(owned.upload(0, &policy));
+        assert_eq!(store.pending_upload_bytes(), 0);
+        let got =
+            wavedb_platform::carrier::block_on(store.read_uploaded(SH, id(7)));
+        let mut want = SH.to_le_bytes().to_vec();
+        want.extend_from_slice(&7u64.to_le_bytes());
+        assert_eq!(got.unwrap(), Some(want));
     }
 }
