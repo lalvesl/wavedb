@@ -36,6 +36,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The object-backed upkeep runs against a local versitygw.
+wavedb-platform = { workspace = true, features = ["test-server"] }
 wavedb-net = { path = "../wavedb-net" }
 # Integration tests drive the node with real `#[wavedb]` structs + a REGISTRY.
 schema-smoke = { path = "../../examples/schema-smoke" }
