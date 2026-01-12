@@ -17,6 +17,8 @@
 
 mod exchange;
 pub mod sign;
+#[cfg(feature = "test-server")]
+pub mod test_server;
 
 use core::fmt::Write as _;
 use core::ops::Range;
@@ -227,11 +229,11 @@ mod tests {
 
     #[test]
     fn a_listing_yields_its_first_key_unescaped() {
-        let xml = "<ListBucketResult><Contents><Key>2seg/a&amp;b</Key>\
-                   </Contents><Contents><Key>2seg/z</Key></Contents>";
+        let xml = "<ListBucketResult><Contents><Key>1seg/a&amp;b</Key>\
+                   </Contents><Contents><Key>1seg/z</Key></Contents>";
         assert_eq!(
             between(xml, "<Key>", "</Key>").map(unescape),
-            Some("2seg/a&b".into())
+            Some("1seg/a&b".into())
         );
         assert_eq!(between("<ListBucketResult/>", "<Key>", "</Key>"), None);
     }
