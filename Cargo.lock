@@ -1793,6 +1793,7 @@ dependencies = [
  "thiserror",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wavedb-platform",
  "web-sys",
 ]
 
@@ -1826,6 +1827,7 @@ dependencies = [
  "thiserror",
  "wavedb-core",
  "wavedb-macros",
+ "wavedb-platform",
  "wavedb-wire",
  "zstd",
 ]

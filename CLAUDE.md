@@ -170,7 +170,15 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   record cache — one log per type in chunks + one Dashtable-shaped index;
   settledness is a cursor, eviction drops settled chunks (RFC 0068). Compaction
   moves pages down into the holes and truncates the free tail, stepped,
-  on the node's triggers (daily UTC time, disk ceiling, free share — RFC 0069). A store
+  on the node's triggers (daily UTC time, disk ceiling, free share — RFC 0069).
+  A database created with `StoreOptions::remote` (`Server::object_store` on a
+  node) keeps its pages in an S3-compatible object store, the disk caching
+  them (RFC 0070 phase 3): settle rounds flag the pages they write, `upload`
+  reassembles the flagged ones into the object store's own linear hash
+  (128 KiB pages, files of `[32 KiB header][pages]`), and the remote
+  directories ride the disk's addressing log; the mode is fixed in the
+  superblock. Eviction from disk (and so any read reaching the object store)
+  is phase 4. A store
   is used from one thread: plain cells, no lock, no atomic; `Send`, not `Sync`. **One open `PageStore`
   per data directory** — `data.bin` is locked while open, a second open of it is
   `EngineBusy` — and stores over different directories coexist in one process.
