@@ -2853,6 +2853,7 @@ dependencies = [
  "seahash",
  "thiserror",
  "wavedb-core",
+ "wavedb-platform",
  "wavedb-wire",
  "zstd",
 ]
