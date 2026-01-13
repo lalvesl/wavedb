@@ -62,6 +62,8 @@ pub struct Recovered {
     pub journal: Journal,
     pub replay: Vec<Vec<Write>>,
     pub meta: MetaLog,
+    /// Where the next upload writes in the object store (RFC 0070).
+    pub remote_end: u64,
 }
 
 /// Recover engine state from the journals under `dir` (see module docs).
@@ -89,6 +91,7 @@ pub fn restore(
             journal,
             replay: Vec::new(),
             meta: MetaLog::default(),
+            remote_end: 0,
         });
     }
 
@@ -106,12 +109,13 @@ pub fn restore(
         journals.push((*ts, journal, frames));
     }
 
-    let ((alloc, meta), covered_ts) = if let Some(commit) = &newest_commit {
-        (load_commit(file, types, commit)?, commit.journal_ts)
-    } else {
-        // First generation (never rotated): rebuild pages from scratch.
-        ((fresh_alloc(file)?, MetaLog::default()), 0)
-    };
+    let ((alloc, meta, remote_end), covered_ts) =
+        if let Some(commit) = &newest_commit {
+            (load_commit(file, types, commit)?, commit.journal_ts)
+        } else {
+            // First generation (never rotated): rebuild pages from scratch.
+            ((fresh_alloc(file)?, MetaLog::default(), 0), 0)
+        };
 
     // Batches from journals the commit does not cover, oldest first. The
     // covered ones only linger after a crash between commit and delete —
@@ -140,6 +144,7 @@ pub fn restore(
         journal,
         replay,
         meta,
+        remote_end,
     })
 }
 
@@ -155,7 +160,7 @@ fn load_commit(
     file: &BlockFile,
     types: &[TypeSlot],
     commit: &CommitFrame,
-) -> StorageResult<(BlockAllocator, MetaLog)> {
+) -> StorageResult<(BlockAllocator, MetaLog, u64)> {
     let mut used = vec![Run::new(0, RESERVED_BLOCKS)];
     let mut replay = Replay::default();
     let chain = walk(file, BlockDescriptor::from_raw(commit.head))?;
@@ -164,8 +169,21 @@ fn load_commit(
         used.push(desc.run());
     }
 
-    let (slots, dicts) = replay.into_parts();
-    for (hash, addresses) in slots {
+    let parts = replay.into_parts();
+    for (hash, addresses) in parts.remote {
+        // Remote descriptors name the object store's blocks, so none of
+        // them enters the disk allocator.
+        let slot = slot_of(types, hash)?;
+        let descriptors: Vec<BlockDescriptor> = addresses
+            .into_iter()
+            .map(BlockDescriptor::from_raw)
+            .collect();
+        if !descriptors.is_empty() {
+            *slot.remote_directory().borrow_mut() =
+                Some(Directory::from_slots(descriptors, file.seed()));
+        }
+    }
+    for (hash, addresses) in parts.slots {
         let slot = slot_of(types, hash)?;
         if addresses.is_empty() {
             continue; // the type never settled anything
@@ -183,7 +201,7 @@ fn load_commit(
         *slot.directory().borrow_mut() =
             Some(Directory::from_slots(descriptors, file.seed()));
     }
-    for (hash, desc_raw) in dicts {
+    for (hash, desc_raw) in parts.dicts {
         let slot = slot_of(types, hash)?;
         let desc = BlockDescriptor::from_raw(desc_raw);
         if !desc.is_allocated() {
@@ -195,7 +213,7 @@ fn load_commit(
     }
     let mut alloc = BlockAllocator::from_layout(file.len_blocks()?, &used);
     alloc.set_protected(&used);
-    Ok((alloc, MetaLog::restored(chain)))
+    Ok((alloc, MetaLog::restored(chain), parts.remote_end))
 }
 
 /// The registered slot for `hash` — a commit naming an unlisted type
