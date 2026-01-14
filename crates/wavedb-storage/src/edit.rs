@@ -30,7 +30,7 @@
 //! [RFC 0046]: ../../../rfcs/0046-directory-deltas-in-the-window.md
 //! [RFC 0048]: ../../../rfcs/0048-chained-addressing-log.md
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use wavedb_core::wire::{WaveWire, from_wire_checked, to_wire_checked};
 
@@ -39,7 +39,7 @@ use crate::block_file::BlockFile;
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::PageStore;
 use crate::plan::SlotPlan;
-use crate::struct_storage::TypeSlot;
+use crate::struct_storage::{StructDirectory, TypeSlot};
 
 /// Hard cap on chunks between snapshots — bounds a recovery's scattered reads
 /// even when the snapshot is large enough that the ratio alone would not.
@@ -80,6 +80,11 @@ pub struct EditChunk {
     /// [RFC 0048]: ../../../rfcs/0048-chained-addressing-log.md
     pub prev: u64,
     pub slots: Vec<SlotEdit>,
+    /// The object store's directories (RFC 0070 §2): the same edits, over
+    /// remote descriptors. A disk-only store writes none.
+    pub remote: Vec<SlotEdit>,
+    /// The next remote block an upload writes at; `0` until the first.
+    pub remote_end: u64,
 }
 
 /// Walk the chain back from `head`, newest first, returning every live chunk
@@ -157,24 +162,48 @@ pub fn chunk_of(
     dicts: &BTreeMap<usize, BlockDescriptor>,
     prev: u64,
 ) -> EditChunk {
+    let unrecorded = store.object.as_ref().map(|o| o.unrecorded.borrow());
+    let touched =
+        |idx: usize| unrecorded.as_ref().and_then(|u| u.slots.get(&idx));
     let mut slots: Vec<SlotEdit> = plans
         .iter()
         .enumerate()
-        .map(|(plan, work)| planned_edit(store, plan, work, full, dicts))
+        .map(|(plan, work)| {
+            let cleared = touched(work.idx).map(|t| &t.disk);
+            planned_edit(store, plan, work, full, dicts, cleared)
+        })
         .collect();
-    if full {
-        // A snapshot must stand alone, so the types this round did not touch
-        // contribute their resident state.
-        for (idx, slot) in store.types.iter().enumerate() {
-            if plans.iter().any(|work| work.idx == idx) {
-                continue;
+    // A snapshot must stand alone, so the types this round did not touch
+    // contribute their resident state. A delta carries what uploads changed
+    // since the last chunk: the flags they cleared, the remote pages they
+    // placed (RFC 0070 §5).
+    let mut remote = Vec::new();
+    for (idx, slot) in store.types.iter().enumerate() {
+        if store.object.is_some() {
+            let listed = touched(idx).map(|t| &t.remote);
+            let dir = slot.remote_directory();
+            remote.extend(listed_edit(dir, slot, full, listed));
+        }
+        if plans.iter().any(|work| work.idx == idx) {
+            continue;
+        }
+        let listed = touched(idx).map(|t| &t.disk);
+        if let Some(mut edit) =
+            listed_edit(slot.directory(), slot, full, listed)
+        {
+            if full {
+                edit.dict = Some(slot.dictionary().borrow().descriptor().raw());
             }
-            if let Some(edit) = resident_edit(slot) {
-                slots.push(edit);
-            }
+            slots.push(edit);
         }
     }
-    EditChunk { prev, slots }
+    let remote_end = store.object.as_ref().map_or(0, |o| o.end.get());
+    EditChunk {
+        prev,
+        slots,
+        remote,
+        remote_end,
+    }
 }
 
 /// The edit for a slot this round planned — its working directory holds the
@@ -185,14 +214,22 @@ fn planned_edit(
     work: &SlotPlan,
     full: bool,
     dicts: &BTreeMap<usize, BlockDescriptor>,
+    cleared: Option<&BTreeSet<usize>>,
 ) -> SlotEdit {
     let slot = &store.types[work.idx];
     let changed = if full {
         every_bucket(work.dir.slots())
     } else {
-        work.pages
+        // The rewritten buckets, and those whose flag an upload cleared.
+        let buckets: BTreeSet<usize> = work
+            .pages
             .keys()
-            .map(|&bucket| (bucket as u32, work.dir.descriptor(bucket).raw()))
+            .chain(cleared.into_iter().flatten())
+            .copied()
+            .collect();
+        buckets
+            .into_iter()
+            .map(|bucket| (bucket as u32, work.dir.descriptor(bucket).raw()))
             .collect()
     };
     let dict = if work.dict.is_some() {
@@ -210,20 +247,30 @@ fn planned_edit(
     }
 }
 
-/// A snapshot entry for a type this round did not touch.
-fn resident_edit(slot: &TypeSlot) -> Option<SlotEdit> {
-    // The directory guard is released before the dictionary's is taken: this
-    // is a read of settled state, so it needs no consistent pair.
-    let guard = slot.directory().borrow_mut();
+/// The edit for a directory this round planned no page of: every bucket of
+/// it for a snapshot, the `listed` ones for a delta — `None` when that is
+/// nothing, or the directory does not exist yet.
+fn listed_edit(
+    cell: &StructDirectory,
+    slot: &TypeSlot,
+    full: bool,
+    listed: Option<&BTreeSet<usize>>,
+) -> Option<SlotEdit> {
+    let guard = cell.borrow();
     let dir = guard.as_ref()?;
-    let buckets = dir.len() as u32;
-    let changed = every_bucket(dir.slots());
-    drop(guard);
-    Some(SlotEdit {
+    let changed: Vec<(u32, u64)> = if full {
+        every_bucket(dir.slots())
+    } else {
+        listed?
+            .iter()
+            .map(|&bucket| (bucket as u32, dir.descriptor(bucket).raw()))
+            .collect()
+    };
+    (full || !changed.is_empty()).then(|| SlotEdit {
         struct_hash: slot.struct_hash(),
-        buckets,
+        buckets: dir.len() as u32,
         changed,
-        dict: Some(slot.dictionary().borrow_mut().descriptor().raw()),
+        dict: None,
     })
 }
 
@@ -239,8 +286,20 @@ fn every_bucket(slots: &[BlockDescriptor]) -> Vec<(u32, u64)> {
 /// it, in order.
 #[derive(Debug, Default)]
 pub struct Replay {
-    slots: BTreeMap<u64, Vec<u64>>,
-    dicts: BTreeMap<u64, u64>,
+    parts: Replayed,
+}
+
+/// What a [`Replay`] rebuilt, per `STRUCT_HASH`.
+#[derive(Debug, Default)]
+pub struct Replayed {
+    /// The disk directories' raw descriptors.
+    pub slots: BTreeMap<u64, Vec<u64>>,
+    /// The dictionaries' runs.
+    pub dicts: BTreeMap<u64, u64>,
+    /// The object store's directories' raw descriptors (RFC 0070).
+    pub remote: BTreeMap<u64, Vec<u64>>,
+    /// The next remote block an upload writes at.
+    pub remote_end: u64,
 }
 
 impl Replay {
@@ -251,27 +310,40 @@ impl Replay {
     /// directory size it declares.
     pub fn apply(&mut self, chunk: &EditChunk) -> StorageResult<()> {
         for edit in &chunk.slots {
-            let addresses = self.slots.entry(edit.struct_hash).or_default();
-            if (edit.buckets as usize) > addresses.len() {
-                addresses.resize(edit.buckets as usize, 0);
-            }
-            for &(bucket, raw) in &edit.changed {
-                let cell = addresses.get_mut(bucket as usize).ok_or(
-                    StorageError::Corrupt("edit chunk bucket out of range"),
-                )?;
-                *cell = raw;
-            }
+            fold(&mut self.parts.slots, edit)?;
             if let Some(dict) = edit.dict {
-                self.dicts.insert(edit.struct_hash, dict);
+                self.parts.dicts.insert(edit.struct_hash, dict);
             }
         }
+        for edit in &chunk.remote {
+            fold(&mut self.parts.remote, edit)?;
+        }
+        self.parts.remote_end = chunk.remote_end;
         Ok(())
     }
 
-    /// `(STRUCT_HASH → bucket descriptors, STRUCT_HASH → dictionary run)`.
-    pub fn into_parts(self) -> (BTreeMap<u64, Vec<u64>>, BTreeMap<u64, u64>) {
-        (self.slots, self.dicts)
+    /// Everything rebuilt.
+    pub fn into_parts(self) -> Replayed {
+        self.parts
     }
+}
+
+/// Apply one type's edit to its directory in `dirs`.
+fn fold(
+    dirs: &mut BTreeMap<u64, Vec<u64>>,
+    edit: &SlotEdit,
+) -> StorageResult<()> {
+    let addresses = dirs.entry(edit.struct_hash).or_default();
+    if (edit.buckets as usize) > addresses.len() {
+        addresses.resize(edit.buckets as usize, 0);
+    }
+    for &(bucket, raw) in &edit.changed {
+        let cell = addresses
+            .get_mut(bucket as usize)
+            .ok_or(StorageError::Corrupt("edit chunk bucket out of range"))?;
+        *cell = raw;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -292,6 +364,8 @@ mod tests {
     fn chunk_roundtrips_through_its_envelope() {
         let chunk = EditChunk {
             prev: 0,
+            remote: Vec::new(),
+            remote_end: 0,
             slots: vec![SlotEdit {
                 struct_hash: 7,
                 buckets: 3,
@@ -313,10 +387,14 @@ mod tests {
     fn encoded_length_depends_on_shape_not_addresses() {
         let skeleton = EditChunk {
             prev: 0,
+            remote: Vec::new(),
+            remote_end: 0,
             slots: vec![edit(7, 3, &[(0, 0), (2, 0)])],
         };
         let filled = EditChunk {
             prev: 0,
+            remote: Vec::new(),
+            remote_end: 0,
             slots: vec![edit(7, 3, &[(0, u64::MAX), (2, 0x1234_5678)])],
         };
         assert_eq!(encode(&skeleton).len(), encode(&filled).len());
@@ -328,6 +406,8 @@ mod tests {
         replay
             .apply(&EditChunk {
                 prev: 0,
+                remote: Vec::new(),
+                remote_end: 0,
                 slots: vec![SlotEdit {
                     struct_hash: 7,
                     buckets: 2,
@@ -340,10 +420,13 @@ mod tests {
         replay
             .apply(&EditChunk {
                 prev: 0,
+                remote: Vec::new(),
+                remote_end: 0,
                 slots: vec![edit(7, 3, &[(1, 21), (2, 30)])],
             })
             .unwrap();
-        let (slots, dicts) = replay.into_parts();
+        let parts = replay.into_parts();
+        let (slots, dicts) = (parts.slots, parts.dicts);
         assert_eq!(slots[&7], vec![10, 21, 30]);
         assert_eq!(dicts[&7], 5, "an untouched dictionary must carry forward");
     }
@@ -355,6 +438,8 @@ mod tests {
             replay
                 .apply(&EditChunk {
                     prev: 0,
+                    remote: Vec::new(),
+                    remote_end: 0,
                     slots: vec![edit(7, 2, &[(5, 10)])],
                 })
                 .is_err()
