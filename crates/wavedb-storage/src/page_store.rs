@@ -18,33 +18,14 @@
 //!   serve from it, the settle writes from it, eviction drops whole chunks
 //!   of it.
 //!
-//! ## Locking
+//! ## Cells, not locks
 //!
-//! The narrow globals:
-//!
-//! - `journal` (`Mutex`) — appends must be ordered; the cache commit happens
-//!   under it so cache order always equals journal (= replay) order;
-//! - `cache` (`RwLock`) — the record cache; memory work only, never held
-//!   across a page read or write;
-//! - `settling` (`Mutex`) — one settle round at a time, held for the round;
-//! - `alloc` (`Mutex`) — block space is one shared resource.
-//!
-//! Lock order: `journal → cache` on the commit path; `settling → cache`
-//! (copy the round out, released) `→ dir → dict → alloc` (write it) `→
-//! cache` (advance) on the settle; `dir → dict` on the read-through path. No
-//! path takes them in a conflicting order, so the graph is acyclic.
-//! `checkpoint` comes before all of them: only a checkpoint step takes it,
-//! and it holds it for the whole step.
-//!
-//! The commit path takes no directory at all since RFC 0063: every write
-//! carries the STRUCT_HASH it routes by, so committing a batch is memory
-//! work and cannot touch a page.
-//!
-//! `retiring` sits outside that order entirely, by rule: it is **never held
-//! across another lock**. A checkpoint publishes under it (`alloc → retiring`)
-//! and claims it before rotating; `force_retirement` takes it after syncing the
-//! journal and releases it before `dispose` takes `alloc`. Since it is only
-//! ever held alone, it can join no cycle (`crate::retire`).
+//! A store is used from one thread (RFC 0068), so its state sits in plain
+//! cells. What used to be lock order is now borrow discipline: no step holds
+//! a borrow across a call that borrows the same cell, and nothing that
+//! suspends — an object-store request (RFC 0070) — holds one at all. The
+//! commit path touches no directory (RFC 0063): every write carries the
+//! STRUCT_HASH it routes by, so committing a batch is memory work.
 //!
 //! ## Reads
 //!
@@ -108,7 +89,7 @@ const DEFAULT_TARGET_BLOCKS_PER_BUCKET: u64 = 8; // 32 KiB
 /// `STRUCT_HASH`: a window and two cache budgets change when work happens and
 /// what is held in RAM while it does, never what is written. Two stores opened
 /// with different options hold byte-identical files.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct StoreOptions {
     /// Longest a `Batch` may sit unsynced. **Zero (the default) is one
     /// barrier per batch** — the promise the engine was built around, and
@@ -143,6 +124,14 @@ pub struct StoreOptions {
     /// *where the number lives*: opened with the store, instead of a constant
     /// remembered separately at every call site.
     pub record_cache_bytes: usize,
+
+    /// Where the pages live besides the disk (RFC 0070): `Some` makes the
+    /// disk a cache of this object store. Fixed when the database is
+    /// created — the superblock records it, and opening with the other
+    /// answer is [`StorageError::ModeMismatch`](crate::StorageError::ModeMismatch).
+    /// The endpoint and the credentials are not stored anywhere: they come
+    /// with every open.
+    pub remote: Option<crate::remote::Remote>,
 }
 
 /// Bytes of decoded records [`StoreOptions::record_cache_bytes`] defaults to.
@@ -160,6 +149,7 @@ impl Default for StoreOptions {
             relax_window: Duration::ZERO,
             page_cache_bytes: crate::page_cache::DEFAULT_BUDGET_BYTES,
             record_cache_bytes: DEFAULT_RECORD_CACHE_BYTES,
+            remote: None,
         }
     }
 }
@@ -208,6 +198,8 @@ pub struct PageStore {
     pub(crate) barrier: Option<crate::barrier::Barrier>,
     /// Where a compaction is between its steps (RFC 0069).
     pub(crate) compaction: std::cell::Cell<crate::compact::Phase>,
+    /// The object store's side, when the pages live there (RFC 0070).
+    pub(crate) object: Option<crate::remote::ObjectState>,
 }
 
 impl PageStore {
@@ -244,10 +236,16 @@ impl PageStore {
         std::fs::create_dir_all(dir)?;
 
         let data_bin_existed = dir.join("data.bin").exists();
-        let file = BlockFile::open_with(
+        let file = BlockFile::open_as(
             dir.join("data.bin"),
             options.page_cache_bytes,
+            options.remote.is_some(),
         )?;
+        if file.object_backed() != options.remote.is_some() {
+            return Err(crate::StorageError::ModeMismatch {
+                object_backed: file.object_backed(),
+            });
+        }
         let seed = file.seed();
 
         // Generated Pivot types of identical shape may share a STRUCT_HASH;
@@ -285,7 +283,12 @@ impl PageStore {
             record_cache_bytes: options.record_cache_bytes,
             barrier: None,
             compaction: std::cell::Cell::default(),
+            object: options.remote.map(crate::remote::ObjectState::new),
         };
+        if let Some(object) = &store.object {
+            object.end.set(recovered.remote_end);
+        }
+        store.tally_pending();
         // Rebuild the logs in journal order, no re-journal, then settle them
         // into the pages as the live engine would have.
         for batch in &recovered.replay {
