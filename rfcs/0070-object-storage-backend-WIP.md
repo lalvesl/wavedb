@@ -1,6 +1,6 @@
 # RFC 0070 — Object storage as a page backend
 
-- **Status:** In progress — opened 2026-10-10. Phases 1–2 done (descriptor, test store, S3 client); phase 3 next.
+- **Status:** In progress — opened 2026-10-10. Phases 1–3 done (descriptor, test store, S3 client; disk + object: the flag, the remote directories, the upload, reopen from disk); phase 4 next.
 - **Supersedes:** [RFC 0059](0059-object-storage-capacity-tier-PLANNED.md) §2–§5
   (the remote descriptor bit and the object per bucket). 0059 §1, the archive
   lane, stays and is independent of this.
@@ -17,7 +17,8 @@
 ## Summary
 
 A database stores its pages in one of three ways, fixed when it is created
-and recorded in the `MANIFEST` beside `P`:
+and recorded in each shard's superblock beside the hash seed (opening it
+the other way is `StorageError::ModeMismatch`):
 
 | Mode | Pages live in | Disk is | Journal |
 |------|---------------|---------|---------|
@@ -29,7 +30,8 @@ Each type has two `Vec<u64>` directories, each a linear hash of its own: the
 disk's (32 KiB pages) and the object store's (128 KiB pages, for a denser
 vector). The disk pages the settle rounds wrote and the object store has not
 received yet are reassembled, record by record, into the object store's
-pages; those fill files of at most 8 MiB, whose first 64 KiB hold the
+pages; those fill files in which every page *starts* within the first
+8 MiB, whose first 32 KiB hold the
 addressing changes for the pages in it, chained file to file as the disk's
 addressing log is. A remote descriptor turns into a
 file name and a byte range by arithmetic. Everything that navigates stays in
@@ -47,7 +49,7 @@ be joined.
 [RFC 0059](0059-object-storage-capacity-tier-PLANNED.md) joined them one
 bucket at a time — an object per demoted bucket and a stolen descriptor bit —
 which made the object count follow the directory, and only for archives. This
-design ships settle output in files of up to 8 MiB instead, and makes the object store
+design ships settle output in files of about 8 MiB instead, and makes the object store
 the place pages *live*, so a deployment with little or no disk is served too.
 
 ## Design
@@ -91,7 +93,7 @@ flag is clear, i.e. the object store has everything in it.
 
 ### 3. Addressing: arithmetic, not lookup
 
-A file is 8 MiB of address space (2 048 blocks):
+A file *starts* pages within 8 MiB of address space (2 048 blocks):
 
 ```
 file   = start >> 11
@@ -99,11 +101,21 @@ offset = (start & 2047) · 4096
 range  = bytes=offset-(offset + count · 4096 − 1)
 ```
 
+- **The 8 MiB bound is on where a page starts, not on where it ends**
+  (decided 2026-10-10). The upload appends pages while its cursor is below
+  the file's 8 MiB mark and closes the file at the first page that ends past
+  it — nothing checks whether a page *fits*, and nothing is ever split. The
+  last page may run as far past the mark as it is long: a page of 4 GiB (the
+  descriptor's `count` limit) makes a file of about 4 GiB, still one PUT
+  (S3's single-PUT limit is 5 GiB). Since every page starts inside its
+  file's window, `file = start >> 11` holds for every page and a page's
+  range is always inside one object.
+- The next file starts at the first file boundary at or after the cursor:
+  the numbers a large page ran over are simply never used. Address space is
+  not scarce — 2^43 blocks is 2^32 files.
 - A file holds what was written to it and no more: its size is stored
   nowhere. It is written block-aligned — its last page padded to its block
-  boundary — so a page's range never runs past the end of its file. A page never crosses a file boundary; one larger than 8 MiB spans
-  consecutive files, read with one GET per file.
-- 2^43 blocks is 2^32 files.
+  boundary — so a page's range never runs past the end of its file.
 
 ### 4. Files, names and the order LIST gives
 
@@ -111,14 +123,24 @@ Per shard, under `<prefix>/shards/<shard:02x>/`:
 
 ```
 0journal/<seq:016x>      object mode only: one object per group-commit window
-1start                   the oldest live file (first_file)
-2seg/<!file:016x>        the files — named by the bitwise complement of the
+1seg/<!file:016x>        the files — named by the bitwise complement of the
                          number, so LIST returns the newest first
-3snap/<!file:016x>/<n>   addressing snapshots (§6)
+2snap/<!file:016x>/<n>   addressing snapshots (§6)
 ```
 
-The numeric prefixes fix the order LIST returns. `LIST prefix=2seg/
-max-keys=1` names the newest file in one request. (Directory buckets of S3
+The numeric prefixes fix the order LIST returns. `LIST prefix=1seg/
+max-keys=1` names the newest file in one request.
+
+**No `start` object** (decided 2026-10-10). The oldest live file
+(`first_file`) is a field of every file's header, and the newest file's
+header is the one recovery reads first anyway — so knowing it costs no
+request, where a `start` object cost a PUT (a tier-1 request) each time it
+advanced and a GET on recovery. The field takes 8 bytes of a header that
+is fixed at 32 KiB, so it costs no space either.
+It is written as the oldest file not yet deleted *when the header is
+written*, so it can only lag behind the truth, never run ahead of it: a
+recovery that finds it low re-issues DELETEs for files already gone, and a
+DELETE of an absent key succeeds. (Directory buckets of S3
 Express One Zone do not list in lexicographic order; they are out of scope.)
 
 ### 5. Upload: reassembling the flagged pages
@@ -128,7 +150,7 @@ pages reach about 8 MiB, an upload reassembles them into remote pages, which
 fill one or more files:
 
 ```
-[ 64 KiB header ][ page ][ page ] … ≤ 8 MiB
+[ 32 KiB header ][ page ][ page ] … the last page starts before 8 MiB
 ```
 
 1. **The input** is every disk page whose flag is set, read by its current
@@ -152,14 +174,26 @@ finished blobs out — so files assemble while the worker keeps serving. It
 starts on the worker and moves to the helper when measurement says so.
 
 - **The header** is the file's addressing delta: per type, the bucket count
-  and `(bucket, remote descriptor)` for every page in the file, plus any
-  dictionary. At most 2 048 pages fit in 8 MiB, ~12 bytes each, so 64 KiB
-  holds the worst case. The file is assembled in RAM before its PUT, so the
-  header is written once, exact.
-- **The chain is implicit**: the header of file `n` follows file `n − 1`'s,
-  until a header that names a snapshot.
-- After the PUT, the clearing of each flag and the new remote descriptors
-  ride the next round on disk. A crash in between uploads those pages again.
+  and `(bucket, remote descriptor)` for every page in the file, the
+  descriptor of the type's dictionary when the file carries it (the
+  dictionary is an image in the file like a page, since at up to 64 KiB it
+  would not fit the header), and `first_file` (§4). **Always 32 KiB** (decided
+  2026-10-10): pages start in at most 2 040 blocks after it, ~12 bytes
+  each, ~24 KiB. Each type in the file adds ~30 bytes of its own, so a file
+  touching very many types could outgrow it; the upload therefore also
+  closes a file when the next page's entry would not fit its header. A
+  header can never overflow, whatever the schema. The file is assembled in
+  RAM before its PUT, so the header is written once, exact.
+- **The chain is the file numbers**: the header of file `n` follows the
+  newest file below `n`, until a header that names a snapshot. A number a
+  large page ran over (§3) has no object; a GET of it answers `404`.
+- After the PUTs, the upload publishes in RAM: the new remote directories,
+  and the flag cleared on each disk page still at the descriptor it was
+  taken at (one a settle rewrote meanwhile is newer and keeps its flag).
+  What changed waits, unrecorded, for **the next window on disk**, whatever
+  else that window carries (decided 2026-10-10: writes are constant, and a
+  crash in between costs one upload again — not worth a write of its own).
+  A crash in between uploads those pages again.
 - A crash after a PUT and before anything records it leaves a file at or
   above what the disk knows; the next upload overwrites it under the same
   name. Nothing names it, so that is safe.
@@ -169,11 +203,13 @@ starts on the worker and moves to the helper when measurement says so.
 - **disk + object**: the disk's own addressing log restores both directories
   (the remote changes ride it), and the flags say what is still to go up. The
   object store is not read at all.
-- **object**, and a disk lost in the other mode: `LIST 2seg/ max-keys=1` → the
-  newest file; `GET 1start` → the oldest; then the 64 KiB headers back to the
-  last snapshot. The names are computable, so those GETs go in parallel.
+- **object**, and a disk lost in the other mode: `LIST 1seg/ max-keys=1` → the
+  newest file, `LIST 2snap/ max-keys=1` → the newest snapshot and the file
+  it covers; then the 32 KiB header of every number between them. The names
+  are computable, so those GETs go in parallel; a `404` is a number a large
+  page ran over. `first_file` comes with the newest header.
   Snapshots are periodic, as on disk ([RFC 0048](0048-chained-addressing-log.md)),
-  and stored apart (`3snap/`) since a whole directory does not fit in a
+  and stored apart (`2snap/`) since a whole directory does not fit in a
   header.
 
 ### 7. Eviction from disk
@@ -198,8 +234,8 @@ by deleting whole files:
   It never decides where to write — writing is always at the end.
 - A file below the 0069 free share has its live pages fetched (one GET of the
   whole file) and written into the current upload; after the two sealing
-  checkpoints of 0069 nothing names it, and it is DELETEd. `1start` advances
-  when the oldest goes.
+  checkpoints of 0069 nothing names it, and it is DELETEd. The next header
+  carries the advanced `first_file`.
 - **Only files older than the latest snapshot are deleted**, so the header
   chain recovery walks is never broken.
 
@@ -269,7 +305,12 @@ and write points — not a registry and not `dyn`.
   returns a future; what is synchronous is the chain beneath it. Made `async`
   ahead of anything that awaits, it would be plumbing with no await in it
   (`clippy::unused_async`), so the chain turns asynchronous in the phase that
-  adds the first remote read.
+  adds the first remote read **on the read path — phase 4** (moved from
+  phase 3, 2026-10-10): until a disk page can be evicted, every page is on
+  disk and complete, so no `get` reaches the object store. Phase 3's only
+  remote reads are the upload's own (`PageStore::upload`, and
+  `read_uploaded`, the read phase 4 builds the fallback on), and those are
+  `async` already.
 - **No cell is borrowed across the await.** The read copies the bucket's
   descriptor out of the directory, awaits the bytes, then borrows the
   dictionary to decode: a settle round publishing on the same thread must
@@ -290,20 +331,51 @@ and write points — not a registry and not `dyn`.
   server starts in milliseconds. Probed 2026-10-10 with `curl --aws-sigv4`:
   - `If-None-Match: *` on an existing key answers `412`; `If-Match` answers
     `200` with the current ETag and `412` with another — the conditional
-    PUTs the journal, `1start` and the lease rely on;
+    PUTs the journal and the lease rely on;
   - a range inside an object answers `206` with exactly its bytes, one
     running past the end `206` cut at the end, one starting past it `416`;
     files are block-aligned anyway, so a page's range never runs past its
     file;
-  - `LIST prefix=2seg/ max-keys=1` answers the smallest key — the newest
+  - `LIST prefix=1seg/ max-keys=1` answers the smallest key — the newest
     file, by the complemented names; DELETE answers `204`.
 - Rejected: **Garage** 1.3.1 (Rust) ignores conditional headers on PUT —
   `If-None-Match: *` answers `200` and overwrites (`src/api/s3/put.rs` never
   reads them); **MinIO** is abandoned upstream and marked insecure in
   nixpkgs.
-- Durability angles: reopen from the object store alone; a crash between a
-  PUT and the round that records it; a crash between a flag-clearing round
-  and the next checkpoint.
+- `wavedb-platform`'s `test-server` feature runs one versitygw per test
+  over its own directory (`s3::test_server::TestServer`), shared by the
+  client's tests, the engine's and the node's.
+- Durability angles: reopen from the object store alone (phase 5); a crash
+  between a PUT and the window that records it; a crash between a
+  flag-clearing round and the next checkpoint.
+
+### Phase 3, as built (2026-10-10)
+
+- `StoreOptions::remote` (`Remote`: a bucket and a key prefix; each shard
+  keeps its objects under `shards/<xx>/` below it). The endpoint and the
+  credentials come with every open and are stored nowhere.
+- A settle round writes its pages flagged; compaction keeps the flag of what
+  it moves. `pending_upload_bytes` is the tally (an emptied bucket counts a
+  block), kept where descriptors change.
+- `PageStore::upload` (async): takes up to 8 MiB of flagged pages, fetches
+  the remote pages they share records with (32 requests in flight),
+  rebuilds and splits them at 128 KiB, packs files, PUTs them, publishes.
+- `EditChunk` carries the remote directories' changes and the remote end;
+  a snapshot carries them whole. Reopen restores both from the disk alone.
+- The node uploads from each worker's BG task once a store holds back
+  `Maintenance::upload_after_bytes` (8 MiB); `Server::object_store` turns
+  the mode on.
+- Proved against versitygw (`crates/wavedb-storage/tests/object_store.rs`):
+  every settled record reads back from the object store; removals and
+  rewrites reach it; a reopen restores what was uploaded and the next upload
+  continues after it; an upload lost in a crash is made again over the same
+  file numbers; compaction keeps the flags; the mode is fixed. The
+  congruence is checked against real routing for every directory length
+  pair up to 40 × 20.
+- **For phase 5**: a crash after a multi-file upload's PUTs leaves files
+  above the recorded end. The next upload rewrites them from the same
+  numbers, but may write fewer, and a recovery from the object store alone
+  must not take a leftover for the newest file.
 
 ## Phasing
 
@@ -311,9 +383,9 @@ and write points — not a registry and not `dyn`.
 |-------|---------|
 | 1 | The descriptor repacked; the test object store (versitygw) in the dev shell, its behaviour verified — done |
 | 2 | The S3 client half (range GET, PUT, DELETE, LIST, conditional PUT, SigV4): `wavedb-platform::s3` — done |
-| 3 | disk + object: the backend `enum`, the asynchronous read chain, the remote directory, the flag, the upload that reassembles flagged pages into files with the header, reopen from disk |
-| 4 | Eviction from disk and the settle that fetches an evicted page |
-| 5 | Recovery from the object store alone; snapshots in `3snap/` |
+| 3 | disk + object: the remote directory, the flag, the upload that reassembles flagged pages into files with the header, reopen from disk — done |
+| 4 | Eviction from disk; the read path's backend `enum` and asynchronous chain, falling back to the object store; the settle that fetches an evicted page |
+| 5 | Recovery from the object store alone; snapshots in `2snap/` |
 | 6 | Object mode: rounds in RAM, the journal in the object store, the lease |
 | 7 | Compaction by file, on the 0069 triggers |
 
