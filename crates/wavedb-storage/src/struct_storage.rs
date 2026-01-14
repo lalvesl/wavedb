@@ -85,6 +85,12 @@ impl StructStorage {
 pub(crate) struct TypeSlot {
     struct_hash: u64,
     dir: StructDirectory,
+    /// The object store's directory for this type (RFC 0070 §2): 128 KiB
+    /// pages, a linear hash of its own. `None` until the first upload.
+    remote: StructDirectory,
+    /// Bytes of the dictionary the object store holds a copy of — an upload
+    /// carries the dictionary again once it has grown past them.
+    uploaded_dict: std::cell::Cell<usize>,
     dict: StructDictionary,
 }
 
@@ -94,6 +100,8 @@ impl TypeSlot {
         Self {
             struct_hash: declared.struct_hash,
             dir: RefCell::new(None),
+            remote: RefCell::new(None),
+            uploaded_dict: std::cell::Cell::new(0),
             dict: RefCell::new(DictState::new(declared.compress)),
         }
     }
@@ -106,6 +114,16 @@ impl TypeSlot {
     /// This type's page-directory slot — its own cell. `None` until the store settles the first value.
     pub(crate) const fn directory(&self) -> &StructDirectory {
         &self.dir
+    }
+
+    /// This type's directory in the object store — its own cell.
+    pub(crate) const fn remote_directory(&self) -> &StructDirectory {
+        &self.remote
+    }
+
+    /// Bytes of the dictionary already uploaded.
+    pub(crate) const fn uploaded_dict(&self) -> &std::cell::Cell<usize> {
+        &self.uploaded_dict
     }
 
     /// This type's compression slot — its own cell: the zstd policy, the raw-content dictionary, and the block run
