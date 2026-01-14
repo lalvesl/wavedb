@@ -60,6 +60,21 @@ pub enum StorageError {
     /// what is on disk (`crate::barrier`).
     #[error("a journal barrier failed; reopen the store")]
     BarrierFailed,
+    /// The object store failed a request (RFC 0070) — a socket fault, or an
+    /// answer the client does not take for success.
+    #[error("object store: {0}")]
+    Remote(#[from] wavedb_platform::Error),
+    /// The database was created with its pages in an object store and opened
+    /// without one, or the other way round. The mode is fixed at creation
+    /// (RFC 0070), recorded in the superblock.
+    #[error("the database is {} but was opened {}", if *object_backed { "object-backed" } else { "disk-only" }, if *object_backed { "without an object store" } else { "with one" })]
+    ModeMismatch {
+        /// What the superblock records.
+        object_backed: bool,
+    },
+    /// An object-store operation on a store that has none.
+    #[error("this store has no object store")]
+    NotObjectBacked,
     /// A core/codec fault surfaced inside the engine.
     #[error(transparent)]
     Core(#[from] wavedb_core::Error),
