@@ -93,10 +93,19 @@ pub fn open_shards_with(
         record_cache_bytes: share(options.record_cache_bytes),
         ..options
     };
+    let options = &options;
     let threads = threads.clamp(1, count);
+    // Each shard keeps its objects under a prefix of its own, as it keeps
+    // its files in a directory of its own.
     let open_range = |range: std::ops::Range<usize>| -> Vec<_> {
         range
-            .map(|i| PageStore::open_with(shard_dir(dir, i), types, options))
+            .map(|i| {
+                let options = StoreOptions {
+                    remote: options.remote.as_ref().map(|r| r.shard(i)),
+                    ..options.clone()
+                };
+                PageStore::open_with(shard_dir(dir, i), types, options)
+            })
             .collect()
     };
     let opened: Vec<StorageResult<PageStore>> = std::thread::scope(|s| {
