@@ -43,10 +43,16 @@ mod record_cache;
 mod record_index;
 mod record_log;
 mod record_segment;
+pub mod remote;
 mod retire;
 mod settle;
 pub mod shard_set;
 pub mod struct_storage;
+mod superblock;
+mod upload;
+mod upload_file;
+mod upload_plan;
+mod window;
 
 pub use barrier::{Barrier, Durable};
 pub use block::{BLOCK_SIZE, BlockAllocator, BlockDescriptor, Run};
@@ -59,9 +65,11 @@ pub use error::{StorageError, StorageResult};
 pub use journal::{CommitFrame, Journal, JournalFrame};
 pub use page::SlotPage;
 pub use page_store::{DEFAULT_RECORD_CACHE_BYTES, PageStore, StoreOptions};
+pub use remote::Remote;
 pub use settle::Progress;
 pub use shard_set::{MANIFEST, open_shards, open_shards_with};
 pub use struct_storage::{BPTREE_NODE_STORAGE, StorageRegistry, StructStorage};
+pub use upload::Uploaded;
 
 /// The engine's threading contract, **asserted rather than described**.
 ///
