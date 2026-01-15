@@ -22,7 +22,7 @@ use std::collections::btree_map::Entry;
 use crate::block::{BLOCK_SIZE, BlockDescriptor};
 use crate::dictionary::DictState;
 use crate::directory::Directory;
-use crate::error::{StorageError, StorageResult};
+use crate::error::StorageResult;
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
 use crate::record_cache::Records;
@@ -172,14 +172,6 @@ impl PageStore {
         for _ in 0..MAX_SPLITS_PER_ROUND {
             let level = dir.split_bit();
             let source = dir.next_split_bucket() as usize;
-            if dir.descriptor(source).is_evicted() {
-                // The turn's bucket lives in the object store, its size
-                // unknown here: the split waits for it to come back to disk.
-                if let Some(idx) = self.slot_index(slot.struct_hash()) {
-                    self.want(idx, source);
-                }
-                return Ok(());
-            }
             if planned_blocks(dir, pages, source)
                 <= self.target_blocks_per_bucket
             {
@@ -228,13 +220,6 @@ fn staged_page<'a>(
     match staged.entry(bucket) {
         Entry::Occupied(e) => Ok(e.into_mut()),
         Entry::Vacant(v) => {
-            // Every write restores its bucket before it commits (RFC 0070
-            // §7), so an evicted one here would lose its records.
-            if dir.descriptor(bucket).is_evicted() {
-                return Err(StorageError::Corrupt(
-                    "a settle reached an evicted bucket",
-                ));
-            }
             let page =
                 dir.read_page(slot.struct_hash(), &store.file, bucket, dict)?;
             Ok(v.insert(page))
