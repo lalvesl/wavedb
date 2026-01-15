@@ -83,9 +83,8 @@ pub struct EditChunk {
     /// The object store's directories (RFC 0070 §2): the same edits, over
     /// remote descriptors. A disk-only store writes none.
     pub remote: Vec<SlotEdit>,
-    /// Where the object store's chain of files stands (RFC 0070 §6) — in a
-    /// snapshot, and in a delta that carries upload results.
-    pub chain: Option<crate::file_header::ChainRecord>,
+    /// The next remote block an upload writes at; `0` until the first.
+    pub remote_end: u64,
 }
 
 /// Walk the chain back from `head`, newest first, returning every live chunk
@@ -183,12 +182,7 @@ pub fn chunk_of(
         if store.object.is_some() {
             let listed = touched(idx).map(|t| &t.remote);
             let dir = slot.remote_directory();
-            if let Some(mut edit) = listed_edit(dir, slot, full, listed) {
-                // The dictionary's copy in the object store rides along.
-                let dict = slot.remote_dict().get();
-                edit.dict = dict.is_allocated().then_some(dict.raw());
-                remote.push(edit);
-            }
+            remote.extend(listed_edit(dir, slot, full, listed));
         }
         if plans.iter().any(|work| work.idx == idx) {
             continue;
@@ -203,16 +197,12 @@ pub fn chunk_of(
             slots.push(edit);
         }
     }
-    let chain = store
-        .object
-        .as_ref()
-        .filter(|_| full || store.has_unrecorded())
-        .map(|o| o.chain.borrow().record());
+    let remote_end = store.object.as_ref().map_or(0, |o| o.end.get());
     EditChunk {
         prev,
         slots,
         remote,
-        chain,
+        remote_end,
     }
 }
 
@@ -292,10 +282,73 @@ fn every_bucket(slots: &[BlockDescriptor]) -> Vec<(u32, u64)> {
         .collect()
 }
 
+/// The addressing state rebuilt by replaying a snapshot and the chunks after
+/// it, in order.
+#[derive(Debug, Default)]
+pub struct Replay {
+    parts: Replayed,
+}
+
+/// What a [`Replay`] rebuilt, per `STRUCT_HASH`.
+#[derive(Debug, Default)]
+pub struct Replayed {
+    /// The disk directories' raw descriptors.
+    pub slots: BTreeMap<u64, Vec<u64>>,
+    /// The dictionaries' runs.
+    pub dicts: BTreeMap<u64, u64>,
+    /// The object store's directories' raw descriptors (RFC 0070).
+    pub remote: BTreeMap<u64, Vec<u64>>,
+    /// The next remote block an upload writes at.
+    pub remote_end: u64,
+}
+
+impl Replay {
+    /// Fold one chunk in.
+    ///
+    /// # Errors
+    /// [`StorageError::Corrupt`] if a chunk names a bucket outside the
+    /// directory size it declares.
+    pub fn apply(&mut self, chunk: &EditChunk) -> StorageResult<()> {
+        for edit in &chunk.slots {
+            fold(&mut self.parts.slots, edit)?;
+            if let Some(dict) = edit.dict {
+                self.parts.dicts.insert(edit.struct_hash, dict);
+            }
+        }
+        for edit in &chunk.remote {
+            fold(&mut self.parts.remote, edit)?;
+        }
+        self.parts.remote_end = chunk.remote_end;
+        Ok(())
+    }
+
+    /// Everything rebuilt.
+    pub fn into_parts(self) -> Replayed {
+        self.parts
+    }
+}
+
+/// Apply one type's edit to its directory in `dirs`.
+fn fold(
+    dirs: &mut BTreeMap<u64, Vec<u64>>,
+    edit: &SlotEdit,
+) -> StorageResult<()> {
+    let addresses = dirs.entry(edit.struct_hash).or_default();
+    if (edit.buckets as usize) > addresses.len() {
+        addresses.resize(edit.buckets as usize, 0);
+    }
+    for &(bucket, raw) in &edit.changed {
+        let cell = addresses
+            .get_mut(bucket as usize)
+            .ok_or(StorageError::Corrupt("edit chunk bucket out of range"))?;
+        *cell = raw;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EditChunk, SlotEdit, encode};
-    use crate::replay::Replay;
+    use super::{EditChunk, Replay, SlotEdit, encode};
     use wavedb_core::wire::from_wire_checked;
 
     fn edit(hash: u64, buckets: u32, changed: &[(u32, u64)]) -> SlotEdit {
@@ -312,7 +365,7 @@ mod tests {
         let chunk = EditChunk {
             prev: 0,
             remote: Vec::new(),
-            chain: None,
+            remote_end: 0,
             slots: vec![SlotEdit {
                 struct_hash: 7,
                 buckets: 3,
@@ -335,13 +388,13 @@ mod tests {
         let skeleton = EditChunk {
             prev: 0,
             remote: Vec::new(),
-            chain: None,
+            remote_end: 0,
             slots: vec![edit(7, 3, &[(0, 0), (2, 0)])],
         };
         let filled = EditChunk {
             prev: 0,
             remote: Vec::new(),
-            chain: None,
+            remote_end: 0,
             slots: vec![edit(7, 3, &[(0, u64::MAX), (2, 0x1234_5678)])],
         };
         assert_eq!(encode(&skeleton).len(), encode(&filled).len());
@@ -354,7 +407,7 @@ mod tests {
             .apply(&EditChunk {
                 prev: 0,
                 remote: Vec::new(),
-                chain: None,
+                remote_end: 0,
                 slots: vec![SlotEdit {
                     struct_hash: 7,
                     buckets: 2,
@@ -368,7 +421,7 @@ mod tests {
             .apply(&EditChunk {
                 prev: 0,
                 remote: Vec::new(),
-                chain: None,
+                remote_end: 0,
                 slots: vec![edit(7, 3, &[(1, 21), (2, 30)])],
             })
             .unwrap();
@@ -386,7 +439,7 @@ mod tests {
                 .apply(&EditChunk {
                     prev: 0,
                     remote: Vec::new(),
-                    chain: None,
+                    remote_end: 0,
                     slots: vec![edit(7, 2, &[(5, 10)])],
                 })
                 .is_err()
