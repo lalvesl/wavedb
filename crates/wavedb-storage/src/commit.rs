@@ -48,11 +48,10 @@ use crate::block::{BlockDescriptor, Run};
 use crate::block_file::{BlockFile, RESERVED_BLOCKS};
 use crate::dictionary::Dictionary;
 use crate::directory::Directory;
-use crate::edit::{read_chunk, walk};
+use crate::edit::{Replay, read_chunk, walk};
 use crate::error::{StorageError, StorageResult};
 use crate::journal::{self, CommitFrame, Journal, JournalFrame};
 use crate::meta_log::MetaLog;
-use crate::replay::Replay;
 use crate::struct_storage::TypeSlot;
 
 /// What [`restore`] recovered: the allocator and the batches still to
@@ -63,8 +62,8 @@ pub struct Recovered {
     pub journal: Journal,
     pub replay: Vec<Vec<Write>>,
     pub meta: MetaLog,
-    /// Where the object store's chain of files stood (RFC 0070).
-    pub chain: Option<crate::file_header::ChainRecord>,
+    /// Where the next upload writes in the object store (RFC 0070).
+    pub remote_end: u64,
 }
 
 /// Recover engine state from the journals under `dir` (see module docs).
@@ -92,7 +91,7 @@ pub fn restore(
             journal,
             replay: Vec::new(),
             meta: MetaLog::default(),
-            chain: None,
+            remote_end: 0,
         });
     }
 
@@ -110,12 +109,12 @@ pub fn restore(
         journals.push((*ts, journal, frames));
     }
 
-    let ((alloc, meta, chain), covered_ts) =
+    let ((alloc, meta, remote_end), covered_ts) =
         if let Some(commit) = &newest_commit {
             (load_commit(file, types, commit)?, commit.journal_ts)
         } else {
             // First generation (never rotated): rebuild pages from scratch.
-            ((fresh_alloc(file)?, MetaLog::default(), None), 0)
+            ((fresh_alloc(file)?, MetaLog::default(), 0), 0)
         };
 
     // Batches from journals the commit does not cover, oldest first. The
@@ -145,7 +144,7 @@ pub fn restore(
         journal,
         replay,
         meta,
-        chain,
+        remote_end,
     })
 }
 
@@ -161,11 +160,7 @@ fn load_commit(
     file: &BlockFile,
     types: &[TypeSlot],
     commit: &CommitFrame,
-) -> StorageResult<(
-    BlockAllocator,
-    MetaLog,
-    Option<crate::file_header::ChainRecord>,
-)> {
+) -> StorageResult<(BlockAllocator, MetaLog, u64)> {
     let mut used = vec![Run::new(0, RESERVED_BLOCKS)];
     let mut replay = Replay::default();
     let chain = walk(file, BlockDescriptor::from_raw(commit.head))?;
@@ -218,12 +213,7 @@ fn load_commit(
     }
     let mut alloc = BlockAllocator::from_layout(file.len_blocks()?, &used);
     alloc.set_protected(&used);
-    for (hash, raw) in &parts.remote_dicts {
-        slot_of(types, *hash)?
-            .remote_dict()
-            .set(BlockDescriptor::from_raw(*raw));
-    }
-    Ok((alloc, MetaLog::restored(chain), parts.chain))
+    Ok((alloc, MetaLog::restored(chain), parts.remote_end))
 }
 
 /// The registered slot for `hash` — a commit naming an unlisted type
