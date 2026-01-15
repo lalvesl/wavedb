@@ -29,11 +29,13 @@
 //!
 //! ## Reads
 //!
-//! The record cache answers when it indexes the id (bytes, or `None` for a
-//! remove not yet settled); otherwise the settled page does
-//! ([`Directory::get_record`]), and in an object-backed store an evicted
-//! page's copy in the object store (`crate::read_through`). Only settled
-//! chunks leave the cache, so a fallback sees the newest settled state.
+//! The cache is a **cache**, not the dataset: a read serves from it when it
+//! indexes the id — the bytes, or `None` for a remove not yet settled — and
+//! falls back to the settled page ([`Directory::get_record`]) otherwise. Only
+//! chunks the settle has passed are evicted, so the fallback can only ever
+//! see the newest settled state — never a version the cache has superseded.
+//! An absent id costs one page probe; that's fine until a keyed filter earns
+//! its place.
 //!
 //! ## Recovery model
 //!
@@ -234,9 +236,16 @@ impl PageStore {
         std::fs::create_dir_all(dir)?;
 
         let data_bin_existed = dir.join("data.bin").exists();
-        // An object-backed store with no disk yet may have a database in its
-        // object store already: it is recovered, never created over.
-        let (file, found) = crate::recover::open_file(dir, &options)?;
+        let file = BlockFile::open_as(
+            dir.join("data.bin"),
+            options.page_cache_bytes,
+            options.remote.is_some(),
+        )?;
+        if file.object_backed() != options.remote.is_some() {
+            return Err(crate::StorageError::ModeMismatch {
+                object_backed: file.object_backed(),
+            });
+        }
         let seed = file.seed();
 
         // Generated Pivot types of identical shape may share a STRUCT_HASH;
@@ -276,25 +285,17 @@ impl PageStore {
             compaction: std::cell::Cell::default(),
             object: options.remote.map(crate::remote::ObjectState::new),
         };
-        if let Some(object) = &store.object
-            && let Some(chain) = &recovered.chain
-        {
-            *object.chain.borrow_mut() =
-                crate::file_header::Chain::from_record(chain);
+        if let Some(object) = &store.object {
+            object.end.set(recovered.remote_end);
         }
-        store.prepare_object(data_bin_existed)?;
+        store.tally_pending();
         // Rebuild the logs in journal order, no re-journal, then settle them
         // into the pages as the live engine would have.
         for batch in &recovered.replay {
             store.route_batch(batch)?;
             store.commit_to_caches(batch);
         }
-        // An evicted bucket a replayed write lands in comes back first.
-        store.restore_replayed(&recovered.replay)?;
         store.drain()?;
-        if let Some(found) = found {
-            store.adopt(found)?;
-        }
         Ok(store)
     }
 
