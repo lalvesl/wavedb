@@ -13,9 +13,8 @@
 //!
 //! On a timer it applies the node's policy to each store in turn
 //! ([`Owned::upkeep`]): open a checkpoint, evict, compact — each bounded,
-//! with a yield between stores — and an object-backed store brings back the
-//! buckets reads wanted and uploads what it holds back past the threshold
-//! ([`Owned::object_upkeep`], RFC 0070). An
+//! with a yield between stores — and an object-backed store uploads what
+//! it holds back past the threshold ([`Owned::upload`], RFC 0070). An
 //! upload awaits the object store: the jobs keep the thread meanwhile, and
 //! this task's own steps wait for it.
 //!
@@ -95,7 +94,7 @@ async fn run(bg: &Background) {
         if last.elapsed() >= UPKEEP_PERIOD {
             for i in 0..bg.owned.len() {
                 bg.owned.upkeep(i, &bg.policy, bg.partitions);
-                bg.owned.object_upkeep(i, &bg.policy).await;
+                bg.owned.upload(i, &bg.policy).await;
                 yield_now().await;
             }
             last = Instant::now();

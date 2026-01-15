@@ -175,7 +175,7 @@ pub fn nonunique_types(
     let pivot_hash_expr =
         quote!(<#pivot as ::wavedb_core::index::Pivot>::STRUCT_HASH);
     let pivot_storage =
-        storage_statics::statics_for(&pivot, &pivot_hash_expr, true, true);
+        storage_statics::statics_for(&pivot, &pivot_hash_expr, true);
     let storage_entries = storage_statics::entries_for(name, Some(&pivot));
 
     // Secondary-index hooks + the typed `by_<field>` lookup surface, and the

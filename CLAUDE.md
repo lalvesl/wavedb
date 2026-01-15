@@ -177,19 +177,8 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   reassembles the flagged ones into the object store's own linear hash
   (128 KiB pages, files of `[32 KiB header][pages]`), and the remote
   directories ride the disk's addressing log; the mode is fixed in the
-  superblock. Past the compaction ceiling the least recently used uploaded
-  pages leave the disk (phase 4): a read of one goes to the object store, a
-  write brings its bucket back before it commits, so a settle never meets
-  an evicted bucket. A database whose disk is gone opens from its files
-  alone (phase 5): chained headers name every type and restate the oldest
-  entries, so no snapshot object is needed; only a **cut** (an upload that
-  left nothing waiting) is recovered, so no batch comes back in part.
-  **Object mode** (`PageStore::open_object`, `Server::object_mode`; phase 6)
-  has no disk at all: pages in RAM until uploaded and as a cache, no
-  journal — a write is durable once an upload carries it, on 8 MiB or
-  `upload_interval` (10 s) — every open a recovery from the files; no
-  lease, but every file is PUT create-only, so a second writer on the
-  prefix is `Fenced`, never merged. A store
+  superblock. Eviction from disk (and so any read reaching the object store)
+  is phase 4. A store
   is used from one thread: plain cells, no lock, no atomic; `Send`, not `Sync`. **One open `PageStore`
   per data directory** — `data.bin` is locked while open, a second open of it is
   `EngineBusy` — and stores over different directories coexist in one process.
