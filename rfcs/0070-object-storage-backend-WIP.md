@@ -1,6 +1,6 @@
 # RFC 0070 — Object storage as a page backend
 
-- **Status:** In progress — opened 2026-10-10. Phases 1–5 done (descriptor, test store, S3 client; disk + object: the flag, the remote directories, the upload, reopen from disk; eviction from disk and the read that falls back to the object store; recovery from the object store alone); phase 6 next.
+- **Status:** In progress — opened 2026-10-10. Phases 1–3 done (descriptor, test store, S3 client; disk + object: the flag, the remote directories, the upload, reopen from disk); phase 4 next.
 - **Supersedes:** [RFC 0059](0059-object-storage-capacity-tier-PLANNED.md) §2–§5
   (the remote descriptor bit and the object per bucket). 0059 §1, the archive
   lane, stays and is independent of this.
@@ -125,6 +125,7 @@ Per shard, under `<prefix>/shards/<shard:02x>/`:
 0journal/<seq:016x>      object mode only: one object per group-commit window
 1seg/<!file:016x>        the files — named by the bitwise complement of the
                          number, so LIST returns the newest first
+2snap/<!file:016x>/<n>   addressing snapshots (§6)
 ```
 
 The numeric prefixes fix the order LIST returns. `LIST prefix=1seg/
@@ -172,9 +173,8 @@ thread as owned messages — the records and a copy of the dictionary in, the
 finished blobs out — so files assemble while the worker keeps serving. It
 starts on the worker and moves to the helper when measurement says so.
 
-- **The header** is the file's addressing delta (every field in §6): per
-  type, the bucket count and `(bucket, remote descriptor)` for every page in
-  the file, the
+- **The header** is the file's addressing delta: per type, the bucket count
+  and `(bucket, remote descriptor)` for every page in the file, the
   descriptor of the type's dictionary when the file carries it (the
   dictionary is an image in the file like a page, since at up to 64 KiB it
   would not fit the header), and `first_file` (§4). **Always 32 KiB** (decided
@@ -184,9 +184,9 @@ starts on the worker and moves to the helper when measurement says so.
   closes a file when the next page's entry would not fit its header. A
   header can never overflow, whatever the schema. The file is assembled in
   RAM before its PUT, so the header is written once, exact.
-- **The headers form a chain** (§6): each names the file before it and the
-  hash of that file's header. A number a large page ran over (§3) has no
-  object; a GET of it answers `404`.
+- **The chain is the file numbers**: the header of file `n` follows the
+  newest file below `n`, until a header that names a snapshot. A number a
+  large page ran over (§3) has no object; a GET of it answers `404`.
 - After the PUTs, the upload publishes in RAM: the new remote directories,
   and the flag cleared on each disk page still at the descriptor it was
   taken at (one a settle rewrote meanwhile is newer and keeps its flag).
@@ -194,97 +194,34 @@ starts on the worker and moves to the helper when measurement says so.
   else that window carries (decided 2026-10-10: writes are constant, and a
   crash in between costs one upload again — not worth a write of its own).
   A crash in between uploads those pages again.
-- A crash after a PUT and before anything records it leaves files at or
-  above what the disk knows. **A file number is never written twice**
-  (decided 2026-10-10, phase 5): a store reopening over its disk lists the
-  newest file (one `LIST max-keys=1`) and moves its end past it, so the redo
-  goes to new numbers and the leftovers stay — a branch no chain and no
-  `last` names. Rewriting them in place had a hole: a redo that replaced
-  only the first file of an earlier lost upload left a later lost upload
-  whole, linked to a file that still existed, while the pages it named were
-  gone.
+- A crash after a PUT and before anything records it leaves a file at or
+  above what the disk knows; the next upload overwrites it under the same
+  name. Nothing names it, so that is safe.
 
 ### 6. Recovery
 
 - **disk + object**: the disk's own addressing log restores both directories
   (the remote changes ride it), and the flags say what is still to go up. The
   object store is not read at all.
-- **object**, and a disk lost in the other mode — **from the headers alone,
-  no snapshot object** (decided 2026-10-10: more GETs, which are cheap,
-  instead of more PUTs and objects). Built in phase 5 (`recover.rs`):
-  - **Every header names every type** the object store holds: its bucket
-    count, its dictionary's remote descriptor, and `last` — the newest
-    earlier file with entries for it. The header also carries the hash
-    seed, `start` (`first_file`), the remote end, its own number, its
-    upload (`group`, `group_files`), and `prev` with the hash of that
-    file's header.
-  - **Spare room restates old entries**: after its own pages, a header
-    spends what is left (typically ~31 KiB, ~2 600 entries) on the type
-    mentioned longest ago (smallest `last`), from a **rotating cursor** —
-    not at random, which would need `(B/S)·ln B` files to cover `B` buckets
-    instead of `B/S` (1 TB: ~49 000 files against ~3 100). Every type keeps
-    appearing near the tail, so a recovery reads a bounded number of
-    headers.
-  - **The newest whole upload**: `LIST 1seg/ max-keys=1` names the highest
-    file. It is taken only if its upload is whole — every file of the group
-    present, linked by header hash, it the last of them, and the group
-    linked to the file before. Otherwise the next number down is tried. So
-    the files a crashed upload left above the recorded end, a copy under
-    another key, or bytes that are no header are never taken for the newest.
-  - **The type walk**: newest first, always the nearest file some incomplete
-    type's `last` points at; the first value seen for a bucket is its newest.
-    A type is done when every bucket is known or its chain ends (a bucket no
-    header names was never written: empty). Headers come 32 per round.
-  - **Adoption**: an object-backed store opening with no `data.bin` asks the
-    object store first, and if it holds files the database is recovered —
-    never created over. The store opens with the recovered seed, every disk
-    bucket evicted (reads go to the object store, the disk refills as a
-    cache), the dictionaries written to disk, then one snapshot and one
-    checkpoint make the disk a root of its own.
-  - **The recovery horizon** is the lowest file such a walk reads a header
-    of. Compaction by file (phase 7) deletes only below it.
-  - In disk + object mode, losing the disk loses what was not uploaded yet
-    (the flagged pages and the journal); object mode (phase 6) closes that.
+- **object**, and a disk lost in the other mode: `LIST 1seg/ max-keys=1` → the
+  newest file, `LIST 2snap/ max-keys=1` → the newest snapshot and the file
+  it covers; then the 32 KiB header of every number between them. The names
+  are computable, so those GETs go in parallel; a `404` is a number a large
+  page ran over. `first_file` comes with the newest header.
+  Snapshots are periodic, as on disk ([RFC 0048](0048-chained-addressing-log.md)),
+  and stored apart (`2snap/`) since a whole directory does not fit in a
+  header.
 
 ### 7. Eviction from disk
 
 In disk + object mode the disk is a cache. A bucket whose flag is clear may
 have its disk page freed when the disk passes its budget; a read then goes to
-the remote page covering the id. A page on disk is always complete,
-removals included, and no tombstone has to outlive anything.
-
-Decided 2026-10-10, built in phase 4:
-
-- **The budget is the compaction ceiling** (RFC 0069 `above_bytes`, per
-  shard). Past it, the coldest uploaded pages leave the disk down to nine
-  tenths of the share, and the ceiling trigger then compacts the room they
-  left out of the file. Eviction frees runs; compaction is what shrinks
-  `data.bin`.
-- **Cold is least recently used**: a `u32` stamp per disk bucket, in RAM
-  (`evict::Heat`), moved by every page read and every page a settle round
-  writes or a restore brings back. Its clock halves every stamp when it
-  runs out. A reopen starts everything equally cold.
-- **Evicted is its own descriptor**, `start 1 · count 0 · flag 0`
-  (`BlockDescriptor::EVICTED`): no run, like `EMPTY`, but distinct from
-  it, so a bucket that is merely empty still answers "absent" without a
-  request.
-- **A write brings its bucket back before it commits** (`Store::apply`
-  restores, re-checks after its awaits, then commits synchronously), and so
-  does a replayed one at open. A settle round therefore never meets an
-  evicted bucket — it refuses one as corruption — and the settle stays
-  synchronous. A restored page is the object store's copy filtered to the
-  bucket, which is exactly what the object store holds, so its flag is clear.
-- **A read of an evicted bucket** fetches the page covering the id and marks
-  the bucket *wanted*; the node's upkeep brings wanted buckets back, 16 per
-  tick. A split whose turn's bucket is evicted waits for it the same way.
-- **The guard of a first save** (`Expect(id, None)`) on an evicted bucket
-  costs a GET — accepted: the answer is a disk cache kept as large as it can
-  be and a hot/cold tracker that works, not a structure to prove absence.
-- **Recording**: an eviction frees a run, so unlike an upload's results it
-  must never be missing from the addressing a `Commit` frame names. Every
-  checkpoint writes what is unrecorded before its frame
-  (`record_unrecorded`); between two checkpoints a crash reopens from a root
-  whose runs were held back, so it simply undoes the eviction.
+the remote page covering the id. A settle round on an evicted bucket first
+rebuilds it — the remote pages that share records with it (§2), filtered to
+its own — and writes the merged page to disk with the flag set. Settle runs
+in the background, so those GETs are off every request path. A page on disk
+is therefore always complete, removals included, and no tombstone has to
+outlive anything.
 
 ### 8. Compaction deletes files
 
@@ -299,10 +236,8 @@ by deleting whole files:
   whole file) and written into the current upload; after the two sealing
   checkpoints of 0069 nothing names it, and it is DELETEd. The next header
   carries the advanced `first_file`.
-- **Only files below the recovery horizon are deleted** (§6): the lowest
-  file a recovery from the tail would read a header of. Below it, every
-  entry a header holds has been restated nearer the tail, so its header is
-  never read again.
+- **Only files older than the latest snapshot are deleted**, so the header
+  chain recovery walks is never broken.
 
 ### 9. Object mode
 
@@ -363,15 +298,8 @@ noted, not built.
 `BlockFile::read_run` and `Directory::read_page` are synchronous `pread`s. A
 GET must be awaited, so that the worker serves other owners meanwhile (one
 executor per thread, [RFC 0067](0067-thread-per-core-shards-WIP.md)). Where
-a page is read is the bucket's own descriptor: `EVICTED` sends the read to
-the object store — a plain `match` (`read_through::Settled`), not a
-registry and not `dyn`.
-
-As built in phase 4: a read does its synchronous half — record cache, page
-on disk — when it is *called*, as before, and its future awaits only for an
-evicted bucket; `apply` commits on the call unless the batch writes to an
-evicted bucket. A disk-only store's futures are therefore still ready at
-once and never suspend.
+pages are read sits behind a plain `enum` of backends, matched at the read
+and write points — not a registry and not `dyn`.
 
 - **It lands with the remote read, not before.** `Store::get_of` already
   returns a future; what is synchronous is the chain beneath it. Made `async`
@@ -440,17 +368,14 @@ once and never suspend.
 - Proved against versitygw (`crates/wavedb-storage/tests/object_store.rs`):
   every settled record reads back from the object store; removals and
   rewrites reach it; a reopen restores what was uploaded and the next upload
-  continues after it; an upload lost in a crash is made again, past the
-  lost files; compaction keeps the flags; the mode is fixed. The
+  continues after it; an upload lost in a crash is made again over the same
+  file numbers; compaction keeps the flags; the mode is fixed. The
   congruence is checked against real routing for every directory length
   pair up to 40 × 20.
-- **Phase 5** is proved in `tests/recovery.rs`: a database whose disk is
-  deleted opens from its files and carries on (and again after a second
-  loss); the newest of three uploads of each record wins; a copy of a file
-  under another number and bytes that are no header are skipped; and the
-  files crashed uploads left are not taken for the newest. In-crate tests
-  build chains by hand: an upload missing a file, or linked to another
-  header, is passed over for the one before it.
+- **For phase 5**: a crash after a multi-file upload's PUTs leaves files
+  above the recorded end. The next upload rewrites them from the same
+  numbers, but may write fewer, and a recovery from the object store alone
+  must not take a leftover for the newest file.
 
 ## Phasing
 
@@ -459,8 +384,8 @@ once and never suspend.
 | 1 | The descriptor repacked; the test object store (versitygw) in the dev shell, its behaviour verified — done |
 | 2 | The S3 client half (range GET, PUT, DELETE, LIST, conditional PUT, SigV4): `wavedb-platform::s3` — done |
 | 3 | disk + object: the remote directory, the flag, the upload that reassembles flagged pages into files with the header, reopen from disk — done |
-| 4 | Eviction from disk (LRU, past the compaction ceiling); the read path falling back to the object store; writes, replays and wanted reads bringing a bucket back — done |
-| 5 | Recovery from the object store alone: chained headers that name every type, spare room restating the oldest entries, the newest whole upload, adoption on open — done |
+| 4 | Eviction from disk; the read path's backend `enum` and asynchronous chain, falling back to the object store; the settle that fetches an evicted page |
+| 5 | Recovery from the object store alone; snapshots in `2snap/` |
 | 6 | Object mode: rounds in RAM, the journal in the object store, the lease |
 | 7 | Compaction by file, on the 0069 triggers |
 
@@ -470,5 +395,5 @@ once and never suspend.
    server; a public endpoint is HTTPS. This is the node's outbound
    connection, a separate question from TLS between WaveDB and its clients
    (future work).
-2. ~~The disk cache's budget and eviction order~~ — decided 2026-10-10: the
-   compaction ceiling, least recently used (§7).
+2. **The disk cache's budget and eviction order** (least recently read, or
+   oldest written).
