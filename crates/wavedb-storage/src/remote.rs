@@ -29,6 +29,7 @@ use wavedb_platform::s3::Bucket;
 
 use crate::block::{BLOCK_SIZE, BlockDescriptor};
 use crate::error::{StorageError, StorageResult};
+use crate::page::SlotPage;
 use crate::page_store::PageStore;
 
 /// Blocks of address space a file starts pages in (8 MiB).
@@ -100,10 +101,9 @@ pub const fn byte_range(desc: BlockDescriptor) -> Range<u64> {
 #[derive(Debug)]
 pub(crate) struct ObjectState {
     pub(crate) remote: Remote,
-    /// Where the chain of uploaded files stands: the remote end (writing is
-    /// always there), the newest file and its header's hash, and per type
-    /// the newest file with entries for it (RFC 0070 §6).
-    pub(crate) chain: RefCell<crate::file_header::Chain>,
+    /// The next remote block an upload writes at — the end of everything
+    /// uploaded. It only ever grows: writing is always at the end.
+    pub(crate) end: Cell<u64>,
     /// Blocks of disk pages the object store has not received yet (an
     /// emptied bucket counts one) — what the upload trigger reads.
     pub(crate) pending_blocks: Cell<u64>,
@@ -112,12 +112,6 @@ pub(crate) struct ObjectState {
     pub(crate) unrecorded: RefCell<Unrecorded>,
     /// One upload at a time.
     pub(crate) uploading: Cell<bool>,
-    /// How recently each disk bucket was read or written — what eviction
-    /// orders by (RFC 0070 §7).
-    pub(crate) heat: RefCell<crate::evict::Heat>,
-    /// Evicted buckets worth having on disk again: read from the object
-    /// store, or holding back a split (`restore_wanted`).
-    pub(crate) wanted: RefCell<BTreeSet<(usize, usize)>>,
 }
 
 /// Buckets whose descriptors an upload changed, per slot index: disk ones
@@ -138,12 +132,10 @@ impl ObjectState {
     pub(crate) fn new(remote: Remote) -> Self {
         Self {
             remote,
-            chain: RefCell::default(),
+            end: Cell::new(0),
             pending_blocks: Cell::new(0),
             unrecorded: RefCell::new(Unrecorded::default()),
             uploading: Cell::new(false),
-            heat: RefCell::default(),
-            wanted: RefCell::default(),
         }
     }
 
@@ -170,19 +162,6 @@ impl PageStore {
         self.object.as_ref().ok_or(StorageError::NotObjectBacked)
     }
 
-    /// Whether uploads or evictions changed something no chunk records yet.
-    pub(crate) fn has_unrecorded(&self) -> bool {
-        self.object
-            .as_ref()
-            .is_some_and(|o| !o.unrecorded.borrow().slots.is_empty())
-    }
-
-    /// Whether this store's pages live in an object store (RFC 0070).
-    #[must_use]
-    pub const fn is_object_backed(&self) -> bool {
-        self.object.is_some()
-    }
-
     /// Bytes of disk pages the object store has not received yet — what an
     /// upload would carry; `0` for a disk-only store.
     #[must_use]
@@ -192,23 +171,9 @@ impl PageStore {
             .map_or(0, |o| o.pending_blocks.get() * BLOCK_SIZE as u64)
     }
 
-    /// An object-backed store's open: tally what is still to upload and,
-    /// over a disk that had a database, step past every file the object
-    /// store holds (`step_over_leftovers`).
-    ///
-    /// # Errors
-    /// Object-store faults.
-    pub(crate) fn prepare_object(&self, reopened: bool) -> StorageResult<()> {
-        self.tally_pending();
-        if reopened {
-            self.step_over_leftovers()?;
-        }
-        Ok(())
-    }
-
     /// Count the pending blocks the restored directories hold — once, at
     /// open; every change after it is tallied where it happens.
-    fn tally_pending(&self) {
+    pub(crate) fn tally_pending(&self) {
         let Some(object) = &self.object else { return };
         let mut blocks = 0;
         for slot in &self.types {
@@ -229,21 +194,7 @@ impl PageStore {
         &self,
         desc: BlockDescriptor,
     ) -> StorageResult<Vec<u8>> {
-        self.object()?.remote.fetch(desc).await
-    }
-}
-
-impl Remote {
-    /// The image a remote descriptor names — what
-    /// [`PageStore::fetch_image`] reads, usable before there is a store.
-    ///
-    /// # Errors
-    /// As [`PageStore::fetch_image`].
-    pub(crate) async fn fetch(
-        &self,
-        desc: BlockDescriptor,
-    ) -> StorageResult<Vec<u8>> {
-        let remote = self;
+        let remote = &self.object()?.remote;
         let range = byte_range(desc);
         let want = range.end - range.start;
         let image = remote
@@ -256,9 +207,7 @@ impl Remote {
         }
         Ok(image)
     }
-}
 
-impl PageStore {
     /// `id`'s bytes as the object store holds them — the uploaded page
     /// covering it, filtered to it. `None` when no uploaded page holds it.
     ///
@@ -276,20 +225,11 @@ impl PageStore {
         id: Id,
     ) -> StorageResult<Option<Vec<u8>>> {
         self.object()?;
-        match self.slot_index(struct_hash) {
-            Some(idx) => self.read_remote(idx, id).await,
-            None => Ok(None),
-        }
-    }
-
-    /// `id`'s bytes in the uploaded page of slot `idx` that covers it.
-    pub(crate) async fn read_remote(
-        &self,
-        idx: usize,
-        id: Id,
-    ) -> StorageResult<Option<Vec<u8>>> {
+        let Some(slot) = self.slot_of(struct_hash) else {
+            return Ok(None);
+        };
         let desc = {
-            let remote = self.types[idx].remote_directory().borrow();
+            let remote = slot.remote_directory().borrow();
             let Some(dir) = remote.as_ref() else {
                 return Ok(None);
             };
@@ -299,7 +239,8 @@ impl PageStore {
             return Ok(None);
         }
         let image = self.fetch_image(desc).await?;
-        let page = self.decode_remote(idx, &image)?;
+        let dict = slot.dictionary().borrow();
+        let page = SlotPage::from_bytes(&image, dict.dictionary())?;
         Ok(page.get(id).map(<[u8]>::to_vec))
     }
 }
