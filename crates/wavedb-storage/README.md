@@ -391,15 +391,9 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
    object store's own linear hash of 128 KiB pages, packed into files of
    `[32 KiB header][pages…]` (every page starts within the file's first
    8 MiB), and clears the flags. The remote directories ride the disk's
-   addressing log, so a reopen restores them from the disk alone. Past the
-   compaction ceiling the least recently used uploaded pages leave the disk
-   (`BlockDescriptor::EVICTED`; phase 4): a read of one goes to the object
-   store and marks it wanted back, and a write restores its bucket before it
-   commits, so a page on disk is always the whole truth about its bucket.
-   A database whose disk is gone opens from its files alone (phase 5): every
-   header names every type and chains to the one before by hash, its spare
-   room restates the oldest entries, and the store adopts what the newest
-   whole upload says, every disk bucket evicted.
+   addressing log, so a reopen restores them from the disk alone. Eviction
+   from disk is phase 4: until then every page is on disk and no read
+   reaches the object store.
 
 On startup the directories and the block allocator rebuild by **journal replay**.
 
