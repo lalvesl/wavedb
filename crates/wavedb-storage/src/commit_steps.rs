@@ -173,12 +173,6 @@ impl PageStore {
     // between.
     #[allow(clippy::significant_drop_tightening)]
     fn close_checkpoint(&self, journal_ts: u64) -> StorageResult<u64> {
-        // What uploads and evictions changed goes into a chunk first: the
-        // frame names the addressing, and an evicted page's run is already
-        // free (RFC 0070 §7).
-        if self.has_unrecorded() {
-            self.record_unrecorded()?;
-        }
         // Every run the frame will keep reachable — the next protected set.
         // The allocator guard spans the snapshot so no window can land between
         // reading this state and syncing it.
