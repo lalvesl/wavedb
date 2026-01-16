@@ -29,7 +29,6 @@ use wavedb_platform::s3::Bucket;
 
 use crate::block::{BLOCK_SIZE, BlockDescriptor};
 use crate::error::{StorageError, StorageResult};
-use crate::page::SlotPage;
 use crate::page_store::PageStore;
 
 /// Blocks of address space a file starts pages in (8 MiB).
@@ -112,6 +111,12 @@ pub(crate) struct ObjectState {
     pub(crate) unrecorded: RefCell<Unrecorded>,
     /// One upload at a time.
     pub(crate) uploading: Cell<bool>,
+    /// How recently each disk bucket was read or written — what eviction
+    /// orders by (RFC 0070 §7).
+    pub(crate) heat: RefCell<crate::evict::Heat>,
+    /// Evicted buckets worth having on disk again: read from the object
+    /// store, or holding back a split (`restore_wanted`).
+    pub(crate) wanted: RefCell<BTreeSet<(usize, usize)>>,
 }
 
 /// Buckets whose descriptors an upload changed, per slot index: disk ones
@@ -136,6 +141,8 @@ impl ObjectState {
             pending_blocks: Cell::new(0),
             unrecorded: RefCell::new(Unrecorded::default()),
             uploading: Cell::new(false),
+            heat: RefCell::default(),
+            wanted: RefCell::default(),
         }
     }
 
@@ -160,6 +167,19 @@ impl PageStore {
     /// for a disk-only one.
     pub(crate) fn object(&self) -> StorageResult<&ObjectState> {
         self.object.as_ref().ok_or(StorageError::NotObjectBacked)
+    }
+
+    /// Whether uploads or evictions changed something no chunk records yet.
+    pub(crate) fn has_unrecorded(&self) -> bool {
+        self.object
+            .as_ref()
+            .is_some_and(|o| !o.unrecorded.borrow().slots.is_empty())
+    }
+
+    /// Whether this store's pages live in an object store (RFC 0070).
+    #[must_use]
+    pub const fn is_object_backed(&self) -> bool {
+        self.object.is_some()
     }
 
     /// Bytes of disk pages the object store has not received yet — what an
@@ -225,11 +245,20 @@ impl PageStore {
         id: Id,
     ) -> StorageResult<Option<Vec<u8>>> {
         self.object()?;
-        let Some(slot) = self.slot_of(struct_hash) else {
-            return Ok(None);
-        };
+        match self.slot_index(struct_hash) {
+            Some(idx) => self.read_remote(idx, id).await,
+            None => Ok(None),
+        }
+    }
+
+    /// `id`'s bytes in the uploaded page of slot `idx` that covers it.
+    pub(crate) async fn read_remote(
+        &self,
+        idx: usize,
+        id: Id,
+    ) -> StorageResult<Option<Vec<u8>>> {
         let desc = {
-            let remote = slot.remote_directory().borrow();
+            let remote = self.types[idx].remote_directory().borrow();
             let Some(dir) = remote.as_ref() else {
                 return Ok(None);
             };
@@ -239,8 +268,7 @@ impl PageStore {
             return Ok(None);
         }
         let image = self.fetch_image(desc).await?;
-        let dict = slot.dictionary().borrow();
-        let page = SlotPage::from_bytes(&image, dict.dictionary())?;
+        let page = self.decode_remote(idx, &image)?;
         Ok(page.get(id).map(<[u8]>::to_vec))
     }
 }
