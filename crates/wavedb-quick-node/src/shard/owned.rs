@@ -11,7 +11,9 @@
 
 use std::cell::Cell;
 
-use wavedb_storage::{Compacting, PageStore, StorageError, StorageResult};
+use wavedb_storage::{
+    BLOCK_SIZE, Compacting, PageStore, StorageError, StorageResult,
+};
 
 use crate::upkeep::{Armed, Compaction, Maintenance};
 
@@ -23,6 +25,10 @@ use crate::upkeep::{Armed, Compaction, Maintenance};
 /// is short, large enough that a round's fixed cost (one window allocation,
 /// one positioned write) is not paid per handful of records.
 pub const SETTLE_BUDGET_IDS: usize = 4096;
+
+/// Evicted buckets one upkeep tick brings back to disk at most — each is a
+/// request or two to the object store and one window write.
+pub const RESTORES_PER_TICK: usize = 16;
 
 /// A worker's data shards, and how busy its jobs keep it.
 pub struct Owned {
@@ -157,6 +163,9 @@ impl Owned {
             return;
         };
         let mut armed = cell.get();
+        if !store.is_compacting() {
+            evict_past_ceiling(store, policy, partitions);
+        }
         let now = wavedb_platform::time::unix_secs();
         if store.is_compacting()
             || policy.due(&mut armed, store.space(), partitions, now)
@@ -172,14 +181,19 @@ impl Owned {
         cell.set(armed);
     }
 
-    /// Upload store `i`'s pending disk pages once they pass the policy's
-    /// threshold (RFC 0070 §5), in uploads of a few files each. The jobs
-    /// keep the thread while it awaits the object store; a fault is
-    /// reported, and the flags stay for the next tick to retry.
-    pub async fn upload(&self, i: usize, policy: &Maintenance) {
+    /// Store `i`'s exchange with its object store (RFC 0070): bring back
+    /// the evicted buckets reads went looking for, a few per tick, then
+    /// upload the pending disk pages once they pass the policy's
+    /// threshold, in uploads of a few files each. The jobs keep the thread
+    /// while it awaits the object store; a fault is reported, and what it
+    /// left undone stays for the next tick.
+    pub async fn object_upkeep(&self, i: usize, policy: &Maintenance) {
         let Some(store) = self.stores.get(i) else {
             return;
         };
+        if let Err(e) = store.restore_wanted(RESTORES_PER_TICK).await {
+            eprintln!("worker: restore failed: {e}");
+        }
         while store.pending_upload_bytes() >= policy.upload_after_bytes.max(1) {
             match store.upload().await {
                 Ok(done) if done.pages > 0 => {}
@@ -223,6 +237,33 @@ impl Owned {
             drop(store);
         }
         first.map_or(Ok(()), Err)
+    }
+}
+
+/// An object-backed store's disk is a cache bounded by the compaction
+/// ceiling (RFC 0070 §7): past its share, the coldest uploaded pages leave
+/// it, down to nine tenths of the share, and the ceiling trigger then
+/// compacts the room they left out of the file.
+fn evict_past_ceiling(
+    store: &PageStore,
+    policy: &Compaction,
+    partitions: usize,
+) {
+    let Some(ceiling) = policy.above_bytes else {
+        return;
+    };
+    if !store.is_object_backed() {
+        return;
+    }
+    let share = ceiling / u64::try_from(partitions.max(1)).unwrap_or(u64::MAX);
+    let share_blocks = share / BLOCK_SIZE as u64;
+    let space = store.space();
+    let live = space.file_blocks - space.free_blocks - space.deferred_blocks;
+    if live <= share_blocks {
+        return;
+    }
+    if let Err(e) = store.evict_cold(share_blocks / 10 * 9) {
+        eprintln!("worker: eviction failed: {e}");
     }
 }
 
@@ -414,7 +455,7 @@ mod tests {
             upload_after_bytes: pending + 1,
             ..Maintenance::default()
         };
-        wavedb_platform::carrier::block_on(owned.upload(0, &policy));
+        wavedb_platform::carrier::block_on(owned.object_upkeep(0, &policy));
         assert_eq!(
             store.pending_upload_bytes(),
             pending,
@@ -425,12 +466,35 @@ mod tests {
             upload_after_bytes: pending,
             ..Maintenance::default()
         };
-        wavedb_platform::carrier::block_on(owned.upload(0, &policy));
+        wavedb_platform::carrier::block_on(owned.object_upkeep(0, &policy));
         assert_eq!(store.pending_upload_bytes(), 0);
         let got =
             wavedb_platform::carrier::block_on(store.read_uploaded(SH, id(7)));
         let mut want = SH.to_le_bytes().to_vec();
         want.extend_from_slice(&7u64.to_le_bytes());
         assert_eq!(got.unwrap(), Some(want));
+
+        // Past the ceiling, the uploaded pages leave the disk and the
+        // compaction it triggers cuts the room out of the file; the records
+        // still read back, from the object store.
+        let live = |s: &PageStore| {
+            let space = s.space();
+            space.file_blocks - space.free_blocks - space.deferred_blocks
+        };
+        let before = live(store);
+        let policy = Maintenance {
+            compaction: Compaction {
+                above_bytes: Some(4096),
+                above_free_percent: None,
+                daily_at: None,
+                budget_blocks: 1,
+            },
+            ..Maintenance::default()
+        };
+        owned.upkeep(0, &policy, 1);
+        assert!(live(store) < before, "the uploaded pages left the disk");
+        assert!(store.is_compacting(), "and the ceiling compacts the file");
+        let got = wavedb_platform::carrier::block_on(store.get_of(SH, id(7)));
+        assert!(got.unwrap().is_some());
     }
 }
