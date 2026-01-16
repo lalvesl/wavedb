@@ -47,11 +47,14 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   runs **down** into the lowest holes instead, drops the old addressing chain,
   and truncates the free tail, on a daily UTC time, a disk ceiling or a
   free-space share.
-  [0070](0070-object-storage-backend-WIP.md) *(WIP, phases 1–3 done)* makes
+  [0070](0070-object-storage-backend-WIP.md) *(WIP, phases 1–4 done)* makes
   an S3-compatible object store the place pages live, the disk caching them:
   settled pages are flagged, uploaded into the object store's own linear hash
-  in files of `[32 KiB header][pages]`, and their remote directories ride the
-  disk's addressing log; eviction from disk (phase 4) is next. And
+  in files of `[32 KiB header][pages]`, their remote directories ride the
+  disk's addressing log, and past the compaction ceiling the least recently
+  used uploaded pages leave the disk, read back from the object store until a
+  write brings them back; recovery from the object store alone (phase 5) is
+  next. And
   [0043](0043-descriptors-in-the-commit-frame.md) *(Implemented)* moved the
   addressing state **into** the `Commit` frame — one journal append carries every
   type's descriptor vector plus the retired journal's DONE marker, so `data.bin`
@@ -602,7 +605,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0067](0067-thread-per-core-shards-WIP.md) | Thread per core: the shard as a database, the thread as placement | In progress (steps 1–5, the fsync helper and parallel recovery landed; one executor per thread decided; step 6, measuring, next) |
 | [0068](0068-record-cache-as-a-log-WIP.md) | The record cache as a log | WIP |
 | [0069](0069-compaction-into-the-holes.md) | Compaction into the holes | Implemented |
-| [0070](0070-object-storage-backend-WIP.md) | Object storage as a page backend (three modes) | WIP (phases 1–3 done) |
+| [0070](0070-object-storage-backend-WIP.md) | Object storage as a page backend (three modes) | WIP (phases 1–4 done) |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
