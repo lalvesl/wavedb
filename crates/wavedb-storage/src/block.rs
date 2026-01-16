@@ -80,6 +80,12 @@ impl BlockDescriptor {
     /// The empty descriptor — an unallocated directory slot.
     pub const EMPTY: Self = Self(0);
 
+    /// A disk bucket whose page was **evicted** (RFC 0070 §7): nothing on
+    /// disk, everything in the object store. `start 1 · count 0` — no run,
+    /// like [`EMPTY`](Self::EMPTY), but distinct from it, so a bucket that
+    /// is merely empty still answers "absent" without a request.
+    pub const EVICTED: Self = Self(1 << START_SHIFT);
+
     /// Pack a descriptor.
     ///
     /// # Panics
@@ -129,6 +135,12 @@ impl BlockDescriptor {
     #[must_use]
     pub const fn pending_upload(self) -> bool {
         self.0 & 1 == 1
+    }
+
+    /// Whether this disk bucket's page lives only in the object store.
+    #[must_use]
+    pub const fn is_evicted(self) -> bool {
+        self.0 == Self::EVICTED.0
     }
 
     /// This descriptor with the "not uploaded yet" flag set to `pending`.
@@ -214,6 +226,17 @@ mod tests {
         assert!(emptied.pending_upload());
         assert!(!emptied.is_allocated());
         assert_ne!(emptied, BlockDescriptor::EMPTY);
+    }
+
+    /// Evicted is no run and no flag, and is told apart from empty.
+    #[test]
+    fn evicted_is_neither_a_run_nor_empty() {
+        let evicted = BlockDescriptor::EVICTED;
+        assert!(evicted.is_evicted());
+        assert!(!evicted.is_allocated());
+        assert!(!evicted.pending_upload());
+        assert!(!BlockDescriptor::EMPTY.is_evicted());
+        assert!(!BlockDescriptor::new(1, 1).is_evicted());
     }
 
     #[test]
