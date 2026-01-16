@@ -29,13 +29,11 @@
 //!
 //! ## Reads
 //!
-//! The cache is a **cache**, not the dataset: a read serves from it when it
-//! indexes the id — the bytes, or `None` for a remove not yet settled — and
-//! falls back to the settled page ([`Directory::get_record`]) otherwise. Only
-//! chunks the settle has passed are evicted, so the fallback can only ever
-//! see the newest settled state — never a version the cache has superseded.
-//! An absent id costs one page probe; that's fine until a keyed filter earns
-//! its place.
+//! The record cache answers when it indexes the id (bytes, or `None` for a
+//! remove not yet settled); otherwise the settled page does
+//! ([`Directory::get_record`]), and in an object-backed store an evicted
+//! page's copy in the object store (`crate::read_through`). Only settled
+//! chunks leave the cache, so a fallback sees the newest settled state.
 //!
 //! ## Recovery model
 //!
@@ -295,6 +293,8 @@ impl PageStore {
             store.route_batch(batch)?;
             store.commit_to_caches(batch);
         }
+        // An evicted bucket a replayed write lands in comes back first.
+        store.restore_replayed(&recovered.replay)?;
         store.drain()?;
         Ok(store)
     }
