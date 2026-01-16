@@ -177,8 +177,10 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   reassembles the flagged ones into the object store's own linear hash
   (128 KiB pages, files of `[32 KiB header][pages]`), and the remote
   directories ride the disk's addressing log; the mode is fixed in the
-  superblock. Eviction from disk (and so any read reaching the object store)
-  is phase 4. A store
+  superblock. Past the compaction ceiling the least recently used uploaded
+  pages leave the disk (phase 4): a read of one goes to the object store, a
+  write brings its bucket back before it commits, so a settle never meets
+  an evicted bucket. A store
   is used from one thread: plain cells, no lock, no atomic; `Send`, not `Sync`. **One open `PageStore`
   per data directory** — `data.bin` is locked while open, a second open of it is
   `EngineBusy` — and stores over different directories coexist in one process.
