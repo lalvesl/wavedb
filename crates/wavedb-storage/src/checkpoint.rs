@@ -50,6 +50,9 @@ enum Placement {
     /// A full addressing snapshot even if no page moves, in the lowest hole
     /// that holds it — compaction dropping the chain it has outgrown.
     Snapshot,
+    /// Best fit, for a page brought back from the object store (RFC 0070
+    /// §7): what it holds is what the object store holds, so no flag.
+    Restore,
 }
 
 impl PageStore {
@@ -100,6 +103,24 @@ impl PageStore {
         self.place_in(Vec::new(), Placement::Snapshot).map(|_| ())
     }
 
+    /// Write a page restored from the object store.
+    ///
+    /// # Errors
+    /// Propagates the window write fault.
+    pub(crate) fn place_restored(&self, plan: SlotPlan) -> StorageResult<()> {
+        self.place_in(vec![plan], Placement::Restore).map(|_| ())
+    }
+
+    /// Write what uploads and evictions changed and no chunk records yet, in
+    /// a window of its own — the checkpoint does, before its `Commit` frame
+    /// names the addressing: an evicted page's run is already free.
+    ///
+    /// # Errors
+    /// Propagates the window write fault.
+    pub(crate) fn record_unrecorded(&self) -> StorageResult<()> {
+        self.place_in(Vec::new(), Placement::BestFit).map(|_| ())
+    }
+
     /// Phases 2–4 + 6: carve one window for every planned image *and* the
     /// round's edit chunk, write it, swap the descriptors in, and release the
     /// superseded runs. `false` only for a [`Placement::Below`] no hole fits,
@@ -121,7 +142,7 @@ impl PageStore {
     ) -> StorageResult<bool> {
         let snapshot = matches!(placement, Placement::Snapshot);
         let mut targets = targets_of(&plans);
-        if targets.is_empty() && !snapshot {
+        if targets.is_empty() && !snapshot && !self.has_unrecorded() {
             return Ok(true);
         }
         let mut alloc = self.alloc.borrow_mut();
@@ -150,7 +171,7 @@ impl PageStore {
 
         let window = match placement {
             _ if total == 0 => None,
-            Placement::BestFit => Some(alloc.alloc(total)),
+            Placement::BestFit | Placement::Restore => Some(alloc.alloc(total)),
             Placement::Snapshot => Some(alloc.alloc_lowest(total)),
             Placement::Below(limit) => match alloc.alloc_below(total, limit) {
                 Some(run) => Some(run),
@@ -161,8 +182,11 @@ impl PageStore {
             .map_or_else(|| vec![None; targets.len()], |w| carve(w, &sizes));
         // A settle writes what the object store has not seen; a move does
         // not change what it moves.
-        let pending = matches!(placement, Placement::BestFit)
-            .then_some(self.object.is_some());
+        let pending = match placement {
+            Placement::BestFit => Some(self.object.is_some()),
+            Placement::Restore => Some(false),
+            Placement::Below(_) | Placement::Snapshot => None,
+        };
         let changed = install(&mut plans, &targets, &runs, pending);
 
         // Pass two: the same shape, now naming the runs just handed out.
@@ -191,6 +215,14 @@ impl PageStore {
             let desc = BlockDescriptor::from_run(run);
             for stale in meta.record(desc, full) {
                 alloc.free(stale);
+            }
+        }
+        if pending.is_some() {
+            // A page written for use — settled or brought back — is hot.
+            for target in &targets {
+                if let Target::Page { plan, bucket } = target {
+                    self.touch(plans[*plan].idx, *bucket);
+                }
             }
         }
         self.publish(plans, &dicts, &mut alloc);
