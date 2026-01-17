@@ -396,6 +396,10 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
    (`BlockDescriptor::EVICTED`; phase 4): a read of one goes to the object
    store and marks it wanted back, and a write restores its bucket before it
    commits, so a page on disk is always the whole truth about its bucket.
+   A database whose disk is gone opens from its files alone (phase 5): every
+   header names every type and chains to the one before by hash, its spare
+   room restates the oldest entries, and the store adopts what the newest
+   whole upload says, every disk bucket evicted.
 
 On startup the directories and the block allocator rebuild by **journal replay**.
 
