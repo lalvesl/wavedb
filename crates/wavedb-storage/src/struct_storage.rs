@@ -21,6 +21,7 @@
 use std::cell::RefCell;
 use wavedb_core::index::BPTREE_NODE_STRUCT_HASH;
 
+use crate::block::BlockDescriptor;
 use crate::dictionary::DictState;
 use crate::directory::Directory;
 
@@ -88,6 +89,9 @@ pub(crate) struct TypeSlot {
     /// The object store's directory for this type (RFC 0070 §2): 128 KiB
     /// pages, a linear hash of its own. `None` until the first upload.
     remote: StructDirectory,
+    /// Where the object store's copy of the dictionary is — the remote
+    /// descriptor a header names.
+    remote_dict: std::cell::Cell<BlockDescriptor>,
     /// Bytes of the dictionary the object store holds a copy of — an upload
     /// carries the dictionary again once it has grown past them.
     uploaded_dict: std::cell::Cell<usize>,
@@ -101,6 +105,7 @@ impl TypeSlot {
             struct_hash: declared.struct_hash,
             dir: RefCell::new(None),
             remote: RefCell::new(None),
+            remote_dict: std::cell::Cell::new(BlockDescriptor::EMPTY),
             uploaded_dict: std::cell::Cell::new(0),
             dict: RefCell::new(DictState::new(declared.compress)),
         }
@@ -119,6 +124,13 @@ impl TypeSlot {
     /// This type's directory in the object store — its own cell.
     pub(crate) const fn remote_directory(&self) -> &StructDirectory {
         &self.remote
+    }
+
+    /// The remote descriptor of the dictionary's uploaded copy.
+    pub(crate) const fn remote_dict(
+        &self,
+    ) -> &std::cell::Cell<BlockDescriptor> {
+        &self.remote_dict
     }
 
     /// Bytes of the dictionary already uploaded.
