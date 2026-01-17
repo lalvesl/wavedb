@@ -90,7 +90,8 @@ fn a_reopen_restores_what_was_uploaded() {
 }
 
 /// An upload a crash kept off the disk is made again: the flags are still
-/// set, the end is still where it was, and the file is written over.
+/// set — and the new files go past the lost ones, which stay where they
+/// are: a file number once written is never written again.
 #[test]
 fn an_upload_lost_in_a_crash_is_made_again() {
     let fx = Fixture::new();
@@ -109,12 +110,9 @@ fn an_upload_lost_in_a_crash_is_made_again() {
     block_on(async {
         assert_eq!(s.read_uploaded(SH, id(0)).await.unwrap(), None);
     });
+    let lost = fx.newest_file();
     upload_all(&s);
-    assert_eq!(
-        fx.newest_file(),
-        Some(format!("db/1seg/{:016x}", !0u64)),
-        "the same file numbers again"
-    );
+    assert!(fx.newest_file() < lost, "past the lost upload's files");
     assert_uploaded(&s, |k| Some(record(k, 0)));
 }
 
