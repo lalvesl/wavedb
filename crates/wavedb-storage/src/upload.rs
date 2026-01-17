@@ -15,8 +15,8 @@
 //! settle round may run between two awaits — it writes newer, flagged pages,
 //! which the next upload carries. Publishing records nothing on disk: the
 //! next window carries it, whatever else it holds (RFC 0070 §5). A crash
-//! before then uploads those pages again, and the files above the recorded
-//! end are written over.
+//! before then uploads those pages again, past the files the lost upload
+//! left — a file number is never written twice (`step_over_leftovers`).
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
 
@@ -26,12 +26,16 @@ use std::collections::BTreeMap;
 use futures::stream::{self, StreamExt, TryStreamExt};
 use wavedb_platform::s3::When;
 
+use crate::block::BlockDescriptor;
 use crate::directory::Directory;
 use crate::error::StorageResult;
+use crate::file_header::Chain;
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
 use crate::remote::weight;
-use crate::upload_file::{Packed, Placed, SlotImages, pack};
+use crate::upload_file::{
+    Packed, Placed, SlotImages, TypeView, finish, layout,
+};
 use crate::upload_plan::SlotUpload;
 
 /// Blocks of flagged disk pages one upload takes (8 MiB) — a pacing bound,
@@ -98,12 +102,31 @@ impl PageStore {
             dicts.push(carried.then_some(len));
             slots.push(SlotImages {
                 struct_hash: slot.struct_hash(),
-                buckets: w.remote.len() as u32,
                 pages,
                 dict: carried.then(|| dict.image()),
             });
         }
-        let packed = pack(object.end.get(), &slots);
+        let types = self
+            .types
+            .iter()
+            .enumerate()
+            .filter(|(idx, slot)| {
+                work.iter().any(|w| w.idx == *idx)
+                    || slot.remote_directory().borrow().is_some()
+            })
+            .count();
+        let mut packed = layout(object.chain.borrow().end, &slots, types);
+        let mut placed_dicts = vec![None; work.len()];
+        for placed in &packed.placed {
+            match *placed {
+                Placed::Page { slot, bucket, desc } => {
+                    work[slot].remote.set_descriptor(bucket, desc);
+                }
+                Placed::Dict { slot, desc } => placed_dicts[slot] = Some(desc),
+            }
+        }
+        let mut chain = object.chain.borrow().clone();
+        self.write_headers(&mut packed, &work, &placed_dicts, &mut chain)?;
         let remote = &object.remote;
         stream::iter(&packed.files)
             .map(|file| {
@@ -115,7 +138,46 @@ impl PageStore {
             .buffer_unordered(IN_FLIGHT)
             .try_for_each(|_| async { Ok(()) })
             .await?;
-        Ok(self.publish_upload(work, &slots, &dicts, &packed))
+        let carried = Carried {
+            lens: dicts,
+            descs: placed_dicts,
+        };
+        Ok(self.publish_upload(work, &slots, &carried, &packed, chain))
+    }
+
+    /// Write every file's header ([`finish`]): each names every type the
+    /// object store holds once this upload is in — the work's new
+    /// directories, the others as they stand.
+    fn write_headers(
+        &self,
+        packed: &mut Packed,
+        work: &[SlotUpload],
+        placed_dicts: &[Option<BlockDescriptor>],
+        chain: &mut Chain,
+    ) -> StorageResult<()> {
+        let guards: Vec<_> = self
+            .types
+            .iter()
+            .map(|slot| slot.remote_directory().borrow())
+            .collect();
+        let mut views = Vec::new();
+        for (idx, slot) in self.types.iter().enumerate() {
+            let at = work.iter().position(|w| w.idx == idx);
+            let slots = match (at, guards[idx].as_ref()) {
+                (Some(w), _) => work[w].remote.slots(),
+                (None, Some(dir)) => dir.slots(),
+                (None, None) => continue,
+            };
+            let dict = at
+                .and_then(|w| placed_dicts[w])
+                .unwrap_or_else(|| slot.remote_dict().get());
+            views.push(TypeView {
+                struct_hash: slot.struct_hash(),
+                slots,
+                dict: dict.is_allocated().then_some(dict.raw()),
+            });
+        }
+        finish(packed, &views, chain, self.seed)
     }
 
     /// Step 1: every type's flagged disk pages, up to the input bound, and a
@@ -192,15 +254,10 @@ impl PageStore {
         &self,
         work: Vec<SlotUpload>,
         slots: &[SlotImages],
-        dicts: &[Option<usize>],
+        carried: &Carried,
         packed: &Packed,
+        chain: Chain,
     ) -> Uploaded {
-        let mut work = work;
-        for placed in &packed.placed {
-            if let Placed::Page { slot, bucket, desc } = *placed {
-                work[slot].remote.set_descriptor(bucket, desc);
-            }
-        }
         let Some(object) = &self.object else {
             return Uploaded::default();
         };
@@ -215,8 +272,10 @@ impl PageStore {
             let touched = unrecorded.slots.entry(upload.idx).or_default();
             touched.remote.extend(slots[w].pages.keys());
             *slot.remote_directory().borrow_mut() = Some(upload.remote);
-            if let Some(len) = dicts[w] {
+            if let (Some(len), Some(desc)) = (carried.lens[w], carried.descs[w])
+            {
                 slot.uploaded_dict().set(len);
+                slot.remote_dict().set(desc);
             }
             let mut live = slot.directory().borrow_mut();
             let Some(dir) = live.as_mut() else { continue };
@@ -231,7 +290,14 @@ impl PageStore {
                 done.pages += 1;
             }
         }
-        object.end.set(packed.end);
+        *object.chain.borrow_mut() = chain;
         done
     }
+}
+
+/// The dictionaries an upload carried, per work item: the length of each
+/// copy and where it landed.
+struct Carried {
+    lens: Vec<Option<usize>>,
+    descs: Vec<Option<BlockDescriptor>>,
 }
