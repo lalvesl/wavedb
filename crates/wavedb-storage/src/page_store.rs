@@ -234,16 +234,9 @@ impl PageStore {
         std::fs::create_dir_all(dir)?;
 
         let data_bin_existed = dir.join("data.bin").exists();
-        let file = BlockFile::open_as(
-            dir.join("data.bin"),
-            options.page_cache_bytes,
-            options.remote.is_some(),
-        )?;
-        if file.object_backed() != options.remote.is_some() {
-            return Err(crate::StorageError::ModeMismatch {
-                object_backed: file.object_backed(),
-            });
-        }
+        // An object-backed store with no disk yet may have a database in its
+        // object store already: it is recovered, never created over.
+        let (file, found) = crate::recover::open_file(dir, &options)?;
         let seed = file.seed();
 
         // Generated Pivot types of identical shape may share a STRUCT_HASH;
@@ -283,10 +276,13 @@ impl PageStore {
             compaction: std::cell::Cell::default(),
             object: options.remote.map(crate::remote::ObjectState::new),
         };
-        if let Some(object) = &store.object {
-            object.end.set(recovered.remote_end);
+        if let Some(object) = &store.object
+            && let Some(chain) = &recovered.chain
+        {
+            *object.chain.borrow_mut() =
+                crate::file_header::Chain::from_record(chain);
         }
-        store.tally_pending();
+        store.prepare_object(data_bin_existed)?;
         // Rebuild the logs in journal order, no re-journal, then settle them
         // into the pages as the live engine would have.
         for batch in &recovered.replay {
@@ -296,6 +292,9 @@ impl PageStore {
         // An evicted bucket a replayed write lands in comes back first.
         store.restore_replayed(&recovered.replay)?;
         store.drain()?;
+        if let Some(found) = found {
+            store.adopt(found)?;
+        }
         Ok(store)
     }
 
