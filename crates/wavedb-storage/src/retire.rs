@@ -103,13 +103,16 @@ impl PageStore {
     /// A sync or unlink fault. Nothing acked is at risk: until this succeeds
     /// the retired journal is still on disk and still rules.
     pub fn force_retirement(&self) -> StorageResult<()> {
+        let Some(disk) = &self.disk else {
+            return Ok(()); // object mode: no checkpoint, nothing retiring
+        };
         if !self.is_retiring() {
             return Ok(());
         }
         // The pending frame lives in the current journal — `commit_journal`
         // claims the record before it rotates, so there is no state in which a
-        // retirement is observable while its carrier is not `self.journal`.
-        self.journal.borrow_mut().sync()?;
+        // retirement is observable while its carrier is not the live journal.
+        disk.journal.borrow_mut().sync()?;
         let taken = self.retiring.borrow_mut().take();
         let Some(retiring) = taken else {
             return Ok(()); // someone else got there first
