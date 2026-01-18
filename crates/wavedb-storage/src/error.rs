@@ -75,6 +75,13 @@ pub enum StorageError {
     /// An object-store operation on a store that has none.
     #[error("this store has no object store")]
     NotObjectBacked,
+    /// A file this store was writing already existed: another writer is
+    /// using the same prefix (RFC 0070 §11). Every file is created only if
+    /// absent, so the two never overwrite each other; the store that meets
+    /// the other's file stops taking writes — what it holds that is not
+    /// uploaded cannot go up any more — until it is reopened.
+    #[error("another writer is using this object store prefix")]
+    Fenced,
     /// A core/codec fault surfaced inside the engine.
     #[error(transparent)]
     Core(#[from] wavedb_core::Error),
