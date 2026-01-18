@@ -220,7 +220,7 @@ pub async fn shard<E: NodeTasks>(ctx: ShardCtx<E>, here: Here) {
     // be gone before they can be closed and dropped.
     let worker = sole(worker).await;
     let owned = sole(worker.owned).await;
-    let _ = closed.send(owned.close());
+    let _ = closed.send(owned.close().await);
     drop(here);
 }
 
