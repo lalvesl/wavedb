@@ -2,13 +2,19 @@
 //! received, reassembled record by record into its pages and shipped in
 //! files.
 //!
-//! 1. **Take** the flagged disk pages, up to [`UPLOAD_INPUT_BLOCKS`] — each
-//!    is the whole truth about its disk bucket, removals included.
+//! 1. **Settle, then take** — with no await between: every committed batch
+//!    goes into the pages, then the flagged pages are taken, up to
+//!    [`UPLOAD_INPUT_BLOCKS`] — each the whole truth about its disk bucket,
+//!    removals included. A take that leaves nothing flagged behind is a
+//!    **cut** (`FileHeader::cut`): with the uploads before it, it holds
+//!    every batch up to here and no batch in part, and only a cut is ever
+//!    recovered (`crate::recover`).
 //! 2. **Fetch** the remote pages that share records with them, all at once.
 //! 3. **Rebuild** those pages, **split** where the turn's bucket runs over,
 //!    **encode**, and **pack** them into files (`crate::upload_file`).
-//! 4. **PUT** the files, then **publish**: the remote directories, and the
-//!    flags of the pages whose descriptor did not move meanwhile, cleared.
+//! 4. **PUT** the files, each only if its key is absent, then **publish**:
+//!    the remote directories, and the flags of the pages whose descriptor
+//!    did not move meanwhile, cleared.
 //!
 //! Nothing is borrowed across an await: the snapshot copies what it needs
 //! out of the cells, and the cells are touched again only to publish. A
@@ -16,7 +22,10 @@
 //! which the next upload carries. Publishing records nothing on disk: the
 //! next window carries it, whatever else it holds (RFC 0070 §5). A crash
 //! before then uploads those pages again, past the files the lost upload
-//! left — a file number is never written twice (`step_over_leftovers`).
+//! left — a file number is never written twice (`step_over_leftovers`), and
+//! neither is the number of a file whose PUT failed. So a file already
+//! there is another writer's: the store is fenced
+//! ([`StorageError::Fenced`]) rather than overwrite it.
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
 
@@ -24,11 +33,10 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use futures::stream::{self, StreamExt, TryStreamExt};
-use wavedb_platform::s3::When;
 
 use crate::block::BlockDescriptor;
 use crate::directory::Directory;
-use crate::error::StorageResult;
+use crate::error::{StorageError, StorageResult};
 use crate::file_header::Chain;
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
@@ -37,13 +45,14 @@ use crate::upload_file::{
     Packed, Placed, SlotImages, TypeView, finish, layout,
 };
 use crate::upload_plan::SlotUpload;
+use crate::upload_publish::Carried;
 
 /// Blocks of flagged disk pages one upload takes (8 MiB) — a pacing bound,
 /// so the files it builds stay a few, and a backlog drains over several.
 pub const UPLOAD_INPUT_BLOCKS: u64 = 2048;
 
 /// Object-store requests one upload keeps in flight.
-const IN_FLIGHT: usize = 32;
+pub const IN_FLIGHT: usize = 32;
 
 /// What one [`upload`](PageStore::upload) shipped.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -75,16 +84,47 @@ impl PageStore {
     /// publishing happens between two awaits.
     ///
     /// # Errors
-    /// [`StorageError::NotObjectBacked`](crate::StorageError::NotObjectBacked)
-    /// for a disk-only store; an object-store or page fault. Nothing is
-    /// published then: the flags stay set and a later upload retries.
+    /// [`StorageError::NotObjectBacked`]
+    /// for a disk-only store; [`StorageError::Fenced`] once another writer's
+    /// file was met; an object-store or page fault. Nothing is published
+    /// then: the flags stay set and a later upload retries.
     pub async fn upload(&self) -> StorageResult<Uploaded> {
         let object = self.object()?;
         if object.uploading.replace(true) {
             return Ok(Uploaded::default());
         }
         let _one = Release(&object.uploading);
-        let mut work = self.take_flagged()?;
+        if object.fenced.get() {
+            return Err(StorageError::Fenced);
+        }
+        // Every committed batch into the pages first, and the take right
+        // after it, with no await between: what goes up is then every batch
+        // up to here, whole (`cut`), when the take leaves nothing behind.
+        self.drain()?;
+        let (work, cut) = self.take_flagged()?;
+        // Taken at a cut: the oldest write waiting is carried — back if the
+        // upload fails.
+        let carried = if cut {
+            object.oldest_write.take()
+        } else {
+            None
+        };
+        let shipped = self.ship(work, cut).await;
+        if shipped.is_err()
+            && let Some(at) = carried
+        {
+            object.oldest_write.set(Some(at));
+        }
+        shipped
+    }
+
+    /// Everything after the take: fetch, rebuild, pack, PUT, publish.
+    async fn ship(
+        &self,
+        mut work: Vec<SlotUpload>,
+        cut: bool,
+    ) -> StorageResult<Uploaded> {
+        let object = self.object()?;
         if work.is_empty() {
             return Ok(Uploaded::default());
         }
@@ -116,6 +156,7 @@ impl PageStore {
             })
             .count();
         let mut packed = layout(object.chain.borrow().end, &slots, types);
+        packed.cut = cut;
         let mut placed_dicts = vec![None; work.len()];
         for placed in &packed.placed {
             match *placed {
@@ -127,17 +168,13 @@ impl PageStore {
         }
         let mut chain = object.chain.borrow().clone();
         self.write_headers(&mut packed, &work, &placed_dicts, &mut chain)?;
-        let remote = &object.remote;
-        stream::iter(&packed.files)
-            .map(|file| {
-                let key = remote.file_key(file.number);
-                async move {
-                    remote.bucket().put(&key, &file.bytes, When::Always).await
-                }
-            })
-            .buffer_unordered(IN_FLIGHT)
-            .try_for_each(|_| async { Ok(()) })
-            .await?;
+        if let Err(e) = self.put_files(&packed).await {
+            // Any of the files may have landed: their numbers are never
+            // written again (`crate::recover`), so the next upload starts
+            // past them.
+            object.chain.borrow_mut().end = packed.end;
+            return Err(e);
+        }
         let carried = Carried {
             lens: dicts,
             descs: placed_dicts,
@@ -181,9 +218,10 @@ impl PageStore {
     }
 
     /// Step 1: every type's flagged disk pages, up to the input bound, and a
-    /// copy of each type's remote directory.
-    fn take_flagged(&self) -> StorageResult<Vec<SlotUpload>> {
-        let mut taken = 0;
+    /// copy of each type's remote directory — and whether that took every
+    /// flagged page, the bound leaving none behind (a cut).
+    fn take_flagged(&self) -> StorageResult<(Vec<SlotUpload>, bool)> {
+        let (mut taken, mut cut) = (0, true);
         let mut work = Vec::new();
         for (idx, slot) in self.types.iter().enumerate() {
             let Some(disk) = slot.directory().borrow().clone() else {
@@ -192,7 +230,11 @@ impl PageStore {
             let (mut flagged, mut pages) = (Vec::new(), Vec::new());
             let dict = slot.dictionary().borrow();
             for (bucket, &desc) in disk.slots().iter().enumerate() {
-                if !desc.pending_upload() || taken >= UPLOAD_INPUT_BLOCKS {
+                if !desc.pending_upload() {
+                    continue;
+                }
+                if taken >= UPLOAD_INPUT_BLOCKS {
+                    cut = false;
                     continue;
                 }
                 let hash = slot.struct_hash();
@@ -213,7 +255,7 @@ impl PageStore {
                 staged: BTreeMap::new(),
             });
         }
-        Ok(work)
+        Ok((work, cut))
     }
 
     /// Step 2: stage every remote page the flagged ones share records with —
@@ -245,59 +287,4 @@ impl PageStore {
         }
         Ok(())
     }
-
-    /// Step 4, after every PUT: adopt the remote directories and clear the
-    /// flag of each page still at the descriptor it was taken at — one a
-    /// settle round rewrote meanwhile is newer than what went up, and keeps
-    /// its flag. What changed waits in `unrecorded` for the next window.
-    fn publish_upload(
-        &self,
-        work: Vec<SlotUpload>,
-        slots: &[SlotImages],
-        carried: &Carried,
-        packed: &Packed,
-        chain: Chain,
-    ) -> Uploaded {
-        let Some(object) = &self.object else {
-            return Uploaded::default();
-        };
-        let mut done = Uploaded {
-            files: packed.files.len(),
-            pages: 0,
-            bytes: packed.files.iter().map(|f| f.bytes.len() as u64).sum(),
-        };
-        let mut unrecorded = object.unrecorded.borrow_mut();
-        for (w, upload) in work.into_iter().enumerate() {
-            let slot = &self.types[upload.idx];
-            let touched = unrecorded.slots.entry(upload.idx).or_default();
-            touched.remote.extend(slots[w].pages.keys());
-            *slot.remote_directory().borrow_mut() = Some(upload.remote);
-            if let (Some(len), Some(desc)) = (carried.lens[w], carried.descs[w])
-            {
-                slot.uploaded_dict().set(len);
-                slot.remote_dict().set(desc);
-            }
-            let mut live = slot.directory().borrow_mut();
-            let Some(dir) = live.as_mut() else { continue };
-            for (bucket, desc) in upload.flagged {
-                if dir.descriptor(bucket) != desc {
-                    continue;
-                }
-                let sent = desc.with_pending_upload(false);
-                dir.set_descriptor(bucket, sent);
-                object.retally(desc, sent);
-                touched.disk.insert(bucket);
-                done.pages += 1;
-            }
-        }
-        *object.chain.borrow_mut() = chain;
-        done
-    }
-}
-
-/// The dictionaries an upload carried, per work item: the length of each
-/// copy and where it landed.
-struct Carried {
-    lens: Vec<Option<usize>>,
-    descs: Vec<Option<BlockDescriptor>>,
 }
