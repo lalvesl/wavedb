@@ -148,7 +148,7 @@ impl Owned {
         }
         let share = policy.cache_budget_bytes / partitions;
         store.evict_settled(share);
-        self.compact(i, store, &policy.compaction, partitions);
+        self.compact(i, store, policy, partitions);
     }
 
     /// Start or continue store `i`'s compaction, if its triggers say so.
@@ -156,15 +156,16 @@ impl Owned {
         &self,
         i: usize,
         store: &PageStore,
-        policy: &Compaction,
+        maintenance: &Maintenance,
         partitions: usize,
     ) {
+        let policy = &maintenance.compaction;
         let Some(cell) = self.armed.get(i) else {
             return;
         };
         let mut armed = cell.get();
         if !store.is_compacting() {
-            evict_past_ceiling(store, policy, partitions);
+            evict_past_ceiling(store, maintenance, partitions);
         }
         let now = wavedb_platform::time::unix_secs();
         if store.is_compacting()
@@ -183,10 +184,11 @@ impl Owned {
 
     /// Store `i`'s exchange with its object store (RFC 0070): bring back
     /// the evicted buckets reads went looking for, a few per tick, then
-    /// upload the pending disk pages once they pass the policy's
-    /// threshold, in uploads of a few files each. The jobs keep the thread
-    /// while it awaits the object store; a fault is reported, and what it
-    /// left undone stays for the next tick.
+    /// upload once the store holds back the policy's bytes, or once its
+    /// oldest write has waited the policy's interval — in uploads of a few
+    /// files each. The jobs keep the thread while it awaits the object
+    /// store; a fault is reported, and what it left undone stays for the
+    /// next tick.
     pub async fn object_upkeep(&self, i: usize, policy: &Maintenance) {
         let Some(store) = self.stores.get(i) else {
             return;
@@ -194,7 +196,7 @@ impl Owned {
         if let Err(e) = store.restore_wanted(RESTORES_PER_TICK).await {
             eprintln!("worker: restore failed: {e}");
         }
-        while store.pending_upload_bytes() >= policy.upload_after_bytes.max(1) {
+        while upload_due(store, policy) {
             match store.upload().await {
                 Ok(done) if done.pages > 0 => {}
                 Ok(_) => return, // another upload has it, or nothing moved
@@ -219,17 +221,23 @@ impl Owned {
     }
 
     /// Close every store cleanly — settle, checkpoint, force the retirement
-    /// barrier, so a restart replays nothing — and **drop them before
+    /// barrier, so a restart replays nothing; in object mode, upload every
+    /// write first, since nothing else keeps it — and **drop them before
     /// returning**: a caller that resumes on the answer may reopen the
     /// directories at once, and a lock still held would be `EngineBusy`.
     ///
     /// # Errors
     /// The first store's fault; every store is still attempted and dropped.
-    pub fn close(self) -> StorageResult<()> {
+    pub async fn close(self) -> StorageResult<()> {
         let mut first: Option<StorageError> = None;
         for store in self.stores {
-            let closed = store
-                .commit_journal()
+            let uploaded = if store.is_object_mode() {
+                store.upload_all().await
+            } else {
+                Ok(())
+            };
+            let closed = uploaded
+                .and_then(|()| store.commit_journal())
                 .and_then(|()| store.force_retirement());
             if let Err(e) = closed {
                 first.get_or_insert(e);
@@ -244,17 +252,25 @@ impl Owned {
 /// ceiling (RFC 0070 §7): past its share, the coldest uploaded pages leave
 /// it, down to nine tenths of the share, and the ceiling trigger then
 /// compacts the room they left out of the file.
+///
+/// In object mode the "disk" is RAM, and its ceiling the policy's
+/// [`object_ram_bytes`](Maintenance::object_ram_bytes).
 fn evict_past_ceiling(
     store: &PageStore,
-    policy: &Compaction,
+    policy: &Maintenance,
     partitions: usize,
 ) {
-    let Some(ceiling) = policy.above_bytes else {
-        return;
-    };
     if !store.is_object_backed() {
         return;
     }
+    let ceiling = if store.is_object_mode() {
+        Some(policy.object_ram_bytes)
+    } else {
+        policy.compaction.above_bytes
+    };
+    let Some(ceiling) = ceiling else {
+        return;
+    };
     let share = ceiling / u64::try_from(partitions.max(1)).unwrap_or(u64::MAX);
     let share_blocks = share / BLOCK_SIZE as u64;
     let space = store.space();
@@ -267,12 +283,24 @@ fn evict_past_ceiling(
     }
 }
 
+/// Whether `store` should upload now: it holds back the policy's bytes, or
+/// its oldest write no upload carried has waited the policy's interval.
+fn upload_due(store: &PageStore, policy: &Maintenance) -> bool {
+    store.pending_upload_bytes() >= policy.upload_after_bytes.max(1)
+        || policy
+            .upload_interval
+            .zip(store.unuploaded_for())
+            .is_some_and(|(interval, waited)| waited >= interval)
+}
+
 fn owes(store: &PageStore) -> bool {
     store.has_pending() || store.is_checkpointing()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use futures::executor::block_on;
     use wavedb_core::{Id, Store, U48, Write};
     use wavedb_storage::{PageStore, StoreOptions, StructStorage, open_shards};
@@ -415,7 +443,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let owned = Owned::new(0, open(d.path(), 2));
         put(owned.store(1).unwrap(), 0..20);
-        owned.close().unwrap();
+        wavedb_platform::carrier::block_on(owned.close()).unwrap();
         let reopened = open(d.path(), 2);
         assert!(reopened.iter().all(|s| !s.has_pending()));
     }
@@ -453,6 +481,7 @@ mod tests {
 
         let policy = Maintenance {
             upload_after_bytes: pending + 1,
+            upload_interval: None,
             ..Maintenance::default()
         };
         wavedb_platform::carrier::block_on(owned.object_upkeep(0, &policy));
@@ -496,5 +525,49 @@ mod tests {
         assert!(store.is_compacting(), "and the ceiling compacts the file");
         let got = wavedb_platform::carrier::block_on(store.get_of(SH, id(7)));
         assert!(got.unwrap().is_some());
+    }
+
+    /// In object mode the interval is the durability window: a store holding
+    /// far less than a file uploads once its oldest write has waited it, and
+    /// a close uploads whatever is left — so a reopen finds every write.
+    #[test]
+    fn an_object_mode_store_uploads_on_its_interval_and_at_close() {
+        let d = tempfile::tempdir().unwrap();
+        let server = wavedb_platform::s3::test_server::TestServer::start(
+            &d.path().join("objects"),
+        );
+        let options = || StoreOptions {
+            remote: Some(wavedb_storage::Remote::new(server.bucket(), "")),
+            ..StoreOptions::default()
+        };
+        let open = || {
+            wavedb_storage::open_object_shards(&[&SLOT], options(), 1, 1)
+                .unwrap()
+        };
+        let owned = Owned::new(0, open());
+        let store = owned.store(0).unwrap();
+        put(store, 0..20);
+        let waiting = Maintenance {
+            upload_interval: Some(Duration::from_secs(3_600)),
+            ..Maintenance::default()
+        };
+        wavedb_platform::carrier::block_on(owned.object_upkeep(0, &waiting));
+        assert!(store.unuploaded_for().is_some(), "not due yet");
+        let due = Maintenance {
+            upload_interval: Some(Duration::ZERO),
+            ..Maintenance::default()
+        };
+        wavedb_platform::carrier::block_on(owned.object_upkeep(0, &due));
+        assert_eq!(store.unuploaded_for(), None, "the interval uploaded it");
+
+        put(store, 20..40);
+        wavedb_platform::carrier::block_on(owned.close()).unwrap();
+        let reopened = open();
+        for k in 0..40 {
+            let got = wavedb_platform::carrier::block_on(
+                reopened[0].get_of(SH, id(k)),
+            );
+            assert!(got.unwrap().is_some(), "record {k}");
+        }
     }
 }
