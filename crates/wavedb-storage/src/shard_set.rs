@@ -21,7 +21,11 @@ use std::path::Path;
 use wavedb_wire::WaveWire;
 
 use crate::error::{StorageError, StorageResult};
+use futures::executor::block_on;
+use wavedb_platform::s3::{Put, When};
+
 use crate::page_store::{PageStore, StoreOptions};
+use crate::remote::Remote;
 use crate::struct_storage::StructStorage;
 
 /// The file naming the shard count, at the database's root.
@@ -69,12 +73,17 @@ pub fn open_shards(
 /// The budgets in `options` are the database's: each shard gets an equal
 /// share of the page cache and of the record-cache budget.
 ///
+/// An object-backed database keeps a copy of the `MANIFEST` in its object
+/// store as well, so a database whose disk is gone — or one reopened in
+/// object mode — still knows its count.
+///
 /// # Errors
 /// [`StorageError::Corrupt`] for an unreadable `MANIFEST`, a shard count out
-/// of `1..=256`, or a directory holding an unsharded store; otherwise the
-/// first fault, in shard order, that opening a shard raised (a shard already
-/// open is [`StorageError::EngineBusy`]). Every store that did open is
-/// dropped again before this returns, so a retry finds them closed.
+/// of `1..=256`, two `MANIFEST`s that disagree, or a directory holding an
+/// unsharded store; otherwise the first fault, in shard order, that opening
+/// a shard raised (a shard already open is [`StorageError::EngineBusy`]).
+/// Every store that did open is dropped again before this returns, so a
+/// retry finds them closed.
 pub fn open_shards_with(
     dir: impl AsRef<Path>,
     types: &[&'static StructStorage],
@@ -83,17 +92,49 @@ pub fn open_shards_with(
     threads: usize,
 ) -> StorageResult<Vec<PageStore>> {
     let dir = dir.as_ref();
-    let count = match read_manifest(dir)? {
-        Some(count) => count,
-        None => create(dir, shards)?,
-    };
+    let count = shard_count(Some(dir), options.remote.as_ref(), shards)?;
+    open_each(count, options, threads, |i, options| {
+        PageStore::open_with(shard_dir(dir, i), types, options)
+    })
+}
+
+/// [`open_shards_with`] in object mode ([`PageStore::open_object`]): no
+/// disk, the `MANIFEST` in the object store alone.
+///
+/// # Errors
+/// [`StorageError::NotObjectBacked`] without `options.remote`; otherwise
+/// as [`open_shards_with`].
+pub fn open_object_shards(
+    types: &[&'static StructStorage],
+    options: StoreOptions,
+    shards: usize,
+    threads: usize,
+) -> StorageResult<Vec<PageStore>> {
+    let remote = options
+        .remote
+        .as_ref()
+        .ok_or(StorageError::NotObjectBacked)?;
+    let count = shard_count(None, Some(remote), shards)?;
+    open_each(count, options, threads, |_, options| {
+        PageStore::open_object(types, options)
+    })
+}
+
+/// Open shards `0..count` on `threads` threads with `open`, each with its
+/// share of the budgets and its own prefix in the object store.
+fn open_each(
+    count: usize,
+    options: StoreOptions,
+    threads: usize,
+    open: impl Fn(usize, StoreOptions) -> StorageResult<PageStore> + Sync,
+) -> StorageResult<Vec<PageStore>> {
     let share = |bytes: usize| bytes / count;
     let options = StoreOptions {
         page_cache_bytes: share(options.page_cache_bytes),
         record_cache_bytes: share(options.record_cache_bytes),
         ..options
     };
-    let options = &options;
+    let (options, open) = (&options, &open);
     let threads = threads.clamp(1, count);
     // Each shard keeps its objects under a prefix of its own, as it keeps
     // its files in a directory of its own.
@@ -104,7 +145,7 @@ pub fn open_shards_with(
                     remote: options.remote.as_ref().map(|r| r.shard(i)),
                     ..options.clone()
                 };
-                PageStore::open_with(shard_dir(dir, i), types, options)
+                open(i, options)
             })
             .collect()
     };
@@ -132,6 +173,57 @@ pub fn open_shards_with(
     opened.into_iter().collect()
 }
 
+/// The database's shard count: the one its `MANIFEST`s record, or `shards`
+/// for a new database — whose `MANIFEST`s are written here, the object
+/// store's first.
+fn shard_count(
+    dir: Option<&Path>,
+    remote: Option<&Remote>,
+    shards: usize,
+) -> StorageResult<usize> {
+    let on_disk = dir.map(read_manifest).transpose()?.flatten();
+    let in_store = remote.map(read_remote_manifest).transpose()?.flatten();
+    if let (Some(a), Some(b)) = (on_disk, in_store)
+        && a != b
+    {
+        return Err(StorageError::Corrupt("the two MANIFESTs disagree"));
+    }
+    let count = checked(on_disk.or(in_store).unwrap_or(shards))?;
+    if let (Some(remote), None) = (remote, in_store) {
+        write_remote_manifest(remote, count)?;
+    }
+    if let (Some(dir), None) = (dir, on_disk) {
+        create(dir, count)?;
+    }
+    Ok(count)
+}
+
+/// The object store's `MANIFEST` key.
+fn manifest_key(remote: &Remote) -> String {
+    format!("{}{MANIFEST}", remote.prefix())
+}
+
+/// The shard count the object store's `MANIFEST` records, if it has one.
+fn read_remote_manifest(remote: &Remote) -> StorageResult<Option<usize>> {
+    let key = manifest_key(remote);
+    let bytes = block_on(remote.bucket().get(&key, None))?;
+    bytes.map(|b| decode_manifest(&b)).transpose()
+}
+
+/// Write the object store's `MANIFEST` if it has none — a racing creator's
+/// count wins, and must then be ours.
+fn write_remote_manifest(remote: &Remote, count: usize) -> StorageResult<()> {
+    let key = manifest_key(remote);
+    let bytes = wavedb_wire::to_wire_checked(&manifest_of(count)?);
+    match block_on(remote.bucket().put(&key, &bytes, When::Absent))? {
+        Put::Stored { .. } => Ok(()),
+        Put::Refused => match read_remote_manifest(remote)? {
+            Some(theirs) if theirs == count => Ok(()),
+            _ => Err(StorageError::Corrupt("the two MANIFESTs disagree")),
+        },
+    }
+}
+
 /// The directory of shard `i` under the database root `dir`.
 #[must_use]
 pub fn shard_dir(dir: &Path, i: usize) -> std::path::PathBuf {
@@ -145,36 +237,43 @@ fn read_manifest(dir: &Path) -> StorageResult<Option<usize>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    let manifest: Manifest = wavedb_wire::from_wire_checked(&bytes)
+    decode_manifest(&bytes).map(Some)
+}
+
+fn decode_manifest(bytes: &[u8]) -> StorageResult<usize> {
+    let manifest: Manifest = wavedb_wire::from_wire_checked(bytes)
         .map_err(|_| StorageError::Corrupt("unreadable MANIFEST"))?;
     let count = usize::try_from(manifest.shards)
         .map_err(|_| StorageError::Corrupt("MANIFEST shard count"))?;
-    checked(count).map(Some)
+    checked(count)
+}
+
+fn manifest_of(count: usize) -> StorageResult<Manifest> {
+    Ok(Manifest {
+        shards: u32::try_from(count)
+            .map_err(|_| StorageError::Corrupt("MANIFEST shard count"))?,
+    })
 }
 
 /// Create the database: the shard directories are created by opening them;
 /// the `MANIFEST` is written last and atomically, so a crash part-way leaves
 /// a directory that is created again from scratch rather than half a
 /// database.
-fn create(dir: &Path, shards: usize) -> StorageResult<usize> {
-    let count = checked(shards)?;
+fn create(dir: &Path, count: usize) -> StorageResult<()> {
     fs::create_dir_all(dir)?;
     if dir.join("data.bin").exists() {
         // An unsharded store from before RFC 0067 — unsupported, like any
         // older layout, and not to be silently shadowed by a new database.
         return Err(StorageError::Corrupt("unsharded data directory"));
     }
-    let manifest = Manifest {
-        shards: u32::try_from(count)
-            .map_err(|_| StorageError::Corrupt("MANIFEST shard count"))?,
-    };
+    let manifest = manifest_of(count)?;
     let tmp = dir.join(format!("{MANIFEST}.tmp"));
     let mut file = fs::File::create(&tmp)?;
     file.write_all(&wavedb_wire::to_wire_checked(&manifest))?;
     file.sync_all()?;
     fs::rename(&tmp, dir.join(MANIFEST))?;
     fs::File::open(dir)?.sync_all()?;
-    Ok(count)
+    Ok(())
 }
 
 const fn checked(count: usize) -> StorageResult<usize> {
@@ -223,7 +322,10 @@ mod tests {
         let stores = open_on(dir.path(), 3);
         assert_eq!(stores.len(), 8);
         for (i, store) in stores.iter().enumerate() {
-            assert_eq!(store.data_dir, shard_dir(dir.path(), i));
+            assert_eq!(
+                store.disk.as_ref().unwrap().dir,
+                shard_dir(dir.path(), i)
+            );
             for k in 0..8u64 {
                 let found = block_on(store.get_of(SH, id(k))).unwrap();
                 assert_eq!(
