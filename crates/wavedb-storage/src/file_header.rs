@@ -12,9 +12,10 @@
 //!   bounded number of headers — no snapshot object, no extra PUT.
 //! - **The chain is checked**: `prev` names the file before this one and the
 //!   hash of its header, and `group` the upload this file belongs to. A
-//!   recovery accepts an upload only whole, with every link intact, so the
-//!   files a crashed upload left above the recorded end are never taken for
-//!   the newest.
+//!   recovery accepts an upload only whole, with every link intact, and
+//!   only one that ends a cut (`cut`), so neither the files a crashed
+//!   upload left above the recorded end nor a part of a backlog is ever
+//!   taken for the newest.
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
 
@@ -38,6 +39,11 @@ pub struct FileHeader {
     pub group: u64,
     /// How many files that upload wrote.
     pub group_files: u32,
+    /// Whether that upload ends a **cut**: it carried every page still
+    /// waiting to go up, taken with every committed batch settled — so the
+    /// files up to it hold every batch up to a point, and no batch in part.
+    /// A recovery takes only a cut, never an upload of a part of a backlog.
+    pub cut: bool,
     /// The file before this one in the chain ([`NO_FILE`] for the first).
     pub prev: u64,
     /// The hash of that file's header ([`header_hash`]).
@@ -174,6 +180,7 @@ mod tests {
             file: 7,
             group: 6,
             group_files: 2,
+            cut: true,
             prev: 6,
             prev_hash: 99,
             start: 0,
