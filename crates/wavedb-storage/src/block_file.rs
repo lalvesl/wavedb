@@ -18,15 +18,15 @@
 //! Reads and writes take `&self` and use positioned syscalls (`pread`/`pwrite`),
 //! so concurrent callers don't fight over a shared seek cursor. The engine is
 //! native-only (the browser uses IndexedDB, never this file), so the Unix
-//! [`FileExt`] is the portable-enough surface here.
+//! [`FileExt`](std::os::unix::fs::FileExt) is the portable-enough surface here.
 
 use std::cell::Cell;
 use std::collections::hash_map::RandomState;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::hash::{BuildHasher, Hasher};
-use std::os::unix::fs::FileExt;
 use std::path::Path;
 
+use crate::backing::{Backing, Memory};
 use crate::block::{BLOCK_SIZE, Run};
 use crate::error::{StorageError, StorageResult};
 use crate::page_cache::{self, PageCache};
@@ -39,7 +39,7 @@ pub const RESERVED_BLOCKS: u64 = 1;
 /// `data.bin` opened as an array of fixed [`BLOCK_SIZE`]-byte blocks.
 #[derive(Debug)]
 pub struct BlockFile {
-    file: File,
+    file: Backing,
     seed: [u64; 4],
     object_backed: bool,
     io: IoCounts,
@@ -135,7 +135,7 @@ impl BlockFile {
         if len == 0 {
             let seed = seed.unwrap_or_else(random_seed);
             let bf = Self {
-                file,
+                file: Backing::File(file),
                 seed,
                 object_backed,
                 io: IoCounts::default(),
@@ -147,13 +147,36 @@ impl BlockFile {
         } else {
             let body = superblock::read(&file)?;
             Ok(Self {
-                file,
+                file: Backing::File(file),
                 seed: body.seed,
                 object_backed: body.object_backed,
                 io: IoCounts::default(),
                 cache: PageCache::new(page_cache_bytes),
             })
         }
+    }
+
+    /// A block file in RAM, for a store with no disk (RFC 0070 §9): block 0
+    /// is reserved as on disk but holds nothing — the seed is `seed`, and
+    /// nothing reads it back. No page cache: the pages are in RAM already.
+    #[must_use]
+    pub fn in_memory(seed: [u64; 4]) -> Self {
+        let bf = Self {
+            file: Backing::Memory(Memory::default()),
+            seed,
+            object_backed: true,
+            io: IoCounts::default(),
+            cache: PageCache::new(0),
+        };
+        // Growing RAM cannot fail.
+        let _ = bf.file.set_len(RESERVED_BLOCKS * BLOCK_SIZE as u64);
+        bf
+    }
+
+    /// Whether the blocks are in RAM rather than in `data.bin`.
+    #[must_use]
+    pub const fn is_in_memory(&self) -> bool {
+        matches!(self.file, Backing::Memory(_))
     }
 
     /// The per-database hash seed read from (or written to) the superblock.
@@ -173,7 +196,7 @@ impl BlockFile {
     /// # Errors
     /// [`StorageError::Io`] if the file's metadata can't be read.
     pub fn len_blocks(&self) -> StorageResult<u64> {
-        Ok(self.file.metadata()?.len() / BLOCK_SIZE as u64)
+        Ok(self.file.len()? / BLOCK_SIZE as u64)
     }
 
     /// Read a run's bytes (`run.byte_len()` of them) out of `data.bin`.
@@ -182,7 +205,7 @@ impl BlockFile {
     /// [`StorageError::OutOfBounds`] if the run extends past the file;
     /// [`StorageError::Io`] on a read fault.
     pub fn read_run(&self, run: Run) -> StorageResult<Vec<u8>> {
-        let have = self.file.metadata()?.len();
+        let have = self.file.len()?;
         let need = run.end() * BLOCK_SIZE as u64;
         if need > have {
             return Err(StorageError::OutOfBounds { need, have });
@@ -280,7 +303,7 @@ impl BlockFile {
 
     /// Grow the file to at least `min_len` bytes (never shrinks).
     fn ensure_len(&self, min_len: u64) -> StorageResult<()> {
-        if self.file.metadata()?.len() < min_len {
+        if self.file.len()? < min_len {
             self.file.set_len(min_len)?;
         }
         Ok(())
