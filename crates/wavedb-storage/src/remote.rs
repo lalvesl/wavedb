@@ -23,6 +23,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
+use std::time::Instant;
 
 use wavedb_core::Id;
 use wavedb_platform::s3::Bucket;
@@ -75,6 +76,12 @@ impl Remote {
         &self.bucket
     }
 
+    /// The key prefix every object is under.
+    #[must_use]
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
     /// The key of file `file`: its number complemented, so a listing — in
     /// key order — names the newest file first (§4).
     #[must_use]
@@ -118,6 +125,12 @@ pub(crate) struct ObjectState {
     /// Evicted buckets worth having on disk again: read from the object
     /// store, or holding back a split (`restore_wanted`).
     pub(crate) wanted: RefCell<BTreeSet<(usize, usize)>>,
+    /// When the oldest write no cut upload carries was committed — what
+    /// the upload interval is measured against (RFC 0070 §9).
+    pub(crate) oldest_write: Cell<Option<Instant>>,
+    /// Another writer's file was met: this store takes no more writes
+    /// ([`StorageError::Fenced`]).
+    pub(crate) fenced: Cell<bool>,
 }
 
 /// Buckets whose descriptors an upload changed, per slot index: disk ones
@@ -144,6 +157,8 @@ impl ObjectState {
             uploading: Cell::new(false),
             heat: RefCell::default(),
             wanted: RefCell::default(),
+            oldest_write: Cell::new(None),
+            fenced: Cell::new(false),
         }
     }
 
@@ -217,6 +232,10 @@ impl PageStore {
             }
         }
         object.pending_blocks.set(blocks);
+        // What waited before the reopen waits on from now.
+        if blocks > 0 {
+            object.oldest_write.set(Some(Instant::now()));
+        }
     }
 
     /// One uploaded page's image, fetched by its remote descriptor.
