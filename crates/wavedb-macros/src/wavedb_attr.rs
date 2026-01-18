@@ -197,7 +197,7 @@ fn shape_scaffolding(
     let struct_hash_expr =
         quote!(<#name as ::wavedb_core::WaveDbStruct>::STRUCT_HASH);
     let storage_slot =
-        storage_statics::statics_for(name, &struct_hash_expr, compress);
+        storage_statics::statics_for(name, &struct_hash_expr, compress, false);
     let (storage_entries, exec_steps, shape_marker) = match shape {
         Shape::Unique => (
             storage_statics::entries_for(name, None),
