@@ -4,6 +4,8 @@
 //! it compacts. Each worker applies them to the stores it owns, on its own
 //! thread, between its jobs (`shard::background`, RFC 0067 step 4).
 
+use std::time::Duration;
+
 use wavedb_storage::{BLOCK_SIZE, Space};
 
 /// The background maintenance policy: how the node settles, checkpoints,
@@ -20,6 +22,16 @@ pub struct Maintenance {
     /// uploads them (RFC 0070 §5) — per store, since each uploads its own
     /// files. Default 8 MiB: about a file's worth.
     pub upload_after_bytes: u64,
+    /// The longest a write waits for an upload when its store holds less
+    /// than [`upload_after_bytes`](Self::upload_after_bytes) — per store.
+    /// In object mode it is the durability window: a crash loses at most
+    /// this much, and each store with a write waiting costs a PUT per
+    /// interval. `None` waits for the bytes alone. Default 10 s.
+    pub upload_interval: Option<Duration>,
+    /// RAM an object-mode database may fill with pages (RFC 0070 §9) —
+    /// past each store's share, the coldest uploaded pages leave it.
+    /// Default 1 GiB.
+    pub object_ram_bytes: u64,
 }
 
 impl Default for Maintenance {
@@ -29,6 +41,8 @@ impl Default for Maintenance {
             cache_budget_bytes: 1024 * 1024 * 1024,   // 1 GiB — generous
             compaction: Compaction::default(),
             upload_after_bytes: 8 << 20, // 8 MiB, about a file
+            upload_interval: Some(Duration::from_secs(10)),
+            object_ram_bytes: 1 << 30, // 1 GiB
         }
     }
 }
