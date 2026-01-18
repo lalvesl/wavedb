@@ -76,6 +76,8 @@ pub struct Packed {
     pub(crate) files: Vec<File>,
     pub(crate) placed: Vec<Placed>,
     pub(crate) end: u64,
+    /// Whether the upload ends a cut ([`FileHeader::cut`]).
+    pub(crate) cut: bool,
 }
 
 /// Lay `slots` out in files from remote block `end` on, budgeting each
@@ -85,6 +87,7 @@ pub fn layout(end: u64, slots: &[SlotImages], types: usize) -> Packed {
         files: Vec::new(),
         placed: Vec::new(),
         end,
+        cut: true,
     };
     for (slot, images) in slots.iter().enumerate() {
         let dict = images.dict.iter().map(|bytes| (None, bytes));
@@ -163,6 +166,7 @@ pub fn finish(
             file: file.number,
             group,
             group_files,
+            cut: packed.cut,
             prev,
             prev_hash,
             start: chain.start,
