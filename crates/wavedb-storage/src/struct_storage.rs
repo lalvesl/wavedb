@@ -43,6 +43,7 @@ pub(crate) type StructDictionary = RefCell<DictState>;
 pub struct StructStorage {
     struct_hash: u64,
     compress: bool,
+    resident: bool,
 }
 
 impl StructStorage {
@@ -52,6 +53,7 @@ impl StructStorage {
         Self {
             struct_hash,
             compress: true,
+            resident: false,
         }
     }
 
@@ -63,6 +65,20 @@ impl StructStorage {
         Self {
             struct_hash,
             compress: false,
+            resident: false,
+        }
+    }
+
+    /// The same declaration, its pages **resident**: an object-backed store
+    /// never evicts them (RFC 0070 §10). For what navigation reads — the
+    /// recency and removal chains, sparse indexes, Pivots, `BpTree` nodes —
+    /// so a walk never waits on the object store, only the record bytes it
+    /// leads to do. Behaviour, not bytes: it does not fold into the hash.
+    #[must_use]
+    pub const fn resident(self) -> Self {
+        Self {
+            resident: true,
+            ..self
         }
     }
 
@@ -70,6 +86,12 @@ impl StructStorage {
     #[must_use]
     pub const fn struct_hash(&self) -> u64 {
         self.struct_hash
+    }
+
+    /// Whether this type's pages stay resident ([`resident`](Self::resident)).
+    #[must_use]
+    pub const fn is_resident(&self) -> bool {
+        self.resident
     }
 
     /// Whether this type's pages compress — fixed by the declaration; only the
@@ -85,6 +107,8 @@ impl StructStorage {
 #[derive(Debug)]
 pub(crate) struct TypeSlot {
     struct_hash: u64,
+    /// Never evicted ([`StructStorage::resident`]).
+    resident: bool,
     dir: StructDirectory,
     /// The object store's directory for this type (RFC 0070 §2): 128 KiB
     /// pages, a linear hash of its own. `None` until the first upload.
@@ -103,6 +127,7 @@ impl TypeSlot {
     pub(crate) const fn new(declared: &StructStorage) -> Self {
         Self {
             struct_hash: declared.struct_hash,
+            resident: declared.resident,
             dir: RefCell::new(None),
             remote: RefCell::new(None),
             remote_dict: std::cell::Cell::new(BlockDescriptor::EMPTY),
@@ -114,6 +139,11 @@ impl TypeSlot {
     /// The `STRUCT_HASH` this slot stores.
     pub(crate) const fn struct_hash(&self) -> u64 {
         self.struct_hash
+    }
+
+    /// Whether this type's pages are never evicted.
+    pub(crate) const fn is_resident(&self) -> bool {
+        self.resident
     }
 
     /// This type's page-directory slot — its own cell. `None` until the store settles the first value.
@@ -175,7 +205,7 @@ pub trait StorageRegistry {
 ///
 /// [`PageStore::open`]: crate::page_store::PageStore::open
 pub static BPTREE_NODE_STORAGE: StructStorage =
-    StructStorage::without_compression(BPTREE_NODE_STRUCT_HASH);
+    StructStorage::without_compression(BPTREE_NODE_STRUCT_HASH).resident();
 
 #[cfg(test)]
 mod tests {
