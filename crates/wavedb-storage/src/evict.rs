@@ -3,7 +3,9 @@
 //!
 //! - **What leaves**: the coldest pages whose flag is clear — the object
 //!   store has everything in them. Cold is [`Heat`]: a stamp per disk bucket,
-//!   moved on every page read and every page a settle round writes.
+//!   moved on every page read and every page a settle round writes. A
+//!   resident type's pages never leave (§10): what navigation reads stays,
+//!   so only the record bytes it leads to are ever fetched.
 //! - **What it leaves behind**: [`BlockDescriptor::EVICTED`], and a run
 //!   freed like any superseded one. The change rides the next window, and a
 //!   checkpoint records it before its `Commit` frame, so no recovery root
@@ -106,7 +108,13 @@ impl PageStore {
         let mut cold = Vec::new();
         {
             let heat = object.heat.borrow();
-            for (idx, slot) in self.types.iter().enumerate() {
+            // Navigation stays (§10): a walk never waits on the object store.
+            let evictable = self
+                .types
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| !s.is_resident());
+            for (idx, slot) in evictable {
                 let dir = slot.directory().borrow();
                 let Some(dir) = dir.as_ref() else { continue };
                 for (bucket, desc) in dir.slots().iter().enumerate() {
@@ -133,6 +141,9 @@ impl PageStore {
             unrecorded.slots.entry(idx).or_default().disk.insert(bucket);
             live = live.saturating_sub(run.count);
             evicted += run.count;
+        }
+        if self.disk.is_none() {
+            unrecorded.slots.clear(); // no addressing log to record it in
         }
         Ok(evicted)
     }
