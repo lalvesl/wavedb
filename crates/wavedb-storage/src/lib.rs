@@ -18,6 +18,7 @@
 
 pub mod alloc;
 mod apply;
+mod backing;
 pub mod barrier;
 pub mod block;
 pub mod block_file;
@@ -36,6 +37,7 @@ mod file_header;
 pub mod journal;
 mod journal_frame;
 mod meta_log;
+mod object_mode;
 pub mod page;
 pub mod page_cache;
 pub mod page_store;
@@ -52,11 +54,13 @@ mod replay;
 mod retire;
 mod settle;
 pub mod shard_set;
+mod store_options;
 pub mod struct_storage;
 mod superblock;
 mod upload;
 mod upload_file;
 mod upload_plan;
+mod upload_publish;
 mod window;
 
 pub use barrier::{Barrier, Durable};
@@ -72,7 +76,9 @@ pub use page::SlotPage;
 pub use page_store::{DEFAULT_RECORD_CACHE_BYTES, PageStore, StoreOptions};
 pub use remote::Remote;
 pub use settle::Progress;
-pub use shard_set::{MANIFEST, open_shards, open_shards_with};
+pub use shard_set::{
+    MANIFEST, open_object_shards, open_shards, open_shards_with,
+};
 pub use struct_storage::{BPTREE_NODE_STORAGE, StorageRegistry, StructStorage};
 pub use upload::Uploaded;
 
