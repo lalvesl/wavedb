@@ -1,12 +1,16 @@
 //! Recovery from the object store alone ([RFC 0070] §6, phase 5) — an
 //! object-backed database whose disk is gone opens from its files.
 //!
-//! 1. **The newest whole upload.** `LIST 1seg/ max-keys=1` names the highest
-//!    file. It is taken only if its upload is whole: every file of the
-//!    group present, each linked to the one before by its header's hash, and
-//!    the group linked to the file before it. Otherwise the next number down
-//!    is tried — so the files a crashed upload left above the recorded end,
-//!    or a copy under another key, are never taken for the newest.
+//! 1. **The newest whole cut.** `LIST 1seg/ max-keys=1` names the highest
+//!    file. It is taken only if its upload ends a cut (`FileHeader::cut`:
+//!    every batch up to a point, none in part) and is whole: every file of
+//!    the group present, each linked to the one before by its header's
+//!    hash, and the group linked to the file before it. Otherwise the next
+//!    number down is tried — so the files a crashed upload left above the
+//!    recorded end, a part of a backlog, or a copy under another key, are
+//!    never taken for the newest. Files with no cut among them are a
+//!    database whose first upload never finished: it opens empty, its
+//!    numbers stepped over.
 //! 2. **The type walk.** That header names every type, its bucket count, its
 //!    dictionary and `last`, the newest earlier file with entries for it.
 //!    Headers are read newest first, always the nearest file some
@@ -15,10 +19,11 @@
 //!    ends — a bucket no header names was never written: it is empty.
 //!    Headers are fetched a batch at a time, so the walk mostly finds the
 //!    next one already read.
-//! 3. **Adoption.** The store opens with the recovered seed; every disk
-//!    bucket is evicted, so reads go to the object store and the disk fills
-//!    again as a cache. The dictionaries come down, and one snapshot and one
-//!    checkpoint make the disk a root of its own.
+//! 3. **Adoption.** The store opens with the recovered seed; every bucket
+//!    is evicted, so reads go to the object store and the disk — or, in
+//!    object mode, RAM — fills again as a cache. The dictionaries come
+//!    down, and with a disk, one snapshot and one checkpoint make it a root
+//!    of its own.
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
 
@@ -40,7 +45,8 @@ use crate::remote::{FILE_BLOCKS, Remote};
 
 /// What a recovery found in the object store.
 pub struct Found {
-    pub seed: [u64; 4],
+    /// `None` when no cut was ever uploaded: a database still to create.
+    pub seed: Option<[u64; 4]>,
     pub chain: Chain,
     pub types: Vec<FoundType>,
 }
@@ -70,7 +76,7 @@ pub fn open_file(
         _ => None,
     };
     let object_backed = options.remote.is_some();
-    let seed = found.as_ref().map(|f| f.seed);
+    let seed = found.as_ref().and_then(|f| f.seed);
     let file = BlockFile::open_as(
         path,
         options.page_cache_bytes,
@@ -88,29 +94,42 @@ pub fn open_file(
 /// What `remote` holds, or `None` when it holds no file at all.
 ///
 /// # Errors
-/// Object-store faults; [`StorageError::Corrupt`] when files exist but no
-/// whole upload is among them, or a chained header is missing.
+/// Object-store faults; [`StorageError::Corrupt`] when a chained header is
+/// missing.
 pub async fn recover(remote: &Remote) -> StorageResult<Option<Found>> {
     let Some(newest) = newest_file(remote).await? else {
         return Ok(None);
     };
+    // Past every file there is, leftovers included: a number once written
+    // is never written again.
+    let past = (newest + 1) * FILE_BLOCKS;
     let mut headers = Headers::new(remote);
-    let mut top = newest;
+    let mut top = Some(newest);
     let top = loop {
-        if let Some(header) = headers.get(top).await?
+        let Some(n) = top else {
+            // Files, but no cut among them: the first uploads never
+            // finished one, so nothing was ever recoverable.
+            let chain = Chain {
+                end: past,
+                ..Chain::default()
+            };
+            return Ok(Some(Found {
+                seed: None,
+                chain,
+                types: Vec::new(),
+            }));
+        };
+        if let Some(header) = headers.get(n).await?
+            && header.0.cut
             && headers.whole(&header).await?
         {
             break header;
         }
-        top = top.checked_sub(1).ok_or(StorageError::Corrupt(
-            "no whole upload in the object store",
-        ))?;
+        top = n.checked_sub(1);
     };
     let (seed, start) = (top.0.seed, top.0.start);
     let mut chain = Chain {
-        // Past every file there is, leftovers included: a number once
-        // written is never written again.
-        end: top.0.end.max((newest + 1) * FILE_BLOCKS),
+        end: top.0.end.max(past),
         start,
         tail: Some((top.0.file, top.1)),
         ..Chain::default()
@@ -140,7 +159,11 @@ pub async fn recover(remote: &Remote) -> StorageResult<Option<Found>> {
         },
     ))
     .await?;
-    Ok(Some(Found { seed, chain, types }))
+    Ok(Some(Found {
+        seed: Some(seed),
+        chain,
+        types,
+    }))
 }
 
 /// One type's directory being gathered.
@@ -334,6 +357,7 @@ mod tests {
             file,
             group,
             group_files: files,
+            cut: true,
             prev: prev.0,
             prev_hash: prev.1,
             start: 0,
@@ -388,7 +412,7 @@ mod tests {
         let t = &found.types[0];
         assert_eq!(t.remote[0].raw(), page(2), "the newest entry wins");
         assert_eq!(t.remote[1], BlockDescriptor::EMPTY, "never written");
-        assert_eq!(found.seed, [1, 2, 3, 4]);
+        assert_eq!(found.seed, Some([1, 2, 3, 4]));
         assert!(found.chain.end >= 3 * FILE_BLOCKS, "past every file");
     }
 
