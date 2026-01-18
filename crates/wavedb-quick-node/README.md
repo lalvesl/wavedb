@@ -38,7 +38,9 @@ Server::bind("0.0.0.0:7700")
 > routing/failover — is the **target design, deferred** until the single-node
 > engine is solid. The async-replication durability window (owner crash before
 > replicating) is therefore moot for now: with one node the journal is the whole
-> guarantee.
+> guarantee. A node in **object mode** (`Server::object_mode`, RFC 0070 §9) has
+> no disk and no journal: a write is durable once uploaded, within
+> `upload_interval` (default 10 s), and a shutdown uploads everything first.
 
 ## Write-ownership model
 
