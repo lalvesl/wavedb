@@ -59,8 +59,8 @@
 //! removed them too. [`PageStore::commit_journal`] settles everything its
 //! rotated journal holds before the frame it appends claims it.
 
+pub use crate::store_options::{DEFAULT_RECORD_CACHE_BYTES, StoreOptions};
 use std::path::Path;
-use std::time::Duration;
 
 use std::cell::RefCell;
 
@@ -75,83 +75,6 @@ use crate::struct_storage::{BPTREE_NODE_STORAGE, StructStorage, TypeSlot};
 /// blocks until then (RFC 0049). Tunable.
 const DEFAULT_TARGET_BLOCKS_PER_BUCKET: u64 = 8; // 32 KiB
 
-/// How a store answers the durability question and how much RAM it may spend
-/// answering reads — chosen once at [`open_with`](PageStore::open_with)
-/// (RFCs 0061, 0044, 0065 §6).
-///
-/// Opened, never inferred: a durability mode that changes by itself is a
-/// guarantee nobody can reason about, and a cache budget that drifts is a
-/// memory ceiling nobody can hold a process to.
-///
-/// **None of these fields reaches stored bytes**, so none folds into a
-/// `STRUCT_HASH`: a window and two cache budgets change when work happens and
-/// what is held in RAM while it does, never what is written. Two stores opened
-/// with different options hold byte-identical files.
-#[derive(Debug, Clone)]
-pub struct StoreOptions {
-    /// Longest a `Batch` may sit unsynced. **Zero (the default) is one
-    /// barrier per batch** — the promise the engine was built around, and
-    /// what every existing caller keeps.
-    ///
-    /// Non-zero trades it for group commit: `apply` appends without a barrier
-    /// and syncs only once the window has elapsed, so a burst inside one
-    /// window amortises to a single `fsync`. `Ok` from a write then means *in
-    /// the journal, ordered, and durable within the window unless the process
-    /// dies first* — a crash loses a **suffix** of acknowledged writes and
-    /// never corrupts (frames are crc-framed, replay stops at the first torn
-    /// one). [`flush`](PageStore::flush) forces the barrier when a particular
-    /// write does need the stronger answer.
-    pub relax_window: Duration,
-
-    /// Bytes of **page images** the block file may hold (RFC 0044) — whole
-    /// runs, still compressed, exactly as they sit on disk.
-    ///
-    /// Zero disables the cache. Read once at open: a budget that changed
-    /// under a running store would make "how much RAM does this hold" a
-    /// question with no answer.
-    pub page_cache_bytes: usize,
-
-    /// Bytes of **decoded records** the caches should be evicted down to —
-    /// the budget [`evict_to_budget`](PageStore::evict_to_budget) targets.
-    ///
-    /// **The store never applies it on its own.** Eviction stays where it
-    /// already is, in the caller's hands (the node's upkeep loop, a
-    /// benchmark's phase boundary), because a `PageStore` that dropped cache
-    /// entries on a timer of its own would be doing work no caller asked for
-    /// inside a window someone is timing. What this field changes is only
-    /// *where the number lives*: opened with the store, instead of a constant
-    /// remembered separately at every call site.
-    pub record_cache_bytes: usize,
-
-    /// Where the pages live besides the disk (RFC 0070): `Some` makes the
-    /// disk a cache of this object store. Fixed when the database is
-    /// created — the superblock records it, and opening with the other
-    /// answer is [`StorageError::ModeMismatch`](crate::StorageError::ModeMismatch).
-    /// The endpoint and the credentials are not stored anywhere: they come
-    /// with every open.
-    pub remote: Option<crate::remote::Remote>,
-}
-
-/// Bytes of decoded records [`StoreOptions::record_cache_bytes`] defaults to.
-///
-/// The number callers were already passing by hand, so the default changes
-/// nothing; it is advisory in the strict sense, since nothing evicts until a
-/// caller asks.
-pub const DEFAULT_RECORD_CACHE_BYTES: usize = 96 << 20;
-
-impl Default for StoreOptions {
-    /// Exactly today's engine: one barrier per batch, a 64 MiB page cache,
-    /// and a record-cache budget nothing applies unless asked.
-    fn default() -> Self {
-        Self {
-            relax_window: Duration::ZERO,
-            page_cache_bytes: crate::page_cache::DEFAULT_BUDGET_BYTES,
-            record_cache_bytes: DEFAULT_RECORD_CACHE_BYTES,
-            remote: None,
-        }
-    }
-}
-
 /// The native, page-backed [`Store`](wavedb_core::Store).
 ///
 /// One instance per data directory: the directory's `data.bin` is locked
@@ -161,10 +84,9 @@ impl Default for StoreOptions {
 #[derive(Debug)]
 pub struct PageStore {
     pub(crate) file: BlockFile,
-    /// The directory holding `data.bin` + the journal chain (rotation
-    /// creates new journal files here).
-    pub(crate) data_dir: std::path::PathBuf,
-    pub(crate) journal: RefCell<crate::journal::Journal>,
+    /// The data directory and its journal; `None` in object mode, which
+    /// has no disk (RFC 0070 §9).
+    pub(crate) disk: Option<Disk>,
     pub(crate) alloc: RefCell<BlockAllocator>,
     /// The addressing log written into the settle windows (RFC 0046): the
     /// last full snapshot chunk and every delta chunk after it.
@@ -187,7 +109,7 @@ pub struct PageStore {
     pub(crate) checkpoint: RefCell<Option<crate::journal::Journal>>,
     /// The durability window this store was opened with (RFC 0061); zero is
     /// one barrier per batch.
-    pub(crate) relax_window: Duration,
+    pub(crate) relax_window: std::time::Duration,
     /// The record-cache budget this store was opened with — carried, not
     /// applied (see [`StoreOptions::record_cache_bytes`]).
     pub(crate) record_cache_bytes: usize,
@@ -198,6 +120,15 @@ pub struct PageStore {
     pub(crate) compaction: std::cell::Cell<crate::compact::Phase>,
     /// The object store's side, when the pages live there (RFC 0070).
     pub(crate) object: Option<crate::remote::ObjectState>,
+}
+
+/// What a store with a disk keeps there besides `data.bin`.
+#[derive(Debug)]
+pub(crate) struct Disk {
+    /// The directory holding `data.bin` + the journal chain (rotation
+    /// creates new journal files here).
+    pub(crate) dir: std::path::PathBuf,
+    pub(crate) journal: RefCell<crate::journal::Journal>,
 }
 
 impl PageStore {
@@ -237,45 +168,24 @@ impl PageStore {
         // An object-backed store with no disk yet may have a database in its
         // object store already: it is recovered, never created over.
         let (file, found) = crate::recover::open_file(dir, &options)?;
-        let seed = file.seed();
-
-        // Generated Pivot types of identical shape may share a STRUCT_HASH;
-        // they also share pages today, so one slot serves the hash — dedup.
-        let mut declared: Vec<&'static StructStorage> = types.to_vec();
-        declared.push(&BPTREE_NODE_STORAGE);
-        declared.sort_by_key(|s| s.struct_hash());
-        declared.dedup_by_key(|s| s.struct_hash());
-        let types: Vec<TypeSlot> =
-            declared.into_iter().map(TypeSlot::new).collect();
-        let type_count = types.len();
+        let types = slots_of(types);
 
         // Recover from the journal chain: the newest `Commit` frame roots
         // the directories/dictionaries/allocator (caches stay empty — reads
         // fall through to the pages); every uncovered `Batch` replays below.
         let recovered =
             crate::commit::restore(dir, data_bin_existed, &file, &types)?;
-
-        let store = Self {
-            file,
-            data_dir: dir.to_path_buf(),
+        let disk = Disk {
+            dir: dir.to_path_buf(),
             journal: RefCell::new(recovered.journal),
-            alloc: RefCell::new(recovered.alloc),
-            meta: RefCell::new(recovered.meta),
-            retiring: RefCell::new(None),
-            types,
-            seed,
-            target_blocks_per_bucket: DEFAULT_TARGET_BLOCKS_PER_BUCKET,
-            cache: RefCell::new(crate::record_cache::RecordCache::new(
-                type_count,
-                crate::block_file::random_seed(),
-            )),
-            checkpoint: RefCell::new(None),
-            relax_window: options.relax_window,
-            record_cache_bytes: options.record_cache_bytes,
-            barrier: None,
-            compaction: std::cell::Cell::default(),
-            object: options.remote.map(crate::remote::ObjectState::new),
         };
+        let store = Self::assemble(
+            file,
+            Some(disk),
+            types,
+            (recovered.alloc, recovered.meta),
+            options,
+        );
         if let Some(object) = &store.object
             && let Some(chain) = &recovered.chain
         {
@@ -289,6 +199,9 @@ impl PageStore {
             store.route_batch(batch)?;
             store.commit_to_caches(batch);
         }
+        if !recovered.replay.is_empty() {
+            store.note_unuploaded();
+        }
         // An evicted bucket a replayed write lands in comes back first.
         store.restore_replayed(&recovered.replay)?;
         store.drain()?;
@@ -296,6 +209,38 @@ impl PageStore {
             store.adopt(found)?;
         }
         Ok(store)
+    }
+
+    /// A store over `file` and its recovered allocator and addressing log,
+    /// caches empty — what both opens build on.
+    pub(crate) fn assemble(
+        file: BlockFile,
+        disk: Option<Disk>,
+        types: Vec<TypeSlot>,
+        (alloc, meta): (BlockAllocator, crate::meta_log::MetaLog),
+        options: StoreOptions,
+    ) -> Self {
+        let type_count = types.len();
+        Self {
+            seed: file.seed(),
+            file,
+            disk,
+            alloc: RefCell::new(alloc),
+            meta: RefCell::new(meta),
+            retiring: RefCell::new(None),
+            types,
+            target_blocks_per_bucket: DEFAULT_TARGET_BLOCKS_PER_BUCKET,
+            cache: RefCell::new(crate::record_cache::RecordCache::new(
+                type_count,
+                crate::block_file::random_seed(),
+            )),
+            checkpoint: RefCell::new(None),
+            relax_window: options.relax_window,
+            record_cache_bytes: options.record_cache_bytes,
+            barrier: None,
+            compaction: std::cell::Cell::default(),
+            object: options.remote.map(crate::remote::ObjectState::new),
+        }
     }
 
     /// Force the barrier now: every batch acknowledged so far is on the
@@ -307,10 +252,16 @@ impl PageStore {
     /// wager. An application can be relaxed for the cart and strict for the
     /// receipt (RFC 0061).
     ///
+    /// A store in object mode has no journal to flush: its writes are
+    /// durable once uploaded ([`upload_all`](Self::upload_all)), and this
+    /// does nothing there.
+    ///
     /// # Errors
     /// [`StorageError::Io`](crate::StorageError::Io) if the sync fails.
     pub fn flush(&self) -> StorageResult<()> {
-        self.journal.borrow_mut().sync()
+        self.disk
+            .as_ref()
+            .map_or(Ok(()), |disk| disk.journal.borrow_mut().sync())
     }
 
     /// Number of records the cache indexes across every registered type —
@@ -345,6 +296,17 @@ impl PageStore {
             .ok()
             .and_then(|i| self.types.get(i))
     }
+}
+
+/// One slot per registered type, the `BpTree`-node slot included, sorted
+/// by `STRUCT_HASH`. Generated Pivot types of identical shape may share a
+/// hash; they also share pages today, so one slot serves the hash — dedup.
+pub(crate) fn slots_of(types: &[&'static StructStorage]) -> Vec<TypeSlot> {
+    let mut declared: Vec<&'static StructStorage> = types.to_vec();
+    declared.push(&BPTREE_NODE_STORAGE);
+    declared.sort_by_key(|s| s.struct_hash());
+    declared.dedup_by_key(|s| s.struct_hash());
+    declared.into_iter().map(TypeSlot::new).collect()
 }
 
 #[cfg(test)]
@@ -557,7 +519,7 @@ mod tests {
             assert_eq!(w - writes, 1, "pages + delta ride one window write");
             assert_eq!(sy - syncs, 1, "one `data.bin` barrier…");
             assert_eq!(
-                s.journal.borrow_mut().barriers(),
+                s.journal_barriers(),
                 0,
                 "…and none on the fresh journal: the frame is deferred"
             );
@@ -569,11 +531,7 @@ mod tests {
             s.apply(&[Write::Put(nonunique(99), rec(SH, b"carrier"))])
                 .await
                 .unwrap();
-            assert_eq!(
-                s.journal.borrow_mut().barriers(),
-                1,
-                "the batch's own fsync"
-            );
+            assert_eq!(s.journal_barriers(), 1, "the batch's own fsync");
             assert!(s.is_retiring(), "disposal belongs to the next checkpoint");
             assert_eq!(journals(d.path()).len(), 2);
 
@@ -585,7 +543,7 @@ mod tests {
             assert_eq!(w2 - w, 1, "one window write again");
             assert_eq!(sy2 - sy, 1, "one `data.bin` barrier again");
             assert_eq!(
-                s.journal.borrow_mut().barriers(),
+                s.journal_barriers(),
                 0,
                 "the fresh journal took none: no barrier for housekeeping"
             );
@@ -1647,7 +1605,7 @@ mod tests {
     fn a_zero_window_takes_one_barrier_per_batch() {
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path()); // StoreOptions::default()
-        let before = s.journal.borrow_mut().barriers();
+        let before = s.journal_barriers();
         block_on(async {
             for k in 0..8u64 {
                 s.apply(&[Write::Put(nonunique(k), rec(SH, b"strict"))])
@@ -1655,7 +1613,7 @@ mod tests {
                     .unwrap();
             }
         });
-        assert_eq!(s.journal.borrow_mut().barriers(), before + 8);
+        assert_eq!(s.journal_barriers(), before + 8);
     }
 
     /// The whole point of the window: a burst inside one costs no barrier,
@@ -1674,7 +1632,7 @@ mod tests {
             },
         )
         .unwrap();
-        let before = s.journal.borrow_mut().barriers();
+        let before = s.journal_barriers();
         block_on(async {
             for k in 0..32u64 {
                 s.apply(&[Write::Put(nonunique(k), rec(SH, b"windowed"))])
@@ -1683,12 +1641,12 @@ mod tests {
             }
         });
         assert_eq!(
-            s.journal.borrow_mut().barriers(),
+            s.journal_barriers(),
             before,
             "32 batches inside one window must take no barrier"
         );
         s.flush().unwrap();
-        assert_eq!(s.journal.borrow_mut().barriers(), before + 1);
+        assert_eq!(s.journal_barriers(), before + 1);
     }
 
     /// Elapsed window ⇒ the barrier is taken, and what was acked is on the
@@ -1707,10 +1665,10 @@ mod tests {
                 },
             )
             .unwrap();
-            let before = s.journal.borrow_mut().barriers();
+            let before = s.journal_barriers();
             block_on(s.apply(&[Write::Put(nonunique(7), rec(SH, b"elapsed"))]))
                 .unwrap();
-            assert_eq!(s.journal.borrow_mut().barriers(), before + 1);
+            assert_eq!(s.journal_barriers(), before + 1);
         }
         let s = open(d.path());
         assert_eq!(
