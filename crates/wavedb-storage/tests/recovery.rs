@@ -11,8 +11,10 @@
 
 mod common;
 
-use common::{Fixture, RECORDS, SH, fill, id, record, sampled, upload_all};
-use wavedb_core::{Id, Store, Write};
+use common::{
+    Fixture, RECORDS, SH, big, big_id, fill, id, record, sampled, upload_all,
+};
+use wavedb_core::{Store, Write};
 use wavedb_platform::carrier::block_on;
 use wavedb_platform::s3::When;
 use wavedb_storage::PageStore;
@@ -124,24 +126,6 @@ fn a_stray_object_is_never_the_newest_file() {
     fx.lose_the_disk();
     let s = fx.open();
     assert_reads(&s, |k| Some(record(k, 0)));
-}
-
-/// A record of ~64 KiB that does not compress: a few hundred make several
-/// files of an upload.
-fn big(key: u64, version: u64) -> Vec<u8> {
-    let mut bytes = SH.to_le_bytes().to_vec();
-    let mut x = key.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ version ^ 1;
-    for _ in 0..8_192 {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        bytes.extend_from_slice(&x.to_le_bytes());
-    }
-    bytes
-}
-
-fn big_id(key: u64) -> Id {
-    id(1_000_000 + key)
 }
 
 /// Uploads whose files all went up but which a crash kept off the disk are
