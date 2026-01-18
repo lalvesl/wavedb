@@ -48,6 +48,15 @@ impl Fixture {
         PageStore::open_with(self.db(), &[&SLOT], options).unwrap()
     }
 
+    /// The same database in object mode: no disk at all (RFC 0070 §9).
+    pub fn open_object(&self) -> PageStore {
+        let options = StoreOptions {
+            remote: Some(self.remote()),
+            ..StoreOptions::default()
+        };
+        PageStore::open_object(&[&SLOT], options).unwrap()
+    }
+
     /// The newest file's key, by the one-key listing recovery will use.
     pub fn newest_file(&self) -> Option<String> {
         block_on(self.server.bucket().first_key("db/1seg/")).unwrap()
@@ -83,12 +92,10 @@ pub fn fill(s: &PageStore, keys: impl Iterator<Item = u64>, version: u64) {
     s.drain().unwrap();
 }
 
-/// Upload until nothing is pending.
+/// Upload until every committed write is in the object store.
 pub fn upload_all(s: &PageStore) {
-    while s.pending_upload_bytes() > 0 {
-        let done = block_on(s.upload()).unwrap();
-        assert!(done.pages > 0, "an upload with work pending moved nothing");
-    }
+    block_on(s.upload_all()).unwrap();
+    assert_eq!(s.pending_upload_bytes(), 0);
 }
 
 /// The keys read back from the object store: the first ten, and one in
@@ -106,4 +113,22 @@ pub fn assert_uploaded(s: &PageStore, want: impl Fn(u64) -> Option<Vec<u8>>) {
             assert_eq!(got, want(k), "record {k} in the object store");
         }
     });
+}
+
+/// A record of ~64 KiB that does not compress: a few hundred make several
+/// files of an upload.
+pub fn big(key: u64, version: u64) -> Vec<u8> {
+    let mut bytes = SH.to_le_bytes().to_vec();
+    let mut x = key.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ version ^ 1;
+    for _ in 0..8_192 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        bytes.extend_from_slice(&x.to_le_bytes());
+    }
+    bytes
+}
+
+pub fn big_id(key: u64) -> Id {
+    id(1_000_000 + key)
 }
