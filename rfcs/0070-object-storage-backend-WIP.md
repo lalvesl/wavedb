@@ -1,6 +1,6 @@
 # RFC 0070 — Object storage as a page backend
 
-- **Status:** In progress — opened 2026-10-10. Phases 1–5 done (descriptor, test store, S3 client; disk + object: the flag, the remote directories, the upload, reopen from disk; eviction from disk and the read that falls back to the object store; recovery from the object store alone); phase 6 next.
+- **Status:** In progress — opened 2026-10-10. Phases 1–6 done (descriptor, test store, S3 client; disk + object: the flag, the remote directories, the upload, reopen from disk; eviction from disk and the read that falls back to the object store; recovery from the object store alone; object mode, with no disk and no journal); phase 7 next.
 - **Supersedes:** [RFC 0059](0059-object-storage-capacity-tier-PLANNED.md) §2–§5
   (the remote descriptor bit and the object per bucket). 0059 §1, the archive
   lane, stays and is independent of this.
@@ -16,15 +16,17 @@
 
 ## Summary
 
-A database stores its pages in one of three ways, fixed when it is created
-and recorded in each shard's superblock beside the hash seed (opening it
-the other way is `StorageError::ModeMismatch`):
+A database stores its pages in one of three ways. Disk and disk + object
+are fixed when the database is created and recorded in each shard's
+superblock beside the hash seed (opening it the other way is
+`StorageError::ModeMismatch`); disk + object and object hold the same
+files, and a database closed in one opens in the other (§9):
 
 | Mode | Pages live in | Disk is | Journal |
 |------|---------------|---------|---------|
 | **disk** | `data.bin` | the store | local, fsync |
 | **disk + object** | the object store | a **cache** of it, plus the pages not uploaded yet | local, fsync |
-| **object** | the object store | absent — RAM caches | the object store |
+| **object** | the object store | absent — RAM caches | none: a write is durable once uploaded (§9) |
 
 Each type has two `Vec<u64>` directories, each a linear hash of its own: the
 disk's (32 KiB pages) and the object store's (128 KiB pages, for a denser
@@ -122,10 +124,12 @@ range  = bytes=offset-(offset + count · 4096 − 1)
 Per shard, under `<prefix>/shards/<shard:02x>/`:
 
 ```
-0journal/<seq:016x>      object mode only: one object per group-commit window
 1seg/<!file:016x>        the files — named by the bitwise complement of the
                          number, so LIST returns the newest first
 ```
+
+and `<prefix>/MANIFEST`, the shard count, beside the disk's copy (in
+object mode, instead of it).
 
 The numeric prefixes fix the order LIST returns. `LIST prefix=1seg/
 max-keys=1` names the newest file in one request.
@@ -225,12 +229,13 @@ starts on the worker and moves to the helper when measurement says so.
     instead of `B/S` (1 TB: ~49 000 files against ~3 100). Every type keeps
     appearing near the tail, so a recovery reads a bounded number of
     headers.
-  - **The newest whole upload**: `LIST 1seg/ max-keys=1` names the highest
-    file. It is taken only if its upload is whole — every file of the group
-    present, linked by header hash, it the last of them, and the group
-    linked to the file before. Otherwise the next number down is tried. So
-    the files a crashed upload left above the recorded end, a copy under
-    another key, or bytes that are no header are never taken for the newest.
+  - **The newest whole cut**: `LIST 1seg/ max-keys=1` names the highest
+    file. It is taken only if its upload ends a cut (§9) and is whole —
+    every file of the group present, linked by header hash, it the last of
+    them, and the group linked to the file before. Otherwise the next
+    number down is tried. So the files a crashed upload left above the
+    recorded end, a part of a backlog, a copy under another key, or bytes
+    that are no header are never taken for the newest.
   - **The type walk**: newest first, always the nearest file some incomplete
     type's `last` points at; the first value seen for a bucket is its newest.
     A type is done when every bucket is known or its chain ends (a bucket no
@@ -244,7 +249,8 @@ starts on the worker and moves to the helper when measurement says so.
   - **The recovery horizon** is the lowest file such a walk reads a header
     of. Compaction by file (phase 7) deletes only below it.
   - In disk + object mode, losing the disk loses what was not uploaded yet
-    (the flagged pages and the journal); object mode (phase 6) closes that.
+    (the flagged pages and the journal); in object mode a crash loses what
+    was not uploaded either, which `upload_interval` bounds (§9).
 
 ### 7. Eviction from disk
 
@@ -306,13 +312,47 @@ by deleting whole files:
 
 ### 9. Object mode
 
-There is no disk: the rounds accumulate in RAM until a file is ready, and
-reads of pages not yet uploaded are served from there. A batch is durable
-when its frame is in `0journal/` — one PUT per group-commit window
-([RFC 0061](0061-relaxed-durability-window.md)), so an acknowledgement costs
-one PUT's latency, shared by every write in the window. Each file header
-records the journal sequence it covers; recovery replays the journal objects
-after it until the first 404, and deletes the covered ones.
+**Decided 2026-10-10: no journal in the object store, and no lease.** A
+journal object per group-commit window would cost a PUT per window per
+shard, and a lease a PUT per renewal; neither buys what object mode is for.
+Built in phase 6 (`object_mode.rs`, `backing.rs`):
+
+- **No disk at all.** `PageStore::open_object` (`open_object_shards`, and
+  `Server::object_mode` on a node) lays out what would be `data.bin` in RAM
+  (`Backing::Memory`, 1 MiB chunks: growing never copies, a truncation
+  gives whole chunks back). The settle rounds, the flag, the upload, the
+  eviction and the compaction are the disk + object ones, unchanged. What a
+  disk keeps only so that it can reopen from itself — the journal, the
+  addressing log, the checkpoints, the protection generations — is not
+  kept: nothing reopens from RAM.
+- **A write is durable once an upload carried it.** A store uploads once it
+  holds back `upload_after_bytes` (8 MiB, about a file), or once its oldest
+  write not uploaded has waited `upload_interval` (default 10 s; the
+  user's figure). That interval is the durability window: a crash loses at
+  most it, and each shard with a write waiting costs one PUT per interval
+  (all 64 shards dirty all the time: ~553 000 PUTs a day, ~US$ 83 a month
+  at US$ 0.005 per 1 000; 60 s: ~US$ 14). A close uploads everything first
+  (`upload_all`), so a planned restart loses nothing.
+- **Every open is a recovery** (§6) from the files: the store opens with
+  every bucket evicted, and RAM fills as reads and writes want pages.
+- **Only a cut is recovered.** An upload first settles every committed
+  batch, then takes the flagged pages with no await between; if the take
+  leaves nothing flagged behind, the upload is a **cut**
+  (`FileHeader::cut`), and with the uploads before it holds every batch up
+  to that point and no batch in part. Recovery takes the newest whole cut.
+  An upload of part of a backlog — the 8 MiB input bound leaving pages
+  behind — is never recovered on its own: a batch's writes to two buckets
+  could otherwise come back one without the other. (This held for phase 5's
+  disaster recovery too, which took any whole upload; the cut fixes both.)
+  Files with no cut among them — a first upload that never finished — open
+  as an empty database, their numbers stepped over.
+- **Converting** between disk + object and object is a close and an open:
+  the files are the same. Closed in disk + object mode with everything
+  uploaded, a database reopens in object mode; opened from object mode with
+  a disk, it is adopted as phase 5 adopts it. The `MANIFEST` lives in the
+  object store too, so the shard count travels with the files. Converting
+  from or to disk mode (uploading or bringing back every page) is a later,
+  separate item.
 
 ### 10. Navigation is resident
 
@@ -321,11 +361,24 @@ Pivots and B+tree nodes are kept in RAM and never evicted: only the pages
 holding record bytes — a type's own slot and `WDB.SEG` — are fetched on
 demand. The cost is RAM proportional to the navigation structures.
 
+As built (phase 6): `StructStorage::resident()`, a declaration flag the
+macros set on the recency, removal and index lanes and on every Pivot, and
+the engine on its `BpTree` node slot; `evict_cold` passes those types
+over. It is behaviour, not bytes, so it does not fold into the
+`STRUCT_HASH`. After a recovery they start evicted like everything else and
+stay once a read or a write brings them back.
+
 ### 11. One writer per prefix
 
-The lock on `data.bin` makes a second open `EngineBusy`. In object mode the
-node holds a lease object (`<prefix>/LOCK`) taken and renewed with
-conditional PUTs (`If-None-Match`, `If-Match`).
+The lock on `data.bin` makes a second open `EngineBusy`. Object mode has no
+such lock, and **no lease** (decided 2026-10-10): running one node per
+prefix is the deployment's to arrange. A second writer is caught, not
+merged: every file is PUT with `If-None-Match: *`, and a file number is
+never written twice — not after a crash, and not after a failed PUT either
+(the next upload starts past the attempted files). So a refused PUT means
+another writer's file is there: the store is **fenced**
+(`StorageError::Fenced`), takes no more writes, and what it held that was
+not uploaded is lost. Neither writer's files are ever overwritten.
 
 ### 12. Signing requests
 
@@ -403,7 +456,7 @@ once and never suspend.
   server starts in milliseconds. Probed 2026-10-10 with `curl --aws-sigv4`:
   - `If-None-Match: *` on an existing key answers `412`; `If-Match` answers
     `200` with the current ETag and `412` with another — the conditional
-    PUTs the journal and the lease rely on;
+    PUT the fencing relies on (§11);
   - a range inside an object answers `206` with exactly its bytes, one
     running past the end `206` cut at the end, one starting past it `416`;
     files are block-aligned anyway, so a page's range never runs past its
@@ -451,6 +504,20 @@ once and never suspend.
   files crashed uploads left are not taken for the newest. In-crate tests
   build chains by hand: an upload missing a file, or linked to another
   header, is passed over for the one before it.
+- **Phase 6** is proved in `tests/object_mode.rs`: a database lives in the
+  object store alone (no disk directory is ever created) and carries on
+  across reopens; a crash loses only what no upload carried; an upload of
+  part of a backlog is never recovered — the test fails with the cut check
+  removed — and its files are stepped over; a second writer on the prefix
+  is fenced, and nothing either wrote is overwritten — the test fails with
+  the PUT made unconditional; evicted pages give their RAM back once
+  compacted; navigation is never evicted; and a sharded disk + object
+  database reopens in object mode with its own shard count. The node's
+  upkeep uploads on the interval below a file's worth, and its close
+  uploads the rest (`shard::owned`).
+- The test server now counts as started only once it serves a marker
+  written into its own root: two servers handed the same free port made
+  tests talk to another test's server, now and then.
 
 ## Phasing
 
@@ -461,7 +528,7 @@ once and never suspend.
 | 3 | disk + object: the remote directory, the flag, the upload that reassembles flagged pages into files with the header, reopen from disk — done |
 | 4 | Eviction from disk (LRU, past the compaction ceiling); the read path falling back to the object store; writes, replays and wanted reads bringing a bucket back — done |
 | 5 | Recovery from the object store alone: chained headers that name every type, spare room restating the oldest entries, the newest whole upload, adoption on open — done |
-| 6 | Object mode: rounds in RAM, the journal in the object store, the lease |
+| 6 | Object mode: no disk, the pages in RAM until uploaded and as a cache, no journal (a write is durable once uploaded, on bytes or an interval), only cuts recovered, writers fenced by create-only PUTs, navigation resident — done |
 | 7 | Compaction by file, on the 0069 triggers |
 
 ## Open questions
