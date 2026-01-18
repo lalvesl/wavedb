@@ -30,7 +30,9 @@ impl PageStore {
     /// Barriers completed on the live journal, on any thread.
     #[must_use]
     pub fn journal_barriers(&self) -> u64 {
-        self.journal.borrow_mut().barriers()
+        self.disk
+            .as_ref()
+            .map_or(0, |disk| disk.journal.borrow_mut().barriers())
     }
 
     /// Journal first, then append to the types' logs, where the settle drain
@@ -50,31 +52,19 @@ impl PageStore {
         // Refuse unroutable writes *before* the journal sees the batch, so the
         // log never holds a batch replay would choke on.
         self.route_batch(batch)?;
-        let mut journal = self.journal.borrow_mut();
-        // Guards validate against the pre-batch state under the same lock
-        // that orders commits; a mismatch refuses the batch before the
-        // durability point. Guards are not state — the journal never holds
-        // them, so replay re-applies only the effective writes.
-        for w in batch {
-            // One routed lookup, not a scan. Before RFC 0063's yield map made
-            // it visible, this read the id's *type* out of the store by
-            // probing every registered slot in turn — so an
-            // `Expect(id, None)`, the guard on every first save, matched
-            // nothing and paid a page read plus a zstd decode per type, here,
-            // under the lock that serializes all writers.
-            if let Write::Expect(hash, id, expected) = w
-                && self.read_of(*hash, *id)? != *expected
-            {
-                return Err(StorageError::Core(wavedb_core::Error::Conflict(
-                    *id,
-                )));
-            }
+        if self.is_fenced() {
+            return Err(StorageError::Fenced);
         }
-        let effective: Vec<Write> = batch
-            .iter()
-            .filter(|w| !matches!(w, Write::Expect(..)))
-            .cloned()
-            .collect();
+        let Some(disk) = &self.disk else {
+            // Object mode (RFC 0070 §9): no journal — the upload that
+            // carries the batch is its durability point.
+            let effective = self.validate_guards(batch)?;
+            self.commit_to_caches(&effective);
+            self.note_unuploaded();
+            return Ok(None);
+        };
+        let mut journal = disk.journal.borrow_mut();
+        let effective = self.validate_guards(batch)?;
         let frame = crate::journal::JournalFrame::Batch(effective.clone());
         // The durability point, and the one place the window changes anything
         // (RFC 0061). The check runs under the journal lock this function
@@ -108,6 +98,7 @@ impl PageStore {
         }
         // Commit under the journal lock: cache order == journal order.
         self.commit_to_caches(&effective);
+        self.note_unuploaded();
         // The append's fsync flushed the whole file, so a checkpoint's deferred
         // `Commit` frame is now durable too — for free, and with nothing to do
         // about it here. Acting on it (deleting the retired journal, rolling
@@ -115,6 +106,36 @@ impl PageStore {
         // journal's barrier count (RFC 0047); the write path stays a journal
         // append and a cache commit.
         Ok(wait)
+    }
+
+    /// Check `batch`'s guards against the pre-batch state, returning its
+    /// effective writes — the guards stripped.
+    ///
+    /// Called under the same lock that orders commits; a mismatch refuses
+    /// the batch before the durability point. Guards are not state — the
+    /// journal never holds them, so replay re-applies only the effective
+    /// writes.
+    fn validate_guards(&self, batch: &[Write]) -> StorageResult<Vec<Write>> {
+        for w in batch {
+            // One routed lookup, not a scan. Before RFC 0063's yield map made
+            // it visible, this read the id's *type* out of the store by
+            // probing every registered slot in turn — so an
+            // `Expect(id, None)`, the guard on every first save, matched
+            // nothing and paid a page read plus a zstd decode per type, here,
+            // under the lock that serializes all writers.
+            if let Write::Expect(hash, id, expected) = w
+                && self.read_of(*hash, *id)? != *expected
+            {
+                return Err(StorageError::Core(wavedb_core::Error::Conflict(
+                    *id,
+                )));
+            }
+        }
+        Ok(batch
+            .iter()
+            .filter(|w| !matches!(w, Write::Expect(..)))
+            .cloned()
+            .collect())
     }
 
     /// Verify every write in `batch` routes to a registered slot — `Put` by
