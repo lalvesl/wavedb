@@ -19,17 +19,21 @@ use syn::Ident;
 /// Emit the storage-slot impl for `ty`; `hash_expr` is the `const` expression
 /// yielding its `STRUCT_HASH` (inherent for structs, the `Pivot` trait const
 /// for generated pivots). `compress = false` (`#[wavedb(compress = false)]`)
-/// opts the type's pages out of zstd — storage policy, never schema identity.
+/// opts the type's pages out of zstd — storage policy, never schema identity;
+/// `resident` keeps its pages from eviction (a Pivot: navigation, RFC 0070
+/// §10) — behaviour, never schema identity either.
 pub fn statics_for(
     ty: &Ident,
     hash_expr: &TokenStream,
     compress: bool,
+    resident: bool,
 ) -> TokenStream {
     let ctor = if compress {
         quote!(new)
     } else {
         quote!(without_compression)
     };
+    let resident = resident.then(|| quote!(.resident()));
     quote! {
         #[cfg(not(target_arch = "wasm32"))]
         impl #ty {
@@ -39,7 +43,7 @@ pub fn statics_for(
             #[must_use]
             pub fn struct_storage() -> &'static ::wavedb_storage::StructStorage {
                 static SLOT: ::wavedb_storage::StructStorage =
-                    ::wavedb_storage::StructStorage::#ctor(#hash_expr);
+                    ::wavedb_storage::StructStorage::#ctor(#hash_expr)#resident;
                 &SLOT
             }
         }
@@ -106,7 +110,7 @@ pub fn lane_statics(name: &Ident, hash: u64) -> TokenStream {
             pub fn recency_lane_storage()
             -> &'static ::wavedb_storage::StructStorage {
                 static SLOT: ::wavedb_storage::StructStorage =
-                    ::wavedb_storage::StructStorage::new(#recency);
+                    ::wavedb_storage::StructStorage::new(#recency).resident();
                 &SLOT
             }
 
@@ -125,7 +129,7 @@ pub fn lane_statics(name: &Ident, hash: u64) -> TokenStream {
             pub fn dead_lane_storage()
             -> &'static ::wavedb_storage::StructStorage {
                 static SLOT: ::wavedb_storage::StructStorage =
-                    ::wavedb_storage::StructStorage::new(#dead);
+                    ::wavedb_storage::StructStorage::new(#dead).resident();
                 &SLOT
             }
 
@@ -134,7 +138,7 @@ pub fn lane_statics(name: &Ident, hash: u64) -> TokenStream {
             pub fn index_lane_storage()
             -> &'static ::wavedb_storage::StructStorage {
                 static SLOT: ::wavedb_storage::StructStorage =
-                    ::wavedb_storage::StructStorage::new(#index);
+                    ::wavedb_storage::StructStorage::new(#index).resident();
                 &SLOT
             }
         }
