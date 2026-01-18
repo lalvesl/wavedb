@@ -92,7 +92,9 @@ impl PageStore {
     /// Bytes of committed journal frames — the checkpoint policy's input.
     #[must_use]
     pub fn journal_len(&self) -> u64 {
-        self.journal.borrow().len_bytes()
+        self.disk
+            .as_ref()
+            .map_or(0, |disk| disk.journal.borrow().len_bytes())
     }
 
     /// Drop settled chunks of the types' logs, oldest first, until the
