@@ -153,8 +153,13 @@ impl PageStore {
         placement: Placement,
     ) -> StorageResult<bool> {
         let snapshot = matches!(placement, Placement::Snapshot);
+        // Object mode keeps no addressing log: nothing reopens from RAM
+        // (RFC 0070 §9), so a window holds its images and nothing else.
+        let logged = self.disk.is_some();
         let mut targets = targets_of(&plans);
-        if targets.is_empty() && !snapshot && !self.has_unrecorded() {
+        if (targets.is_empty() && !snapshot && !self.has_unrecorded())
+            || (snapshot && !logged)
+        {
             return Ok(true);
         }
         let mut alloc = self.alloc.borrow_mut();
@@ -167,14 +172,20 @@ impl PageStore {
         // it (RFC 0048). `prev` is known before the carve and is a fixed 8
         // bytes, so it does not disturb the shape both passes agree on.
         let prev = if full { 0 } else { meta.head() };
-        let reserved = edit::encode(&edit::chunk_of(
-            self,
-            &plans,
-            full,
-            &BTreeMap::new(),
-            prev,
-        ));
-        targets.push(Target::Edit);
+        let chunk_of =
+            |plans: &[SlotPlan], dicts: &BTreeMap<usize, BlockDescriptor>| {
+                if logged {
+                    edit::encode(&edit::chunk_of(
+                        self, plans, full, dicts, prev,
+                    ))
+                } else {
+                    Vec::new()
+                }
+            };
+        let reserved = chunk_of(&plans, &BTreeMap::new());
+        if logged {
+            targets.push(Target::Edit);
+        }
         let sizes: Vec<u64> = targets
             .iter()
             .map(|t| size_of(&plans, t, &reserved))
@@ -203,8 +214,7 @@ impl PageStore {
 
         // Pass two: the same shape, now naming the runs just handed out.
         let dicts = dict_descriptors(&plans, &targets, &runs);
-        let chunk =
-            edit::encode(&edit::chunk_of(self, &plans, full, &dicts, prev));
+        let chunk = chunk_of(&plans, &dicts);
         if chunk.len() > reserved.len() {
             return Err(StorageError::Corrupt("edit chunk outgrew its window"));
         }
@@ -223,7 +233,9 @@ impl PageStore {
             self.file.page_cache().invalidate(run);
             alloc.free(run);
         }
-        if let Some(run) = runs.last().copied().flatten() {
+        if let Some(run) = runs.last().copied().flatten()
+            && logged
+        {
             let desc = BlockDescriptor::from_run(run);
             for stale in meta.record(desc, full) {
                 alloc.free(stale);
