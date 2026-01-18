@@ -31,7 +31,7 @@ use crate::block::Run;
 use crate::block_file::RESERVED_BLOCKS;
 use crate::error::StorageResult;
 use crate::journal::{self, CommitFrame, Journal, JournalFrame};
-use crate::page_store::PageStore;
+use crate::page_store::{Disk, PageStore};
 use crate::retire::Retiring;
 
 /// What one [`checkpoint_step`](PageStore::checkpoint_step) did.
@@ -94,6 +94,10 @@ impl PageStore {
     // not both see "none open" and rotate twice.
     #[allow(clippy::significant_drop_tightening)]
     pub fn begin_checkpoint(&self) -> StorageResult<bool> {
+        // Object mode has no journal to retire: never a checkpoint.
+        let Some(disk) = &self.disk else {
+            return Ok(false);
+        };
         let mut open = self.checkpoint.borrow_mut();
         if open.is_some() {
             return Ok(false);
@@ -112,11 +116,9 @@ impl PageStore {
         // the commit path appends under this lock too, so the owed span is
         // exactly the old journal's batches.
         let mut old = {
-            let mut journal = self.journal.borrow_mut();
-            let fresh = Journal::create(
-                &self.data_dir,
-                journal::next_ts(journal.ts()),
-            )?;
+            let mut journal = disk.journal.borrow_mut();
+            let fresh =
+                Journal::create(&disk.dir, journal::next_ts(journal.ts()))?;
             self.cache.borrow_mut().rotate();
             std::mem::replace(&mut *journal, fresh)
         };
@@ -147,7 +149,7 @@ impl PageStore {
         budget: usize,
     ) -> StorageResult<Checkpointing> {
         let mut open = self.checkpoint.borrow_mut();
-        let Some(old) = open.as_ref() else {
+        let (Some(old), Some(disk)) = (open.as_ref(), &self.disk) else {
             return Ok(Checkpointing::Done);
         };
         if self.cache.borrow().owes() {
@@ -156,7 +158,7 @@ impl PageStore {
             return Ok(Checkpointing::Settling);
         }
         let journal_ts = old.ts();
-        let frame_barrier = self.close_checkpoint(journal_ts)?;
+        let frame_barrier = self.close_checkpoint(disk, journal_ts)?;
         if let Some(journal) = open.take() {
             *self.retiring.borrow_mut() = Some(Retiring {
                 journal,
@@ -172,7 +174,11 @@ impl PageStore {
     // name exactly the state that was just synced, with no write landing in
     // between.
     #[allow(clippy::significant_drop_tightening)]
-    fn close_checkpoint(&self, journal_ts: u64) -> StorageResult<u64> {
+    fn close_checkpoint(
+        &self,
+        disk: &Disk,
+        journal_ts: u64,
+    ) -> StorageResult<u64> {
         // What uploads and evictions changed goes into a chunk first: the
         // frame names the addressing, and an evicted page's run is already
         // free (RFC 0070 §7).
@@ -215,7 +221,7 @@ impl PageStore {
         // marker, in ONE crc-framed append — written **without** a barrier.
         // The frame only points at state the sync above already made durable,
         // so the next `Batch` append's fsync carries it for free.
-        let mut journal = self.journal.borrow_mut();
+        let mut journal = disk.journal.borrow_mut();
         journal.append_deferred(&JournalFrame::Commit(CommitFrame {
             journal_ts,
             head: meta.head(),
