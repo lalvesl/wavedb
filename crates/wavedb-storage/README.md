@@ -385,7 +385,7 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
    time, a disk ceiling, or a free-space share.
 
 7. **The object store** ([RFC 0070](../../rfcs/0070-object-storage-backend-WIP.md),
-   phase 3). A database created with `StoreOptions::remote` keeps its pages
+   phases 3–6). A database created with `StoreOptions::remote` keeps its pages
    in an object store, the disk caching them. Settle rounds flag what they
    write; `upload` reassembles the flagged pages, record by record, into the
    object store's own linear hash of 128 KiB pages, packed into files of
@@ -399,7 +399,14 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
    A database whose disk is gone opens from its files alone (phase 5): every
    header names every type and chains to the one before by hash, its spare
    room restates the oldest entries, and the store adopts what the newest
-   whole upload says, every disk bucket evicted.
+   whole **cut** says (an upload that left nothing waiting: every batch up
+   to a point, none in part), every disk bucket evicted. In **object mode**
+   (`PageStore::open_object`, phase 6) there is no disk at all: what would
+   be `data.bin` sits in RAM, there is no journal — a write is durable once
+   an upload carries it, which happens on 8 MiB or an interval — and every
+   open is such a recovery. Every file is created only if absent, so a
+   second writer on the prefix is fenced (`StorageError::Fenced`), never
+   merged; what navigation reads is resident (`StructStorage::resident`).
 
 On startup the directories and the block allocator rebuild by **journal replay**.
 
