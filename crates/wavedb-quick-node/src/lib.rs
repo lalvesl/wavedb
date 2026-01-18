@@ -40,6 +40,7 @@ pub mod error;
 mod serve;
 mod serve_ws;
 pub mod shard;
+mod storage_config;
 mod subscribe;
 pub mod upkeep;
 mod ws_read;
@@ -47,7 +48,6 @@ mod ws_read;
 use std::future::{Future, pending};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use embassy_futures::select::{Either, select};
 use wavedb_platform::io::Listener;
@@ -73,6 +73,9 @@ pub struct Server<E> {
     maintenance: Maintenance,
     secret: Option<[u8; 32]>,
     store: StoreOptions,
+    /// No disk at all: the database lives in the object store alone
+    /// ([`Server::object_mode`]).
+    diskless: bool,
     /// Workers to serve on — see [`Server::threads`].
     threads: usize,
 }
@@ -109,6 +112,7 @@ where
             maintenance: Maintenance::default(),
             secret: None,
             store: StoreOptions::default(),
+            diskless: false,
             threads: 1,
         }
     }
@@ -120,56 +124,6 @@ where
     #[must_use]
     pub const fn secret(mut self, secret: [u8; 32]) -> Self {
         self.secret = Some(secret);
-        self
-    }
-
-    /// Set the directory holding `data.bin` + `journal.log`.
-    #[must_use]
-    pub fn data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.data_dir = dir.into();
-        self
-    }
-
-    /// Group-commit writes: allow an acknowledged batch to sit unsynced for
-    /// up to `window`, so a burst costs one `fsync` instead of one each
-    /// (RFC 0061).
-    ///
-    /// **Default zero — one barrier per batch**, which is the promise the
-    /// engine is built around. Setting this weakens what `Ok` means for
-    /// every write the node serves: a crash then loses a *suffix* of
-    /// acknowledged writes (never a corrupt store). Set it when the
-    /// application can say how much recent work it is willing to lose, and
-    /// not otherwise.
-    #[must_use]
-    pub const fn relax_window(mut self, window: Duration) -> Self {
-        self.store.relax_window = window;
-        self
-    }
-
-    /// Keep the pages in an object store, the disk caching them (RFC 0070):
-    /// each shard keeps its objects under `shards/<xx>/` below `remote`'s
-    /// prefix, and uploads what it settled once it holds back
-    /// [`Maintenance::upload_after_bytes`]. The mode is fixed when the
-    /// database is created; opening it the other way is refused.
-    #[must_use]
-    pub fn object_store(mut self, remote: wavedb_storage::Remote) -> Self {
-        self.store.remote = Some(remote);
-        self
-    }
-
-    /// Checkpoint (persist the pages' metadata and truncate the journal)
-    /// once the journal exceeds `bytes`. Default 64 MiB.
-    #[must_use]
-    pub const fn checkpoint_after_bytes(mut self, bytes: u64) -> Self {
-        self.maintenance.checkpoint_after_bytes = bytes;
-        self
-    }
-
-    /// Evict settled cache entries down to `bytes` (reads then serve from
-    /// the pages). Default 1 GiB.
-    #[must_use]
-    pub const fn cache_budget_bytes(mut self, bytes: usize) -> Self {
-        self.maintenance.cache_budget_bytes = bytes;
         self
     }
 
@@ -207,13 +161,24 @@ where
     pub async fn bind(self, addr: &str) -> Result<Bound<E>> {
         // Recovery runs on as many threads as will serve, each replaying the
         // range of shards its worker will own (RFC 0067 §3).
-        let stores = wavedb_storage::open_shards_with(
-            &self.data_dir,
-            &self.registry.storage_entries(),
-            self.store,
-            wavedb_core::placement::DEFAULT_SHARDS,
-            self.threads.max(1),
-        )?;
+        let entries = self.registry.storage_entries();
+        let shards = wavedb_core::placement::DEFAULT_SHARDS;
+        let stores = if self.diskless {
+            wavedb_storage::open_object_shards(
+                &entries,
+                self.store,
+                shards,
+                self.threads.max(1),
+            )?
+        } else {
+            wavedb_storage::open_shards_with(
+                &self.data_dir,
+                &entries,
+                self.store,
+                shards,
+                self.threads.max(1),
+            )?
+        };
         let threads = self.threads.clamp(1, stores.len().max(1));
         let listeners = Listener::bind_many(addr, threads)?;
         // Publish for the token-minting helpers (`wavedb::auth`) — one node
