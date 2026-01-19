@@ -12,20 +12,24 @@ write pipeline. This is where most of WaveDB's engineering energy lives.
 
 | Module            | Responsibility                                                                                                                                       |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `block`           | `BlockDescriptor` (u43·u20·u1) + `Run` + `BlockAllocator` — alloc/free/coalesce runs of 4 KiB blocks.                                                |
-| `block_file`      | `data.bin` as a block-addressed file: superblock (block 0), positioned run I/O, grow/truncate, fsync.                                                |
+| `block`           | `BlockDescriptor` (u43·u20·u1) + `Run`.                                                                                                              |
+| `alloc`           | `BlockAllocator` — runs appended to the active data file, rollover at the ceiling, holes per file, free tails to cut (RFC 0071).                     |
+| `file_space`      | One data file as the allocator sees it: its end, its holes (coalesced within the file), what a reclaim cuts.                                         |
+| `manifest`        | The database's `MANIFEST`: magic, format version, shard count, seed, mode — written once at creation, a copy in the object store.                   |
+| `block_file`      | A shard's data files, named by the block each starts at and found by listing: positioned run I/O, create/cut/delete, the lock, fsync.              |
+| `data_file`       | One data file: its handle and name (16 hex digits), the per-file lock, create/cut/delete.                                                              |
 | `dictionary`      | Per-`STRUCT_HASH` raw-content zstd dictionary (`Dictionary` + `DictState`): capped append-only buffer, version = prefix length, own run persistence. |
 | `directory`       | The per-`STRUCT_HASH` page directory container + the linear-hashing addressing math (pure addressing).                                               |
 | `directory_pages` | The directory's page **reads**: resolving a bucket to its `SlotPage`, decompressing against the passed-in `DictState`.                               |
 | `plan`            | A checkpoint's phase 1: touched ids → page images grouped per bucket, splits decided, nothing written.                                               |
-| `checkpoint`      | Phases 2–4: one best-fit window for every image, one positioned write, then the descriptor swap.                                                     |
+| `checkpoint`      | Phases 2–4: one window for every image at the end of the active file, one positioned write, then the descriptor swap.                              |
 | `edit`            | The addressing delta riding each window (`EditChunk`, chained by `prev`), its recovery fold (`Replay`), and the chain walk (`walk`).                 |
 | `meta_log`        | Which chunks are live, the `Commit` frame's `head`, and when a round should compact the chain into a fresh snapshot.                                 |
 | `retire`          | A checkpoint's deferred half: the retired journal + protection roll, held for the _next_ checkpoint to dispose of.                                   |
 | `settle`          | The drain queue: what a round is, when it retries, and the cache-eviction budget.                                                                    |
 | `chain`           | Directory chain blocks — the persisted address vector, copy-on-write, placed in the checkpoint's window.                                             |
-| `compact`         | Compaction's phases and surface (`compact_step`, `compact`, `reclaim_tail`, `space`): move, drop the old addressing, seal, truncate.                 |
-| `defrag`          | Compaction's moves: the highest runs, verbatim, into the lowest hole below them — one window write per round.                                        |
+| `compact`         | Compaction's phases and surface (`compact_step`, `compact`, `reclaim`, `space`): move, drop the old addressing, seal, cut and delete.              |
+| `defrag`          | Compaction's moves: the emptiest data file's runs, highest first, verbatim, into the active file — one window write per round.                    |
 | `page`            | `SlotPage` — the homogeneous record page: `[len][to_wire_checked(PageEnvelope)]`, body raw or zstd.                                                  |
 | `journal`         | Append-only WAL of `Write` batches (checked wire frames); fsync = durability; torn-tail-tolerant replay.                                             |
 | `struct_storage`  | `StructStorage` — one type's own cache + directory slot (`#[wavedb]` emits one `static` per type).                                                   |
@@ -41,8 +45,8 @@ drains that queue and checkpoints on a journal-size threshold. The
 
 ## Where this crate runs
 
-This crate is the **node's authoritative engine** — native only: filesystem
-`data.bin` (block runs) + `journal`. It provides the native **`PageStore`** — the
+This crate is the **node's authoritative engine** — native only: per shard, the
+data files (block runs) + `journal`. It provides the native **`PageStore`** — the
 disk-optimised `Store` backend (`get` + atomic `apply`) — that the `Store`-generic
 `Pivot`/`BpTree` contracts in [`wavedb-core`](../wavedb-core/README.md#index-contracts--pivot-bptree-indexkey)
 run over. The index logic itself is portable; pages, blocks, journal, and the
@@ -57,54 +61,60 @@ web ([`wavedb-wasm`](../wavedb-wasm/README.md)) — no pages, no journal. See
 
 ## Block manager
 
-`data.bin` is an **array of fixed 4 KiB blocks**. The block manager owns it:
+A shard's blocks are **one address space of 4 KiB blocks, cut into data files**
+([RFC 0071](../../rfcs/0071-data-files-by-address.md)). Each file is named
+by the block it starts at — 16 hex digits, `shards/00/0000000000280000` holds
+the blocks from `0x280000` on — and the store finds them by **listing** the
+shard's directory into a `BTreeMap<start, file>`: a run at block `s` lives in
+the file with the greatest start `≤ s`. Descriptors never name a file, only a
+block.
 
-- **Allocate** a contiguous run of `n` blocks for a new or growing page,
-  returning its start block.
-- **Free** a run when a page is relocated, emptied, or its type is dropped.
-- **Coalesce** adjacent free extents so large pages always have somewhere to
-  land, and **truncate** the tail when trailing blocks are free.
+- **Allocate** — only ever **appends**, at the end of the newest (*active*)
+  file. Once that file has reached the ceiling (`StoreOptions::file_bytes`,
+  10 GiB by default) the next run opens a new file named after where it ended.
+  A run is never split, so the run that reaches the ceiling lands whole (a
+  page may be up to 4 GiB). The ceiling decides only when a file closes, so it
+  may change between runs.
+- **Free** — a superseded run becomes a hole in its file, never handed out
+  again; holes coalesce within a file, never across two.
+- **Cut** — a file's free tail is cut off, and a file left empty is deleted
+  ([`reclaim`](#write-pipeline--concurrency)); compaction is what empties them.
 
-Free space is tracked as **extents** indexed by position (to coalesce on free)
-and by size (best-fit, to satisfy "give me `n` contiguous blocks"). The allocator
-is a pure in-memory structure; durability is the pipeline's job — **every alloc
-and every free is appended to the journal** so a crash can replay them and never
-leak or lose blocks.
+The allocator is a pure in-memory structure. On open it is rebuilt from the
+runs the recovered addressing names; what lies past a file's last used run —
+what settle rounds wrote after the last `Commit`, which the journal replay
+writes again — is cut, and a file no run names is deleted.
 
 ---
 
-## On-disk metadata — the superblock & the WaveWire rule
+## On-disk metadata — the `MANIFEST` & the WaveWire rule
 
-### Block 0: the superblock
+### The `MANIFEST`
 
-The first `RESERVED_BLOCKS` (currently 1) blocks of `data.bin` are engine
-metadata — the allocator never hands them out. Block 0 is the **superblock**:
-it stamps the file as a WaveDB data file and carries the per-database facts.
-Layout (little-endian, zero-padded to the block):
+A database's fixed facts live in **one** record at its root, `MANIFEST`
+(`crate::manifest`, RFC 0071 §2) — beside `shards/00` … `shards/xx`, each
+shard a whole `PageStore`. A single `PageStore::open(dir)` is a database of
+one shard, the same shape. Written once, atomically, when the database is
+created, and read on every open:
 
-| Offset | Field                             | Size | Meaning                                                                         |
-| ------ | --------------------------------- | ---- | ------------------------------------------------------------------------------- |
-| 0      | magic                             | 8 B  | `WAVEDBIN` — "this is a WaveDB data file". Mismatch ⇒ `StorageError::BadMagic`. |
-| 8      | `to_wire_checked(SuperblockBody)` | 40 B | `[crc32 (u32 LE)][wire]` of `{ version: u32, seed: [u64; 4] }`.                 |
+| Field                       | Meaning                                                                             |
+| --------------------------- | ----------------------------------------------------------------------------------- |
+| magic                       | `WAVEDBMF`, a raw 8-byte prefix. Mismatch ⇒ `StorageError::BadMagic`.               |
+| `to_wire_checked(Manifest)` | `[crc32][wire]` of `{ version, shards, seed: [u64; 4], object_backed }`.            |
 
-The body is the **checked wire encoding** of `SuperblockBody` — the format
-version (`BadVersion` if it mismatches; pinned at 1 pre-release, see the
-[root README](../../readme.md)) and the per-database random SeaHash seed that
-`hash_of` routes every record with. A crc failure surfaces as
-`Corrupt("superblock")`.
-
-A fresh file mints a random seed and persists the superblock before anything
-else; opening an existing file validates magic + version and loads the seed.
-Keeping the seed in block 0 is what lets a `data.bin` rebuilt by journal replay
-on another machine route every `Id` into the same bucket.
+The format version is pinned at 1 pre-release (`BadVersion` otherwise; see
+the [root README](../../readme.md)); the shard count and the seed are part of
+every record's address, and the mode is fixed. An object-backed database keeps
+a copy at `<prefix>MANIFEST`, so one whose disk is gone still knows every
+fact; the two copies must agree. A data file is blocks and nothing else.
 
 ### One layout language: WaveWire (+ checked framing)
 
 Engine metadata is described with **the `WaveWire` codec only** — the same
 layout language records use. No structure gets its own bespoke byte format:
 
-- **superblock body** (version + seed) — a plain `WaveWire` struct behind the
-  magic. The 8-byte magic itself stays a raw prefix _outside_ the wire payload:
+- **`MANIFEST` body** (version, shards, seed, mode) — a plain `WaveWire`
+  struct behind the magic. The 8-byte magic itself stays a raw prefix _outside_ the wire payload:
   it must be checkable before any decode is attempted;
 - **block descriptor** (`start u43 · count u20 · flag u1`, exact-packed
   into one `u64` — see the table below) — wire-encodes as that `u64`;
@@ -120,9 +130,9 @@ it uses the wire crate's [`validation` feature](../wavedb-wire/README.md#feature
 not a hand-patched CRC slot re-implemented in every format. A corrupted page
 surfaces as the wire `CrcMismatch` before any decode runs.
 
-> **Status.** Fully in effect: the superblock body, journal frames, **and
+> **Status.** Fully in effect: the `MANIFEST` body, journal frames, **and
 > pages** are all on checked `WaveWire`. No engine structure hand-rolls its
-> byte layout anymore; the only raw prefixes left are the 8-byte superblock
+> byte layout anymore; the only raw prefixes left are the 8-byte `MANIFEST`
 > magic (checkable before any decode) and the `u32` length that delimits a
 > payload inside a zero-padded run / append-only log.
 
@@ -130,7 +140,7 @@ surfaces as the wire `CrcMismatch` before any decode runs.
 
 ## Per-`STRUCT_HASH` page directory
 
-`data.bin` is **partitioned by type**: each `STRUCT_HASH` owns its own page
+A shard's pages are **partitioned by type**: each `STRUCT_HASH` owns its own page
 directory — an in-memory `Vec<u64>` where every entry is a 64-bit **page
 descriptor** pointing at one homogeneous page (a run of blocks holding records of
 exactly that `STRUCT_HASH`). One `Vec<u64>` per type, so unrelated types never
@@ -160,10 +170,10 @@ nothing ever read it, so its bits went to the address and the flag.)
 
 `hash_of(id)` is **SeaHash over the 16 little-endian bytes of the `Id`** — fast and
 DoS-resistant. It is seeded with a **per-database random `[u64; 4]` seed persisted
-in the first page of `data.bin`** (page 0), read once at startup. The seed is
+in the `MANIFEST`**, read once at startup. The seed is
 per-database (not the fixed `STRUCT_HASH` seed): each node rebuilds its own
 directory consistently, and an attacker can't precompute bucket collisions. SeaHash
-is portable across architectures and endianness, so a `data.bin` rebuilt by journal
+is portable across architectures and endianness, so data files rebuilt by journal
 replay on another machine routes every record to the same bucket. The resulting
 `u64` feeds the linear-hashing reduction below.
 
@@ -311,7 +321,7 @@ dictionary is simply a **capped, append-only buffer of record bytes** for that
 into the buffer until the cap (`DICT_CAP`), then it freezes. Simpler than a
 trainer and naturally incremental.
 
-The dictionary is stored in `data.bin` like a page: a block run handed out by
+The dictionary is stored in the data files like a page: a block run handed out by
 the block manager (`[len][to_wire_checked(buf)]`, same framing as everything
 else), tracked by a descriptor in the type's `DictState` — the compression
 slot the open store keeps for the type — and repointed
@@ -331,7 +341,7 @@ recompression and no superseded-run bookkeeping** — one stored buffer serves
 all versions. (A background recompress-cold-pages pass remains possible later
 as a pure space optimisation, not a correctness need.)
 
-On open the dictionary is rebuilt exactly, for free: `data.bin` is a
+On open the dictionary is rebuilt exactly, for free: the data files are a
 journal-replay projection, and the settle path re-samples the same records in
 the same order — every `dict_len` a rebuilt page stamps resolves against the
 rebuilt buffer. Reading the persisted run back becomes load-bearing only when
@@ -347,7 +357,7 @@ CPU is free here — there is no join processing competing for it. Per-value
 ```
 mutation → journal append → the type's own BTreeMap<Id> cache → (client confirmed)
                                           │
-                                          └─ background: settle into data.bin,
+                                          └─ background: settle into the data files,
                                              then rebalance (split_next)
 ```
 
@@ -375,14 +385,19 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
    Once the deltas outweigh the state they patch, a round emits a full chunk
    instead and the superseded runs are freed.
 
-6. **Compaction.** Copy-on-write leaves holes, and best-fit only reuses the
-   ones a window happens to fit. Compaction moves the runs nearest the end of
-   the file — pages and dictionaries, verbatim — into the lowest hole below
-   them, rewrites the addressing chain as one low snapshot, lets two
-   checkpoints release what the moves vacated, and cuts the free tail off
-   `data.bin` ([RFC 0069](../../rfcs/0069-compaction-into-the-holes.md)). It
-   is stepped, a bounded pass at a time; the node starts one on a daily UTC
-   time, a disk ceiling, or a free-space share.
+6. **Compaction.** Copy-on-write leaves a hole wherever a page used to be,
+   and writing only appends, so nothing fills it. Compaction picks the data
+   files that are mostly holes (`victim_free_percent`, 50 by default), the
+   fewest live blocks first, and carries their runs — pages and dictionaries,
+   verbatim, highest first — into the active file; the active file itself is
+   closed first when it is the one to empty. A snapshot replaces the
+   addressing chain, and every checkpoint's opening cuts the free tails that
+   the release left and deletes the emptied files, so space comes back during
+   a compaction, not only at its end
+   ([RFC 0071](../../rfcs/0071-data-files-by-address.md), superseding
+   [RFC 0069](../../rfcs/0069-compaction-into-the-holes-DEPRECATED.md)'s holes).
+   It is stepped, a bounded pass at a time; the node starts one on a daily
+   UTC time, a disk ceiling, or a free-space share.
 
 7. **The object store** ([RFC 0070](../../rfcs/0070-object-storage-backend-WIP.md),
    phases 3–6). A database created with `StoreOptions::remote` keeps its pages
@@ -402,7 +417,7 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
    whole **cut** says (an upload that left nothing waiting: every batch up
    to a point, none in part), every disk bucket evicted. In **object mode**
    (`PageStore::open_object`, phase 6) there is no disk at all: what would
-   be `data.bin` sits in RAM, there is no journal — a write is durable once
+   be the data files sit in RAM, there is no journal — a write is durable once
    an upload carries it, which happens on 8 MiB or an interval — and every
    open is such a recovery. Every file is created only if absent, so a
    second writer on the prefix is fenced (`StorageError::Fenced`), never
@@ -443,8 +458,8 @@ the `STRUCT_HASH`.
 declared, not discovered, the same allowlist stance as exposure. A write whose
 `STRUCT_HASH` has no listed slot is refused (`UnregisteredStructHash`); the
 reserved `BpTree`-node slot is always included (compression off). A data
-directory has **one open `PageStore` at a time**: `data.bin` is locked while
-open, so a second open of the same directory — in this process or another —
+directory has **one open `PageStore` at a time**: every data file and journal
+is locked while open, so a second open of the same directory — in this process or another —
 fails with `EngineBusy`. Stores over different directories open side by side.
 
 **Threading.** A store is used from **one thread** — a node moves each onto the
@@ -454,7 +469,7 @@ Reads (`get_of`, routed by the compile-time-known hash) are one binary search
 over the sorted registry, one index probe, and a page read on a miss. The
 cache commit follows the journal append, so the logs' order is the journal's.
 A settle round copies each record's **newest entry** out of its log and skips
-the copies it superseded, so it is idempotent — `data.bin` stays a pure
+the copies it superseded, so it is idempotent — the data files stay a pure
 projection of the journal. Eviction drops whole chunks the settle has passed,
 measured against what the cache actually allocates.
 
@@ -499,7 +514,8 @@ the buckets that round moved, in the same write, for no extra IOp
 ([RFC 0046](../../rfcs/0046-directory-deltas-in-the-window.md)).
 
 **Per checkpoint: one write, ONE barrier.** The window additionally carries a
-grown dictionary; then `data.bin` is synced — and that is the only barrier. The
+grown dictionary; then the data files it wrote are synced — and that is the
+only barrier. The
 `Commit` frame is a _pointer_ into state that sync already made durable, so it
 is appended **unsynced** and the next ordinary write's fsync carries it. Each
 chunk names the one before it, so the frame names only the head
@@ -580,8 +596,8 @@ actually wants).
 
 There is **no cold tier** (the slow-node was removed — not part of the design for
 now). History is first-class and **never erased**: superseded versions and
-deleted-record bytes stay in `data.bin`, reachable via the modification chain and
-the `dead` `BpTree`. So a node's `data.bin` **grows unbounded** with history — and
+deleted-record bytes stay in the data files, reachable via the modification chain
+and the `dead` `BpTree`. So a node's data **grows unbounded** with history — and
 that is **accepted for now**. History pruning / compaction / a separate archive
 tier is left for later; nothing reclaims old versions today.
 
