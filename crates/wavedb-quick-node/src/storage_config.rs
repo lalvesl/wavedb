@@ -14,7 +14,9 @@ impl<E> Server<E>
 where
     E: NodeTasks + StorageRegistry,
 {
-    /// Set the directory holding `data.bin` + `journal.log`.
+    /// Set the directory holding the database: its `MANIFEST` and one
+    /// directory per shard under `shards/`, each with its data files and
+    /// journal.
     #[must_use]
     pub fn data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.data_dir = dir.into();
@@ -80,6 +82,25 @@ where
     #[must_use]
     pub const fn upload_interval(mut self, interval: Option<Duration>) -> Self {
         self.maintenance.upload_interval = interval;
+        self
+    }
+
+    /// Bytes a shard's data file grows to before the next one opens
+    /// (RFC 0071). Default 10 GiB. It decides only when a file closes, so it
+    /// may change between runs: fewer, larger files hold fewer descriptors
+    /// open, smaller ones give space back in smaller steps.
+    #[must_use]
+    pub const fn data_file_bytes(mut self, bytes: u64) -> Self {
+        self.store.file_bytes = bytes;
+        self
+    }
+
+    /// How much of a data file must be free before compaction empties it
+    /// (RFC 0071 §7), in percent. Default 50: a file mostly alive is not
+    /// rewritten for little.
+    #[must_use]
+    pub const fn victim_free_percent(mut self, percent: u8) -> Self {
+        self.store.victim_free_percent = percent;
         self
     }
 
