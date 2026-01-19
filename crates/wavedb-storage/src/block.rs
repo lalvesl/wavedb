@@ -1,7 +1,7 @@
 //! The block layer: the 64-bit [`BlockDescriptor`] and a [`Run`] of
 //! contiguous blocks.
 //!
-//! `data.bin` is an array of fixed [`BLOCK_SIZE`]-byte blocks. The
+//! A shard's data files are one array of fixed [`BLOCK_SIZE`]-byte blocks. The
 //! [`BlockAllocator`] (in [`crate::alloc`], re-exported here) hands out
 //! contiguous runs and reclaims them, coalescing adjacent free space so large
 //! pages always have somewhere to land. It is a **pure in-memory structure** —
@@ -52,7 +52,7 @@ impl Run {
         self.start + self.count
     }
 
-    /// Byte offset of this run's first block in `data.bin`.
+    /// Byte offset of this run's first block from block 0.
     #[must_use]
     pub const fn byte_offset(self) -> u64 {
         self.start * BLOCK_SIZE as u64
