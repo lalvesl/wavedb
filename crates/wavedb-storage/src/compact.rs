@@ -1,53 +1,53 @@
-//! Compaction ([RFC 0069]) — moving live runs **down** into the holes, so the
-//! free space gathers at the tail of `data.bin` and the file can shrink.
+//! Compaction ([RFC 0071] §7) — carrying the live runs of the emptiest data
+//! files forward into the active one, so the files they leave can be cut
+//! from the tail and deleted.
 //!
-//! Copy-on-write leaves a hole wherever a page used to be. Best-fit reuses
-//! the holes a settle round fits, but nothing ever gives the rest back: the
-//! file only grows. Compaction takes the runs nearest the end of the file —
-//! pages and dictionaries — and rewrites them, verbatim, into the
-//! lowest-addressed hole that holds them ([`alloc_below`](crate::block::BlockAllocator::alloc_below)).
-//! A run only ever moves down, so the live data packs toward the front and
-//! what it vacated is one free extent at the back, which
-//! [`truncate`](crate::block::BlockAllocator::truncate) cuts off.
+//! Writing only ever appends, so a superseded page leaves a hole in its file
+//! that nothing fills. Compaction picks the files that are mostly holes — at
+//! least `victim_free_percent` free or held back, the fewest live blocks
+//! first — and rewrites their runs, pages and dictionaries, **verbatim**,
+//! at the end of the active file, highest first, so each file's tail empties
+//! first. The active file itself can be one: it is closed to new runs
+//! first, or a shard smaller than one file would never give anything back.
 //!
 //! ## In steps
 //!
 //! A compaction is stepped like a checkpoint ([`PageStore::compact_step`]),
 //! the caller choosing when; the store keeps where it is ([`Phase`]):
 //!
-//! 1. **Moving.** Bounded passes, each a few rounds of one window write per
-//!    hole filled — the same write a settle round makes, carrying its own
-//!    addressing delta ([RFC 0046]).
-//! 2. **The old addressing goes.** The moves leave a chain of delta chunks,
-//!    and the chunks before them may sit anywhere in the file. One snapshot
-//!    in the lowest hole that holds it replaces the whole chain
-//!    ([RFC 0048]), releasing every chunk it supersedes.
+//! 1. **Moving.** Bounded passes, each a few rounds of one window write —
+//!    the same write a settle round makes, carrying its own addressing delta
+//!    ([RFC 0046]). A file holding nothing but the addressing log's chunks
+//!    gets one snapshot in the active file, which releases them all
+//!    ([RFC 0048]).
+//! 2. **The old addressing goes.** The moves leave a chain of delta chunks;
+//!    one snapshot replaces it.
 //! 3. **Sealing.** The vacated runs are still named by the last `Commit`
 //!    frame — a crash would reopen from it — so the allocator holds them back
 //!    ([RFC 0047]). One checkpoint names the moved state; the next one's
 //!    opening proves that frame durable and releases the old generation.
-//! 4. **Truncating.** The free tail leaves the file. Should the snapshot of
-//!    step 2 have had to land high, it is rewritten once more into the room
-//!    the release opened, and sealed again.
+//! 4. **Reclaiming.** Every file's free tail is cut off, and a file left
+//!    empty is deleted ([`reclaim`](PageStore::reclaim)). Every checkpoint's
+//!    opening does the same (`crate::retire`), so a long compaction gives
+//!    space back as it goes, not only at its end.
 //!
 //! Safety is the checkpoint's: a moved run is written before any descriptor
-//! names it, and nothing is freed into reuse while a recovery root names it.
+//! names it, and nothing is cut while a recovery root names it.
 //!
 //! [RFC 0046]: ../../../rfcs/0046-directory-deltas-in-the-window.md
 //! [RFC 0047]: ../../../rfcs/0047-generational-journal-retirement.md
 //! [RFC 0048]: ../../../rfcs/0048-chained-addressing-log.md
-//! [RFC 0069]: ../../../rfcs/0069-compaction-into-the-holes.md
+//! [RFC 0071]: ../../../rfcs/0071-data-files-by-address.md
 
-use crate::block::Run;
 use crate::error::StorageResult;
 use crate::page_store::PageStore;
 
-/// `data.bin`'s space, in 4 KiB blocks.
+/// A shard's space, in 4 KiB blocks, across its data files.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Space {
-    /// The file's length.
+    /// The files' length.
     pub file_blocks: u64,
-    /// Free and reusable now.
+    /// Free: holes no run will use again.
     pub free_blocks: u64,
     /// Freed, but named by a recovery root until the next checkpoints.
     pub deferred_blocks: u64,
@@ -61,7 +61,7 @@ pub enum Compacting {
     /// Waiting for a checkpoint to close — the caller steps it
     /// ([`checkpoint_step`](PageStore::checkpoint_step)).
     Sealing,
-    /// Finished: the free tail is out of the file.
+    /// Finished: the emptied files are cut and deleted.
     Done { reclaimed_blocks: u64 },
 }
 
@@ -73,26 +73,25 @@ pub struct Compacted {
     pub reclaimed_blocks: u64,
 }
 
-/// Where a store's compaction is between steps (see the module docs).
+/// Where a store's compaction is between steps (see the module docs);
+/// `since` is what [`reclaimed`](PageStore::reclaimed) read when it began.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     #[default]
     Idle,
-    Moving,
-    /// `last`: the snapshot was already rewritten after a release once;
-    /// `reclaimed`: blocks truncated so far.
+    Moving {
+        since: u64,
+    },
     Sealing {
-        last: bool,
-        reclaimed: u64,
+        since: u64,
     },
     Releasing {
-        last: bool,
-        reclaimed: u64,
+        since: u64,
     },
 }
 
 impl PageStore {
-    /// How `data.bin`'s blocks are used.
+    /// How the data files' blocks are used.
     #[must_use]
     pub fn space(&self) -> Space {
         let alloc = self.alloc.borrow();
@@ -109,6 +108,12 @@ impl PageStore {
         self.compaction.get() != Phase::Idle
     }
 
+    /// Blocks cut off the data files since the store opened.
+    #[must_use]
+    pub const fn reclaimed(&self) -> u64 {
+        self.reclaimed.get()
+    }
+
     /// One step of a compaction, starting one if none is under way: a pass
     /// copying about `budget_blocks` (at least one image), or the next move
     /// of the sealing. A [`Compacting::Sealing`] step leaves a checkpoint
@@ -122,48 +127,43 @@ impl PageStore {
         budget_blocks: u64,
     ) -> StorageResult<Compacting> {
         match self.compaction.get() {
-            Phase::Idle | Phase::Moving => {
-                self.compaction.set(Phase::Moving);
+            Phase::Idle => {
+                let since = self.reclaimed();
+                self.compaction.set(Phase::Moving { since });
+                self.compact_step(budget_blocks)
+            }
+            Phase::Moving { since } => {
                 let (images, blocks, finished) = self.shift(budget_blocks)?;
                 if finished {
-                    let lower = self.snapshot_would_drop();
-                    if self.meta.borrow().has_deltas() || lower {
+                    if self.meta.borrow().has_deltas() {
                         self.rewrite_addressing()?;
                     }
-                    self.compaction.set(Phase::Sealing {
-                        last: false,
-                        reclaimed: 0,
-                    });
+                    self.compaction.set(Phase::Sealing { since });
                 }
                 Ok(Compacting::Moved { images, blocks })
             }
-            Phase::Sealing { last, reclaimed } => {
+            Phase::Sealing { since } => {
                 // An open checkpoint closes over the moved state as well as a
                 // fresh one would.
                 if !self.is_checkpointing() {
                     self.begin_checkpoint()?;
                 }
-                self.compaction.set(Phase::Releasing { last, reclaimed });
+                self.compaction.set(Phase::Releasing { since });
                 Ok(Compacting::Sealing)
             }
-            Phase::Releasing { last, reclaimed } => {
+            Phase::Releasing { since } => {
                 if self.is_checkpointing() {
                     return Ok(Compacting::Sealing);
                 }
-                // Opening the next checkpoint proves the sealing frame durable
-                // and drops the generation that still named the vacated runs.
+                // Opening the next checkpoint proves that frame durable and
+                // drops the generation that still named the vacated runs —
+                // and reclaims what that released.
                 self.begin_checkpoint()?;
-                let reclaimed_blocks = reclaimed + self.reclaim_tail()?;
-                if !last && self.snapshot_would_drop() {
-                    self.rewrite_addressing()?;
-                    self.compaction.set(Phase::Sealing {
-                        last: true,
-                        reclaimed: reclaimed_blocks,
-                    });
-                    return Ok(Compacting::Sealing);
-                }
+                self.reclaim()?;
                 self.compaction.set(Phase::Idle);
-                Ok(Compacting::Done { reclaimed_blocks })
+                Ok(Compacting::Done {
+                    reclaimed_blocks: self.reclaimed() - since,
+                })
             }
         }
     }
@@ -193,24 +193,24 @@ impl PageStore {
         }
     }
 
-    /// Cut the free extent at the end of the file off `data.bin`, returning
-    /// the blocks reclaimed. Only free blocks are ever in that extent — a run
-    /// a recovery root names is held back, not freed — so no reopen can need
-    /// them.
+    /// Cut the free tail off every data file but the active one, and delete
+    /// the files left empty, returning the blocks reclaimed. Only free blocks
+    /// are in a tail — a run a recovery root names is held back, not freed —
+    /// so no reopen can need them.
     ///
     /// # Errors
-    /// [`StorageError::Io`](crate::StorageError::Io) if the resize fails; the
-    /// file is then merely longer than the allocator says, which a reopen
-    /// reads as free tail.
-    pub fn reclaim_tail(&self) -> StorageResult<u64> {
-        let mut alloc = self.alloc.borrow_mut();
-        let reclaimed = alloc.truncate();
-        if reclaimed > 0 {
-            let end = alloc.total_blocks();
-            self.file.page_cache().invalidate(Run::new(end, reclaimed));
-            self.file.truncate_to_blocks(end)?;
+    /// [`StorageError::Io`](crate::StorageError::Io) if a resize or an unlink
+    /// fails; the file is then merely longer than the allocator says, which
+    /// a reopen reads as free tail.
+    pub fn reclaim(&self) -> StorageResult<u64> {
+        let cuts = self.alloc.borrow_mut().reclaim(false);
+        let mut blocks = 0;
+        for cut in cuts {
+            self.file.cut(cut.file, cut.end)?;
+            blocks += cut.was - cut.end;
+            self.reclaimed.set(self.reclaimed.get() + cut.was - cut.end);
         }
-        Ok(reclaimed)
+        Ok(blocks)
     }
 
     fn close_open_checkpoint(&self) -> StorageResult<()> {
