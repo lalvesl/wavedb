@@ -65,14 +65,14 @@ pub trait Engineish {
     /// Settle the pending queue into pages, to completion.
     fn drain(&self) -> Result<(), String>;
 
-    /// Settle, sync `data.bin`, frame the journal.
+    /// Settle, sync the data files, frame the journal.
     fn checkpoint(&self) -> Result<(), String>;
 
     /// Drop settled cache entries down to `budget`.
     fn evict(&self, budget: usize);
 
-    /// Compact `data.bin` to the end: live pages down into the holes, the
-    /// free tail cut off (RFC 0069).
+    /// Compact to the end: the live pages of the emptiest data files carried
+    /// forward, what they leave cut off and deleted (RFC 0071).
     fn compact(&self) -> Result<(), String>;
 
     /// Committed journal bytes — what the adapter's maintenance threshold
