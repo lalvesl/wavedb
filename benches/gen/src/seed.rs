@@ -112,7 +112,7 @@ pub fn fill_wavedb(
             relax_window: crate::FILL_WINDOW,
             page_cache_bytes: profile.page_cache_bytes,
             record_cache_bytes: profile.record_cache_bytes,
-            remote: None,
+            ..Default::default()
         },
     )
     .map_err(|e| format!("open: {e}"))?;
