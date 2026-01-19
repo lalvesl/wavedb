@@ -2,12 +2,11 @@
 //! then the in-memory swap that publishes the new pages.
 //!
 //! Every image [`crate::plan`] produced — the rewritten pages and a grown
-//! dictionary — is placed inside **one contiguous window**: the allocator's
-//! existing best-fit finds the smallest free extent that holds the whole
-//! round (a recycled window when one exists, the file's tail otherwise), the
-//! window is filled block-aligned, and it reaches the disk as a single
-//! positioned write. Only afterwards are the descriptor vectors swapped — so
-//! a reader either sees the previous pages (still allocated, still valid:
+//! dictionary — is placed inside **one contiguous window** at the end of the
+//! active data file (writing only ever appends, [RFC 0071]); the window is
+//! filled block-aligned, and it reaches the disk as a single positioned
+//! write. Only afterwards are the descriptor vectors swapped — so a reader
+//! either sees the previous pages (still allocated, still valid:
 //! page writes are copy-on-write) or the new ones, never a half-written run.
 //!
 //! The window's last target is the round's own [`EditChunk`](crate::edit):
@@ -18,11 +17,12 @@
 //!
 //! Nothing on disk records that these blocks were written together: the window
 //! is an allocation-time concept only, and each page keeps its own descriptor.
-//! That is what lets pages be freed one by one later and the extent coalesce
-//! back into a large hole.
+//! That is what lets pages be freed one by one later, and compaction carry
+//! the live ones forward on their own.
 //!
 //! [RFC 0041]: ../../../rfcs/0041-single-barrier-checkpoint.md
 //! [RFC 0046]: ../../../rfcs/0046-directory-deltas-in-the-window.md
+//! [RFC 0071]: ../../../rfcs/0071-data-files-by-address.md
 
 use std::collections::BTreeMap;
 
@@ -37,21 +37,20 @@ use crate::window::{
     targets_of,
 };
 
-/// Where the window itself is allocated.
+/// What a window writes — which decides the "not uploaded yet" flag of the
+/// pages it places. Every window appends to the active data file.
 #[derive(Clone, Copy)]
 enum Placement {
-    /// The allocator's best fit: a recycled hole when one holds the whole
-    /// round, the tail otherwise. Every ordinary settle.
-    BestFit,
-    /// The lowest-addressed hole that holds the round and ends at or before
-    /// this block — compaction's move, which must only ever go down. No such
-    /// hole means no round.
-    Below(u64),
-    /// A full addressing snapshot even if no page moves, in the lowest hole
-    /// that holds it — compaction dropping the chain it has outgrown.
+    /// Every ordinary settle: what the object store has not seen.
+    Settle,
+    /// Compaction's copies (RFC 0071 §7): a move does not change what it
+    /// moves, flag included.
+    Move,
+    /// A full addressing snapshot even if no page moves — compaction
+    /// dropping the chain it has outgrown.
     Snapshot,
-    /// Best fit, for a page brought back from the object store (RFC 0070
-    /// §7): what it holds is what the object store holds, so no flag.
+    /// A page brought back from the object store (RFC 0070 §7): what it
+    /// holds is what the object store holds, so no flag.
     Restore,
 }
 
@@ -60,7 +59,7 @@ impl PageStore {
     /// whole round as one window and publish it.
     ///
     /// Durability is not taken here: the journal already holds the batch, and
-    /// `data.bin` only becomes authoritative at
+    /// the data files only become authoritative at
     /// [`commit_journal`](Self::commit_journal), which syncs the pages before
     /// the `Commit` frame addresses them.
     ///
@@ -76,31 +75,25 @@ impl PageStore {
         for (idx, records) in work {
             plans.push(self.plan_slot(idx, records)?);
         }
-        self.place_in(plans, Placement::BestFit).map(|_| ())
+        self.place_in(plans, Placement::Settle)
     }
 
-    /// Write already-serialised images into the lowest hole that ends at or
-    /// before `limit`, and repoint them — compaction's move
-    /// ([RFC 0069](../../../rfcs/0069-compaction-into-the-holes.md)).
-    /// `false`, with nothing changed, when no such hole holds the round.
+    /// Write already-serialised images at the end of the active file, and
+    /// repoint them — compaction's move (RFC 0071 §7).
     ///
     /// # Errors
     /// Propagates the window write fault; nothing is repointed if it fails.
-    pub(crate) fn relocate(
-        &self,
-        plans: Vec<SlotPlan>,
-        limit: u64,
-    ) -> StorageResult<bool> {
-        self.place_in(plans, Placement::Below(limit))
+    pub(crate) fn relocate(&self, plans: Vec<SlotPlan>) -> StorageResult<()> {
+        self.place_in(plans, Placement::Move)
     }
 
-    /// Rewrite the addressing log as one snapshot in the lowest hole that
-    /// holds it, releasing every chunk before it.
+    /// Rewrite the addressing log as one snapshot, releasing every chunk
+    /// before it.
     ///
     /// # Errors
     /// Propagates the window write fault.
     pub(crate) fn rewrite_addressing(&self) -> StorageResult<()> {
-        self.place_in(Vec::new(), Placement::Snapshot).map(|_| ())
+        self.place_in(Vec::new(), Placement::Snapshot)
     }
 
     /// Write already-planned images (a recovery's dictionaries) as one
@@ -112,7 +105,7 @@ impl PageStore {
         &self,
         plans: Vec<SlotPlan>,
     ) -> StorageResult<()> {
-        self.place_in(plans, Placement::BestFit).map(|_| ())
+        self.place_in(plans, Placement::Settle)
     }
 
     /// Write a page restored from the object store.
@@ -120,7 +113,7 @@ impl PageStore {
     /// # Errors
     /// Propagates the window write fault.
     pub(crate) fn place_restored(&self, plan: SlotPlan) -> StorageResult<()> {
-        self.place_in(vec![plan], Placement::Restore).map(|_| ())
+        self.place_in(vec![plan], Placement::Restore)
     }
 
     /// Write what uploads and evictions changed and no chunk records yet, in
@@ -130,13 +123,12 @@ impl PageStore {
     /// # Errors
     /// Propagates the window write fault.
     pub(crate) fn record_unrecorded(&self) -> StorageResult<()> {
-        self.place_in(Vec::new(), Placement::BestFit).map(|_| ())
+        self.place_in(Vec::new(), Placement::Settle)
     }
 
     /// Phases 2–4 + 6: carve one window for every planned image *and* the
     /// round's edit chunk, write it, swap the descriptors in, and release the
-    /// superseded runs. `false` only for a [`Placement::Below`] no hole fits,
-    /// and then nothing has happened.
+    /// superseded runs.
     ///
     /// # Errors
     /// The window write's fault, or [`StorageError::Corrupt`] if the filled
@@ -151,7 +143,7 @@ impl PageStore {
         &self,
         mut plans: Vec<SlotPlan>,
         placement: Placement,
-    ) -> StorageResult<bool> {
+    ) -> StorageResult<()> {
         let snapshot = matches!(placement, Placement::Snapshot);
         // Object mode keeps no addressing log: nothing reopens from RAM
         // (RFC 0070 §9), so a window holds its images and nothing else.
@@ -160,7 +152,7 @@ impl PageStore {
         if (targets.is_empty() && !snapshot && !self.has_unrecorded())
             || (snapshot && !logged)
         {
-            return Ok(true);
+            return Ok(());
         }
         let mut alloc = self.alloc.borrow_mut();
         let mut meta = self.meta.borrow_mut();
@@ -192,23 +184,15 @@ impl PageStore {
             .collect();
         let total: u64 = sizes.iter().sum();
 
-        let window = match placement {
-            _ if total == 0 => None,
-            Placement::BestFit | Placement::Restore => Some(alloc.alloc(total)),
-            Placement::Snapshot => Some(alloc.alloc_lowest(total)),
-            Placement::Below(limit) => match alloc.alloc_below(total, limit) {
-                Some(run) => Some(run),
-                None => return Ok(false),
-            },
-        };
+        let window = (total > 0).then(|| alloc.alloc(total));
         let runs = window
             .map_or_else(|| vec![None; targets.len()], |w| carve(w, &sizes));
         // A settle writes what the object store has not seen; a move does
         // not change what it moves.
         let pending = match placement {
-            Placement::BestFit => Some(self.object.is_some()),
+            Placement::Settle => Some(self.object.is_some()),
             Placement::Restore => Some(false),
-            Placement::Below(_) | Placement::Snapshot => None,
+            Placement::Move | Placement::Snapshot => None,
         };
         let changed = install(&mut plans, &targets, &runs, pending);
 
@@ -221,7 +205,12 @@ impl PageStore {
 
         if let Some(window) = window {
             let buf = assemble(window, &plans, &targets, &runs, &chunk);
-            self.file.write_run(window, &buf)?; // the round's one write
+            let Some(file) = alloc.file_of(window.start) else {
+                return Err(StorageError::Corrupt(
+                    "a window outside every file",
+                ));
+            };
+            self.file.write_run(file, window, &buf)?; // the round's one write
         }
         if let Some(object) = &self.object {
             // The chunk just written carries every upload result it had.
@@ -250,7 +239,7 @@ impl PageStore {
             }
         }
         self.publish(plans, &dicts, &mut alloc);
-        Ok(true)
+        Ok(())
     }
 
     /// Phase 4: adopt the working directories and the new dictionary runs.
