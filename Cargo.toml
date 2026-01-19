@@ -68,7 +68,7 @@ embedded-io-adapters = { version = "0.7.0", features = ["futures-03"] }
 async-io = "2.6.0"
 # `SO_REUSEPORT` for the node's per-thread listeners (RFC 0067 §6) — already
 # in the tree under `async-io`, with the same features.
-rustix = { version = "1.1.5", default-features = false, features = ["net", "std"] }
+rustix = { version = "1.1.5", default-features = false, features = ["net", "process", "std"] }
 # Queues: `embassy-sync` within one thread (no lock at all), lock-free
 # `async-channel` across threads; `embassy-futures` for `select`.
 embassy-sync = "0.8.0"

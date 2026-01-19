@@ -78,8 +78,8 @@ Full rationale in `docs/development_standards.md`. The load-bearing ones:
   knob that silently falsifies whatever guarantee it declares. Behaviour that never
   reaches disk doesn't fold.
 - **No format versioning pre-release (policy).** `FORMAT_VERSION` pinned at 1; on-disk
-  layouts change freely between commits with no bump, no migration notes. An old
-  `data.bin` is simply unsupported.
+  layouts change freely between commits with no bump, no migration notes. An older
+  database is simply unsupported.
 - **Errors are typed per layer** (`wavedb_wire::Error`, `wavedb_core::Error`,
   `StorageError`, net/node/client errors). Never fabricate a foreign layer's error
   inline — convert at the documented seam (`StorageError` → `core::Error::Backend`,
@@ -109,7 +109,9 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   patterns), `task` (browser only: `spawn_local` and `spawn_detached`, which runs the
   client manager there — natively it runs on a carrier), `io` (native sockets from
   `async-io`, a node's listeners an `SO_REUSEPORT` group on Linux via `rustix`;
-  protocols are generic over `embedded-io-async`) and `carrier`
+  protocols are generic over `embedded-io-async`), `limits` (native: the
+  open-files soft limit raised to the hard one, since a node holds every data
+  file open — RFC 0071) and `carrier`
   (native: an OS thread running one Embassy executor whose tasks come from
   static pools — the node runs on these).
   Everything above must route clock/entropy/client-HTTP through it — never name
@@ -156,8 +158,10 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   concrete for the registry (static pools need the concrete type, RFC 0066) — so a
   schema crate's `server-side` feature must enable an optional `wavedb-quick-node`
   dependency (native target).
-- **wavedb-storage** — the node engine behind `Store`: `data.bin` (4 KiB blocks,
-  superblock in block 0), per-STRUCT_HASH linear-hashed page directories, `SlotPage`
+- **wavedb-storage** — the node engine behind `Store`: per shard, **data files**
+  of 4 KiB blocks named by the block each starts at (16 hex digits, found by
+  listing the directory; writing only appends, a file closes at
+  `StoreOptions::file_bytes`, 10 GiB — RFC 0071), per-STRUCT_HASH linear-hashed page directories, `SlotPage`
   (checked-wire envelope, per-type zstd dictionaries with version = prefix length),
   journal-first WAL (append + cache commit under the journal lock = the atomic unit;
   one barrier per batch by default, or one per elapsed `StoreOptions::relax_window`
@@ -169,15 +173,17 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   dictionary) belongs to the open store (RFC 0067 step 1), and so does the
   record cache — one log per type in chunks + one Dashtable-shaped index;
   settledness is a cursor, eviction drops settled chunks (RFC 0068). Compaction
-  moves pages down into the holes and truncates the free tail, stepped,
-  on the node's triggers (daily UTC time, disk ceiling, free share — RFC 0069).
+  carries the runs of the emptiest data files (≥ `victim_free_percent`
+  free, 50) forward into the active one, and every checkpoint's opening cuts
+  the free tails and deletes the emptied files; stepped, on the node's
+  triggers (daily UTC time, disk ceiling, free share — RFC 0071).
   A database created with `StoreOptions::remote` (`Server::object_store` on a
   node) keeps its pages in an S3-compatible object store, the disk caching
   them (RFC 0070 phase 3): settle rounds flag the pages they write, `upload`
   reassembles the flagged ones into the object store's own linear hash
   (128 KiB pages, files of `[32 KiB header][pages]`), and the remote
   directories ride the disk's addressing log; the mode is fixed in the
-  superblock. Past the compaction ceiling the least recently used uploaded
+  `MANIFEST`. Past the compaction ceiling the least recently used uploaded
   pages leave the disk (phase 4): a read of one goes to the object store, a
   write brings its bucket back before it commits, so a settle never meets
   an evicted bucket. A database whose disk is gone opens from its files
@@ -191,10 +197,12 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   lease, but every file is PUT create-only, so a second writer on the
   prefix is `Fenced`, never merged. A store
   is used from one thread: plain cells, no lock, no atomic; `Send`, not `Sync`. **One open `PageStore`
-  per data directory** — `data.bin` is locked while open, a second open of it is
-  `EngineBusy` — and stores over different directories coexist in one process.
-  A node's database is **sharded** (RFC 0067): `MANIFEST` (the shard count `P`,
-  64, fixed at creation) + `shards/00..3f/`, each a whole `PageStore`
+  per data directory** — every data file and journal is locked while open, a
+  second open is `EngineBusy` — and stores over different directories coexist
+  in one process. A database is **sharded** (RFC 0067): `MANIFEST` (magic,
+  version, the shard count `P` — 64 on a node, fixed at creation — the seed and
+  the mode; RFC 0071 §2) + `shards/00..3f/`, each a whole `PageStore`; a single
+  `PageStore::open(dir)` is a database of one shard, the same shape
   (`open_shards`; the journals replay in parallel ranges, `open_shards_with`);
   a record lives in shard `seahash(owner bytes) % P` (`core::placement`).
 - **wavedb-net** — hand-rolled minimal HTTP/1.1 POST as a **dumb tunnel**: no headers,
