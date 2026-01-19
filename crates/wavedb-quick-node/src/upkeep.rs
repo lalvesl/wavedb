@@ -16,7 +16,7 @@ pub struct Maintenance {
     pub checkpoint_after_bytes: u64,
     /// Cache bytes the settle task evicts down to (settled entries only).
     pub cache_budget_bytes: usize,
-    /// When `data.bin` is compacted (RFC 0069).
+    /// When the data files are compacted (RFCs 0069, 0071).
     pub compaction: Compaction,
     /// Bytes of disk pages an object-backed store holds back before it
     /// uploads them (RFC 0070 §5) — per store, since each uploads its own
@@ -47,11 +47,13 @@ impl Default for Maintenance {
     }
 }
 
-/// When to compact `data.bin` (RFC 0069).
+/// When to compact the data files (RFCs 0069, 0071).
 ///
-/// A compaction moves the live pages down into the holes and cuts the free
-/// tail off. Any trigger that is set and met starts one, which then runs to
-/// its end, one bounded pass per tick.
+/// A compaction carries the live pages of the emptiest data files forward
+/// into the active one and cuts or deletes what they leave
+/// ([`Server::victim_free_percent`](crate::Server::victim_free_percent)
+/// says which files). Any trigger that is set and met starts one, which
+/// then runs to its end, one bounded pass per tick.
 ///
 /// The size triggers also need something to give back — at least a pass's
 /// worth of free blocks — and, once a compaction has finished, that free
@@ -65,7 +67,7 @@ pub struct Compaction {
     /// share (`/ P`), as with the cache budget: workers share no memory, so
     /// none of them sees the whole.
     pub above_bytes: Option<u64>,
-    /// Once this share of a file, in percent, is free.
+    /// Once this share of a shard's files, in percent, is free.
     pub above_free_percent: Option<u8>,
     /// Blocks one pass may copy — the IO a tick spends on it.
     pub budget_blocks: u64,
@@ -76,7 +78,7 @@ impl Default for Compaction {
         Self {
             daily_at: None,
             above_bytes: Some(10 << 30),  // 10 GiB
-            above_free_percent: Some(50), // half the file is holes
+            above_free_percent: Some(50), // half the files are holes
             budget_blocks: 256,           // ≤ 1 MiB copied per tick
         }
     }
