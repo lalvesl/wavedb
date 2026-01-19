@@ -1,65 +1,74 @@
-//! [`BlockFile`] — `data.bin` as a block-addressed file.
+//! [`BlockFile`] — a shard's **data files** ([RFC 0071]), one address space
+//! of 4 KiB blocks cut into files each named by the block it starts at.
 //!
-//! The block layer ([`crate::block`]) decides *which* runs of blocks exist; this
-//! module is what actually puts bytes on disk. It owns the file handle, the
-//! **superblock** in block 0 (magic + format version + the per-database hash
-//! seed), and positioned run-granular reads/writes.
+//! The block layer ([`crate::block`]) decides *which* runs of blocks exist
+//! and in which file ([`BlockAllocator`](crate::BlockAllocator)); this module
+//! is what actually puts bytes there. It owns the file handles, found by
+//! **listing** the shard's directory: a name of exactly 16 hex digits is a
+//! data file starting at that block, anything else is not one. A run at
+//! block `s` lives in the file with the greatest start `≤ s`, at byte
+//! `(s − start) · 4096` — one `BTreeMap` lookup, no arithmetic on a size, so
+//! the size a file grows to can change between runs.
 //!
-//! ## Block 0 is the superblock
+//! A data file is blocks and nothing else: the database's fixed facts — the
+//! seed, the mode — are its `MANIFEST`'s ([`crate::manifest`]).
 //!
-//! Block 0 is reserved for the superblock and is **never** handed out by the
-//! allocator — see [`RESERVED_BLOCKS`]. It persists the per-database random
-//! `[u64; 4]` seed that [`crate::directory::hash_of`] routes every record with, so
-//! a `data.bin` reopened (or rebuilt by journal replay on another machine) hashes
-//! every `Id` into the same bucket.
+//! ## One open store per directory
+//!
+//! Every data file is opened read-write and **locked** (`try_lock`, an
+//! advisory `flock`), and a file created later is locked as it is created:
+//! a second store over the same directory meets the first file locked and
+//! is [`StorageError::EngineBusy`]. There is no lock file.
 //!
 //! ## Positioned I/O
 //!
 //! Reads and writes take `&self` and use positioned syscalls (`pread`/`pwrite`),
-//! so concurrent callers don't fight over a shared seek cursor. The engine is
-//! native-only (the browser uses IndexedDB, never this file), so the Unix
+//! so no caller fights over a seek cursor. The engine is native-only (the
+//! browser uses IndexedDB, never this file), so the Unix
 //! [`FileExt`](std::os::unix::fs::FileExt) is the portable-enough surface here.
+//!
+//! [RFC 0071]: ../../../rfcs/0071-data-files-by-address.md
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::RandomState;
-use std::fs::OpenOptions;
+use std::collections::{BTreeMap, BTreeSet};
+
 use std::hash::{BuildHasher, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::backing::{Backing, Memory};
+use crate::backing::Backing;
 use crate::block::{BLOCK_SIZE, Run};
+use crate::data_file::{DataFile, open_locked, start_of};
 use crate::error::{StorageError, StorageResult};
-use crate::page_cache::{self, PageCache};
-use crate::superblock::{self, FORMAT_VERSION, SuperblockBody};
+use crate::page_cache::PageCache;
 
-/// Blocks reserved at the head of the file for engine metadata (the superblock).
-/// The allocator must never hand these out.
-pub const RESERVED_BLOCKS: u64 = 1;
-
-/// `data.bin` opened as an array of fixed [`BLOCK_SIZE`]-byte blocks.
+/// A shard's data files (see the module docs), on disk or in RAM.
 #[derive(Debug)]
 pub struct BlockFile {
-    file: Backing,
+    /// The shard's directory; `None` in RAM (object mode, RFC 0070 §9).
+    pub(crate) dir: Option<PathBuf>,
+    /// The data files, by first block.
+    pub(crate) files: RefCell<BTreeMap<u64, DataFile>>,
+    /// Files written since the last [`sync`](Self::sync).
+    pub(crate) dirty: RefCell<BTreeSet<u64>>,
     seed: [u64; 4],
     object_backed: bool,
     io: IoCounts,
     /// Settled page images by run ([RFC 0044]).
     ///
     /// It lives here because the cache's key **is** this type's addressing
-    /// unit, so every event that can falsify an entry — a write into an extent
-    /// the allocator recycled, the defragmenter relocating one — already
-    /// passes through [`write_run`](BlockFile::write_run) or is one call away
-    /// from it. Putting it a layer up would mean re-deriving "which cached
-    /// bytes did that write invalidate?" from something that no longer knows.
+    /// unit, so every event that can falsify an entry — a write over blocks,
+    /// a file cut or deleted — already passes through this type.
     ///
     /// [RFC 0044]: ../../../rfcs/0044-page-cache-PLANNED-LOW.md
-    cache: PageCache,
+    pub(crate) cache: PageCache,
 }
 
 /// Disk operations issued on one [`BlockFile`] since it was opened.
 ///
 /// The accounting behind RFC 0041's claim: a settle round is **one** write,
-/// a checkpoint one write plus one sync, and reads are one per touched page.
+/// a checkpoint one write plus one sync per file written, and reads are one
+/// per touched page.
 #[derive(Debug, Default)]
 pub struct IoCounts {
     reads: Cell<u64>,
@@ -73,113 +82,72 @@ impl IoCounts {
     pub const fn snapshot(&self) -> (u64, u64, u64) {
         (self.reads.get(), self.writes.get(), self.syncs.get())
     }
+
+    fn bump(cell: &Cell<u64>) {
+        cell.set(cell.get() + 1);
+    }
 }
 
 impl BlockFile {
-    /// Open `path`, creating and initialising it if it does not yet exist.
-    ///
-    /// A fresh file gets a superblock with a freshly generated random seed; an
-    /// existing file's superblock is validated (magic + version) and its seed
-    /// loaded. Either way the returned handle's [`seed`](Self::seed) is the one
-    /// records must be routed with.
-    ///
-    /// The page cache gets [`page_cache::DEFAULT_BUDGET_BYTES`];
-    /// [`open_with`](Self::open_with) chooses it.
+    /// Open the data files in `dir`, creating the directory if needed, each
+    /// locked. `seed` and `object_backed` are the database's (its
+    /// `MANIFEST`'s); the page cache gets `page_cache_bytes` (`0` disables
+    /// it).
     ///
     /// # Errors
-    /// [`StorageError::Io`] on a filesystem failure, [`StorageError::BadMagic`] /
-    /// [`StorageError::BadVersion`] if an existing file is not a compatible
-    /// `data.bin`.
-    pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
-        Self::open_with(path, page_cache::DEFAULT_BUDGET_BYTES)
-    }
-
-    /// [`open`](Self::open), with the page cache's budget named by the caller
-    /// (RFC 0065 §6). `0` disables the cache; a fill wants gigabytes and a
-    /// measured row wants the default, and neither number belongs hardcoded
-    /// where the file is opened.
-    ///
-    /// # Errors
-    /// The same faults as [`open`](Self::open).
-    pub fn open_with(
-        path: impl AsRef<Path>,
-        page_cache_bytes: usize,
-    ) -> StorageResult<Self> {
-        Self::open_as(path, page_cache_bytes, false, None)
-    }
-
-    /// [`open_with`](Self::open_with), creating a new file object-backed or
-    /// not (RFC 0070). An existing file keeps the mode it was created with —
-    /// [`object_backed`](Self::object_backed) says which; comparing it with
-    /// what the caller expected is the caller's business. A new file takes
-    /// `seed` when given — a database recovered from its object store keeps
-    /// routing as it did — and a fresh random one otherwise.
-    ///
-    /// # Errors
-    /// The same faults as [`open`](Self::open).
-    pub fn open_as(
-        path: impl AsRef<Path>,
-        page_cache_bytes: usize,
+    /// [`StorageError::EngineBusy`] if another store holds a file;
+    /// [`StorageError::Io`] on a filesystem failure.
+    pub fn open(
+        dir: &Path,
+        seed: [u64; 4],
         object_backed: bool,
-        seed: Option<[u64; 4]>,
+        page_cache_bytes: usize,
     ) -> StorageResult<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)?;
-        file.try_lock()?; // one open store per `data.bin`, in any process
-
-        let len = file.metadata()?.len();
-        if len == 0 {
-            let seed = seed.unwrap_or_else(random_seed);
-            let bf = Self {
-                file: Backing::File(file),
-                seed,
-                object_backed,
-                io: IoCounts::default(),
-                cache: PageCache::new(page_cache_bytes),
+        std::fs::create_dir_all(dir)?;
+        let mut files = BTreeMap::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let Some(start) = entry.file_name().to_str().and_then(start_of)
+            else {
+                continue;
             };
-            bf.write_superblock()?;
-            bf.file.sync_all()?;
-            Ok(bf)
-        } else {
-            let body = superblock::read(&file)?;
-            Ok(Self {
-                file: Backing::File(file),
-                seed: body.seed,
-                object_backed: body.object_backed,
-                io: IoCounts::default(),
-                cache: PageCache::new(page_cache_bytes),
-            })
+            let file = open_locked(&entry.path(), false)?;
+            let len = file.metadata()?.len();
+            files.insert(start, DataFile::new(Backing::File(file), len));
         }
+        Ok(Self {
+            dir: Some(dir.to_path_buf()),
+            files: RefCell::new(files),
+            dirty: RefCell::default(),
+            seed,
+            object_backed,
+            io: IoCounts::default(),
+            cache: PageCache::new(page_cache_bytes),
+        })
     }
 
-    /// A block file in RAM, for a store with no disk (RFC 0070 §9): block 0
-    /// is reserved as on disk but holds nothing — the seed is `seed`, and
-    /// nothing reads it back. No page cache: the pages are in RAM already.
+    /// Data files in RAM, for a store with no disk (RFC 0070 §9). No page
+    /// cache: the pages are in RAM already.
     #[must_use]
     pub fn in_memory(seed: [u64; 4]) -> Self {
-        let bf = Self {
-            file: Backing::Memory(Memory::default()),
+        Self {
+            dir: None,
+            files: RefCell::default(),
+            dirty: RefCell::default(),
             seed,
             object_backed: true,
             io: IoCounts::default(),
             cache: PageCache::new(0),
-        };
-        // Growing RAM cannot fail.
-        let _ = bf.file.set_len(RESERVED_BLOCKS * BLOCK_SIZE as u64);
-        bf
+        }
     }
 
-    /// Whether the blocks are in RAM rather than in `data.bin`.
+    /// Whether the blocks are in RAM rather than in files.
     #[must_use]
     pub const fn is_in_memory(&self) -> bool {
-        matches!(self.file, Backing::Memory(_))
+        self.dir.is_none()
     }
 
-    /// The per-database hash seed read from (or written to) the superblock.
+    /// The database's hash seed.
     #[must_use]
     pub const fn seed(&self) -> [u64; 4] {
         self.seed
@@ -191,54 +159,89 @@ impl BlockFile {
         self.object_backed
     }
 
-    /// Current file length in whole blocks (rounding any partial tail down).
-    ///
-    /// # Errors
-    /// [`StorageError::Io`] if the file's metadata can't be read.
-    pub fn len_blocks(&self) -> StorageResult<u64> {
-        Ok(self.file.len()? / BLOCK_SIZE as u64)
+    /// Every data file as `(first block, end)` — whole blocks, a partial
+    /// tail rounded down.
+    #[must_use]
+    pub fn layout(&self) -> Vec<(u64, u64)> {
+        self.files
+            .borrow()
+            .iter()
+            .map(|(&start, f)| (start, start + f.len.get() / BLOCK_SIZE as u64))
+            .collect()
     }
 
-    /// Read a run's bytes (`run.byte_len()` of them) out of `data.bin`.
+    /// Whether any data file exists.
+    #[must_use]
+    pub fn has_files(&self) -> bool {
+        !self.files.borrow().is_empty()
+    }
+
+    /// Read a run's bytes (`run.byte_len()` of them).
     ///
     /// # Errors
-    /// [`StorageError::OutOfBounds`] if the run extends past the file;
-    /// [`StorageError::Io`] on a read fault.
+    /// [`StorageError::OutOfBounds`] if the run extends past its file, or no
+    /// file holds it; [`StorageError::Io`] on a read fault.
     pub fn read_run(&self, run: Run) -> StorageResult<Vec<u8>> {
-        let have = self.file.len()?;
-        let need = run.end() * BLOCK_SIZE as u64;
+        let files = self.files.borrow();
+        let Some((&start, file)) = files.range(..=run.start).next_back() else {
+            return Err(StorageError::OutOfBounds {
+                need: run.end() * BLOCK_SIZE as u64,
+                have: 0,
+            });
+        };
+        let offset = (run.start - start) * BLOCK_SIZE as u64;
+        let need = offset + run.byte_len();
+        let have = file.len.get();
         if need > have {
             return Err(StorageError::OutOfBounds { need, have });
         }
         let mut buf = vec![0u8; run.byte_len() as usize];
-        self.file.read_exact_at(&mut buf, run.byte_offset())?;
-        self.io.reads.set(self.io.reads.get() + 1);
+        file.backing.read_exact_at(&mut buf, offset)?;
+        IoCounts::bump(&self.io.reads);
         Ok(buf)
     }
 
-    /// Write `bytes` to the start of `run`. `bytes` must fit in the run; any
-    /// remaining tail of the run is left untouched (a page records its own
-    /// length, so trailing bytes are irrelevant). The file grows if the run
-    /// reaches past the current end.
+    /// Write `bytes` to the start of `run`, which lies in the data file
+    /// starting at block `file` — created (and locked) here if it does not
+    /// exist yet. `bytes` must fit in the run; the rest of the run is left as
+    /// it is (a page records its own length). The file grows to hold the run.
     ///
     /// # Errors
     /// [`StorageError::RunOverflow`] if `bytes` is larger than the run;
-    /// [`StorageError::Io`] on a write fault.
-    pub fn write_run(&self, run: Run, bytes: &[u8]) -> StorageResult<()> {
+    /// [`StorageError::Io`] on a create or write fault.
+    pub fn write_run(
+        &self,
+        file: u64,
+        run: Run,
+        bytes: &[u8],
+    ) -> StorageResult<()> {
         let cap = run.byte_len();
-        if bytes.len() as u64 > cap {
+        if bytes.len() as u64 > cap || run.start < file {
             return Err(StorageError::RunOverflow {
                 got: bytes.len() as u64,
                 cap,
             });
         }
-        self.ensure_len(run.end() * BLOCK_SIZE as u64)?;
-        // A write lands only on a recycled extent — cached runs are immutable
-        // while allocated — so whatever the cache still remembers of these
-        // blocks describes bytes about to be overwritten.
+        if !self.files.borrow().contains_key(&file) {
+            self.create(file)?;
+        }
+        let files = self.files.borrow();
+        let Some(data) = files.get(&file) else {
+            return Err(StorageError::Corrupt("a data file vanished"));
+        };
+        let offset = (run.start - file) * BLOCK_SIZE as u64;
+        let end = offset + cap;
+        if data.len.get() < end {
+            data.backing.set_len(end)?;
+            data.len.set(end);
+        }
+        // Blocks are written once and never again until the file is cut,
+        // which drops what the cache held of them — but a write is the one
+        // place that can say so for certain.
         self.cache.invalidate(run);
-        self.file.write_all_at(bytes, run.byte_offset())?;
-        self.io.writes.set(self.io.writes.get() + 1);
+        data.backing.write_all_at(bytes, offset)?;
+        self.dirty.borrow_mut().insert(file);
+        IoCounts::bump(&self.io.writes);
         Ok(())
     }
 
@@ -246,8 +249,8 @@ impl BlockFile {
     /// the image where it lies — lent by the cache on a hit (so it must not
     /// reach the cache itself), or the buffer just read on a miss, which the
     /// cache then keeps. Pages only: the dictionary image, the addressing
-    /// log's chunks and the defragmenter's buffers are read once and want
-    /// owned bytes ([`read_run`](Self::read_run)).
+    /// log's chunks and compaction's buffers are read once and want owned
+    /// bytes ([`read_run`](Self::read_run)).
     ///
     /// # Errors
     /// The same faults as [`read_run`](Self::read_run). A cache hit cannot
@@ -273,52 +276,31 @@ impl BlockFile {
         &self.cache
     }
 
-    /// Flush all buffered data and metadata to stable storage (`fsync`).
+    /// Flush every file written since the last sync to stable storage
+    /// (`fsync`) — the active file, or two across a rollover.
     ///
     /// # Errors
-    /// [`StorageError::Io`] if the sync fails.
+    /// [`StorageError::Io`] if a sync fails; the files not synced yet stay
+    /// owed to the next call.
     pub fn sync(&self) -> StorageResult<()> {
-        self.file.sync_all()?;
-        self.io.syncs.set(self.io.syncs.get() + 1);
-        Ok(())
-    }
-
-    /// Disk operations issued on this file since it was opened.
-    #[must_use]
-    pub const fn io(&self) -> &IoCounts {
-        &self.io
-    }
-
-    /// Truncate the file to exactly `blocks` blocks, discarding everything past
-    /// them. Used to reset `data.bin` to the superblock before a journal-replay
-    /// rebuild of the pages. `blocks` must be `>= RESERVED_BLOCKS`.
-    ///
-    /// # Errors
-    /// [`StorageError::Io`] if the resize fails.
-    pub fn truncate_to_blocks(&self, blocks: u64) -> StorageResult<()> {
-        debug_assert!(blocks >= RESERVED_BLOCKS, "would drop the superblock");
-        self.file.set_len(blocks * BLOCK_SIZE as u64)?;
-        Ok(())
-    }
-
-    /// Grow the file to at least `min_len` bytes (never shrinks).
-    fn ensure_len(&self, min_len: u64) -> StorageResult<()> {
-        if self.file.len()? < min_len {
-            self.file.set_len(min_len)?;
+        let files = self.files.borrow();
+        let mut dirty = self.dirty.borrow_mut();
+        while let Some(&file) = dirty.first() {
+            if let Some(data) = files.get(&file)
+                && !self.is_in_memory()
+            {
+                data.backing.sync_all()?;
+                IoCounts::bump(&self.io.syncs);
+            }
+            dirty.remove(&file);
         }
         Ok(())
     }
 
-    /// Serialise the superblock into block 0 and persist it.
-    fn write_superblock(&self) -> StorageResult<()> {
-        let block = superblock::block_of(&SuperblockBody {
-            version: FORMAT_VERSION,
-            seed: self.seed,
-            object_backed: self.object_backed,
-        });
-        self.ensure_len(BLOCK_SIZE as u64)?;
-        self.file.write_all_at(&block, 0)?;
-        Ok(())
+    /// Disk operations issued on these files since they were opened.
+    #[must_use]
+    pub const fn io(&self) -> &IoCounts {
+        &self.io
     }
 }
 
@@ -337,24 +319,20 @@ pub(crate) fn random_seed() -> [u64; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockFile, page_cache};
+    use super::BlockFile;
     use crate::block::{BLOCK_SIZE, Run};
+    use crate::data_file::{name_of, start_of};
     use crate::error::StorageError;
-    use crate::superblock::{FORMAT_VERSION, MAGIC, OFF_BODY, SuperblockBody};
-    use std::os::unix::fs::FileExt;
-    use wavedb_core::wire::to_wire_checked;
 
-    fn temp_path() -> (tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("data.bin");
-        (dir, path)
+    fn open(dir: &std::path::Path, cache: usize) -> BlockFile {
+        BlockFile::open(dir, [1, 2, 3, 4], false, cache).unwrap()
     }
 
     /// A run written then read through the cached path, so the entry exists.
     fn cache_one(bf: &BlockFile, start: u64) {
         let run = Run::new(start, 1);
         let byte = u8::try_from(start % 251).unwrap();
-        bf.write_run(run, &vec![byte; run.byte_len() as usize])
+        bf.write_run(0, run, &vec![byte; run.byte_len() as usize])
             .unwrap();
         bf.read_run_with(run, |_| ()).unwrap();
     }
@@ -364,18 +342,14 @@ mod tests {
     /// always the one still held.
     #[test]
     fn the_page_cache_holds_only_what_the_caller_budgeted() {
-        let (_d, path) = temp_path();
+        let d = tempfile::tempdir().unwrap();
         let budget = 2 * BLOCK_SIZE;
-        let bf = BlockFile::open_with(&path, budget).unwrap();
+        let bf = open(d.path(), budget);
         for start in 1..=8u64 {
             cache_one(&bf, start);
         }
         assert_eq!(bf.page_cache().budget(), budget);
-        assert!(
-            bf.page_cache().bytes() <= budget,
-            "held {} bytes against a {budget}-byte budget",
-            bf.page_cache().bytes()
-        );
+        assert!(bf.page_cache().bytes() <= budget);
         assert!(
             bf.page_cache().with(Run::new(8, 1), |_| ()).is_ok(),
             "the newest read must be the one kept"
@@ -390,73 +364,70 @@ mod tests {
     /// — `read_run_with` is the read path, not an optimisation beside it.
     #[test]
     fn a_zero_budget_disables_the_cache_without_changing_reads() {
-        let (_d, path) = temp_path();
-        let bf = BlockFile::open_with(&path, 0).unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let bf = open(d.path(), 0);
         let run = Run::new(1, 2);
         let payload = vec![0xA5; run.byte_len() as usize];
-        bf.write_run(run, &payload).unwrap();
+        bf.write_run(0, run, &payload).unwrap();
         assert_eq!(bf.read_run_with(run, <[u8]>::to_vec).unwrap(), payload);
         assert!(bf.page_cache().is_empty(), "zero must hold nothing");
     }
 
-    /// [`BlockFile::open`] is [`open_with`] at the documented default, so the
-    /// callers that never asked keep the cache they have always had.
+    /// A run is read from the file the listing places it in, at its offset
+    /// there — and a reopen lists the same files.
     #[test]
-    fn open_is_open_with_at_the_default_budget() {
-        let (_d, path) = temp_path();
-        let bf = BlockFile::open(&path).unwrap();
-        assert_eq!(bf.page_cache().budget(), page_cache::DEFAULT_BUDGET_BYTES);
-    }
-
-    #[test]
-    fn fresh_file_gets_superblock_and_nonzero_seed() {
-        let (_d, path) = temp_path();
-        let bf = BlockFile::open(&path).unwrap();
-        assert_ne!(bf.seed(), [0; 4], "seed must be randomised");
-        // Block 0 exists on disk.
-        assert_eq!(bf.len_blocks().unwrap(), 1);
-    }
-
-    #[test]
-    fn seed_persists_across_reopen() {
-        let (_d, path) = temp_path();
-        let seed = {
-            let bf = BlockFile::open(&path).unwrap();
-            bf.seed()
-        };
-        let reopened = BlockFile::open(&path).unwrap();
-        assert_eq!(reopened.seed(), seed, "seed must survive reopen");
-    }
-
-    #[test]
-    fn run_write_then_read_roundtrips() {
-        let (_d, path) = temp_path();
-        let bf = BlockFile::open(&path).unwrap();
-        // Block 0 is the superblock; write user data at block 1.
-        let run = Run::new(1, 2);
-        let mut payload = vec![0u8; run.byte_len() as usize];
-        for (i, b) in payload.iter_mut().enumerate() {
-            *b = (i % 251) as u8;
+    fn runs_live_in_the_file_their_address_names() {
+        let d = tempfile::tempdir().unwrap();
+        let (low, high) = (Run::new(2, 1), Run::new(0x30, 2));
+        {
+            let bf = open(d.path(), 0);
+            bf.write_run(0, low, &[7; 10]).unwrap();
+            bf.write_run(0x2e, high, &[9; 10]).unwrap();
+            assert_eq!(bf.layout(), vec![(0, 3), (0x2e, 0x32)]);
         }
-        bf.write_run(run, &payload).unwrap();
-        assert_eq!(bf.read_run(run).unwrap(), payload);
+        assert!(d.path().join(name_of(0x2e)).exists());
+        let bf = open(d.path(), 0);
+        assert_eq!(bf.layout(), vec![(0, 3), (0x2e, 0x32)]);
+        assert_eq!(bf.read_run(low).unwrap()[..10], [7; 10]);
+        assert_eq!(bf.read_run(high).unwrap()[..10], [9; 10]);
+        let len = std::fs::metadata(d.path().join(name_of(0x2e)))
+            .unwrap()
+            .len();
+        assert_eq!(len, 4 * BLOCK_SIZE as u64, "block 0x2e is its first");
+    }
+
+    /// Only a name of exactly 16 lowercase hex digits is a data file.
+    #[test]
+    fn other_names_are_not_data_files() {
+        assert_eq!(start_of("00000000000000ff"), Some(0xff));
+        for name in ["MANIFEST", "journal_1.log", "ff", "00000000000000FF"] {
+            assert_eq!(start_of(name), None, "{name}");
+        }
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("journal_1.log"), b"x").unwrap();
+        assert!(!open(d.path(), 0).has_files());
     }
 
     #[test]
-    fn write_grows_the_file() {
-        let (_d, path) = temp_path();
-        let bf = BlockFile::open(&path).unwrap();
-        assert_eq!(bf.len_blocks().unwrap(), 1);
-        bf.write_run(Run::new(5, 1), &[1, 2, 3]).unwrap();
-        assert_eq!(bf.len_blocks().unwrap(), 6, "file grew to hold block 5");
+    fn a_cut_shortens_a_file_and_a_cut_to_its_start_deletes_it() {
+        let d = tempfile::tempdir().unwrap();
+        let bf = open(d.path(), 0);
+        bf.write_run(4, Run::new(4, 4), &[1]).unwrap();
+        bf.cut(4, 6).unwrap();
+        assert_eq!(bf.layout(), vec![(4, 6)]);
+        let err = bf.read_run(Run::new(6, 1)).unwrap_err();
+        assert!(matches!(err, StorageError::OutOfBounds { .. }), "{err:?}");
+        bf.cut(4, 4).unwrap();
+        assert!(!bf.has_files());
+        assert!(!d.path().join(name_of(4)).exists());
     }
 
     #[test]
     fn short_write_leaves_run_tail_untouched() {
-        let (_d, path) = temp_path();
-        let bf = BlockFile::open(&path).unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let bf = open(d.path(), 0);
         let run = Run::new(1, 1);
-        bf.write_run(run, &[0xAB, 0xCD]).unwrap(); // only first 2 bytes
+        bf.write_run(0, run, &[0xAB, 0xCD]).unwrap();
         let back = bf.read_run(run).unwrap();
         assert_eq!(&back[..2], &[0xAB, 0xCD]);
         assert_eq!(back.len(), BLOCK_SIZE);
@@ -464,79 +435,45 @@ mod tests {
 
     #[test]
     fn read_past_end_is_out_of_bounds() {
-        let (_d, path) = temp_path();
-        let bf = BlockFile::open(&path).unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let bf = open(d.path(), 0);
         let err = bf.read_run(Run::new(10, 1)).unwrap_err();
+        assert!(matches!(err, StorageError::OutOfBounds { .. }));
+        bf.write_run(0, Run::new(0, 1), &[1]).unwrap();
+        let err = bf.read_run(Run::new(0, 2)).unwrap_err();
         assert!(matches!(err, StorageError::OutOfBounds { .. }));
     }
 
     #[test]
     fn oversized_write_is_run_overflow() {
-        let (_d, path) = temp_path();
-        let bf = BlockFile::open(&path).unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let bf = open(d.path(), 0);
         let big = vec![0u8; BLOCK_SIZE + 1];
-        let err = bf.write_run(Run::new(1, 1), &big).unwrap_err();
+        let err = bf.write_run(0, Run::new(1, 1), &big).unwrap_err();
         assert!(matches!(err, StorageError::RunOverflow { .. }));
     }
 
+    /// A second store over the directory meets the first's lock — on a file
+    /// it found, and on one it created.
     #[test]
-    fn bad_magic_is_rejected() {
-        let (_d, path) = temp_path();
-        {
-            let f = std::fs::File::create(&path).unwrap();
-            f.set_len(BLOCK_SIZE as u64).unwrap();
-            f.write_all_at(b"NOTWAVE!", 0).unwrap();
-        }
-        assert!(matches!(
-            BlockFile::open(&path).unwrap_err(),
-            StorageError::BadMagic
-        ));
+    fn a_second_open_is_engine_busy() {
+        let d = tempfile::tempdir().unwrap();
+        let bf = open(d.path(), 0);
+        bf.write_run(9, Run::new(9, 1), &[1]).unwrap(); // created while open
+        let err = BlockFile::open(d.path(), [0; 4], false, 0).unwrap_err();
+        assert!(matches!(err, StorageError::EngineBusy), "{err:?}");
+        drop(bf);
+        let _found = open(d.path(), 0);
+        let err = BlockFile::open(d.path(), [0; 4], false, 0).unwrap_err();
+        assert!(matches!(err, StorageError::EngineBusy), "{err:?}");
     }
 
     #[test]
-    fn wrong_version_is_rejected() {
-        let (_d, path) = temp_path();
-        {
-            // A well-formed (crc-valid) superblock claiming a future version.
-            let f = std::fs::File::create(&path).unwrap();
-            f.set_len(BLOCK_SIZE as u64).unwrap();
-            f.write_all_at(MAGIC, 0).unwrap();
-            let body = to_wire_checked(&SuperblockBody {
-                version: FORMAT_VERSION + 1,
-                seed: [1, 2, 3, 4],
-                object_backed: false,
-            });
-            f.write_all_at(&body, OFF_BODY as u64).unwrap();
-        }
-        assert!(matches!(
-            BlockFile::open(&path).unwrap_err(),
-            StorageError::BadVersion(v) if v == FORMAT_VERSION + 1
-        ));
-    }
-
-    #[test]
-    fn corrupt_superblock_body_is_rejected() {
-        let (_d, path) = temp_path();
-        {
-            let bf = BlockFile::open(&path).unwrap();
-            drop(bf);
-        }
-        // Flip a byte inside the crc-protected body (the seed area).
-        {
-            let f = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)
-                .unwrap();
-            let at = (OFF_BODY + 8) as u64;
-            let mut b = [0u8];
-            f.read_exact_at(&mut b, at).unwrap();
-            b[0] ^= 0xFF;
-            f.write_all_at(&b, at).unwrap();
-        }
-        assert!(matches!(
-            BlockFile::open(&path).unwrap_err(),
-            StorageError::Corrupt("superblock")
-        ));
+    fn ram_files_work_alike() {
+        let bf = BlockFile::in_memory([1; 4]);
+        bf.write_run(0, Run::new(0, 2), &[5; 5000]).unwrap();
+        assert_eq!(bf.read_run(Run::new(1, 1)).unwrap()[..904], [5; 904]);
+        bf.cut(0, 0).unwrap();
+        assert!(!bf.has_files());
     }
 }
