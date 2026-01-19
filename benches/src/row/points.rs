@@ -164,9 +164,9 @@ mod tests {
     }
 
     #[test]
-    fn wavedb_separates_its_journals_from_data_bin() {
-        assert!(wavedb_is_log(Path::new("/d/journal_0001")));
-        assert!(!wavedb_is_log(Path::new("/d/data.bin")));
+    fn wavedb_separates_its_journals_from_its_data_files() {
+        assert!(wavedb_is_log(Path::new("/d/journal_0001.log")));
+        assert!(!wavedb_is_log(Path::new("/d/0000000000280000")));
     }
 
     /// The 80 MB that is there whether the table holds 200 000 rows or 20.
