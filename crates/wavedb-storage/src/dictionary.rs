@@ -16,14 +16,14 @@
 //!
 //! ## Storage & recovery
 //!
-//! The dictionary is stored in `data.bin` like a page: a block run handed out
+//! The dictionary is stored in the data files like a page: a block run handed out
 //! by the allocator, holding `[len (u32 LE)][to_wire_checked(buf)]`, repointed
 //! by its [`Directory`](crate::directory::Directory) whenever the buffer
-//! grows (which stops at the cap). On open, `data.bin` is a journal-replay
+//! grows (which stops at the cap). On open, the data files are a journal-replay
 //! projection: the settle path re-samples the same records in the same order,
 //! so the buffer — and every `dict_len` a rebuilt page stamps — is reproduced
 //! deterministically and re-persisted. Reading the stored run back becomes
-//! load-bearing only when settling checkpoints (stops truncating `data.bin`
+//! load-bearing only when settling checkpoints (stops truncating the data files
 //! on open).
 
 use wavedb_core::wire::{from_wire_checked, to_wire_checked};
