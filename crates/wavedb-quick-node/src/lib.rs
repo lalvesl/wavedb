@@ -161,6 +161,11 @@ where
     pub async fn bind(self, addr: &str) -> Result<Bound<E>> {
         // Recovery runs on as many threads as will serve, each replaying the
         // range of shards its worker will own (RFC 0067 §3).
+        // A data file per shard at least, and one per closed file still live
+        // (RFC 0071 §9): the soft limit a process starts with is often far
+        // below them. Best effort — a system that refuses leaves the limit
+        // where it was, and a file past it fails to open as an I/O fault.
+        let _ = wavedb_platform::limits::raise_open_files();
         let entries = self.registry.storage_entries();
         let shards = wavedb_core::placement::DEFAULT_SHARDS;
         let stores = if self.diskless {
