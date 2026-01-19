@@ -1,7 +1,7 @@
 //! A checkpoint, in steps ([RFC 0063] part 3, [RFC 0067] step 3).
 //!
 //! The sequence is the one `crate::commit` documents — rotate, dispose of
-//! the previous generation, settle, sync `data.bin`, append the `Commit`
+//! the previous generation, settle, sync the data files, append the `Commit`
 //! frame — but the settle in the middle is no longer one `drain`. A
 //! checkpoint is **opened** ([`PageStore::begin_checkpoint`]: claim, rotate,
 //! retire — bounded) and then **stepped** ([`PageStore::checkpoint_step`]):
@@ -27,8 +27,6 @@
 //! [RFC 0063]: ../../../rfcs/0063-engine-yield-map-and-interruptible-engine-PLANNED.md
 //! [RFC 0067]: ../../../rfcs/0067-thread-per-core-shards-WIP.md
 
-use crate::block::Run;
-use crate::block_file::RESERVED_BLOCKS;
 use crate::error::StorageResult;
 use crate::journal::{self, CommitFrame, Journal, JournalFrame};
 use crate::page_store::{Disk, PageStore};
@@ -55,7 +53,7 @@ impl PageStore {
     /// one is then run whole, so on return the journal that was live at the
     /// call is covered — which is what a shutdown asks for.
     ///
-    /// Costs **one** barrier per checkpoint (the `data.bin` sync). The frame
+    /// Costs **one** barrier per checkpoint (the data files' sync). The frame
     /// is written unsynced, so on return the retirement is *pending*: the old
     /// journal stays on disk, and recovery still roots in it, until an
     /// ordinary append makes the frame durable — which the **next** checkpoint
@@ -133,7 +131,7 @@ impl PageStore {
     }
 
     /// One step of the open checkpoint: settle a round of at most `budget`
-    /// owed ids, or — when nothing is owed — close it (sync `data.bin`,
+    /// owed ids, or — when nothing is owed — close it (sync the data files,
     /// append the frame). [`Checkpointing::Done`] when it closed, or when
     /// none was open.
     ///
@@ -190,7 +188,7 @@ impl PageStore {
         // reading this state and syncing it.
         let mut alloc = self.alloc.borrow_mut();
         let meta = self.meta.borrow_mut();
-        let mut used = vec![Run::new(0, RESERVED_BLOCKS)];
+        let mut used = Vec::new();
         for slot in &self.types {
             let dir_guard = slot.directory().borrow_mut();
             if let Some(dir) = dir_guard.as_ref() {
@@ -302,7 +300,8 @@ mod tests {
         }
         let s = open(d.path());
         assert_all(&s, 0..100);
-        let journals = journal::scan(d.path()).unwrap();
+        let journals =
+            journal::scan(&crate::shard_set::shard_dir(d.path(), 0)).unwrap();
         assert_eq!(journals.len(), 1, "the covered journal was cleaned up");
     }
 
@@ -366,7 +365,12 @@ mod tests {
         }
         let s = open(d.path());
         assert_all(&s, 0..30);
-        assert_eq!(journal::scan(d.path()).unwrap().len(), 1);
+        assert_eq!(
+            journal::scan(&crate::shard_set::shard_dir(d.path(), 0))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
