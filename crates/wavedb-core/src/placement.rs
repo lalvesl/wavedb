@@ -8,7 +8,7 @@
 //!
 //! `shard = seahash(owner bytes) % shards`. The byte layout of both owners is
 //! frozen and pinned by golden vectors below: once the shard decides which
-//! `data.bin` holds a record, changing this function puts every record in
+//! a data file holds a record, changing this function puts every record in
 //! the wrong shard, exactly as changing a `STRUCT_HASH` would. SeaHash is the
 //! project's identity hash, pinned `=4.1.0`, which covers the rest.
 //!
