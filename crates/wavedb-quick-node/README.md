@@ -41,6 +41,13 @@ Server::bind("0.0.0.0:7700")
 > guarantee. A node in **object mode** (`Server::object_mode`, RFC 0070 §9) has
 > no disk and no journal: a write is durable once uploaded, within
 > `upload_interval` (default 10 s), and a shutdown uploads everything first.
+>
+> On disk the database is a `MANIFEST` and a directory per shard of **data
+> files named by the block they start at** (RFC 0071): a file closes at
+> `Server::data_file_bytes` (default 10 GiB), compaction empties the files at
+> least `Server::victim_free_percent` free (default 50) on the
+> `Maintenance::compaction` triggers, and the node raises its soft limit on
+> open files to the hard one when it binds.
 
 ## Write-ownership model
 
@@ -174,5 +181,5 @@ checks also apply inside the body. See
 
 Good CPU/RAM, fast NVMe. Holds active records and the in-memory write cache. A
 separate cold/history tier was **removed** — the node keeps full single-tier
-history in `data.bin`, unbounded growth accepted for now
+history in the data files, unbounded growth accepted for now
 ([RFC 0033](../../rfcs/0033-cold-history-slow-node-tier-DEPRECATED.md)).
