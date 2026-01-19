@@ -66,7 +66,7 @@ impl Directory {
 #[cfg(test)]
 mod tests {
     use crate::block::{BlockDescriptor, Run};
-    use crate::block_file::{BlockFile, RESERVED_BLOCKS};
+    use crate::block_file::BlockFile;
     use crate::dictionary::DictState;
     use crate::directory::Directory;
     use crate::page::SlotPage;
@@ -83,7 +83,8 @@ mod tests {
     #[test]
     fn a_placed_page_resolves_through_the_directory() {
         let d = tempfile::tempdir().unwrap();
-        let file = BlockFile::open(d.path().join("data.bin")).unwrap();
+        let file =
+            BlockFile::open(d.path(), [1, 2, 3, 4], false, 1 << 20).unwrap();
         let dict = DictState::new(true);
         let mut dir = Directory::new(file.seed());
 
@@ -92,8 +93,8 @@ mod tests {
         page.upsert(rec_id(2), vec![4, 5]);
         let bytes = page.to_bytes(dict.dictionary(), dict.enabled()).unwrap();
 
-        let run = Run::new(RESERVED_BLOCKS, 1);
-        file.write_run(run, &bytes).unwrap();
+        let run = Run::new(0, 1);
+        file.write_run(0, run, &bytes).unwrap();
         dir.set_descriptor(0, BlockDescriptor::from_run(run));
 
         assert_eq!(
@@ -116,15 +117,16 @@ mod tests {
     #[test]
     fn a_second_read_of_a_page_costs_no_disk_read() {
         let d = tempfile::tempdir().unwrap();
-        let file = BlockFile::open(d.path().join("data.bin")).unwrap();
+        let file =
+            BlockFile::open(d.path(), [1, 2, 3, 4], false, 1 << 20).unwrap();
         let dict = DictState::new(true);
         let mut dir = Directory::new(file.seed());
 
         let mut page = SlotPage::new(SH);
         page.upsert(rec_id(1), vec![1, 2, 3]);
         let bytes = page.to_bytes(dict.dictionary(), dict.enabled()).unwrap();
-        let run = Run::new(RESERVED_BLOCKS, 1);
-        file.write_run(run, &bytes).unwrap();
+        let run = Run::new(0, 1);
+        file.write_run(0, run, &bytes).unwrap();
         dir.set_descriptor(0, BlockDescriptor::from_run(run));
 
         let before = file.io().snapshot().0;
@@ -149,7 +151,7 @@ mod tests {
 
         // Writing into the extent is what makes the held bytes wrong, and it
         // is the one event a run-keyed cache has to notice.
-        file.write_run(run, &bytes).unwrap();
+        file.write_run(0, run, &bytes).unwrap();
         assert_eq!(
             dir.get_record(SH, &file, rec_id(1), &dict).unwrap(),
             Some(vec![1, 2, 3])
@@ -165,7 +167,8 @@ mod tests {
     #[test]
     fn vacant_bucket_reads_empty() {
         let d = tempfile::tempdir().unwrap();
-        let file = BlockFile::open(d.path().join("data.bin")).unwrap();
+        let file =
+            BlockFile::open(d.path(), [1, 2, 3, 4], false, 1 << 20).unwrap();
         let dict = DictState::new(true);
         let dir = Directory::new(file.seed());
         assert!(dir.read_page(SH, &file, 0, &dict).unwrap().is_empty());
