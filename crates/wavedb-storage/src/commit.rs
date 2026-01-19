@@ -13,7 +13,7 @@
 //! 3. settle what the old journal holds into pages — one window write per
 //!    round (RFC 0041), each carrying its descriptor changes (RFC 0046),
 //!    in as many bounded rounds as the caller steps it — then fsync
-//!    `data.bin`
+//!    the data files
 //! 4. append ONE `Commit { done: old_ts, head }` frame to the NEW journal —
 //!    **no fsync**. The frame is a *pointer* into the addressing log the
 //!    windows already wrote, naming only its newest chunk since each chunk
@@ -23,7 +23,7 @@
 //! 5. hold this round's own retirement for the next checkpoint's step 2
 //! ```
 //!
-//! A checkpoint therefore costs ONE barrier — the `data.bin` sync in step 3 —
+//! A checkpoint therefore costs ONE barrier — the data files' sync in step 3 —
 //! and no barrier is paid anywhere else on its behalf.
 //!
 //! ## Recovery ( [`restore`] )
@@ -44,8 +44,8 @@ use std::path::Path;
 use wavedb_core::Write;
 
 use crate::alloc::BlockAllocator;
-use crate::block::{BlockDescriptor, Run};
-use crate::block_file::{BlockFile, RESERVED_BLOCKS};
+use crate::block::BlockDescriptor;
+use crate::block_file::BlockFile;
 use crate::dictionary::Dictionary;
 use crate::directory::Directory;
 use crate::edit::{read_chunk, walk};
@@ -72,23 +72,24 @@ pub struct Recovered {
 /// dictionaries are loaded into them, caches empty.
 ///
 /// # Errors
-/// [`StorageError::Corrupt`] on a lost recovery root (`data.bin` with no
+/// [`StorageError::Corrupt`] on a lost recovery root (data files with no
 /// journal) or an unreadable addressing log; [`StorageError::UnregisteredStructHash`]
 /// when a commit names a type this open's registry does not list.
 pub fn restore(
     dir: &Path,
-    data_bin_existed: bool,
+    had_files: bool,
     file: &BlockFile,
     types: &[TypeSlot],
+    file_bytes: u64,
 ) -> StorageResult<Recovered> {
     let found = journal::scan(dir)?;
-    journal::require_journal_for(data_bin_existed, &found)?;
+    journal::require_journal_for(had_files, &found)?;
 
     // Fresh database: first journal, empty everything.
     if found.is_empty() {
         let journal = Journal::create(dir, journal::next_ts(0))?;
         return Ok(Recovered {
-            alloc: fresh_alloc(file)?,
+            alloc: fresh_alloc(file, file_bytes)?,
             journal,
             replay: Vec::new(),
             meta: MetaLog::default(),
@@ -112,10 +113,16 @@ pub fn restore(
 
     let ((alloc, meta, chain), covered_ts) =
         if let Some(commit) = &newest_commit {
-            (load_commit(file, types, commit)?, commit.journal_ts)
+            (
+                load_commit(file, types, commit, file_bytes)?,
+                commit.journal_ts,
+            )
         } else {
             // First generation (never rotated): rebuild pages from scratch.
-            ((fresh_alloc(file)?, MetaLog::default(), None), 0)
+            (
+                (fresh_alloc(file, file_bytes)?, MetaLog::default(), None),
+                0,
+            )
         };
 
     // Batches from journals the commit does not cover, oldest first. The
@@ -161,12 +168,13 @@ fn load_commit(
     file: &BlockFile,
     types: &[TypeSlot],
     commit: &CommitFrame,
+    file_bytes: u64,
 ) -> StorageResult<(
     BlockAllocator,
     MetaLog,
     Option<crate::file_header::ChainRecord>,
 )> {
-    let mut used = vec![Run::new(0, RESERVED_BLOCKS)];
+    let mut used = Vec::new();
     let mut replay = Replay::default();
     let chain = walk(file, BlockDescriptor::from_raw(commit.head))?;
     for desc in &chain {
@@ -216,8 +224,10 @@ fn load_commit(
         let dict = Dictionary::from_bytes(&file.read_run(desc.run())?)?;
         slot.dictionary().borrow_mut().load(dict, desc);
     }
-    let mut alloc = BlockAllocator::from_layout(file.len_blocks()?, &used);
+    let mut alloc =
+        BlockAllocator::from_layout(&file.layout(), &used, file_bytes);
     alloc.set_protected(&used);
+    cut_free_tails(file, &mut alloc)?;
     for (hash, raw) in &parts.remote_dicts {
         slot_of(types, *hash)?
             .remote_dict()
@@ -236,10 +246,29 @@ fn slot_of(types: &[TypeSlot], hash: u64) -> StorageResult<&TypeSlot> {
         .ok_or(StorageError::UnregisteredStructHash(hash))
 }
 
-/// An allocator over a page-less `data.bin` (superblock only).
-fn fresh_alloc(file: &BlockFile) -> StorageResult<BlockAllocator> {
-    file.truncate_to_blocks(RESERVED_BLOCKS)?;
-    let mut alloc = BlockAllocator::new();
-    alloc.alloc(RESERVED_BLOCKS);
+/// An allocator over data files no recovery root names: every one of them
+/// is what a store wrote after its last `Commit` — or never committed — and
+/// the journal replay writes it again, so all of it goes.
+fn fresh_alloc(
+    file: &BlockFile,
+    file_bytes: u64,
+) -> StorageResult<BlockAllocator> {
+    let mut alloc =
+        BlockAllocator::from_layout(&file.layout(), &[], file_bytes);
+    cut_free_tails(file, &mut alloc)?;
     Ok(alloc)
+}
+
+/// Cut every data file's free tail off — the active file's too: past its
+/// last used run is what settle rounds wrote after the last `Commit`, which
+/// the replay writes again (RFC 0071 §5) — and delete the files left empty,
+/// as well as any a crash kept from being deleted.
+fn cut_free_tails(
+    file: &BlockFile,
+    alloc: &mut BlockAllocator,
+) -> StorageResult<()> {
+    for cut in alloc.reclaim(true) {
+        file.cut(cut.file, cut.end)?;
+    }
+    Ok(())
 }
