@@ -1,8 +1,9 @@
-//! Where a [`BlockFile`](crate::BlockFile)'s bytes live: `data.bin`, or RAM.
+//! Where a data file's bytes live ([`BlockFile`](crate::BlockFile)): on disk,
+//! or in RAM.
 //!
 //! A store in object mode ([RFC 0070] §9) has no disk: its pages live in the
 //! object store, and what it holds besides — the pages not uploaded yet, and
-//! the ones it caches — sits in RAM, laid out exactly as `data.bin` would
+//! the ones it caches — sits in RAM, laid out exactly as a data file on disk would
 //! lay them out. So the block layer above is the same in both, and only
 //! these few calls tell them apart, by a plain `match`.
 //!
@@ -22,7 +23,7 @@ pub const CHUNK_BYTES: usize = 1 << 20;
 /// The bytes behind a block file.
 #[derive(Debug)]
 pub enum Backing {
-    /// `data.bin`.
+    /// A data file on disk.
     File(File),
     /// RAM, for a store with no disk.
     Memory(Memory),
@@ -36,14 +37,6 @@ pub struct Memory {
 }
 
 impl Backing {
-    /// The length in bytes.
-    pub fn len(&self) -> Result<u64> {
-        match self {
-            Self::File(file) => Ok(file.metadata()?.len()),
-            Self::Memory(memory) => Ok(memory.len.get()),
-        }
-    }
-
     /// Fill `buf` from `offset`.
     pub fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
         match self {
@@ -157,7 +150,6 @@ mod tests {
         let mut back = [0u8; 10];
         m.read_exact_at(&mut back, at).unwrap();
         assert_eq!(&back, b"0123456789");
-        assert_eq!(m.len().unwrap(), at + 10);
     }
 
     #[test]
