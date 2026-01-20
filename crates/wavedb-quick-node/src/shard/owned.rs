@@ -10,12 +10,13 @@
 //! [RFC 0067]: ../../../../rfcs/0067-thread-per-core-shards-WIP.md
 
 use std::cell::Cell;
+use std::time::{Duration, Instant};
 
-use wavedb_storage::{
-    BLOCK_SIZE, Compacting, PageStore, StorageError, StorageResult,
-};
+use wavedb_storage::{Compacting, PageStore, StorageError, StorageResult};
 
 use crate::upkeep::{Armed, Compaction, Maintenance};
+
+use super::object_policy::{evict_past_ceiling, upload_due};
 
 /// Ids one settle or checkpoint round may take before the worker looks at
 /// its jobs again.
@@ -30,6 +31,10 @@ pub const SETTLE_BUDGET_IDS: usize = 4096;
 /// request or two to the object store and one window write.
 pub const RESTORES_PER_TICK: usize = 16;
 
+/// How often a store's object store is weighed for compaction (RFC 0070
+/// §8): weighing walks every remote directory.
+pub const REMOTE_CHECK_EVERY: Duration = Duration::from_secs(60);
+
 /// A worker's data shards, and how busy its jobs keep it.
 pub struct Owned {
     /// The first data shard in the range.
@@ -37,6 +42,9 @@ pub struct Owned {
     stores: Vec<PageStore>,
     /// Each store's compaction triggers, by index.
     armed: Vec<Cell<Armed>>,
+    /// Each store's object-store compaction triggers, and when they were
+    /// last weighed.
+    remote_armed: Vec<Cell<(Armed, Option<Instant>)>>,
     /// Jobs executing right now — the "is DATA busy?" half of the
     /// maintenance valve.
     inflight: Cell<usize>,
@@ -58,6 +66,7 @@ impl Owned {
         Self {
             first,
             armed: stores.iter().map(|_| Cell::default()).collect(),
+            remote_armed: stores.iter().map(|_| Cell::default()).collect(),
             stores,
             inflight: Cell::new(0),
         }
@@ -186,10 +195,15 @@ impl Owned {
     /// the evicted buckets reads went looking for, a few per tick, then
     /// upload once the store holds back the policy's bytes, or once its
     /// oldest write has waited the policy's interval — in uploads of a few
-    /// files each. The jobs keep the thread while it awaits the object
-    /// store; a fault is reported, and what it left undone stays for the
-    /// next tick.
-    pub async fn object_upkeep(&self, i: usize, policy: &Maintenance) {
+    /// files each — and compact the object store when its triggers say so.
+    /// The jobs keep the thread while it awaits the object store; a fault is
+    /// reported, and what it left undone stays for the next tick.
+    pub async fn object_upkeep(
+        &self,
+        i: usize,
+        policy: &Maintenance,
+        partitions: usize,
+    ) {
         let Some(store) = self.stores.get(i) else {
             return;
         };
@@ -206,6 +220,43 @@ impl Owned {
                 }
             }
         }
+        self.compact_remote(i, store, policy, partitions).await;
+    }
+
+    /// Compact store `i`'s object store when the policy's triggers say so,
+    /// weighed against its remote space (RFC 0070 §8) once per
+    /// [`REMOTE_CHECK_EVERY`]; a size trigger needs
+    /// [`object_compact_free_bytes`](Maintenance::object_compact_free_bytes)
+    /// free, and as much again after each compaction.
+    async fn compact_remote(
+        &self,
+        i: usize,
+        store: &PageStore,
+        maintenance: &Maintenance,
+        partitions: usize,
+    ) {
+        let Some(cell) = self.remote_armed.get(i) else {
+            return;
+        };
+        let (mut armed, checked) = cell.get();
+        if checked.is_some_and(|at| at.elapsed() < REMOTE_CHECK_EVERY) {
+            return;
+        }
+        let policy = Compaction {
+            budget_blocks: maintenance.object_compact_free_bytes
+                / wavedb_storage::BLOCK_SIZE as u64,
+            ..maintenance.compaction
+        };
+        let now = wavedb_platform::time::unix_secs();
+        if policy.due(&mut armed, store.remote_space(), partitions, now) {
+            match store.compact_remote().await {
+                Ok(_) => Compaction::finished(&mut armed, store.remote_space()),
+                Err(e) => {
+                    eprintln!("worker: object store compaction failed: {e}");
+                }
+            }
+        }
+        cell.set((armed, Some(Instant::now())));
     }
 
     /// How many stores the range holds.
@@ -246,51 +297,6 @@ impl Owned {
         }
         first.map_or(Ok(()), Err)
     }
-}
-
-/// An object-backed store's disk is a cache bounded by the compaction
-/// ceiling (RFC 0070 §7): past its share, the coldest uploaded pages leave
-/// it, down to nine tenths of the share, and the ceiling trigger then
-/// compacts the room they left out of the file.
-///
-/// In object mode the "disk" is RAM, and its ceiling the policy's
-/// [`object_ram_bytes`](Maintenance::object_ram_bytes).
-fn evict_past_ceiling(
-    store: &PageStore,
-    policy: &Maintenance,
-    partitions: usize,
-) {
-    if !store.is_object_backed() {
-        return;
-    }
-    let ceiling = if store.is_object_mode() {
-        Some(policy.object_ram_bytes)
-    } else {
-        policy.compaction.above_bytes
-    };
-    let Some(ceiling) = ceiling else {
-        return;
-    };
-    let share = ceiling / u64::try_from(partitions.max(1)).unwrap_or(u64::MAX);
-    let share_blocks = share / BLOCK_SIZE as u64;
-    let space = store.space();
-    let live = space.file_blocks - space.free_blocks - space.deferred_blocks;
-    if live <= share_blocks {
-        return;
-    }
-    if let Err(e) = store.evict_cold(share_blocks / 10 * 9) {
-        eprintln!("worker: eviction failed: {e}");
-    }
-}
-
-/// Whether `store` should upload now: it holds back the policy's bytes, or
-/// its oldest write no upload carried has waited the policy's interval.
-fn upload_due(store: &PageStore, policy: &Maintenance) -> bool {
-    store.pending_upload_bytes() >= policy.upload_after_bytes.max(1)
-        || policy
-            .upload_interval
-            .zip(store.unuploaded_for())
-            .is_some_and(|(interval, waited)| waited >= interval)
 }
 
 fn owes(store: &PageStore) -> bool {
@@ -484,7 +490,7 @@ mod tests {
             upload_interval: None,
             ..Maintenance::default()
         };
-        wavedb_platform::carrier::block_on(owned.object_upkeep(0, &policy));
+        wavedb_platform::carrier::block_on(owned.object_upkeep(0, &policy, 1));
         assert_eq!(
             store.pending_upload_bytes(),
             pending,
@@ -495,7 +501,7 @@ mod tests {
             upload_after_bytes: pending,
             ..Maintenance::default()
         };
-        wavedb_platform::carrier::block_on(owned.object_upkeep(0, &policy));
+        wavedb_platform::carrier::block_on(owned.object_upkeep(0, &policy, 1));
         assert_eq!(store.pending_upload_bytes(), 0);
         let got =
             wavedb_platform::carrier::block_on(store.read_uploaded(SH, id(7)));
@@ -551,13 +557,13 @@ mod tests {
             upload_interval: Some(Duration::from_secs(3_600)),
             ..Maintenance::default()
         };
-        wavedb_platform::carrier::block_on(owned.object_upkeep(0, &waiting));
+        wavedb_platform::carrier::block_on(owned.object_upkeep(0, &waiting, 1));
         assert!(store.unuploaded_for().is_some(), "not due yet");
         let due = Maintenance {
             upload_interval: Some(Duration::ZERO),
             ..Maintenance::default()
         };
-        wavedb_platform::carrier::block_on(owned.object_upkeep(0, &due));
+        wavedb_platform::carrier::block_on(owned.object_upkeep(0, &due, 1));
         assert_eq!(store.unuploaded_for(), None, "the interval uploaded it");
 
         put(store, 20..40);
@@ -569,5 +575,47 @@ mod tests {
             );
             assert!(got.unwrap().is_some(), "record {k}");
         }
+    }
+
+    /// A met trigger compacts the object store from the upkeep (RFC 0070
+    /// §8): what earlier uploads left dead goes, and the records still read
+    /// back from the object store.
+    #[test]
+    fn a_met_trigger_compacts_the_object_store() {
+        let d = tempfile::tempdir().unwrap();
+        let server = wavedb_platform::s3::test_server::TestServer::start(
+            &d.path().join("objects"),
+        );
+        let options = StoreOptions {
+            remote: Some(wavedb_storage::Remote::new(server.bucket(), "")),
+            ..StoreOptions::default()
+        };
+        let stores =
+            wavedb_storage::open_object_shards(&[&SLOT], options, 1, 1)
+                .unwrap();
+        let owned = Owned::new(0, stores);
+        let store = owned.store(0).unwrap();
+        for _ in 0..3 {
+            put(store, 0..200);
+            wavedb_platform::carrier::block_on(store.upload_all()).unwrap();
+        }
+        let before = store.remote_space().file_blocks;
+        let policy = Maintenance {
+            compaction: Compaction {
+                above_bytes: None,
+                above_free_percent: Some(1),
+                daily_at: None,
+                budget_blocks: 1,
+            },
+            upload_interval: None,
+            object_compact_free_bytes: 4096,
+            ..Maintenance::default()
+        };
+        wavedb_platform::carrier::block_on(owned.object_upkeep(0, &policy, 1));
+        let after = store.remote_space().file_blocks;
+        assert!(after < before, "{before} → {after} blocks");
+        store.evict_cold(0).unwrap();
+        let got = wavedb_platform::carrier::block_on(store.get_of(SH, id(7)));
+        assert!(got.unwrap().is_some());
     }
 }
