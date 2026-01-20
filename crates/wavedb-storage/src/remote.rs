@@ -25,7 +25,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::time::Instant;
 
-use wavedb_core::Id;
 use wavedb_platform::s3::Bucket;
 
 use crate::block::{BLOCK_SIZE, BlockDescriptor};
@@ -131,6 +130,16 @@ pub(crate) struct ObjectState {
     /// Another writer's file was met: this store takes no more writes
     /// ([`StorageError::Fenced`]).
     pub(crate) fenced: Cell<bool>,
+    /// The files a compaction is emptying: uploads carry their pages
+    /// forward meanwhile (`crate::remote_compact`).
+    pub(crate) moving: RefCell<BTreeSet<u64>>,
+    /// Files deleted above the chain's oldest live one — not deleted
+    /// again. RAM only: after a reopen they are deleted once more.
+    pub(crate) deleted: RefCell<BTreeSet<u64>>,
+    /// The files the disk's recovery roots name — the newest checkpoint's,
+    /// and the one before while its successor's frame is unproven, as the
+    /// allocator protects their runs (RFC 0047). Not deleted.
+    pub(crate) rooted: RefCell<[BTreeSet<u64>; 2]>,
 }
 
 /// Buckets whose descriptors an upload changed, per slot index: disk ones
@@ -159,6 +168,9 @@ impl ObjectState {
             wanted: RefCell::default(),
             oldest_write: Cell::new(None),
             fenced: Cell::new(false),
+            moving: RefCell::default(),
+            deleted: RefCell::default(),
+            rooted: RefCell::default(),
         }
     }
 
@@ -215,6 +227,7 @@ impl PageStore {
     /// Object-store faults.
     pub(crate) fn prepare_object(&self, reopened: bool) -> StorageResult<()> {
         self.tally_pending();
+        self.root_remote();
         if reopened {
             self.step_over_leftovers()?;
         }
@@ -274,52 +287,6 @@ impl Remote {
             return Err(StorageError::Corrupt("an uploaded page is cut short"));
         }
         Ok(image)
-    }
-}
-
-impl PageStore {
-    /// `id`'s bytes as the object store holds them — the uploaded page
-    /// covering it, filtered to it. `None` when no uploaded page holds it.
-    ///
-    /// Nothing is borrowed across the request: the descriptor is copied out
-    /// of the remote directory first, and the dictionary is borrowed only to
-    /// decode the bytes that came back (§14).
-    ///
-    /// # Errors
-    /// An object-store request failing, the object or range missing, or a
-    /// page that fails to decode; [`StorageError::NotObjectBacked`] for a
-    /// disk-only store.
-    pub async fn read_uploaded(
-        &self,
-        struct_hash: u64,
-        id: Id,
-    ) -> StorageResult<Option<Vec<u8>>> {
-        self.object()?;
-        match self.slot_index(struct_hash) {
-            Some(idx) => self.read_remote(idx, id).await,
-            None => Ok(None),
-        }
-    }
-
-    /// `id`'s bytes in the uploaded page of slot `idx` that covers it.
-    pub(crate) async fn read_remote(
-        &self,
-        idx: usize,
-        id: Id,
-    ) -> StorageResult<Option<Vec<u8>>> {
-        let desc = {
-            let remote = self.types[idx].remote_directory().borrow();
-            let Some(dir) = remote.as_ref() else {
-                return Ok(None);
-            };
-            dir.descriptor(dir.bucket_of(id.raw()))
-        };
-        if !desc.is_allocated() {
-            return Ok(None);
-        }
-        let image = self.fetch_image(desc).await?;
-        let page = self.decode_remote(idx, &image)?;
-        Ok(page.get(id).map(<[u8]>::to_vec))
     }
 }
 
