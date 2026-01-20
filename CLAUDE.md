@@ -195,7 +195,11 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   journal — a write is durable once an upload carries it, on 8 MiB or
   `upload_interval` (10 s) — every open a recovery from the files; no
   lease, but every file is PUT create-only, so a second writer on the
-  prefix is `Fenced`, never merged. A store
+  prefix is `Fenced`, never merged. The object store **compacts by file**
+  (phase 7, `compact_remote`): a survey run like a recovery finds the
+  horizon and the files nothing names (the store, the newest cut, the
+  disk's two roots), which are DELETEd blind; mostly free files below the
+  horizon have their pages carried forward first. A store
   is used from one thread: plain cells, no lock, no atomic; `Send`, not `Sync`. **One open `PageStore`
   per data directory** — every data file and journal is locked while open, a
   second open is `EngineBusy` — and stores over different directories coexist
