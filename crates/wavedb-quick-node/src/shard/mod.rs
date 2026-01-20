@@ -32,6 +32,7 @@
 mod background;
 mod lease;
 mod lock;
+mod object_policy;
 mod owned;
 pub mod priority;
 mod route;
