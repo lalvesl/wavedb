@@ -147,7 +147,7 @@ Versioning policy for the platform crates.
   rebuild targets a **single node** first; durability is the journal. (So the
   async-replication durability window is moot for now.)
 - **Cold history tier (slow-node) — removed** for now (not just deferred).
-  History stays single-tier in `data.bin`, **grows unbounded**; no pruning,
+  History stays single-tier in the data files, **grows unbounded**; no pruning,
   compaction, or archive tier yet — accepted.
 - **Permission groups.**
 - **`STRUCT_HASH`-grained write-ownership** — tenant-grained for now.
