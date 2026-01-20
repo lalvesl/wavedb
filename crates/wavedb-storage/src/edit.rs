@@ -6,7 +6,7 @@
 //! the same window: **the metadata costs no IOp of its own**.
 //!
 //! Each chunk names the one written before it ([RFC 0048]), so the log is a
-//! chain in `data.bin` and the `Commit` frame is one address — the head. The
+//! chain in the data files and the `Commit` frame is one address — the head. The
 //! frame therefore costs the same whether the log holds one chunk or a
 //! thousand, which is what lets compaction be spaced by the ratio rule below
 //! instead of by how large a frame is affordable.
