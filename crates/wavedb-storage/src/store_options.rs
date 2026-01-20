@@ -55,13 +55,25 @@ pub struct StoreOptions {
 
     /// Where the pages live besides the disk (RFC 0070): `Some` makes the
     /// disk a cache of this object store. Fixed when the database is
-    /// created — the superblock records it, and opening with the other
+    /// created — the `MANIFEST` records it, and opening with the other
     /// answer is [`StorageError::ModeMismatch`](crate::StorageError::ModeMismatch).
     /// The endpoint and the credentials are not stored anywhere: they come
     /// with every open.
     /// [`PageStore::open_object`](crate::PageStore::open_object) opens the
     /// same object store with no disk at all (object mode).
     pub remote: Option<crate::remote::Remote>,
+    /// Bytes a data file grows to before the next one opens (RFC 0071),
+    /// [`DEFAULT_FILE_BYTES`](crate::DEFAULT_FILE_BYTES) by default. A run
+    /// is never split, so the run that reaches it lands whole. It decides
+    /// only when a file closes — the directory listing says where every file
+    /// is — so it may change between runs, and files of different sizes
+    /// coexist. Fewer, larger files hold fewer descriptors open; smaller ones
+    /// give space back in smaller steps.
+    pub file_bytes: u64,
+    /// How much of a data file must be free — holes, or runs held back for
+    /// a recovery root — before compaction empties it (RFC 0071 §7), 50 by
+    /// default. A file mostly alive is not rewritten for little.
+    pub victim_free_percent: u8,
 }
 
 /// Bytes of decoded records [`StoreOptions::record_cache_bytes`] defaults to.
@@ -80,6 +92,8 @@ impl Default for StoreOptions {
             page_cache_bytes: crate::page_cache::DEFAULT_BUDGET_BYTES,
             record_cache_bytes: DEFAULT_RECORD_CACHE_BYTES,
             remote: None,
+            file_bytes: crate::alloc::DEFAULT_FILE_BYTES,
+            victim_free_percent: 50,
         }
     }
 }
