@@ -59,7 +59,7 @@ impl Fixture {
 
     /// The newest file's key, by the one-key listing recovery will use.
     pub fn newest_file(&self) -> Option<String> {
-        block_on(self.server.bucket().first_key("db/1seg/")).unwrap()
+        block_on(self.server.bucket().first_key("db/shards/00/1seg/")).unwrap()
     }
 }
 
