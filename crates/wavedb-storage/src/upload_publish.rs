@@ -65,6 +65,7 @@ impl PageStore {
             files: packed.files.len(),
             pages: 0,
             bytes: packed.files.iter().map(|f| f.bytes.len() as u64).sum(),
+            moved: 0,
         };
         let mut unrecorded = object.unrecorded.borrow_mut();
         for (w, upload) in work.into_iter().enumerate() {
