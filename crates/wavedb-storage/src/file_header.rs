@@ -53,8 +53,6 @@ pub struct FileHeader {
     pub start: u64,
     /// The remote end once the upload is in.
     pub end: u64,
-    /// The per-database hash seed every record is routed with.
-    pub seed: [u64; 4],
     /// Every type the object store holds.
     pub types: Vec<TypeEntry>,
 }
@@ -135,6 +133,9 @@ pub struct Chain {
     /// Per type: where its next restated entries begin. RAM only — after a
     /// reopen the rotation simply starts over.
     pub cursor: BTreeMap<u64, usize>,
+    /// Per type: the file in which its cursor last came round — a whole
+    /// rotation of its buckets restated. RAM only, like the cursor.
+    pub rotated: BTreeMap<u64, u64>,
 }
 
 /// A [`Chain`] as an addressing chunk records it.
@@ -167,6 +168,7 @@ impl Chain {
                 .then_some((record.tail_file, record.tail_hash)),
             last: record.last.iter().copied().collect(),
             cursor: BTreeMap::new(),
+            rotated: BTreeMap::new(),
         }
     }
 }
@@ -185,7 +187,6 @@ mod tests {
             prev_hash: 99,
             start: 0,
             end: 7 * 2048 + 20,
-            seed: [1, 2, 3, 4],
             types: vec![TypeEntry {
                 struct_hash: 5,
                 buckets: 3,
