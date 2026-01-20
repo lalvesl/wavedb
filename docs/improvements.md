@@ -65,16 +65,18 @@ order of cost:
 
 ## Storage
 
-### A bulk fill leaves its free space inside `data.bin`
+### A bulk fill leaves its free space inside the data files
 
-- **Now.** The `large` seed's `data.bin` is 9.6 GB for 5 million inserts:
+- **Now.** The `large` seed's `data.bin` was 9.6 GB for 5 million inserts:
   ~1 920 bytes per row against ~260 in the dataset, where the 200 000-row
   tier suggests ~100 bytes live. Every checkpoint relocates pages
   copy-on-write, and the bench fill never compacts.
 - **Since** 2026-10-10 the storage half exists
-  ([RFC 0069](../rfcs/0069-compaction-into-the-holes.md)): `PageStore::space()`
-  reports total, free and deferred blocks, and `compact()` moves pages down
-  and truncates the free tail (the 5 000-row growth was 0042's tail moves).
+  ([RFC 0069](../rfcs/0069-compaction-into-the-holes-DEPRECATED.md)): `PageStore::space()`
+  reports total, free and deferred blocks, and `compact()` empties the holed
+  files — since 2026-10-15 by carrying their runs forward into the active
+  data file and deleting them
+  ([RFC 0071](../rfcs/0071-data-files-by-address.md)).
   The embedded row's `compacted` point now runs it.
 - **Instead.** Read `space()` at the end of the fill, and decide whether the
   fill should end with `compact()` — a bench question, needing a run.
