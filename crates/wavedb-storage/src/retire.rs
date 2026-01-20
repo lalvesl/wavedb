@@ -2,10 +2,10 @@
 //! checkpoint that follows it ([RFC 0047]).
 //!
 //! A checkpoint's `Commit` frame is written unsynced ([RFC 0046]): it is a
-//! *pointer* into an addressing log `data.bin` already made durable, so it
+//! *pointer* into an addressing log the data files already made durable, so it
 //! needs no barrier of its own and the next ordinary `Batch` append carries it
 //! (`fsync` flushes the file, not one write). A checkpoint therefore costs
-//! **one** barrier — the `data.bin` sync.
+//! **one** barrier — the data files' sync.
 //!
 //! What has to wait for that durability is everything the frame *authorises*:
 //!
@@ -135,6 +135,10 @@ impl PageStore {
     /// lock, which is what keeps the lock graph acyclic (see `page_store`).
     fn dispose(&self, retiring: Retiring) -> StorageResult<()> {
         self.alloc.borrow_mut().release_previous();
-        retiring.journal.delete()
+        self.release_remote_root();
+        retiring.journal.delete()?;
+        // What the release freed at a file's tail leaves it now, during a
+        // compaction as much as after one (RFC 0071 §5).
+        self.reclaim().map(|_| ())
     }
 }
