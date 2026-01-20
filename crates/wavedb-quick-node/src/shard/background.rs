@@ -95,7 +95,7 @@ async fn run(bg: &Background) {
         if last.elapsed() >= UPKEEP_PERIOD {
             for i in 0..bg.owned.len() {
                 bg.owned.upkeep(i, &bg.policy, bg.partitions);
-                bg.owned.object_upkeep(i, &bg.policy).await;
+                bg.owned.object_upkeep(i, &bg.policy, bg.partitions).await;
                 yield_now().await;
             }
             last = Instant::now();
