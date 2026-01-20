@@ -1,7 +1,7 @@
 # RFC 0042 — Free-space defragmentation
 
 - **Status:** Deprecated (2026-10-10; implemented 2026-07-28)
-- **Superseded by:** [RFC 0069](0069-compaction-into-the-holes.md)
+- **Superseded by:** [RFC 0069](0069-compaction-into-the-holes-DEPRECATED.md)
 - **Crates:** `wavedb-storage`, `wavedb-quick-node`
 
 ## What it proposed
@@ -25,7 +25,7 @@ tick. The resource it defended was IOps, not disk.
 - **Nothing ever gave space back.** `BlockAllocator::truncate` had no caller;
   `data.bin` only grew (9.6 GB for ~1 GB of live data on the `large` seed).
 - The user chose to **reuse the empty space** instead, on triggers the
-  deployment sets: [RFC 0069](0069-compaction-into-the-holes.md) moves the
+  deployment sets: [RFC 0069](0069-compaction-into-the-holes-DEPRECATED.md) moves the
   highest runs *down* into the lowest holes and truncates the free tail.
 
 What survived: the verbatim page move (a page is position-independent), the
