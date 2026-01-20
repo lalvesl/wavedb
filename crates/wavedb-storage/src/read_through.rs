@@ -14,6 +14,7 @@
 
 use wavedb_core::Id;
 
+use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::PageStore;
 use crate::record_cache::Lookup;
@@ -164,5 +165,69 @@ impl PageStore {
             }
         }
         Ok(None)
+    }
+}
+
+impl PageStore {
+    /// `id`'s bytes as the object store holds them — the uploaded page
+    /// covering it, filtered to it. `None` when no uploaded page holds it.
+    ///
+    /// Nothing is borrowed across the request: the descriptor is copied out
+    /// of the remote directory first, and the dictionary is borrowed only to
+    /// decode the bytes that came back (§14).
+    ///
+    /// # Errors
+    /// An object-store request failing, the object or range missing, or a
+    /// page that fails to decode; [`StorageError::NotObjectBacked`] for a
+    /// disk-only store.
+    pub async fn read_uploaded(
+        &self,
+        struct_hash: u64,
+        id: Id,
+    ) -> StorageResult<Option<Vec<u8>>> {
+        self.object()?;
+        match self.slot_index(struct_hash) {
+            Some(idx) => self.read_remote(idx, id).await,
+            None => Ok(None),
+        }
+    }
+
+    /// `id`'s bytes in the uploaded page of slot `idx` that covers it.
+    ///
+    /// A compaction may carry the page forward and delete its file while
+    /// the request is out: a fetch that fails when the descriptor has moved
+    /// meanwhile is made again at the new one.
+    pub(crate) async fn read_remote(
+        &self,
+        idx: usize,
+        id: Id,
+    ) -> StorageResult<Option<Vec<u8>>> {
+        let mut desc = self.remote_descriptor(idx, id);
+        loop {
+            if !desc.is_allocated() {
+                return Ok(None);
+            }
+            match self.fetch_image(desc).await {
+                Ok(image) => {
+                    let page = self.decode_remote(idx, &image)?;
+                    return Ok(page.get(id).map(<[u8]>::to_vec));
+                }
+                Err(e) => {
+                    let now = self.remote_descriptor(idx, id);
+                    if now == desc {
+                        return Err(e);
+                    }
+                    desc = now;
+                }
+            }
+        }
+    }
+
+    /// The remote descriptor of the page of slot `idx` covering `id`.
+    fn remote_descriptor(&self, idx: usize, id: Id) -> BlockDescriptor {
+        let remote = self.types[idx].remote_directory().borrow();
+        remote.as_ref().map_or(BlockDescriptor::EMPTY, |dir| {
+            dir.descriptor(dir.bucket_of(id.raw()))
+        })
     }
 }
