@@ -12,15 +12,15 @@ pub enum StorageError {
     /// An underlying filesystem error.
     #[error("storage io: {0}")]
     Io(#[from] std::io::Error),
-    /// `data.bin`'s superblock did not start with the expected magic — not a
+    /// The `MANIFEST` did not start with the expected magic — not a
     /// WaveDB data file (or a corrupt one).
     #[error("not a wavedb data file (bad magic)")]
     BadMagic,
-    /// `data.bin` was written by an incompatible on-disk format version.
-    #[error("unsupported data.bin format version {0}")]
+    /// The database was written by an incompatible on-disk format version.
+    #[error("unsupported format version {0}")]
     BadVersion(u32),
     /// A read/write addressed blocks past the current end of the file.
-    #[error("data.bin too short: need {need} bytes, file has {have}")]
+    #[error("data file too short: need {need} bytes, file has {have}")]
     OutOfBounds {
         /// Bytes the operation required.
         need: u64,
@@ -52,7 +52,7 @@ pub enum StorageError {
     UnregisteredStructHash(u64),
     /// The data directory is already open — by another
     /// [`PageStore`](crate::page_store::PageStore) in this process or by
-    /// another process. `data.bin` is locked while a store has it open.
+    /// another process. Its files are locked while a store has it open.
     #[error("the data directory is already open")]
     EngineBusy,
     /// A journal barrier failed: the file's durable state is unknown, so the
@@ -66,10 +66,10 @@ pub enum StorageError {
     Remote(#[from] wavedb_platform::Error),
     /// The database was created with its pages in an object store and opened
     /// without one, or the other way round. The mode is fixed at creation
-    /// (RFC 0070), recorded in the superblock.
+    /// (RFC 0070), recorded in the `MANIFEST`.
     #[error("the database is {} but was opened {}", if *object_backed { "object-backed" } else { "disk-only" }, if *object_backed { "without an object store" } else { "with one" })]
     ModeMismatch {
-        /// What the superblock records.
+        /// What the `MANIFEST` records.
         object_backed: bool,
     },
     /// An object-store operation on a store that has none.
@@ -87,7 +87,7 @@ pub enum StorageError {
     Core(#[from] wavedb_core::Error),
 }
 
-/// A held lock on `data.bin` means another store has the directory open
+/// A held lock on a data file or a journal means another store has the directory open
 /// ([`StorageError::EngineBusy`]); any other failure to lock is I/O.
 impl From<std::fs::TryLockError> for StorageError {
     fn from(e: std::fs::TryLockError) -> Self {
