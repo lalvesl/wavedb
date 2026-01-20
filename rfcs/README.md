@@ -43,11 +43,11 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   [0042](0042-free-space-defragmentation-DEPRECATED.md) kept such windows
   available by relocating stranded pages to the tail — *Deprecated* 2026-10-10:
   it grew the file and nothing ever shrank it, so
-  [0069](0069-compaction-into-the-holes.md) *(Implemented)* moves the highest
-  runs **down** into the lowest holes instead, drops the old addressing chain,
-  and truncates the free tail, on a daily UTC time, a disk ceiling or a
-  free-space share.
-  [0070](0070-object-storage-backend-WIP.md) *(WIP, phases 1–6 done)* makes
+  [0069](0069-compaction-into-the-holes-DEPRECATED.md) moved the highest runs
+  **down** into the lowest holes instead — itself *Deprecated* 2026-10-15 for
+  0071 below, which kept its stepped phases and its triggers (a daily UTC
+  time, a disk ceiling or a free-space share).
+  [0070](0070-object-storage-backend-WIP.md) *(WIP, phases 1–7 done)* makes
   an S3-compatible object store the place pages live, the disk caching them:
   settled pages are flagged, uploaded into the object store's own linear hash
   in files of `[32 KiB header][pages]`, their remote directories ride the
@@ -59,11 +59,20 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   recovered); and in object mode a database has no disk at all: pages in
   RAM until uploaded and as a cache, no journal (a write is durable once an
   upload carries it, on 8 MiB or a 10 s interval), a second writer fenced
-  by create-only PUTs. Compaction by file (phase 7) is next. And
+  by create-only PUTs; and the object store compacts by file (phase 7):
+  a survey run like a recovery finds the horizon and the files nothing
+  names, which are DELETEd blind, and the mostly free ones have their
+  pages carried forward first. The disk took the same model in
+  [0071](0071-data-files-by-address.md) *(Implemented)*: a
+  shard's pages live in append-only data files named by the block address
+  they start at (10 GiB by default, found by listing the directory),
+  compaction carries the emptiest files' runs forward and cuts and deletes
+  what they leave, and the per-shard superblock gave way to the root
+  `MANIFEST`. And
   [0043](0043-descriptors-in-the-commit-frame.md) *(Implemented)* moved the
   addressing state **into** the `Commit` frame — one journal append carries every
-  type's descriptor vector plus the retired journal's DONE marker, so `data.bin`
-  holds pages and dictionaries and nothing else, and the copy-on-write directory
+  type's descriptor vector plus the retired journal's DONE marker, so the data
+  files hold pages and dictionaries and nothing else, and the copy-on-write directory
   chain is gone.
   Finally [0046](0046-directory-deltas-in-the-window.md) *(Implemented)* fixed
   the one cost 0043 left behind — a frame carrying every bucket of every type
@@ -609,8 +618,8 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0066](0066-embassy-executor-and-async-io.md) | Embassy executor and async-io: tokio out of the node | Implemented |
 | [0067](0067-thread-per-core-shards-WIP.md) | Thread per core: the shard as a database, the thread as placement | In progress (steps 1–5, the fsync helper and parallel recovery landed; one executor per thread decided; step 6, measuring, next) |
 | [0068](0068-record-cache-as-a-log-WIP.md) | The record cache as a log | WIP |
-| [0069](0069-compaction-into-the-holes.md) | Compaction into the holes | Implemented |
-| [0070](0070-object-storage-backend-WIP.md) | Object storage as a page backend (three modes) | WIP (phases 1–6 done) |
+| [0070](0070-object-storage-backend-WIP.md) | Object storage as a page backend (three modes) | WIP (phases 1–7 done; conversion from/to disk mode left) |
+| [0071](0071-data-files-by-address.md) | Data files named by address (append-only files, compaction forward; supersedes 0069's placement) | Implemented |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
@@ -626,7 +635,8 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0033](0033-cold-history-slow-node-tier-DEPRECATED.md) | Cold/history slow-node tier | removed |
 | [0058](0058-per-type-actors-DEPRECATED.md) | Per-type actors, and a `Send` engine | [0064](0064-pivot-owned-concurrency-PLANNED.md) (the unit) + [0063](0063-engine-yield-map-and-interruptible-engine-PLANNED.md) (the motivation) |
 | [0060](0060-comparative-benchmark-suite-DEPRECATED.md) | Comparative benchmark suite (vs MongoDB/PostgreSQL/MySQL/SQLite) | [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) (the row, not the run) |
-| [0042](0042-free-space-defragmentation-DEPRECATED.md) | Free-space defragmentation (tail relocation) | [0069](0069-compaction-into-the-holes.md) |
+| [0042](0042-free-space-defragmentation-DEPRECATED.md) | Free-space defragmentation (tail relocation) | [0069](0069-compaction-into-the-holes-DEPRECATED.md) |
+| [0069](0069-compaction-into-the-holes-DEPRECATED.md) | Compaction into the holes | [0071](0071-data-files-by-address.md) (append-only data files, compaction forward) |
 
 ## Status vocabulary
 
