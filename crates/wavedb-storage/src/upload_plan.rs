@@ -70,16 +70,23 @@ pub struct SlotUpload {
     pub(crate) remote: Directory,
     /// Remote bucket → its rebuilt page.
     pub(crate) staged: BTreeMap<usize, SlotPage>,
+    /// Remote buckets carried forward as they are, out of files a
+    /// compaction empties (`crate::remote_compact`).
+    pub(crate) moved: BTreeSet<usize>,
+    /// Whether the dictionary is carried forward too.
+    pub(crate) move_dict: bool,
 }
 
 impl SlotUpload {
-    /// The remote buckets this upload rewrites.
+    /// The remote buckets this upload rewrites: those sharing records with a
+    /// flagged disk page, and those carried forward.
     pub(crate) fn affected(&self) -> BTreeSet<usize> {
         let (disk_len, remote_len) =
             (self.disk.len() as u64, self.remote.len() as u64);
         self.flagged
             .iter()
             .flat_map(|&(d, _)| sharing(disk_len, d as u64, remote_len))
+            .chain(self.moved.iter().copied())
             .collect()
     }
 
