@@ -211,6 +211,9 @@ impl PageStore {
         // until step 2 of the next checkpoint proves this frame durable — until
         // then either can be the root a crash reopens from (RFC 0047).
         alloc.set_protected(&used);
+        // And the object store's files this root names: not deleted while
+        // it, or the one before it, may be what a crash reopens from.
+        self.root_remote();
         // The pages — and the delta chunks describing them — must be durable
         // before the frame addressing them.
         self.file.sync()?;
