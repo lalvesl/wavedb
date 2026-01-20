@@ -1,6 +1,6 @@
 //! The M6 exit: a `Db::open` client **survives a node restart with warm
 //! local reads** — writes flow through to the node and mirror into the
-//! local journal + `data.bin` cache; with the node down, everything already
+//! local journal + data files cache; with the node down, everything already
 //! seen answers locally (same values, same ids, same order); writes refuse
 //! honestly; when the node returns, calls reach it again.
 //!
