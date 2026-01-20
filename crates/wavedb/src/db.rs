@@ -74,7 +74,7 @@ impl Db {
     }
 
     /// [`connect`](Self::connect) plus a local write-through cache at the
-    /// **default location** for `app`: natively the journal + `data.bin`
+    /// **default location** for `app`: natively the journal + data files
     /// engine under the platform cache base (`<base>/<app>` — `app` is the
     /// leaf directly under the base, created automatically; see
     /// [`crate::cache::default_dir`]); in the browser the IndexedDB database
