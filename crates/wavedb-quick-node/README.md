@@ -48,6 +48,9 @@ Server::bind("0.0.0.0:7700")
 > least `Server::victim_free_percent` free (default 50) on the
 > `Maintenance::compaction` triggers, and the node raises its soft limit on
 > open files to the hard one when it binds.
+> An object-backed node also compacts its object store (RFC 0070 §8) on the
+> same triggers, weighed once a minute; its size triggers need
+> `Maintenance::object_compact_free_bytes` (512 MiB) free.
 
 ## Write-ownership model
 
