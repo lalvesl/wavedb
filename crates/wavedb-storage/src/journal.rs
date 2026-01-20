@@ -15,7 +15,7 @@
 //! Journals are timestamped: `journal_<nanos>.log`. Rotation creates a new
 //! file and redirects appends; the old journal is retired by a [`Commit`]
 //! frame written into the **new** journal (see `crate::commit`), then
-//! deleted. A `data.bin` with **no** journal present is corrupt — the
+//! deleted. Data files with **no** journal present are corrupt — the
 //! journal chain is the recovery root, its absence means history was lost.
 //!
 //! ## Frame format
@@ -29,7 +29,7 @@
 //! - [`JournalFrame::Batch`] — one all-or-nothing batch of [`Write`](wavedb_core::Write)s (the
 //!   unit [`Store::apply`](wavedb_core::Store::apply) commits);
 //! - [`JournalFrame::Commit`] — "journal `<ts>` is fully settled into
-//!   `data.bin`": the retired journal's timestamp plus the head of the
+//!   the data files": the retired journal's timestamp plus the head of the
 //!   addressing chain. One frame, so the framing crc makes the
 //!   whole commit atomic — a torn commit is ignored and the retired journal
 //!   (still on disk) rules.
@@ -97,6 +97,7 @@ impl Journal {
     /// Create a fresh journal `journal_<ts>.log` under `dir`.
     ///
     /// # Errors
+    /// [`StorageError::EngineBusy`] if another store holds it;
     /// [`StorageError::Io`] on a filesystem failure.
     pub fn create(dir: &Path, ts: u64) -> StorageResult<Self> {
         let path = dir.join(format!("journal_{ts}.log"));
@@ -105,6 +106,7 @@ impl Journal {
             .write(true)
             .create_new(true)
             .open(&path)?;
+        file.try_lock()?; // like a data file: one open store per directory
         Ok(Self {
             file: Synced::new(file)?,
             path,
@@ -118,9 +120,11 @@ impl Journal {
     /// its frames (and truncate any torn tail) before appending.
     ///
     /// # Errors
+    /// [`StorageError::EngineBusy`] if another store holds it;
     /// [`StorageError::Io`] on a filesystem failure.
     pub fn open(path: &Path, ts: u64) -> StorageResult<Self> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
+        file.try_lock()?;
         let end = file.metadata()?.len();
         Ok(Self {
             file: Synced::new(file)?,
@@ -159,7 +163,7 @@ impl Journal {
     /// cache, durable only once someone syncs this file.
     ///
     /// A checkpoint's [`Commit`](JournalFrame::Commit) rides this: it is a
-    /// pointer into state `data.bin` already made durable, so it costs no
+    /// pointer into state the data files already made durable, so it costs no
     /// barrier of its own and the next ordinary `append` carries it
     /// ([RFC 0046](../../../rfcs/0046-directory-deltas-in-the-window.md)).
     /// Until then the retired journal stays on disk and rules, so a crash in
@@ -307,18 +311,18 @@ pub fn next_ts(after: u64) -> u64 {
     now.max(after + 1)
 }
 
-/// The invariant check for an existing database: `data.bin` without any
+/// The invariant check for an existing database: data files without any
 /// journal means the recovery root was lost.
 ///
 /// # Errors
 /// [`StorageError::Corrupt`] when violated.
 pub const fn require_journal_for(
-    data_bin_existed: bool,
+    had_files: bool,
     journals: &[(u64, PathBuf)],
 ) -> StorageResult<()> {
-    if data_bin_existed && journals.is_empty() {
+    if had_files && journals.is_empty() {
         return Err(StorageError::Corrupt(
-            "data.bin present but no journal — recovery root lost",
+            "data files present but no journal — recovery root lost",
         ));
     }
     Ok(())
