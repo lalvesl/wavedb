@@ -63,10 +63,13 @@ pub struct Uploaded {
     pub pages: usize,
     /// Bytes PUT.
     pub bytes: u64,
+    /// Remote pages carried forward out of files compaction empties
+    /// ([`compact_remote`](PageStore::compact_remote)).
+    pub moved: usize,
 }
 
 /// Clears the one-upload-at-a-time mark, however the upload ends.
-struct Release<'a>(&'a Cell<bool>);
+pub struct Release<'a>(pub &'a Cell<bool>);
 
 impl Drop for Release<'_> {
     fn drop(&mut self) {
@@ -94,6 +97,13 @@ impl PageStore {
             return Ok(Uploaded::default());
         }
         let _one = Release(&object.uploading);
+        self.upload_turn().await
+    }
+
+    /// [`upload`](Self::upload) with the turn already held — by it, or by a
+    /// compaction ([`compact_remote`](Self::compact_remote)).
+    pub(crate) async fn upload_turn(&self) -> StorageResult<Uploaded> {
+        let object = self.object()?;
         if object.fenced.get() {
             return Err(StorageError::Fenced);
         }
@@ -109,13 +119,14 @@ impl PageStore {
         } else {
             None
         };
+        let moved = work.iter().map(|w| w.moved.len()).sum();
         let shipped = self.ship(work, cut).await;
         if shipped.is_err()
             && let Some(at) = carried
         {
             object.oldest_write.set(Some(at));
         }
-        shipped
+        shipped.map(|done| Uploaded { moved, ..done })
     }
 
     /// Everything after the take: fetch, rebuild, pack, PUT, publish.
@@ -138,7 +149,8 @@ impl PageStore {
             let slot = &self.types[w.idx];
             let dict = slot.dictionary().borrow();
             let len = dict.dictionary().len();
-            let carried = dict.enabled() && len > slot.uploaded_dict().get();
+            let carried = dict.enabled()
+                && (len > slot.uploaded_dict().get() || w.move_dict);
             dicts.push(carried.then_some(len));
             slots.push(SlotImages {
                 struct_hash: slot.struct_hash(),
@@ -214,18 +226,23 @@ impl PageStore {
                 dict: dict.is_allocated().then_some(dict.raw()),
             });
         }
-        finish(packed, &views, chain, self.seed)
+        finish(packed, &views, chain)
     }
 
     /// Step 1: every type's flagged disk pages, up to the input bound, and a
     /// copy of each type's remote directory — and whether that took every
-    /// flagged page, the bound leaving none behind (a cut).
+    /// flagged page, the bound leaving none behind (a cut). The remote pages
+    /// a compaction carries forward come along, up to their own bound.
     fn take_flagged(&self) -> StorageResult<(Vec<SlotUpload>, bool)> {
         let (mut taken, mut cut) = (0, true);
+        let mut moving = crate::remote_compact::MOVE_BLOCKS;
         let mut work = Vec::new();
         for (idx, slot) in self.types.iter().enumerate() {
-            let Some(disk) = slot.directory().borrow().clone() else {
-                continue;
+            let (moved, move_dict) = self.moves_of(idx, &mut moving);
+            let disk = match slot.directory().borrow().clone() {
+                Some(disk) => disk,
+                None if moved.is_empty() && !move_dict => continue,
+                None => Directory::new(self.seed),
             };
             let (mut flagged, mut pages) = (Vec::new(), Vec::new());
             let dict = slot.dictionary().borrow();
@@ -242,7 +259,7 @@ impl PageStore {
                 flagged.push((bucket, desc));
                 taken += weight(desc);
             }
-            if flagged.is_empty() {
+            if flagged.is_empty() && moved.is_empty() && !move_dict {
                 continue;
             }
             let remote = slot.remote_directory().borrow().clone();
@@ -253,6 +270,8 @@ impl PageStore {
                 pages,
                 remote: remote.unwrap_or_else(|| Directory::new(self.seed)),
                 staged: BTreeMap::new(),
+                moved,
+                move_dict,
             });
         }
         Ok((work, cut))
