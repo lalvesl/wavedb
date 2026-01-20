@@ -20,6 +20,8 @@ pub const BATCH: u64 = 32;
 pub struct Headers<'a> {
     remote: &'a Remote,
     seen: BTreeMap<u64, Option<(FileHeader, u64)>>,
+    /// The lowest number asked for — not merely fetched along with one.
+    lowest: u64,
 }
 
 impl<'a> Headers<'a> {
@@ -27,6 +29,7 @@ impl<'a> Headers<'a> {
         Self {
             remote,
             seen: BTreeMap::new(),
+            lowest: u64::MAX,
         }
     }
 
@@ -36,6 +39,7 @@ impl<'a> Headers<'a> {
         &mut self,
         file: u64,
     ) -> StorageResult<Option<(FileHeader, u64)>> {
+        self.lowest = self.lowest.min(file);
         if !self.seen.contains_key(&file) {
             let from = file.saturating_sub(BATCH - 1);
             let remote = self.remote;
@@ -55,6 +59,12 @@ impl<'a> Headers<'a> {
             self.seen.extend(read);
         }
         Ok(self.seen.get(&file).cloned().flatten())
+    }
+
+    /// The lowest file whose header was asked for: what a recovery reads
+    /// stops there, so the files below it are never read (RFC 0070 §8).
+    pub const fn lowest_asked(&self) -> u64 {
+        self.lowest
     }
 
     /// Whether `top` ends a whole upload: its group's files all present and
