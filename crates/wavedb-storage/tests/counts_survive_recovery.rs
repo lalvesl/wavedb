@@ -16,7 +16,7 @@
 //!
 //! The store is dropped **without a checkpoint**, so the most recent batches
 //! exist only in the journal and recovery has to replay them. Earlier batches
-//! are forced out to `data.bin` first, so the walk after reopen crosses both
+//! are forced out to the data files first, so the walk after reopen crosses both
 //! recovery paths — settled pages and replayed frames — inside one chain.
 //!
 //! ## Why the check runs through the public surface
@@ -96,7 +96,7 @@ fn a_crash_cannot_leave_the_counts_disagreeing_with_the_segments() {
         let col = Entry::collection(pivot);
 
         // Phase 1 — grow past several splits, then force everything out to
-        // `data.bin`. These records recover from settled pages.
+        // the data files. These records recover from settled pages.
         let mut ids = Vec::new();
         for n in 0..24u32 {
             ids.push(col.insert(&db, &entry(n)).await.unwrap());
