@@ -6,7 +6,7 @@
 //! primitives (concrete types, no traits, no `dyn`):
 //!
 //! - **native** — [`PageStore`](wavedb_storage::PageStore): journal +
-//!   `data.bin`. `apply` fsyncs the journal before returning, so a mirrored
+//!   data files. `apply` fsyncs the journal before returning, so a mirrored
 //!   write is durable at the moment the op resolves — read-your-writes needs
 //!   no extra flush. The default location is created automatically under the
 //!   platform cache base (`$XDG_CACHE_HOME` / `~/.cache` on unix,
@@ -18,7 +18,7 @@
 //!   store), database named exactly `app` (the developer chooses the whole
 //!   name — no forced prefix, mirroring the native `<app>` leaf).
 //!
-//! One open native cache per app directory: `data.bin` is locked while open,
+//! One open native cache per app directory: its files are locked while open,
 //! so a second `Db::open` of the same app is `EngineBusy`. A node opens its
 //! own directory and could share the process; the deployment shape runs it
 //! in its own anyway.
