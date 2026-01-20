@@ -36,7 +36,10 @@ fn every_settled_record_reads_back_from_the_object_store() {
     assert!(done.files >= 1 && done.bytes > 0, "{done:?}");
     upload_all(&s);
     assert_uploaded(&s, |k| Some(record(k, 0)));
-    assert_eq!(fx.newest_file(), Some(format!("db/1seg/{:016x}", !0u64)));
+    assert_eq!(
+        fx.newest_file(),
+        Some(format!("db/shards/00/1seg/{:016x}", !0u64))
+    );
 }
 
 /// The flagged disk page is the whole truth about its bucket, so a record
