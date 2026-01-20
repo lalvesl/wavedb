@@ -19,7 +19,7 @@
 //!    ends — a bucket no header names was never written: it is empty.
 //!    Headers are fetched a batch at a time, so the walk mostly finds the
 //!    next one already read.
-//! 3. **Adoption.** The store opens with the recovered seed; every bucket
+//! 3. **Adoption.** The store opens with the `MANIFEST`'s seed; every bucket
 //!    is evicted, so reads go to the object store and the disk — or, in
 //!    object mode, RAM — fills again as a cache. The dictionaries come
 //!    down, and with a disk, one snapshot and one checkpoint make it a root
@@ -28,12 +28,10 @@
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use futures::future::try_join_all;
 
 use crate::block::BlockDescriptor;
-use crate::block_file::BlockFile;
 use crate::dictionary::Dictionary;
 use crate::directory::Directory;
 use crate::error::{StorageError, StorageResult};
@@ -45,8 +43,6 @@ use crate::remote::{FILE_BLOCKS, Remote};
 
 /// What a recovery found in the object store.
 pub struct Found {
-    /// `None` when no cut was ever uploaded: a database still to create.
-    pub seed: Option<[u64; 4]>,
     pub chain: Chain,
     pub types: Vec<FoundType>,
 }
@@ -58,37 +54,22 @@ pub struct FoundType {
     pub dict: Option<(BlockDescriptor, Vec<u8>)>,
 }
 
-/// Open `data.bin` for a store, recovering from the object store first
-/// when the store is object-backed and its disk holds no database yet.
+/// What a store's object store holds, recovered when the store is
+/// object-backed and its disk holds no data file yet — a database to open
+/// from its files rather than create over them. `None` otherwise.
 ///
 /// # Errors
-/// [`StorageError::ModeMismatch`] for a mode other than the file's; the
-/// recovery's and the file's faults.
-pub fn open_file(
-    dir: &Path,
+/// The recovery's faults.
+pub fn found_for(
+    had_files: bool,
     options: &StoreOptions,
-) -> StorageResult<(BlockFile, Option<Found>)> {
-    let path = dir.join("data.bin");
-    let found = match &options.remote {
-        Some(remote) if !path.exists() => {
-            futures::executor::block_on(recover(remote))?
+) -> StorageResult<Option<Found>> {
+    match &options.remote {
+        Some(remote) if !had_files => {
+            futures::executor::block_on(recover(remote))
         }
-        _ => None,
-    };
-    let object_backed = options.remote.is_some();
-    let seed = found.as_ref().and_then(|f| f.seed);
-    let file = BlockFile::open_as(
-        path,
-        options.page_cache_bytes,
-        object_backed,
-        seed,
-    )?;
-    if file.object_backed() != object_backed {
-        return Err(StorageError::ModeMismatch {
-            object_backed: file.object_backed(),
-        });
+        _ => Ok(None),
     }
-    Ok((file, found))
 }
 
 /// What `remote` holds, or `None` when it holds no file at all.
@@ -104,30 +85,19 @@ pub async fn recover(remote: &Remote) -> StorageResult<Option<Found>> {
     // is never written again.
     let past = (newest + 1) * FILE_BLOCKS;
     let mut headers = Headers::new(remote);
-    let mut top = Some(newest);
-    let top = loop {
-        let Some(n) = top else {
-            // Files, but no cut among them: the first uploads never
-            // finished one, so nothing was ever recoverable.
-            let chain = Chain {
-                end: past,
-                ..Chain::default()
-            };
-            return Ok(Some(Found {
-                seed: None,
-                chain,
-                types: Vec::new(),
-            }));
+    let Some(top) = newest_cut(&mut headers, newest).await? else {
+        // Files, but no cut among them: the first uploads never finished
+        // one, so nothing was ever recoverable.
+        let chain = Chain {
+            end: past,
+            ..Chain::default()
         };
-        if let Some(header) = headers.get(n).await?
-            && header.0.cut
-            && headers.whole(&header).await?
-        {
-            break header;
-        }
-        top = n.checked_sub(1);
+        return Ok(Some(Found {
+            chain,
+            types: Vec::new(),
+        }));
     };
-    let (seed, start) = (top.0.seed, top.0.start);
+    let start = top.0.start;
     let mut chain = Chain {
         end: top.0.end.max(past),
         start,
@@ -159,11 +129,29 @@ pub async fn recover(remote: &Remote) -> StorageResult<Option<Found>> {
         },
     ))
     .await?;
-    Ok(Some(Found {
-        seed: Some(seed),
-        chain,
-        types,
-    }))
+    Ok(Some(Found { chain, types }))
+}
+
+/// The newest whole cut at or below file `newest`, trying each number down
+/// — what a recovery takes.
+///
+/// # Errors
+/// Object-store faults.
+pub async fn newest_cut(
+    headers: &mut Headers<'_>,
+    newest: u64,
+) -> StorageResult<Option<(FileHeader, u64)>> {
+    let mut top = Some(newest);
+    while let Some(n) = top {
+        if let Some(header) = headers.get(n).await?
+            && header.0.cut
+            && headers.whole(&header).await?
+        {
+            return Ok(Some(header));
+        }
+        top = n.checked_sub(1);
+    }
+    Ok(None)
 }
 
 /// One type's directory being gathered.
@@ -177,7 +165,7 @@ struct Gathering {
 
 /// Every type's remote directory and dictionary descriptor, gathered from
 /// `top` back along the types' chains.
-async fn walk(
+pub async fn walk(
     headers: &mut Headers<'_>,
     top: &FileHeader,
 ) -> StorageResult<Vec<(u64, Vec<BlockDescriptor>, Option<BlockDescriptor>)>> {
@@ -362,7 +350,6 @@ mod tests {
             prev_hash: prev.1,
             start: 0,
             end: file * FILE_BLOCKS + HEADER_BLOCKS + 1,
-            seed: [1, 2, 3, 4],
             types: vec![TypeEntry {
                 struct_hash: SH,
                 buckets: 2,
@@ -412,7 +399,6 @@ mod tests {
         let t = &found.types[0];
         assert_eq!(t.remote[0].raw(), page(2), "the newest entry wins");
         assert_eq!(t.remote[1], BlockDescriptor::EMPTY, "never written");
-        assert_eq!(found.seed, Some([1, 2, 3, 4]));
         assert!(found.chain.end >= 3 * FILE_BLOCKS, "past every file");
     }
 
