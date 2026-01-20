@@ -111,7 +111,7 @@ fn a_stray_object_is_never_the_newest_file() {
     }
     let bucket = fx.server.bucket();
     let newest = fx.newest_number();
-    let key = |n: u64| format!("db/1seg/{:016x}", !n);
+    let key = |n: u64| format!("db/shards/00/1seg/{:016x}", !n);
     block_on(async {
         let copy = bucket.get(&key(newest), None).await.unwrap().unwrap();
         bucket
