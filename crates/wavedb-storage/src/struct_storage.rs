@@ -207,6 +207,17 @@ pub trait StorageRegistry {
 pub static BPTREE_NODE_STORAGE: StructStorage =
     StructStorage::without_compression(BPTREE_NODE_STRUCT_HASH).resident();
 
+/// One slot per registered type, the `BpTree`-node slot included, sorted
+/// by `STRUCT_HASH`. Generated Pivot types of identical shape may share a
+/// hash; they also share pages today, so one slot serves the hash — dedup.
+pub(crate) fn slots_of(types: &[&'static StructStorage]) -> Vec<TypeSlot> {
+    let mut declared: Vec<&'static StructStorage> = types.to_vec();
+    declared.push(&BPTREE_NODE_STORAGE);
+    declared.sort_by_key(|s| s.struct_hash());
+    declared.dedup_by_key(|s| s.struct_hash());
+    declared.into_iter().map(TypeSlot::new).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BPTREE_NODE_STORAGE, StructStorage, TypeSlot};
