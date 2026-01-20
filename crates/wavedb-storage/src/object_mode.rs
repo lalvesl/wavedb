@@ -2,7 +2,7 @@
 //!
 //! Its pages live in the object store, and what it holds besides — the
 //! pages not uploaded yet and those it caches — is laid out in RAM exactly
-//! as `data.bin` would lay it out (`crate::backing`). There is no journal:
+//! as data files on disk would lay it out (`crate::backing`). There is no journal:
 //! **a write is durable once an upload has carried it.** The store uploads
 //! when it holds a file's worth of pages or when its oldest write has
 //! waited the caller's interval ([`unuploaded_for`](PageStore::unuploaded_for)),
@@ -20,15 +20,20 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use crate::block::BlockAllocator;
-use crate::block_file::{BlockFile, RESERVED_BLOCKS, random_seed};
+use crate::block_file::BlockFile;
 use crate::error::{StorageError, StorageResult};
-use crate::page_store::{PageStore, StoreOptions, slots_of};
+use crate::manifest::Manifest;
+use crate::page_store::{PageStore, StoreOptions};
 use crate::struct_storage::StructStorage;
+use crate::struct_storage::slots_of;
 
 impl PageStore {
     /// Open the database kept in `options.remote`, with no disk: recovered
     /// from its files, every page left in the object store until a read or
     /// a write wants it, and created empty when the prefix holds none.
+    ///
+    /// The prefix holds a database of **one** shard: its `MANIFEST` and
+    /// `shards/00/` ([`crate::shard_set`]).
     ///
     /// One writer per prefix is the caller's to arrange — there is no lock.
     /// A second writer is not silent, though: every file is created only if
@@ -44,14 +49,28 @@ impl PageStore {
     ) -> StorageResult<Self> {
         let remote = options
             .remote
+            .as_ref()
+            .ok_or(StorageError::NotObjectBacked)?;
+        let facts = crate::manifest::resolve(None, Some(remote), 1)?;
+        let options = crate::shard_set::only_shard(&facts, options)?;
+        Self::open_object_shard(types, options, &facts)
+    }
+
+    /// Open one shard of the database `facts` describe in object mode — its
+    /// own prefix in `options.remote`.
+    pub(crate) fn open_object_shard(
+        types: &[&'static StructStorage],
+        options: StoreOptions,
+        facts: &Manifest,
+    ) -> StorageResult<Self> {
+        let remote = options
+            .remote
             .clone()
             .ok_or(StorageError::NotObjectBacked)?;
         let found =
             futures::executor::block_on(crate::recover::recover(&remote))?;
-        let seed = found.as_ref().and_then(|f| f.seed);
-        let file = BlockFile::in_memory(seed.unwrap_or_else(random_seed));
-        let mut alloc = BlockAllocator::new();
-        alloc.alloc(RESERVED_BLOCKS);
+        let file = BlockFile::in_memory(facts.seed());
+        let alloc = BlockAllocator::new(options.file_bytes);
         let store = Self::assemble(
             file,
             None,
