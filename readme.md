@@ -32,7 +32,7 @@ Four properties define it:
 On top of that: a **permission manager** for sharing data between users and
 tenants (tenant-only / public / a specific list of tenants / a group — groups
 deferred), and a storage layer that adapts to its compile target — **native**
-builds (Android, Windows, Linux, macOS, iOS) use the filesystem (`data.bin` +
+builds (Android, Windows, Linux, macOS, iOS) use the filesystem (data files +
 journal); **web** builds use **IndexedDB directly** (no journal needed).
 
 > This file is the **idea + quickstart**. Every detailed mechanism lives in the
@@ -437,7 +437,7 @@ The full client API and object lifecycle live in
 Tooling: `wavedb-examples`, `wavedb-bench`, `wavedb-test-cluster`.
 
 A cold/history tier (slow-node) was **removed** — history is single-tier in
-`data.bin`, unbounded growth accepted for now. A multi-node cluster and its
+the data files, unbounded growth accepted for now. A multi-node cluster and its
 monitors are **deferred**; those crates are intentionally absent.
 
 ---
@@ -469,9 +469,8 @@ design below is being rebuilt from the ground up. These docs describe the
 **target** architecture, not shipped code.
 
 **No format versioning, no migrations — by policy.** WaveDB does not exist yet,
-so no energy goes into tracking on-disk history: the superblock's
-`FORMAT_VERSION` is **pinned at `1`** and every layout (superblock, journal
+so no energy goes into tracking on-disk history: the `MANIFEST`'s
+`FORMAT_VERSION` is **pinned at `1`** and every layout (`MANIFEST`, journal
 frames, pages, wire encodings, `STRUCT_HASH` inputs) may change freely between
-commits with no bump, no changelog, and no migration path. A `data.bin` written
-by an older build is simply unsupported — delete it (journal replay rebuilds
-the pages) or start fresh. Version discipline begins at the first release.
+commits with no bump, no changelog, and no migration path. A database written
+by an older build is simply unsupported — start fresh. Version discipline begins at the first release.
