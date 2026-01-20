@@ -37,7 +37,7 @@
 //!
 //! ## Recovery model
 //!
-//! `data.bin` is a **deterministic projection of the journal**; recovery
+//! The data files are a **deterministic projection of the journal**; recovery
 //! roots in the newest valid `Commit` frame (journal-rooted — see
 //! [`PageStore::commit_journal`] and the `commit` module docs). On
 //! [`open`](PageStore::open): with a durable `Commit`, the
@@ -45,7 +45,7 @@
 //! names, the caches start
 //! **empty** (reads fall through to the pages), and only the uncovered
 //! `Batch` frames replay; without one (first generation), the data file is
-//! truncated back to its superblock and every committed batch replays
+//! cut back to nothing and every committed batch replays
 //! through the same commit + settle path a live `apply` uses. Either way a
 //! crash loses nothing that was acked. Settle writes each record's **newest
 //! entry** in its log and skips the copies it superseded, which makes it
@@ -68,7 +68,8 @@ use crate::block::BlockAllocator;
 use crate::block_file::BlockFile;
 use crate::directory::Directory;
 use crate::error::StorageResult;
-use crate::struct_storage::{BPTREE_NODE_STORAGE, StructStorage, TypeSlot};
+use crate::manifest::Manifest;
+use crate::struct_storage::{StructStorage, TypeSlot};
 
 /// How many blocks a bucket should hold. It is a **target**, not a limit: a
 /// bucket over it is split when its turn comes round, and simply spans more
@@ -77,7 +78,7 @@ const DEFAULT_TARGET_BLOCKS_PER_BUCKET: u64 = 8; // 32 KiB
 
 /// The native, page-backed [`Store`](wavedb_core::Store).
 ///
-/// One instance per data directory: the directory's `data.bin` is locked
+/// One instance per data directory: the directory's files are locked
 /// while it is open. Per-type state lives in the store's own slots, one per
 /// [`StructStorage`] registered at [`open`](Self::open), so stores over
 /// different directories share nothing and can be open side by side.
@@ -118,14 +119,18 @@ pub struct PageStore {
     pub(crate) barrier: Option<crate::barrier::Barrier>,
     /// Where a compaction is between its steps (RFC 0069).
     pub(crate) compaction: std::cell::Cell<crate::compact::Phase>,
+    /// Blocks cut off the data files since open ([`reclaim`](Self::reclaim)).
+    pub(crate) reclaimed: std::cell::Cell<u64>,
+    /// The free share that makes a data file worth emptying (RFC 0071 §7).
+    pub(crate) victim_free_percent: u8,
     /// The object store's side, when the pages live there (RFC 0070).
     pub(crate) object: Option<crate::remote::ObjectState>,
 }
 
-/// What a store with a disk keeps there besides `data.bin`.
+/// What a store with a disk keeps there besides its data files.
 #[derive(Debug)]
 pub(crate) struct Disk {
-    /// The directory holding `data.bin` + the journal chain (rotation
+    /// The directory holding the data files + the journal chain (rotation
     /// creates new journal files here).
     pub(crate) dir: std::path::PathBuf,
     pub(crate) journal: RefCell<crate::journal::Journal>,
@@ -133,7 +138,7 @@ pub(crate) struct Disk {
 
 impl PageStore {
     /// Open (or create) a node store rooted at directory `dir`, holding
-    /// `data.bin` and `journal.log`, serving exactly the listed `types` (each
+    /// its `MANIFEST` and `shards/00`, serving exactly the listed `types` (each
     /// a `#[wavedb]`-generated declaration — `T::storage_entries()`). The
     /// reserved `BpTree`-node slot is always included. Replays the journal to
     /// rebuild every slot's cache and pages.
@@ -154,27 +159,61 @@ impl PageStore {
     /// [`open`](Self::open), with the durability question answered explicitly
     /// (RFC 0061). `StoreOptions::default()` is exactly [`open`](Self::open).
     ///
+    /// `dir` is a database of **one** shard: its `MANIFEST` and
+    /// `shards/00` ([`crate::shard_set`]), created when missing.
+    ///
     /// # Errors
-    /// The same faults as [`open`](Self::open).
+    /// The same faults as [`open`](Self::open);
+    /// [`StorageError::Corrupt`](crate::StorageError::Corrupt) for a database
+    /// of more shards.
     pub fn open_with(
         dir: impl AsRef<Path>,
         types: &[&'static StructStorage],
         options: StoreOptions,
     ) -> StorageResult<Self> {
         let dir = dir.as_ref();
-        std::fs::create_dir_all(dir)?;
+        let facts =
+            crate::manifest::resolve(Some(dir), options.remote.as_ref(), 1)?;
+        let options = crate::shard_set::only_shard(&facts, options)?;
+        Self::open_shard(
+            &crate::shard_set::shard_dir(dir, 0),
+            types,
+            options,
+            &facts,
+        )
+    }
 
-        let data_bin_existed = dir.join("data.bin").exists();
+    /// Open (or create) one shard of the database `facts` describe, in
+    /// `dir`: recover from its journals and its files (RFC 0071), and from
+    /// the object store when the disk holds nothing of an object-backed one.
+    pub(crate) fn open_shard(
+        dir: &Path,
+        types: &[&'static StructStorage],
+        options: StoreOptions,
+        facts: &Manifest,
+    ) -> StorageResult<Self> {
+        let file = BlockFile::open(
+            dir,
+            facts.seed(),
+            facts.object_backed(),
+            options.page_cache_bytes,
+        )?;
+        let had_files = file.has_files();
         // An object-backed store with no disk yet may have a database in its
         // object store already: it is recovered, never created over.
-        let (file, found) = crate::recover::open_file(dir, &options)?;
-        let types = slots_of(types);
+        let found = crate::recover::found_for(had_files, &options)?;
+        let types = crate::struct_storage::slots_of(types);
 
         // Recover from the journal chain: the newest `Commit` frame roots
         // the directories/dictionaries/allocator (caches stay empty — reads
         // fall through to the pages); every uncovered `Batch` replays below.
-        let recovered =
-            crate::commit::restore(dir, data_bin_existed, &file, &types)?;
+        let recovered = crate::commit::restore(
+            dir,
+            had_files,
+            &file,
+            &types,
+            options.file_bytes,
+        )?;
         let disk = Disk {
             dir: dir.to_path_buf(),
             journal: RefCell::new(recovered.journal),
@@ -192,7 +231,7 @@ impl PageStore {
             *object.chain.borrow_mut() =
                 crate::file_header::Chain::from_record(chain);
         }
-        store.prepare_object(data_bin_existed)?;
+        store.prepare_object(had_files)?;
         // Rebuild the logs in journal order, no re-journal, then settle them
         // into the pages as the live engine would have.
         for batch in &recovered.replay {
@@ -239,6 +278,8 @@ impl PageStore {
             record_cache_bytes: options.record_cache_bytes,
             barrier: None,
             compaction: std::cell::Cell::default(),
+            reclaimed: std::cell::Cell::default(),
+            victim_free_percent: options.victim_free_percent,
             object: options.remote.map(crate::remote::ObjectState::new),
         }
     }
@@ -296,17 +337,6 @@ impl PageStore {
             .ok()
             .and_then(|i| self.types.get(i))
     }
-}
-
-/// One slot per registered type, the `BpTree`-node slot included, sorted
-/// by `STRUCT_HASH`. Generated Pivot types of identical shape may share a
-/// hash; they also share pages today, so one slot serves the hash — dedup.
-pub(crate) fn slots_of(types: &[&'static StructStorage]) -> Vec<TypeSlot> {
-    let mut declared: Vec<&'static StructStorage> = types.to_vec();
-    declared.push(&BPTREE_NODE_STORAGE);
-    declared.sort_by_key(|s| s.struct_hash());
-    declared.dedup_by_key(|s| s.struct_hash());
-    declared.into_iter().map(TypeSlot::new).collect()
 }
 
 #[cfg(test)]
@@ -497,7 +527,7 @@ mod tests {
 
     /// A checkpoint costs **one** write and **one** barrier, counting both
     /// files: the pages, the dictionary and the round's descriptor delta share
-    /// the window write and its `data.bin` sync, and the `Commit` frame takes
+    /// the window write and its data-file sync, and the `Commit` frame takes
     /// no barrier of its own — the next ordinary write carries it (RFC 0046).
     ///
     /// And nothing pays a barrier on that checkpoint's behalf afterwards: the
@@ -517,7 +547,7 @@ mod tests {
             s.commit_journal().unwrap();
             let (_, w, sy) = s.file.io().snapshot();
             assert_eq!(w - writes, 1, "pages + delta ride one window write");
-            assert_eq!(sy - syncs, 1, "one `data.bin` barrier…");
+            assert_eq!(sy - syncs, 1, "one data-file barrier…");
             assert_eq!(
                 s.journal_barriers(),
                 0,
@@ -541,7 +571,7 @@ mod tests {
             s.commit_journal().unwrap();
             let (_, w2, sy2) = s.file.io().snapshot();
             assert_eq!(w2 - w, 1, "one window write again");
-            assert_eq!(sy2 - sy, 1, "one `data.bin` barrier again");
+            assert_eq!(sy2 - sy, 1, "one data-file barrier again");
             assert_eq!(
                 s.journal_barriers(),
                 0,
@@ -1222,9 +1252,9 @@ mod tests {
         });
     }
 
-    /// The journal files under a store dir, sorted by ts.
+    /// The journal files of a one-shard store at `dir`, sorted by ts.
     fn journals(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-        crate::journal::scan(dir)
+        crate::journal::scan(&crate::shard_set::shard_dir(dir, 0))
             .unwrap()
             .into_iter()
             .map(|(_, p)| p)
@@ -1315,7 +1345,7 @@ mod tests {
     fn covered_journal_left_behind_is_skipped_and_cleaned() {
         // Simulates a crash between the Commit frame and the old journal's
         // delete: the covered journal is still on disk; recovery must skip
-        // it (its frames are already in data.bin) and clean it up.
+        // it (its frames are already in the data files) and clean it up.
         let d = tempfile::tempdir().unwrap();
         block_on(async {
             let (old_path, old_bytes) = {
@@ -1438,6 +1468,7 @@ mod tests {
             s.apply(&[Write::Put(nonunique(1), rec(SH, b"x"))])
                 .await
                 .unwrap();
+            s.drain().unwrap(); // a data file, which only a journal roots
         });
         for j in journals(d.path()) {
             std::fs::remove_file(j).unwrap();
