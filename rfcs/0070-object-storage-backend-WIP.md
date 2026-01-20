@@ -1,6 +1,6 @@
 # RFC 0070 — Object storage as a page backend
 
-- **Status:** In progress — opened 2026-10-10. Phases 1–6 done (descriptor, test store, S3 client; disk + object: the flag, the remote directories, the upload, reopen from disk; eviction from disk and the read that falls back to the object store; recovery from the object store alone; object mode, with no disk and no journal); phase 7 next.
+- **Status:** In progress — opened 2026-10-10. Phases 1–7 done (descriptor, test store, S3 client; disk + object: the flag, the remote directories, the upload, reopen from disk; eviction from disk and the read that falls back to the object store; recovery from the object store alone; object mode, with no disk and no journal; compaction by file). Left: converting from or to disk mode.
 - **Supersedes:** [RFC 0059](0059-object-storage-capacity-tier-PLANNED.md) §2–§5
   (the remote descriptor bit and the object per bucket). 0059 §1, the archive
   lane, stays and is independent of this.
@@ -12,19 +12,19 @@
   generations), [RFC 0061](0061-relaxed-durability-window.md) (group commit),
   [RFC 0067](0067-thread-per-core-shards-WIP.md) (a shard is a database),
   [RFC 0068](0068-record-cache-as-a-log-WIP.md) (the record log),
-  [RFC 0069](0069-compaction-into-the-holes.md) (compaction and its triggers)
+  [RFC 0069](0069-compaction-into-the-holes-DEPRECATED.md) (compaction and its triggers)
 
 ## Summary
 
 A database stores its pages in one of three ways. Disk and disk + object
-are fixed when the database is created and recorded in each shard's
-superblock beside the hash seed (opening it the other way is
+are fixed when the database is created and recorded in its `MANIFEST`
+beside the hash seed (RFC 0071 §2; opening it the other way is
 `StorageError::ModeMismatch`); disk + object and object hold the same
 files, and a database closed in one opens in the other (§9):
 
 | Mode | Pages live in | Disk is | Journal |
 |------|---------------|---------|---------|
-| **disk** | `data.bin` | the store | local, fsync |
+| **disk** | the data files (RFC 0071) | the store | local, fsync |
 | **disk + object** | the object store | a **cache** of it, plus the pages not uploaded yet | local, fsync |
 | **object** | the object store | absent — RAM caches | none: a write is durable once uploaded (§9) |
 
@@ -74,7 +74,7 @@ to the address (32 PiB) and to the flag.
 
 ```rust
 TypeSlot {
-    disk:   Directory,          // 32 KiB pages in data.bin
+    disk:   Directory,          // 32 KiB pages in the data files
     remote: Option<Directory>,  // 128 KiB pages in the object store
 }
 ```
@@ -218,17 +218,21 @@ starts on the worker and moves to the helper when measurement says so.
   instead of more PUTs and objects). Built in phase 5 (`recover.rs`):
   - **Every header names every type** the object store holds: its bucket
     count, its dictionary's remote descriptor, and `last` — the newest
-    earlier file with entries for it. The header also carries the hash
-    seed, `start` (`first_file`), the remote end, its own number, its
+    earlier file with entries for it. The header also carries
+    `start` (`first_file`), the remote end, its own number, its
     upload (`group`, `group_files`), and `prev` with the hash of that
     file's header.
   - **Spare room restates old entries**: after its own pages, a header
     spends what is left (typically ~31 KiB, ~2 600 entries) on the type
-    mentioned longest ago (smallest `last`), from a **rotating cursor** —
+    whose last whole rotation is oldest (one that never finished one since
+    the store opened goes first), from a **rotating cursor** —
     not at random, which would need `(B/S)·ln B` files to cover `B` buckets
     instead of `B/S` (1 TB: ~49 000 files against ~3 100). Every type keeps
     appearing near the tail, so a recovery reads a bounded number of
-    headers.
+    headers. (Phase 5 ordered by smallest `last`, but a type written in
+    every upload is mentioned in every header and could lose every tie, its
+    untouched buckets never restated and the horizon stuck below them;
+    phase 7 orders by rotation, `Chain::rotated`, RAM only.)
   - **The newest whole cut**: `LIST 1seg/ max-keys=1` names the highest
     file. It is taken only if its upload ends a cut (§9) and is whole —
     every file of the group present, linked by header hash, it the last of
@@ -240,14 +244,16 @@ starts on the worker and moves to the helper when measurement says so.
     type's `last` points at; the first value seen for a bucket is its newest.
     A type is done when every bucket is known or its chain ends (a bucket no
     header names was never written: empty). Headers come 32 per round.
-  - **Adoption**: an object-backed store opening with no `data.bin` asks the
+  - **Adoption**: an object-backed store opening with no data file asks the
     object store first, and if it holds files the database is recovered —
-    never created over. The store opens with the recovered seed, every disk
+    never created over. The store opens with the `MANIFEST`'s seed (the object store keeps a
+    copy, RFC 0071 §2), every disk
     bucket evicted (reads go to the object store, the disk refills as a
     cache), the dictionaries written to disk, then one snapshot and one
     checkpoint make the disk a root of its own.
-  - **The recovery horizon** is the lowest file such a walk reads a header
-    of. Compaction by file (phase 7) deletes only below it.
+  - **The recovery horizon** is the lowest file a recovery asks a header
+    of — the cut's group, the file before it whose hash it names, and the
+    walk. Compaction by file (§8) deletes only below it.
   - In disk + object mode, losing the disk loses what was not uploaded yet
     (the flagged pages and the journal); in object mode a crash loses what
     was not uploaded either, which `upload_interval` bounds (§9).
@@ -265,7 +271,7 @@ Decided 2026-10-10, built in phase 4:
   shard). Past it, the coldest uploaded pages leave the disk down to nine
   tenths of the share, and the ceiling trigger then compacts the room they
   left out of the file. Eviction frees runs; compaction is what shrinks
-  `data.bin`.
+  the data files.
 - **Cold is least recently used**: a `u32` stamp per disk bucket, in RAM
   (`evict::Heat`), moved by every page read and every page a settle round
   writes or a restore brings back. Its clock halves every stamp when it
@@ -294,21 +300,52 @@ Decided 2026-10-10, built in phase 4:
 
 ### 8. Compaction deletes files
 
-The object store cannot reuse a hole inside an object, so space comes back
-by deleting whole files:
+The object store cannot cut an object, so space comes back by deleting
+whole files. Built in phase 7 (`remote_compact.rs`), after RFC 0071 gave the
+disk the same model: files named by address, live pages carried forward,
+a file deleted once nothing needs it.
 
-- **One counter per file, no allocator.** A `Vec<u32>` of live blocks per
-  file (`file − first_file`), built at open by scanning the remote
-  directories, increased by an upload, decreased when a page is superseded.
-  It never decides where to write — writing is always at the end.
-- A file below the 0069 free share has its live pages fetched (one GET of the
-  whole file) and written into the current upload; after the two sealing
-  checkpoints of 0069 nothing names it, and it is DELETEd. The next header
-  carries the advanced `first_file`.
-- **Only files below the recovery horizon are deleted** (§6): the lowest
-  file a recovery from the tail would read a header of. Below it, every
-  entry a header holds has been restated nearer the tail, so its header is
-  never read again.
+- **Deletable**: a file below the **horizon** (§6) that **no live page is
+  in** — not in the store's remote directories, not in what a recovery from
+  the object store would rebuild today (the two differ until a cut carries
+  the store's state), and, with a disk, not in what the disk's recovery
+  roots name: the newest checkpoint's remote directories and the one's
+  before while its frame is unproven (`ObjectState::rooted`, recorded where
+  the allocator protects its runs, RFC 0047).
+- **Found by running a recovery**, not by keeping state: `survey` lists the
+  newest file, finds the newest whole cut, walks the chains and reports the
+  lowest header it asked for and every file the rebuilt directories name.
+  GETs and one LIST per pass, no new object, no new PUT. A file's live pages
+  only leave it and the horizon only rises, so a file found deletable stays
+  deletable.
+- **The upload turn is held** throughout: no upload is in flight while the
+  compaction looks, so no cut taken before it can land after it naming a
+  file it deleted — and the remote directories do not change meanwhile.
+- **Mostly free files are carried forward**: below the horizon, a file
+  whose live pages are less than `100 − victim_free_percent` % of its
+  nominal 8 MiB (with 50, under 4 MiB — which takes in the small files an
+  upload interval leaves) has its pages restaged into uploads the
+  compaction makes itself (`SlotUpload::moved`, up to `MOVE_BLOCKS`, 8 MiB,
+  per upload), its dictionary with them; once those stand as cuts — and,
+  with a disk, after two checkpoints the compaction takes — the files are
+  deleted in the same pass.
+- **DELETEs are blind**: every number below the horizon that nothing names,
+  up to 32 at a time. A DELETE costs nothing on S3 and a LIST costs what a
+  PUT does, so listing first would cost more than deleting a number with no
+  file; numbers already deleted are remembered in RAM
+  (`ObjectState::deleted`) and deleted once more after a reopen. The
+  chain's `start` (the oldest live file) advances and rides the next
+  header.
+- **A read across a deletion**: a read whose page was carried forward and
+  whose file was deleted while its GET was out fails once, finds the
+  descriptor moved, and reads again at the new one.
+- **The node's triggers** are 0069's, weighed against `remote_space()` —
+  every file not deleted at its nominal 8 MiB, free whatever is not a live
+  page — once a minute (`REMOTE_CHECK_EVERY`: weighing walks every remote
+  directory). The size triggers need `Maintenance::object_compact_free_bytes`
+  free (512 MiB, 64 files) and as much again after each compaction: at a
+  10 s upload interval, a compaction per ~11 minutes of steady writes at
+  most, each a LIST, a few header GETs and a PUT or two per 8 MiB carried.
 
 ### 9. Object mode
 
@@ -318,7 +355,7 @@ shard, and a lease a PUT per renewal; neither buys what object mode is for.
 Built in phase 6 (`object_mode.rs`, `backing.rs`):
 
 - **No disk at all.** `PageStore::open_object` (`open_object_shards`, and
-  `Server::object_mode` on a node) lays out what would be `data.bin` in RAM
+  `Server::object_mode` on a node) lays out what would be the data files in RAM
   (`Backing::Memory`, 1 MiB chunks: growing never copies, a truncation
   gives whole chunks back). The settle rounds, the flag, the upload, the
   eviction and the compaction are the disk + object ones, unchanged. What a
@@ -370,7 +407,8 @@ stay once a read or a write brings them back.
 
 ### 11. One writer per prefix
 
-The lock on `data.bin` makes a second open `EngineBusy`. Object mode has no
+The lock on each data file and journal makes a second open
+`EngineBusy`. Object mode has no
 such lock, and **no lease** (decided 2026-10-10): running one node per
 prefix is the deployment's to arrange. A second writer is caught, not
 merged: every file is PUT with `If-None-Match: *`, and a file number is
@@ -515,6 +553,19 @@ once and never suspend.
   database reopens in object mode with its own shard count. The node's
   upkeep uploads on the interval below a file's worth, and its close
   uploads the rest (`shard::owned`).
+- **Phase 7** is proved in `tests/remote_compaction.rs`: rewritten files are
+  deleted and every record reads, through the store and after a reopen;
+  a disk + object store compacts and reopens from its disk and from its
+  files alone; small files are carried forward and deleted; a file the
+  last cut names is kept, and a crash after the compaction recovers that
+  cut — the test fails with the cut's names ignored, and with the horizon
+  ignored; a file the disk's checkpoint names is kept, and the store
+  reopened from that checkpoint uploads on — the test fails with the roots
+  ignored. In-crate: the survey's horizon is the lowest header a recovery
+  reads (`remote_compact`), and a type written in every upload still comes
+  round in the restating order — the test fails with the old order
+  (`upload_file`). The node compacts the object store when a trigger is met
+  (`shard::owned`).
 - The test server now counts as started only once it serves a marker
   written into its own root: two servers handed the same free port made
   tests talk to another test's server, now and then.
@@ -529,7 +580,7 @@ once and never suspend.
 | 4 | Eviction from disk (LRU, past the compaction ceiling); the read path falling back to the object store; writes, replays and wanted reads bringing a bucket back — done |
 | 5 | Recovery from the object store alone: chained headers that name every type, spare room restating the oldest entries, the newest whole upload, adoption on open — done |
 | 6 | Object mode: no disk, the pages in RAM until uploaded and as a cache, no journal (a write is durable once uploaded, on bytes or an interval), only cuts recovered, writers fenced by create-only PUTs, navigation resident — done |
-| 7 | Compaction by file, on the 0069 triggers |
+| 7 | Compaction by file: the horizon and the deletable files found by a survey, mostly free files carried forward, blind DELETEs, the disk's roots kept; the restating order by rotation; the node's triggers — done |
 
 ## Open questions
 
