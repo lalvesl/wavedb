@@ -32,6 +32,13 @@ pub struct Maintenance {
     /// past each store's share, the coldest uploaded pages leave it.
     /// Default 1 GiB.
     pub object_ram_bytes: u64,
+    /// Free bytes the object store's size triggers need before compacting
+    /// it (RFC 0070 §8), and need to have grown by again after each
+    /// compaction — counting every file at its nominal 8 MiB, so the small
+    /// files an upload interval leaves count as mostly free. Default
+    /// 512 MiB, 64 files: at a 10 s interval, a compaction per ~11 minutes
+    /// of steady writes at most. The daily trigger ignores it.
+    pub object_compact_free_bytes: u64,
 }
 
 impl Default for Maintenance {
@@ -43,6 +50,7 @@ impl Default for Maintenance {
             upload_after_bytes: 8 << 20, // 8 MiB, about a file
             upload_interval: Some(Duration::from_secs(10)),
             object_ram_bytes: 1 << 30, // 1 GiB
+            object_compact_free_bytes: 512 << 20, // 64 files
         }
     }
 }
