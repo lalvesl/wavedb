@@ -81,7 +81,7 @@ fn collection_walk_and_durable_reopen() {
         pivot
     });
 
-    // Reopen: data.bin is rebuilt from the journal — the same PivotId still
+    // Reopen: the data files are rebuilt from the journal — the same PivotId still
     // reaches the whole collection (roots come from the recovered Pivot record).
     block_on(async {
         let store = open(dir.path());
