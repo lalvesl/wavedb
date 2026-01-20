@@ -14,7 +14,7 @@ pub enum JournalFrame {
 }
 
 /// "Journal `journal_ts` is **done**" — its writes are settled into
-/// `data.bin` — plus where to find the addressing state that makes those
+/// the data files — plus where to find the addressing state that makes those
 /// pages findable.
 ///
 /// The frame is a **pointer**, not the state: the descriptors themselves ride
