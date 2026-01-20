@@ -156,7 +156,6 @@ pub fn finish(
     packed: &mut Packed,
     views: &[TypeView<'_>],
     chain: &mut Chain,
-    seed: [u64; 4],
 ) -> StorageResult<()> {
     let group = packed.files.first().map_or(NO_FILE, |f| f.number);
     let group_files = packed.files.len() as u32;
@@ -171,7 +170,6 @@ pub fn finish(
             prev_hash,
             start: chain.start,
             end: packed.end,
-            seed,
             types: views
                 .iter()
                 .map(|v| TypeEntry {
@@ -207,17 +205,22 @@ pub fn finish(
     Ok(())
 }
 
-/// Spend `header`'s spare room restating entries: the type mentioned
-/// longest ago first, from its rotating cursor, then the next, until the
-/// room runs out or every type had its turn in this header.
+/// Spend `header`'s spare room restating entries: the type whose last
+/// whole rotation is oldest first, from its rotating cursor, then the next,
+/// until the room runs out or every type had its turn in this header.
+///
+/// The order is by rotation, not by mention: a type written in every upload
+/// is always mentioned, yet its untouched buckets are restated only on its
+/// turn — ordered by mention, it could lose every tie for ever, and the
+/// recovery horizon would never pass the files its old entries are in
+/// (RFC 0070 §8). A type that never finished a rotation since the store
+/// opened goes first.
 fn refresh(header: &mut FileHeader, views: &[TypeView<'_>], chain: &mut Chain) {
     let mut spare = HEADER_BYTES.saturating_sub(header.encoded_len());
     let mut order: Vec<usize> = (0..views.len()).collect();
-    // Never mentioned sorts first: `NO_FILE` is the largest number, so map
-    // it below every real one.
     order.sort_by_key(|&i| {
         chain
-            .last
+            .rotated
             .get(&views[i].struct_hash)
             .map_or(0, |&f| f.saturating_add(1))
     });
@@ -239,6 +242,9 @@ fn refresh(header: &mut FileHeader, views: &[TypeView<'_>], chain: &mut Chain) {
                 .changed
                 .push((bucket as u32, view.slots[bucket].raw()));
         }
+        if *cursor + n >= buckets {
+            chain.rotated.insert(view.struct_hash, header.file);
+        }
         *cursor = (*cursor + n) % buckets;
         spare -= n * ITEM_BYTES;
     }
@@ -250,8 +256,6 @@ mod tests {
     use crate::block::{BLOCK_SIZE, BlockDescriptor};
     use crate::file_header::{Chain, FileHeader, NO_FILE};
     use crate::remote::{FILE_BLOCKS, HEADER_BLOCKS, HEADER_BYTES};
-
-    const SEED: [u64; 4] = [1, 2, 3, 4];
 
     fn images(hash: u64, pages: &[(usize, usize)]) -> SlotImages {
         SlotImages {
@@ -313,10 +317,10 @@ mod tests {
         let (nine, other) = (dir(4), dir(1));
         let views = [view(5, &other), view(9, &nine)];
         let mut chain = Chain::default();
-        finish(&mut packed, &views, &mut chain, SEED).unwrap();
+        finish(&mut packed, &views, &mut chain).unwrap();
         let h = header(&packed, 0);
         assert_eq!((h.file, h.group, h.group_files), (0, 0, 1));
-        assert_eq!((h.prev, h.seed, h.end), (NO_FILE, SEED, packed.end));
+        assert_eq!((h.prev, h.end), (NO_FILE, packed.end));
         assert_eq!(h.types.len(), 2, "every type, placed or not");
         let nine_entry = &h.types[1];
         assert_eq!(nine_entry.buckets, 4);
@@ -369,7 +373,7 @@ mod tests {
         let one = dir(1);
         let views: Vec<TypeView<'_>> =
             (0..900).map(|h| view(h, &one)).collect();
-        finish(&mut packed, &views, &mut Chain::default(), SEED).unwrap();
+        finish(&mut packed, &views, &mut Chain::default()).unwrap();
         for i in 0..packed.files.len() {
             assert!(header(&packed, i).encode().len() <= HEADER_BYTES);
         }
@@ -384,7 +388,7 @@ mod tests {
         let mut chain = Chain::default();
         let big = FILE_BLOCKS as usize;
         let mut first = layout(0, &[images(9, &[(0, big), (1, 1)])], 1);
-        finish(&mut first, &views, &mut chain, SEED).unwrap();
+        finish(&mut first, &views, &mut chain).unwrap();
         assert_eq!(first.files.len(), 2);
         let (a, b) = (header(&first, 0), header(&first, 1));
         assert_eq!((b.group, b.group_files, b.prev), (a.file, 2, a.file));
@@ -392,7 +396,7 @@ mod tests {
         assert_eq!(b.prev_hash, a_hash);
 
         let mut second = layout(chain.end, &[images(9, &[(0, 1)])], 1);
-        finish(&mut second, &views, &mut chain, SEED).unwrap();
+        finish(&mut second, &views, &mut chain).unwrap();
         let c = header(&second, 0);
         let b_hash = FileHeader::decode(&first.files[1].bytes).unwrap().1;
         assert_eq!((c.prev, c.prev_hash), (b.file, b_hash));
@@ -404,7 +408,7 @@ mod tests {
     /// mentioned longest ago first — so a type nobody writes still shows
     /// up near the head of the chain.
     #[test]
-    fn spare_room_restates_the_type_mentioned_longest_ago() {
+    fn spare_room_restates_on_from_the_cursor() {
         let (busy, idle) = (dir(4), dir(5_000));
         let views = [view(1, &busy), view(2, &idle)];
         let mut chain = Chain::default();
@@ -412,7 +416,7 @@ mod tests {
         chain.last.insert(2, 10);
         chain.end = 60 * FILE_BLOCKS;
         let mut packed = layout(chain.end, &[images(1, &[(0, 1)])], 2);
-        finish(&mut packed, &views, &mut chain, SEED).unwrap();
+        finish(&mut packed, &views, &mut chain).unwrap();
         let h = header(&packed, 0);
         let idle_entry = &h.types[1];
         assert_eq!(idle_entry.last, 10);
@@ -427,9 +431,32 @@ mod tests {
 
         // The next file continues where the cursor stopped.
         let mut next = layout(chain.end, &[images(1, &[(0, 1)])], 2);
-        finish(&mut next, &views, &mut chain, SEED).unwrap();
+        finish(&mut next, &views, &mut chain).unwrap();
         let h = header(&next, 0);
         let first = h.types[1].changed.first().copied();
         assert_eq!(first, Some((restated as u32, idle[restated].raw())));
+    }
+
+    /// A type written in every upload is mentioned in every header, and
+    /// ties with the types restated there; ordered by mention it lost every
+    /// tie to the lower-indexed ones and its untouched buckets were never
+    /// restated — the recovery horizon stuck below them. Ordered by the
+    /// oldest whole rotation, every type comes round.
+    #[test]
+    fn a_type_written_every_upload_still_comes_round() {
+        let (a, b, busy) = (dir(3_000), dir(3_000), dir(3_000));
+        let views = [view(1, &a), view(2, &b), view(3, &busy)];
+        let mut chain = Chain::default();
+        for _ in 0..12 {
+            let mut packed = layout(chain.end, &[images(3, &[(0, 1)])], 3);
+            finish(&mut packed, &views, &mut chain).unwrap();
+        }
+        for hash in [1, 2, 3] {
+            assert!(
+                chain.rotated.contains_key(&hash),
+                "type {hash} never came round: {:?}",
+                chain.rotated
+            );
+        }
     }
 }
