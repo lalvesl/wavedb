@@ -86,7 +86,7 @@ impl MetaLog {
     /// The newest chunk's raw descriptor — what a `Commit` frame carries, and
     /// what the next round writes as its `prev`.
     ///
-    /// The whole log is *this*, plus the chain in `data.bin`: a frame is 8
+    /// The whole log is *this*, plus the chain in the data files: a frame is 8
     /// bytes whether the log holds one chunk or a thousand ([RFC 0048]).
     ///
     /// [RFC 0048]: ../../../rfcs/0048-chained-addressing-log.md
