@@ -82,6 +82,13 @@ pub enum StorageError {
     /// uploaded cannot go up any more — until it is reopened.
     #[error("another writer is using this object store prefix")]
     Fenced,
+    /// A conversion found no database to convert ([`convert`](crate::convert)).
+    #[error("there is no database to convert")]
+    NoDatabase,
+    /// A conversion to an object store found another database already under
+    /// its prefix ([`convert`](crate::convert)): never written over.
+    #[error("the object store prefix already holds a database")]
+    ObjectStoreInUse,
     /// A core/codec fault surfaced inside the engine.
     #[error(transparent)]
     Core(#[from] wavedb_core::Error),
