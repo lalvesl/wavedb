@@ -232,6 +232,9 @@ impl PageStore {
                 crate::file_header::Chain::from_record(chain);
         }
         store.prepare_object(had_files)?;
+        if !facts.object_backed() {
+            store.forget_remote(); // converted to the disk (`crate::convert`)
+        }
         // Rebuild the logs in journal order, no re-journal, then settle them
         // into the pages as the live engine would have.
         for batch in &recovered.replay {
