@@ -31,6 +31,7 @@ write pipeline. This is where most of WaveDB's engineering energy lives.
 | `compact`         | Compaction's phases and surface (`compact_step`, `compact`, `reclaim`, `space`): move, drop the old addressing, seal, cut and delete.              |
 | `defrag`          | Compaction's moves: the emptiest data file's runs, highest first, verbatim, into the active file — one window write per round.                    |
 | `remote_compact`  | The object store's compaction (RFC 0070 §8): a survey run like a recovery, blind DELETEs below the horizon, mostly free files carried forward. |
+| `convert`         | Converting a database from or to disk mode, offline: the pages flagged for upload, or brought back from the object store.          |
 | `page`            | `SlotPage` — the homogeneous record page: `[len][to_wire_checked(PageEnvelope)]`, body raw or zstd.                                                  |
 | `journal`         | Append-only WAL of `Write` batches (checked wire frames); fsync = durability; torn-tail-tolerant replay.                                             |
 | `struct_storage`  | `StructStorage` — one type's own cache + directory slot (`#[wavedb]` emits one `static` per type).                                                   |
@@ -430,6 +431,9 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
    mostly free files below the horizon have their pages carried forward
    by uploads of the compaction's own first. The node weighs it once a
    minute on the compaction triggers.
+   `convert` moves a database from or to disk mode, offline: up, every
+   page flagged for upload; down, every evicted page brought back, the
+   object store's files kept.
 
 On startup the directories and the block allocator rebuild by **journal replay**.
 
