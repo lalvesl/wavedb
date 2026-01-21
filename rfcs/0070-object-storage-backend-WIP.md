@@ -1,6 +1,6 @@
 # RFC 0070 — Object storage as a page backend
 
-- **Status:** In progress — opened 2026-10-10. Phases 1–7 done (descriptor, test store, S3 client; disk + object: the flag, the remote directories, the upload, reopen from disk; eviction from disk and the read that falls back to the object store; recovery from the object store alone; object mode, with no disk and no journal; compaction by file). Left: converting from or to disk mode.
+- **Status:** In progress — opened 2026-10-10. Phases 1–7 done (descriptor, test store, S3 client; disk + object: the flag, the remote directories, the upload, reopen from disk; eviction from disk and the read that falls back to the object store; recovery from the object store alone; object mode, with no disk and no journal; compaction by file), and converting from or to disk mode. Open: HTTPS to a public endpoint.
 - **Supersedes:** [RFC 0059](0059-object-storage-capacity-tier-PLANNED.md) §2–§5
   (the remote descriptor bit and the object per bucket). 0059 §1, the archive
   lane, stays and is independent of this.
@@ -387,9 +387,20 @@ Built in phase 6 (`object_mode.rs`, `backing.rs`):
   the files are the same. Closed in disk + object mode with everything
   uploaded, a database reopens in object mode; opened from object mode with
   a disk, it is adopted as phase 5 adopts it. The `MANIFEST` lives in the
-  object store too, so the shard count travels with the files. Converting
-  from or to disk mode (uploading or bringing back every page) is a later,
-  separate item.
+  object store too, so the shard count travels with the files.
+- **Converting from or to disk mode** moves the pages
+  (`wavedb_storage::convert(dir, types, options, Backend)`, offline,
+  decided 2026-10-16). To the object store: the prefix must hold no
+  database (`ObjectStoreInUse`); its `MANIFEST` goes up, every page on disk
+  is flagged and a checkpoint names the flags, and the local `MANIFEST`
+  says object-backed last — the next open uploads it all as any backlog.
+  To the disk: opened object-backed (recovered from the object store when
+  there is no disk yet), every evicted page comes back, the flags are
+  cleared, a checkpoint names it, and the local `MANIFEST` says disk-only
+  last; the object store's files are **kept** as they were (the user's
+  call), and a disk-only open drops the remote directories its addressing
+  log still carries. The stored mode changes only at the last step, so a
+  conversion stopped anywhere is finished by running it again.
 
 ### 10. Navigation is resident
 
@@ -566,6 +577,15 @@ once and never suspend.
   round in the restating order — the test fails with the old order
   (`upload_file`). The node compacts the object store when a trigger is met
   (`shard::owned`).
+- **Converting** is proved in `tests/convert.rs`: a disk database moves to
+  the object store, uploads everything, refuses a disk-only open, and opens
+  from its files alone — the test fails with the flags left unset; a prefix
+  holding a database is refused; an object-store database comes down to a
+  disk it never had, its files kept, and refuses an object-backed open; a
+  disk + object database brings its evicted pages back before the mode
+  changes — the test fails without that — and carries on as a disk
+  database; nothing to convert is `NoDatabase`; converting twice does
+  nothing the second time.
 - The test server now counts as started only once it serves a marker
   written into its own root: two servers handed the same free port made
   tests talk to another test's server, now and then.
@@ -581,6 +601,7 @@ once and never suspend.
 | 5 | Recovery from the object store alone: chained headers that name every type, spare room restating the oldest entries, the newest whole upload, adoption on open — done |
 | 6 | Object mode: no disk, the pages in RAM until uploaded and as a cache, no journal (a write is durable once uploaded, on bytes or an interval), only cuts recovered, writers fenced by create-only PUTs, navigation resident — done |
 | 7 | Compaction by file: the horizon and the deletable files found by a survey, mostly free files carried forward, blind DELETEs, the disk's roots kept; the restating order by rotation; the node's triggers — done |
+| 8 | Converting from or to disk mode: `convert`, offline, the object store's files kept on the way down — done |
 
 ## Open questions
 
