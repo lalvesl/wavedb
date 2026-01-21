@@ -89,6 +89,15 @@ impl Manifest {
         self.object_backed
     }
 
+    /// The same facts in the other mode — a conversion's (`crate::convert`).
+    #[must_use]
+    pub const fn with_object_backed(self, object_backed: bool) -> Self {
+        Self {
+            object_backed,
+            ..self
+        }
+    }
+
     /// The magic, then the checked wire bytes.
     fn encode(&self) -> Vec<u8> {
         let mut bytes = MAGIC.to_vec();
@@ -165,7 +174,7 @@ pub fn resolve(
 }
 
 /// What `dir`'s `MANIFEST` records, or `None` when there is none.
-fn read_local(dir: &Path) -> StorageResult<Option<Manifest>> {
+pub(crate) fn read_local(dir: &Path) -> StorageResult<Option<Manifest>> {
     match fs::read(dir.join(MANIFEST)) {
         Ok(bytes) => Manifest::decode(&bytes).map(Some),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -175,7 +184,10 @@ fn read_local(dir: &Path) -> StorageResult<Option<Manifest>> {
 
 /// Write `dir`'s `MANIFEST`, atomically: a crash part-way leaves a
 /// directory that is created again from scratch, never half a record.
-fn write_local(dir: &Path, manifest: &Manifest) -> StorageResult<()> {
+pub(crate) fn write_local(
+    dir: &Path,
+    manifest: &Manifest,
+) -> StorageResult<()> {
     fs::create_dir_all(dir)?;
     let tmp = dir.join(format!("{MANIFEST}.tmp"));
     let mut file = fs::File::create(&tmp)?;
@@ -192,14 +204,14 @@ fn remote_key(remote: &Remote) -> String {
 }
 
 /// What the object store's `MANIFEST` records, if it has one.
-fn read_remote(remote: &Remote) -> StorageResult<Option<Manifest>> {
+pub(crate) fn read_remote(remote: &Remote) -> StorageResult<Option<Manifest>> {
     let bytes = block_on(remote.bucket().get(&remote_key(remote), None))?;
     bytes.map(|b| Manifest::decode(&b)).transpose()
 }
 
 /// Write the object store's `MANIFEST` if it has none, returning the one
 /// that is there afterwards: ours, or a racing creator's.
-fn write_remote(
+pub(crate) fn write_remote(
     remote: &Remote,
     manifest: Manifest,
 ) -> StorageResult<Manifest> {
