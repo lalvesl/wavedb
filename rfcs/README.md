@@ -47,7 +47,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   **down** into the lowest holes instead — itself *Deprecated* 2026-10-15 for
   0071 below, which kept its stepped phases and its triggers (a daily UTC
   time, a disk ceiling or a free-space share).
-  [0070](0070-object-storage-backend-WIP.md) *(WIP, phases 1–7 done)* makes
+  [0070](0070-object-storage-backend-WIP.md) *(WIP, phases 1–8 done)* makes
   an S3-compatible object store the place pages live, the disk caching them:
   settled pages are flagged, uploaded into the object store's own linear hash
   in files of `[32 KiB header][pages]`, their remote directories ride the
@@ -62,7 +62,8 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   by create-only PUTs; and the object store compacts by file (phase 7):
   a survey run like a recovery finds the horizon and the files nothing
   names, which are DELETEd blind, and the mostly free ones have their
-  pages carried forward first. The disk took the same model in
+  pages carried forward first; `convert` moves a database from or to
+  disk mode offline (phase 8). The disk took the same model in
   [0071](0071-data-files-by-address.md) *(Implemented)*: a
   shard's pages live in append-only data files named by the block address
   they start at (10 GiB by default, found by listing the directory),
@@ -618,7 +619,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0066](0066-embassy-executor-and-async-io.md) | Embassy executor and async-io: tokio out of the node | Implemented |
 | [0067](0067-thread-per-core-shards-WIP.md) | Thread per core: the shard as a database, the thread as placement | In progress (steps 1–5, the fsync helper and parallel recovery landed; one executor per thread decided; step 6, measuring, next) |
 | [0068](0068-record-cache-as-a-log-WIP.md) | The record cache as a log | WIP |
-| [0070](0070-object-storage-backend-WIP.md) | Object storage as a page backend (three modes) | WIP (phases 1–7 done; conversion from/to disk mode left) |
+| [0070](0070-object-storage-backend-WIP.md) | Object storage as a page backend (three modes) | WIP (phases 1–8 done; HTTPS to public endpoints open) |
 | [0071](0071-data-files-by-address.md) | Data files named by address (append-only files, compaction forward; supersedes 0069's placement) | Implemented |
 
 ### Deprecated / superseded
