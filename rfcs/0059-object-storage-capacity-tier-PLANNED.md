@@ -1,7 +1,7 @@
 # RFC 0059 — Object storage as the capacity tier
 
 - **Status:** Planned — opened 2026-08-08. Design only; nothing is built.
-- **Superseded in part by:** [RFC 0070](0070-object-storage-backend-WIP.md) — §2–§5
+- **Superseded in part by:** [RFC 0070](0070-object-storage-backend.md) — §2–§5
   (remote descriptor, object per bucket, demotion, read path). §1, the
   archive lane, stands on its own.
 - **Crates:** `wavedb-storage` (the tier), `wavedb-macros` (one emitted slot),
