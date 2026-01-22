@@ -18,7 +18,7 @@
 //! `crate::upload_file`), so a file's first page starts at block
 //! [`HEADER_BLOCKS`] of it.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
