@@ -17,7 +17,7 @@
 //!   upload left above the recorded end nor a part of a backlog is ever
 //!   taken for the newest.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::collections::BTreeMap;
 
