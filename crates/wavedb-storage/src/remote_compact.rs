@@ -33,7 +33,7 @@
 //! numbers below the horizon are deleted blind rather than listed; the ones
 //! already gone are remembered in RAM, and after a reopen deleted once more.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
