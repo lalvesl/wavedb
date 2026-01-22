@@ -4,7 +4,7 @@
 //! here — the signature accepted, ranges cut at the end, the conditional
 //! PUTs refused with `412`, the listing in key order, deletes idempotent.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 // The client's futures share the platform's current-thread stance.
 #![allow(clippy::future_not_send)]
