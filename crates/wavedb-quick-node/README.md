@@ -51,6 +51,9 @@ Server::bind("0.0.0.0:7700")
 > An object-backed node also compacts its object store (RFC 0070 §8) on the
 > same triggers, weighed once a minute; its size triggers need
 > `Maintenance::object_compact_free_bytes` (512 MiB) free.
+> The object store is any S3-compatible endpoint: `Bucket::new("https://…",
+> …)` speaks TLS, verified against Mozilla's roots (`Bucket::trusting` adds
+> a private authority).
 
 ## Write-ownership model
 
