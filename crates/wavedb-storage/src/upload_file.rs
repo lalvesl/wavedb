@@ -13,7 +13,7 @@
 //!   file before, and its spare room restating the entries of the type
 //!   mentioned longest ago.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::collections::BTreeMap;
 
