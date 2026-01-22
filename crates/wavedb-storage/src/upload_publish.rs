@@ -2,7 +2,7 @@
 //! its key is absent, and only then is anything published. Split from
 //! [`crate::upload`], which takes, fetches, rebuilds and packs.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use futures::stream::{self, StreamExt, TryStreamExt};
 use wavedb_platform::s3::{Put, When};
