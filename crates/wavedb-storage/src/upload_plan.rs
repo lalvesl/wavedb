@@ -8,7 +8,7 @@
 //! `d` and remote bucket `s` can hold the same record exactly when
 //! `d ≡ s (mod 2^min(level(d), level(s)))` — arithmetic, no lookup.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::collections::{BTreeMap, BTreeSet};
 
