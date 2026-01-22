@@ -4,7 +4,7 @@
 //! upload carried, and never part of a batch; a second writer on the prefix
 //! is fenced, not silent.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 // The engine is used from one thread; its futures are not `Send` (lib.rs).
 #![allow(clippy::future_not_send)]
@@ -234,4 +234,24 @@ fn a_sharded_database_moves_to_object_mode_by_reopening() {
         let got = block_on(s.get_of(SH, id(k))).unwrap();
         assert_eq!(got, Some(record(k, 0)), "shard {k}");
     }
+}
+
+/// Over HTTPS (RFC 0070, open question 1): a database in the object store
+/// alone, uploaded through TLS and recovered through it.
+#[test]
+fn a_database_lives_in_the_object_store_over_https() {
+    let dir = tempfile::tempdir().unwrap();
+    let server =
+        wavedb_platform::s3::test_server::TestServer::start_tls(dir.path());
+    let options = || StoreOptions {
+        remote: Some(wavedb_storage::Remote::new(server.bucket(), "db/")),
+        ..StoreOptions::default()
+    };
+    {
+        let s = PageStore::open_object(&[&SLOT], options()).unwrap();
+        fill(&s, 0..RECORDS, 0);
+        upload_all(&s);
+    }
+    let s = PageStore::open_object(&[&SLOT], options()).unwrap();
+    assert_reads(&s, |k| Some(record(k, 0)));
 }
