@@ -25,7 +25,7 @@
 //!    down, and with a disk, one snapshot and one checkpoint make it a root
 //!    of its own.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::collections::BTreeMap;
 
