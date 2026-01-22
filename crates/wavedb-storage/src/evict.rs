@@ -16,7 +16,7 @@
 //!   complete. A restored page is the object store's copy filtered to the
 //!   bucket — exactly what the object store has, so its flag is clear.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::collections::BTreeSet;
 
