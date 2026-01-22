@@ -5,7 +5,7 @@
 //! back. A settle never meets an evicted bucket, so a page on disk stays the
 //! whole truth about its bucket.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 // The engine is used from one thread; its futures are not `Send` (lib.rs).
 #![allow(clippy::future_not_send)]
