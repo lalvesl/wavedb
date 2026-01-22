@@ -9,7 +9,7 @@
 //! bug passes every test and becomes a hole; the protocol around them is
 //! this file.
 //!
-//! [RFC 0070]: ../../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../../rfcs/0070-object-storage-backend.md
 
 use core::fmt::Write as _;
 
