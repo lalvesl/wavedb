@@ -116,6 +116,13 @@ web-sys = { version = "0.3.106", features = [
 ] }
 clap = { version = "4.6.7", features = ["derive"] }
 hmac = "0.13"
+# HTTPS to a public object store (RFC 0070, open question 1): rustls on
+# the *ring* provider (aws-lc-rs, its default, needs cmake and a larger C
+# build), and Mozilla's roots compiled in. Pinned to the release whose
+# source was read before it was added (0.23.46: RUSTSEC-2026-0346 fixed in
+# it, the diff from 0.23.45 read); a bump reads the diff first.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1.0.9"
 sha2 = "0.11"
 # RFC 6455 accept key (the WS handshake pins SHA-1); same RustCrypto family
 # as hmac/sha2. Never used for anything security-load-bearing.
