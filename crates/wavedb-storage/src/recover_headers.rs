@@ -2,7 +2,7 @@
 //! time, newest first, and the check that an upload is whole. Split from
 //! [`crate::recover`], which walks them.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::collections::BTreeMap;
 
