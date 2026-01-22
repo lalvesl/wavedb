@@ -10,7 +10,7 @@
 //! RAM is held in chunks of [`CHUNK_BYTES`], so growing never copies what is
 //! already there and a truncation gives whole chunks back.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::cell::{Cell, RefCell};
 use std::fs::File;
