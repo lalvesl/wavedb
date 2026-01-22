@@ -401,7 +401,7 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
    It is stepped, a bounded pass at a time; the node starts one on a daily
    UTC time, a disk ceiling, or a free-space share.
 
-7. **The object store** ([RFC 0070](../../rfcs/0070-object-storage-backend-WIP.md),
+7. **The object store** ([RFC 0070](../../rfcs/0070-object-storage-backend.md),
    phases 3–6). A database created with `StoreOptions::remote` keeps its pages
    in an object store, the disk caching them. Settle rounds flag what they
    write; `upload` reassembles the flagged pages, record by record, into the
