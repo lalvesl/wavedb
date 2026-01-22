@@ -20,7 +20,7 @@
 //! Each step is safe to stop after: the stored mode changes only at the
 //! last, and running the conversion again finishes it.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::path::Path;
 
