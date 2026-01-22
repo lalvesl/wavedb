@@ -14,7 +14,7 @@
 //! an upload carrying every batch up to a point, whole — so what a crash
 //! leaves is always the database as it stood at some acknowledged batch.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::task::Poll;
 use std::time::{Duration, Instant};
