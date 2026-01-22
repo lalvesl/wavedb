@@ -27,7 +27,7 @@
 //! there is another writer's: the store is fenced
 //! ([`StorageError::Fenced`]) rather than overwrite it.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
