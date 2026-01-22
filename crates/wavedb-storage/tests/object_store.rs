@@ -7,7 +7,7 @@
 //! store too; the remote directories survive a reopen; an upload a crash
 //! kept off the disk is simply made again.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 // The engine is used from one thread; its futures are not `Send` (lib.rs).
 #![allow(clippy::future_not_send)]
