@@ -4,7 +4,7 @@
 //! back, writes carry on, and what a crashed upload or a stray object left
 //! in the prefix is never taken for the newest state.
 //!
-//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend-WIP.md
+//! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 // The engine is used from one thread; its futures are not `Send` (lib.rs).
 #![allow(clippy::future_not_send)]
