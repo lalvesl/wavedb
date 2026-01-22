@@ -10,7 +10,7 @@ ways (conditional compilation is the dispatch — no traits, no `dyn`):
 | `time` | `SystemTime` | `js_sys::Date::now()` |
 | `rand` | `RandomState` hasher keys (OS entropy, no rand dep) | `window.crypto.getRandomValues` |
 | `http` | hand-rolled HTTP/1.1 POST over a fresh `TcpStream` | `fetch` + `Request`, response body via `ReadableStreamDefaultReader` |
-| `s3` | an S3-compatible bucket: ranged GET, conditional PUT, DELETE, one-key LIST, SigV4-signed (RFC 0070) | — (a node is never a browser) |
+| `s3` | an S3-compatible bucket over HTTP or HTTPS: ranged GET, conditional PUT, DELETE, one-key LIST, SigV4-signed (RFC 0070) | — (a node is never a browser) |
 
 Why it exists: on wasm32-unknown-unknown `SystemTime::now()` **panics at
 runtime**, there is no socket, and OS entropy is unreachable — while the
@@ -28,8 +28,12 @@ Notes:
   only: path-style HTTP/1.1, one connection per request, every request
   signed with SigV4 over RustCrypto's `sha2` + `hmac`. `404` on a GET is
   `None`, `412` on a conditional PUT is `Put::Refused`, anything else
-  unexpected is `Error::Status`. Its tests run a `versitygw` from the dev
-  shell per test (`tests/s3_bucket.rs`), through `s3::test_server` — behind
+  unexpected is `Error::Status`. An `https://` endpoint speaks TLS 1.2/1.3
+  (rustls on *ring*, driven by hand over the same socket), its certificate
+  verified against Mozilla's roots plus any `Bucket::trusting` adds;
+  chunked bodies are decoded. Its tests run a `versitygw` from the dev
+  shell per test (`tests/s3_bucket.rs`, and over TLS `tests/s3_https.rs`
+  with a certificate `openssl` makes), through `s3::test_server` — behind
   the `test-server` feature, which the engine's and the node's tests enable
   too; no deployed build does.
 - `time::unix_nanos()` has millisecond precision in the browser; same-instant
