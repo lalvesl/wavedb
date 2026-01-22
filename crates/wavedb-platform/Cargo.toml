@@ -33,6 +33,10 @@ sha1.workspace = true
 # SHA-256 and HMAC, the same pair `wavedb-net` signs tokens with.
 sha2.workspace = true
 hmac.workspace = true
+# HTTPS to a public object store: TLS 1.2/1.3, verified against Mozilla's
+# roots (plus any the caller trusts), driven by hand over the socket.
+rustls.workspace = true
+webpki-roots.workspace = true
 # RFC 0066: the socket (`async-io`) and the I/O traits every protocol layer
 # above is generic over (`embedded-io-async`), bridged by the adapter.
 async-io.workspace = true
