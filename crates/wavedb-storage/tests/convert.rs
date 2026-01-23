@@ -11,11 +11,15 @@
 mod common;
 
 use common::{
-    Fixture, RECORDS, SH, SLOT, assert_uploaded, fill, id, record, upload_all,
+    Fixture, RECORDS, SH, SLOT, assert_uploaded, fill, id, record, sampled,
+    upload_all,
 };
 use wavedb_core::Store;
 use wavedb_platform::carrier::block_on;
-use wavedb_storage::{Backend, PageStore, StorageError, StoreOptions, convert};
+use wavedb_storage::{
+    Backend, PageStore, StorageError, StoreOptions, convert,
+    open_object_shards, open_shards_with,
+};
 
 impl Fixture {
     /// The options a conversion takes: this fixture's object store.
@@ -143,4 +147,53 @@ impl Fixture {
     fn open_with_remote(&self) -> Result<PageStore, StorageError> {
         PageStore::open_with(self.db(), &[&SLOT], self.remote_options())
     }
+}
+
+/// Shards a sharded database writes to: each converted, none skipped.
+const SHARDS: usize = 4;
+
+/// The shard a key lives in, in these tests.
+fn shard_of(k: u64) -> usize {
+    usize::try_from(k).unwrap() % SHARDS
+}
+
+/// Every record reads back through the shard that holds it.
+fn assert_sharded_reads(shards: &[PageStore], keys: impl Iterator<Item = u64>) {
+    for s in shards {
+        s.evict_settled(0);
+    }
+    block_on(async {
+        for k in keys {
+            let got = shards[shard_of(k)].get_of(SH, id(k)).await.unwrap();
+            assert_eq!(got, Some(record(k, 0)), "record {k}");
+        }
+    });
+}
+
+/// A node's database is sharded: every shard goes up, and every shard comes
+/// back down to a disk it never had.
+#[test]
+fn every_shard_of_a_sharded_database_is_converted() {
+    let fx = Fixture::new();
+    let open =
+        |options| open_shards_with(fx.db(), &[&SLOT], options, SHARDS, 1);
+    {
+        let shards = open(StoreOptions::default()).unwrap();
+        for (i, s) in shards.iter().enumerate() {
+            fill(s, (0..RECORDS).filter(|k| shard_of(*k) == i), 0);
+            s.commit_journal().unwrap();
+        }
+    }
+    fx.convert(Backend::ObjectStore).unwrap();
+    for s in open(fx.remote_options()).unwrap() {
+        upload_all(&s);
+    }
+    // The disk gone, every shard opens from its files alone.
+    std::fs::remove_dir_all(fx.db()).unwrap();
+    let object = open_object_shards(&[&SLOT], fx.remote_options(), SHARDS, 1);
+    assert_sharded_reads(&object.unwrap(), sampled());
+
+    fx.convert(Backend::Disk).unwrap();
+    let shards = open(StoreOptions::default()).unwrap();
+    assert_sharded_reads(&shards, 0..RECORDS);
 }
