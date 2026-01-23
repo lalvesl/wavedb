@@ -604,7 +604,9 @@ once and never suspend.
   disk + object database brings its evicted pages back before the mode
   changes — the test fails without that — and carries on as a disk
   database; nothing to convert is `NoDatabase`; converting twice does
-  nothing the second time.
+  nothing the second time; a database of four shards goes up and comes
+  back down to a disk it never had, every record read through its shard —
+  the test fails with any one direction converting shard 0 alone.
 - **HTTPS** is proved in `wavedb-platform/tests/s3_https.rs` against a
   versitygw serving TLS with a certificate for `127.0.0.1` from an authority
   made for the test (`TestServer::start_tls`, `openssl` from the dev shell):
