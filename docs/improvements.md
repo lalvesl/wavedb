@@ -63,6 +63,33 @@ order of cost:
    `.await`, and flatten pass-through layers. `Box::pin` only rare arms
    (the natural-key upsert) last.
 
+## Platform
+
+### Every object-store request opens its own connection
+
+- **Now.** `s3::exchange` sends `connection: close` and dials afresh for
+  each request: a TCP handshake, and over HTTPS a TLS one too — about two
+  extra round trips per GET or PUT against a public endpoint. rustls
+  resumes sessions across connections (the `ClientConfig` is shared), which
+  saves the certificate check but no round trip. The read of an evicted
+  page waits on it.
+- **Instead.** Keep connections alive: a small pool per `Bucket` in a
+  `RefCell` (one thread, no lock), the response read by its own framing —
+  which `exchange` already does (`content-length` or the last chunk) — and
+  a request on a connection the peer closed while idle sent once more on a
+  fresh one.
+- **Decided** 2026-10-16, after RFC 0070 phase 9 (HTTPS): not now.
+
+### A large page is one PUT of one buffer
+
+- **Now.** A file goes up as one PUT of a body held whole in RAM. A page of
+  up to 4 GiB makes a file of about that size (RFC 0070 §3) — inside S3's
+  5 GiB single-PUT limit, but a fault anywhere sends all of it again.
+- **Instead.** Multipart upload past a size threshold: parts sent and
+  retried one by one, the object appearing only at the completing request
+  (which must keep the create-only fence, `If-None-Match: *`).
+- **Decided** 2026-10-16, after RFC 0070 phase 9: not now.
+
 ## Storage
 
 ### A bulk fill leaves its free space inside the data files
