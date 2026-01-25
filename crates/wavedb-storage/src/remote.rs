@@ -109,7 +109,7 @@ pub(crate) struct ObjectState {
     /// Where the chain of uploaded files stands: the remote end (writing is
     /// always there), the newest file and its header's hash, and per type
     /// the newest file with entries for it (RFC 0070 §6).
-    pub(crate) chain: RefCell<crate::file_header::Chain>,
+    pub(crate) chain: RefCell<crate::header::Chain>,
     /// Blocks of disk pages the object store has not received yet (an
     /// emptied bucket counts one) — what the upload trigger reads.
     pub(crate) pending_blocks: Cell<u64>,
