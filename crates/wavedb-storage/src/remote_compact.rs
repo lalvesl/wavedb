@@ -12,9 +12,9 @@
 //!    (RFC 0047) — so with a disk the files emptied are deleted after two
 //!    checkpoints, which the compaction takes itself;
 //! 2. **no recovery reads its header** — it lies below the **horizon**, the
-//!    lowest file a recovery from the newest whole cut asks for: the cut's
-//!    group, the file before it whose hash the group names, and every file
-//!    its walk along the types' chains reaches.
+//!    lowest file a recovery from the newest whole batch asks for: the
+//!    batch's headers back to the one ending the batch before, and every
+//!    header its walk reaches.
 //!
 //! Both are found the way a recovery finds them — by running one over the
 //! object store's headers (`crate::recover`), GETs only, no state of its own.
@@ -44,10 +44,11 @@ use crate::block::BlockDescriptor;
 use crate::compact::Space;
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::PageStore;
-use crate::recover::{newest_cut, newest_file, walk};
+use crate::recover::{newest_cut, newest_file};
 use crate::recover_headers::Headers;
 use crate::remote::{FILE_BLOCKS, Remote, file_of};
 use crate::upload::{IN_FLIGHT, Release};
+use crate::walk::walk;
 
 /// Blocks of remote pages one upload carries forward at most (8 MiB), so
 /// that a compaction does not double every upload.
@@ -162,7 +163,8 @@ impl PageStore {
         for file in object.rooted.borrow().iter().flatten() {
             live.entry(*file).or_insert(0);
         }
-        let Some(survey) = survey(&object.remote).await? else {
+        let registered = self.registered();
+        let Some(survey) = survey(&object.remote, &registered).await? else {
             return Ok(None);
         };
         let start = object.chain.borrow().start;
@@ -304,7 +306,10 @@ impl PageStore {
 
 /// What a recovery from `remote` would read and rebuild, found the way it
 /// finds them; `None` when there is no cut to recover.
-async fn survey(remote: &Remote) -> StorageResult<Option<Survey>> {
+async fn survey(
+    remote: &Remote,
+    registered: &[u64],
+) -> StorageResult<Option<Survey>> {
     let Some(newest) = newest_file(remote).await? else {
         return Ok(None);
     };
@@ -312,10 +317,10 @@ async fn survey(remote: &Remote) -> StorageResult<Option<Survey>> {
     let Some(top) = newest_cut(&mut headers, newest).await? else {
         return Ok(None);
     };
-    let walked = walk(&mut headers, &top.0).await?;
+    let walked = walk(&mut headers, &top, registered).await?;
     let mut named = BTreeSet::new();
-    for (_, slots, dict) in walked {
-        for desc in slots.into_iter().chain(dict) {
+    for w in walked {
+        for desc in w.slots.into_iter().chain(w.dict) {
             if desc.is_allocated() {
                 named.insert(file_of(desc.start()));
             }
@@ -335,7 +340,7 @@ mod tests {
 
     use super::survey;
     use crate::block::BlockDescriptor;
-    use crate::file_header::{FileHeader, NO_FILE, TypeEntry, header_hash};
+    use crate::header::{Header, NO_FILE, TypeEntry};
     use crate::remote::{FILE_BLOCKS, HEADER_BLOCKS, HEADER_BYTES, Remote};
 
     const SH: u64 = 7;
@@ -345,23 +350,13 @@ mod tests {
         BlockDescriptor::new(file * FILE_BLOCKS + HEADER_BLOCKS, 1).raw()
     }
 
-    /// PUT file `file`, a whole upload of its own and a cut, naming
-    /// `changed` for a two-bucket type whose previous entries are in `last`;
-    /// returns its header's hash.
-    fn put(
-        remote: &Remote,
-        file: u64,
-        prev: (u64, u64),
-        last: u64,
-        changed: Vec<(u32, u64)>,
-    ) -> u64 {
-        let header = FileHeader {
-            file,
-            group: file,
-            group_files: 1,
-            cut: true,
-            prev: prev.0,
-            prev_hash: prev.1,
+    /// PUT file `file`, a whole batch of its own, naming `changed` for a
+    /// two-bucket type whose previous entries are in `last`.
+    fn put(remote: &Remote, file: u64, last: u64, changed: Vec<(u32, u64)>) {
+        let header = Header {
+            at: file,
+            prev: file.checked_sub(1).unwrap_or(NO_FILE),
+            end_of_batch: true,
             start: 0,
             end: file * FILE_BLOCKS + HEADER_BLOCKS + 1,
             types: vec![TypeEntry {
@@ -372,8 +367,7 @@ mod tests {
                 changed,
             }],
         };
-        let encoded = header.encode();
-        let mut bytes = encoded.clone();
+        let mut bytes = header.encode();
         bytes.resize(HEADER_BYTES + 4096, 0);
         block_on(remote.bucket().put(
             &remote.file_key(file),
@@ -381,29 +375,30 @@ mod tests {
             When::Always,
         ))
         .unwrap();
-        header_hash(&encoded)
     }
 
-    /// A recovery reads the newest cut, the file before it whose hash it
-    /// names, and back along the type's chain until every bucket is known:
+    /// A recovery reads the newest whole batch, the header ending the batch
+    /// before, and back along the type's chain until every bucket is known:
     /// the lowest of those is the horizon, and a header restating every
-    /// bucket raises it to the cut's own neighbour.
+    /// bucket raises it to the batch before it.
     #[test]
     fn the_horizon_is_the_lowest_header_a_recovery_reads() {
         let dir = tempfile::tempdir().unwrap();
         let server = TestServer::start(dir.path());
         let remote = Remote::new(server.bucket(), "t/");
-        let h0 = put(&remote, 0, (NO_FILE, 0), NO_FILE, vec![(1, page(0))]);
-        let h1 = put(&remote, 1, (0, h0), 0, vec![(0, page(1))]);
-        let h2 = put(&remote, 2, (1, h1), 1, vec![(0, page(2))]);
-        let s = block_on(survey(&remote)).unwrap().unwrap();
+        put(&remote, 0, NO_FILE, vec![(1, page(0))]);
+        put(&remote, 1, 0, vec![(0, page(1))]);
+        put(&remote, 2, 1, vec![(0, page(2))]);
+        let s = block_on(survey(&remote, &[SH])).unwrap().unwrap();
         assert_eq!(s.horizon, 0, "bucket 1 is only known from file 0");
         assert_eq!(s.named.iter().copied().collect::<Vec<_>>(), [0, 2]);
 
-        let both = vec![(0, page(2)), (1, page(0))];
-        put(&remote, 3, (2, h2), 2, both);
-        let s = block_on(survey(&remote)).unwrap().unwrap();
-        assert_eq!(s.horizon, 2, "the cut and the file its hash names");
+        put(&remote, 3, 2, vec![(0, page(2)), (1, page(0))]);
+        let s = block_on(survey(&remote, &[SH])).unwrap().unwrap();
+        assert_eq!(
+            s.horizon, 2,
+            "the batch and the one ending the batch before"
+        );
         assert_eq!(s.named.iter().copied().collect::<Vec<_>>(), [0, 2]);
     }
 }
