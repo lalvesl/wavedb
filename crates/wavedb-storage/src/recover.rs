@@ -1,24 +1,24 @@
 //! Recovery from the object store alone ([RFC 0070] §6, phase 5) — an
-//! object-backed database whose disk is gone opens from its files.
+//! object-backed database whose disk is gone opens from its files — by the
+//! walk every reconstruction makes ([RFC 0072] §6).
 //!
-//! 1. **The newest whole cut.** `LIST 1seg/ max-keys=1` names the highest
-//!    file. It is taken only if its upload ends a cut (`FileHeader::cut`:
-//!    every batch up to a point, none in part) and is whole: every file of
-//!    the group present, each linked to the one before by its header's
-//!    hash, and the group linked to the file before it. Otherwise the next
-//!    number down is tried — so the files a crashed upload left above the
-//!    recorded end, a part of a backlog, or a copy under another key, are
-//!    never taken for the newest. Files with no cut among them are a
-//!    database whose first upload never finished: it opens empty, its
-//!    numbers stepped over.
-//! 2. **The type walk.** That header names every type, its bucket count, its
-//!    dictionary and `last`, the newest earlier file with entries for it.
-//!    Headers are read newest first, always the nearest file some
-//!    incomplete type still points at, and the first value seen for a bucket
-//!    is its newest. A type is done once every bucket is known or its chain
-//!    ends — a bucket no header names was never written: it is empty.
-//!    Headers are fetched a batch at a time, so the walk mostly finds the
-//!    next one already read.
+//! 1. **The newest whole batch.** `LIST 1seg/ max-keys=1` names the highest
+//!    file. It is taken only if its header ends a batch
+//!    (`Header::end_of_batch`: every write up to a point, none in part) and
+//!    the batch is whole: every header back to the one ending the batch
+//!    before present. Otherwise the next number down is tried — so the files
+//!    a crashed upload left above the recorded end, a part of a backlog, or
+//!    a copy under another key, are never taken for the newest. Files with
+//!    no batch end among them are a database whose first upload never
+//!    finished: it opens empty, its numbers stepped over.
+//! 2. **The walk.** Every type that header names is started there, and
+//!    followed along its `last`, the first address seen for a bucket being
+//!    its newest. While a registered type is not found yet, the headers are
+//!    read down by `prev`, one after the other, until one names it; it is
+//!    then followed the same way. Headers are always read highest first and
+//!    a batch at a time, so a type's newest header is the first naming it. A
+//!    type is done once every bucket is known or its chain ends — a bucket
+//!    no header names was never written: it is empty.
 //! 3. **Adoption.** The store opens with the `MANIFEST`'s seed; every bucket
 //!    is evicted, so reads go to the object store and the disk — or, in
 //!    object mode, RAM — fills again as a cache. The dictionaries come
@@ -26,8 +26,7 @@
 //!    of its own.
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
-
-use std::collections::BTreeMap;
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
 
 use futures::future::try_join_all;
 
@@ -35,11 +34,12 @@ use crate::block::BlockDescriptor;
 use crate::dictionary::Dictionary;
 use crate::directory::Directory;
 use crate::error::{StorageError, StorageResult};
-use crate::file_header::{Chain, FileHeader, NO_FILE};
+use crate::header::{Chain, Header, Rotation};
 use crate::page_store::{PageStore, StoreOptions};
 use crate::plan::SlotPlan;
 use crate::recover_headers::Headers;
 use crate::remote::{FILE_BLOCKS, Remote};
+use crate::walk::walk;
 
 /// What a recovery found in the object store.
 pub struct Found {
@@ -63,21 +63,26 @@ pub struct FoundType {
 pub fn found_for(
     had_files: bool,
     options: &StoreOptions,
+    registered: &[u64],
 ) -> StorageResult<Option<Found>> {
     match &options.remote {
         Some(remote) if !had_files => {
-            futures::executor::block_on(recover(remote))
+            futures::executor::block_on(recover(remote, registered))
         }
         _ => Ok(None),
     }
 }
 
-/// What `remote` holds, or `None` when it holds no file at all.
+/// What `remote` holds for the `registered` types (and any other its
+/// headers name), or `None` when it holds no file at all.
 ///
 /// # Errors
 /// Object-store faults; [`StorageError::Corrupt`] when a chained header is
 /// missing.
-pub async fn recover(remote: &Remote) -> StorageResult<Option<Found>> {
+pub async fn recover(
+    remote: &Remote,
+    registered: &[u64],
+) -> StorageResult<Option<Found>> {
     let Some(newest) = newest_file(remote).await? else {
         return Ok(None);
     };
@@ -86,8 +91,8 @@ pub async fn recover(remote: &Remote) -> StorageResult<Option<Found>> {
     let past = (newest + 1) * FILE_BLOCKS;
     let mut headers = Headers::new(remote);
     let Some(top) = newest_cut(&mut headers, newest).await? else {
-        // Files, but no cut among them: the first uploads never finished
-        // one, so nothing was ever recoverable.
+        // Files, but no batch end among them: the first uploads never
+        // finished one, so nothing was ever recoverable.
         let chain = Chain {
             end: past,
             ..Chain::default()
@@ -97,54 +102,48 @@ pub async fn recover(remote: &Remote) -> StorageResult<Option<Found>> {
             types: Vec::new(),
         }));
     };
-    let start = top.0.start;
     let mut chain = Chain {
-        end: top.0.end.max(past),
-        start,
-        tail: Some((top.0.file, top.1)),
+        end: top.end.max(past),
+        start: top.start,
+        tail: Some(top.at),
         ..Chain::default()
     };
-    for entry in &top.0.types {
-        let newest = if entry.changed.is_empty() {
-            entry.last
-        } else {
-            top.0.file
+    let walked = walk(&mut headers, &top, registered).await?;
+    for w in &walked {
+        let rotation = Rotation {
+            last: w.newest,
+            ..Rotation::default()
         };
-        if newest != NO_FILE {
-            chain.last.insert(entry.struct_hash, newest);
-        }
+        chain.types.insert(w.struct_hash, rotation);
     }
-    let walked = walk(&mut headers, &top.0).await?;
-    let types = try_join_all(walked.into_iter().map(
-        |(hash, remote_slots, dict)| async move {
-            let dict = match dict {
-                Some(desc) => Some((desc, remote.fetch(desc).await?)),
-                None => None,
-            };
-            StorageResult::Ok(FoundType {
-                struct_hash: hash,
-                remote: remote_slots,
-                dict,
-            })
-        },
-    ))
+    let types = try_join_all(walked.into_iter().map(|w| async move {
+        let dict = match w.dict {
+            Some(desc) => Some((desc, remote.fetch(desc).await?)),
+            None => None,
+        };
+        StorageResult::Ok(FoundType {
+            struct_hash: w.struct_hash,
+            remote: w.slots,
+            dict,
+        })
+    }))
     .await?;
     Ok(Some(Found { chain, types }))
 }
 
-/// The newest whole cut at or below file `newest`, trying each number down
-/// — what a recovery takes.
+/// The newest header at or below file `newest` that ends a whole batch,
+/// trying each number down — what a recovery roots in.
 ///
 /// # Errors
 /// Object-store faults.
 pub async fn newest_cut(
     headers: &mut Headers<'_>,
     newest: u64,
-) -> StorageResult<Option<(FileHeader, u64)>> {
+) -> StorageResult<Option<Header>> {
     let mut top = Some(newest);
     while let Some(n) = top {
         if let Some(header) = headers.get(n).await?
-            && header.0.cut
+            && header.end_of_batch
             && headers.whole(&header).await?
         {
             return Ok(Some(header));
@@ -154,88 +153,15 @@ pub async fn newest_cut(
     Ok(None)
 }
 
-/// One type's directory being gathered.
-struct Gathering {
-    slots: Vec<Option<u64>>,
-    missing: usize,
-    dict: Option<u64>,
-    /// The next file with entries for it ([`NO_FILE`] once the chain ends).
-    next: u64,
-}
-
-/// Every type's remote directory and dictionary descriptor, gathered from
-/// `top` back along the types' chains.
-pub async fn walk(
-    headers: &mut Headers<'_>,
-    top: &FileHeader,
-) -> StorageResult<Vec<(u64, Vec<BlockDescriptor>, Option<BlockDescriptor>)>> {
-    let mut types: BTreeMap<u64, Gathering> = top
-        .types
-        .iter()
-        .map(|e| {
-            let n = e.buckets as usize;
-            let state = Gathering {
-                slots: vec![None; n],
-                missing: n,
-                dict: e.dict,
-                next: top.file,
-            };
-            (e.struct_hash, state)
-        })
-        .collect();
-    loop {
-        let next = types
-            .values()
-            .filter(|t| t.missing > 0 && t.next != NO_FILE)
-            .map(|t| t.next)
-            .max();
-        let Some(file) = next else { break };
-        let (header, _) = headers
-            .get(file)
-            .await?
-            .ok_or(StorageError::Corrupt("a chained file is missing"))?;
-        for entry in &header.types {
-            let Some(t) = types.get_mut(&entry.struct_hash) else {
-                continue;
-            };
-            if t.next != file {
-                continue;
-            }
-            for &(bucket, raw) in &entry.changed {
-                if let Some(slot) = t.slots.get_mut(bucket as usize)
-                    && slot.is_none()
-                {
-                    *slot = Some(raw);
-                    t.missing -= 1;
-                }
-            }
-            t.next = entry.last;
-        }
-        if types.values().any(|t| t.next == file) {
-            return Err(StorageError::Corrupt(
-                "a chain names a file without it",
-            ));
-        }
-    }
-    Ok(types
-        .into_iter()
-        .map(|(hash, t)| {
-            let slots = t
-                .slots
-                .into_iter()
-                .map(|raw| {
-                    raw.map_or(
-                        BlockDescriptor::EMPTY,
-                        BlockDescriptor::from_raw,
-                    )
-                })
-                .collect();
-            (hash, slots, t.dict.map(BlockDescriptor::from_raw))
-        })
-        .collect())
-}
-
 impl PageStore {
+    /// The registered types' hashes — what a walk looks for.
+    pub(crate) fn registered(&self) -> Vec<u64> {
+        self.types
+            .iter()
+            .map(crate::struct_storage::TypeSlot::struct_hash)
+            .collect()
+    }
+
     /// Take what a recovery found: the remote directories and the chain as
     /// they are, every disk bucket evicted, the dictionaries written to disk,
     /// then a snapshot and a checkpoint, so the disk is a root of its own.
@@ -323,55 +249,47 @@ mod tests {
 
     use super::recover;
     use crate::block::BlockDescriptor;
-    use crate::file_header::{FileHeader, NO_FILE, TypeEntry, header_hash};
+    use crate::header::{Header, NO_FILE, TypeEntry};
     use crate::remote::{FILE_BLOCKS, HEADER_BLOCKS, HEADER_BYTES, Remote};
 
     const SH: u64 = 7;
+    /// A registered type no header names before file 3.
+    const LATE: u64 = 8;
 
     /// A descriptor of a one-block page at the head of file `file`.
     fn page(file: u64) -> u64 {
         BlockDescriptor::new(file * FILE_BLOCKS + HEADER_BLOCKS, 1).raw()
     }
 
-    /// A header for file `file` of the upload starting at `group`, naming
-    /// bucket 0 in itself and following `prev` (hash `prev_hash`).
-    fn header(
-        file: u64,
-        group: u64,
-        files: u32,
-        prev: (u64, u64),
-    ) -> FileHeader {
-        FileHeader {
-            file,
-            group,
-            group_files: files,
-            cut: true,
-            prev: prev.0,
-            prev_hash: prev.1,
+    /// A header for file `file`, following `prev`, naming bucket 0 of a
+    /// two-bucket type in itself — the type's previous entries in `prev`.
+    fn header(file: u64, prev: u64, end_of_batch: bool) -> Header {
+        Header {
+            at: file,
+            prev,
+            end_of_batch,
             start: 0,
             end: file * FILE_BLOCKS + HEADER_BLOCKS + 1,
             types: vec![TypeEntry {
                 struct_hash: SH,
                 buckets: 2,
-                last: if prev.0 == NO_FILE { NO_FILE } else { prev.0 },
+                last: prev,
                 dict: None,
                 changed: vec![(0, page(file))],
             }],
         }
     }
 
-    /// PUT `header` as its file, returning its hash.
-    fn put(remote: &Remote, header: &FileHeader) -> u64 {
-        let encoded = header.encode();
-        let mut bytes = encoded.clone();
+    /// PUT `header` as its file.
+    fn put(remote: &Remote, header: &Header) {
+        let mut bytes = header.encode();
         bytes.resize(HEADER_BYTES + 4096, 0);
         block_on(remote.bucket().put(
-            &remote.file_key(header.file),
+            &remote.file_key(header.at),
             &bytes,
             When::Always,
         ))
         .unwrap();
-        header_hash(&encoded)
     }
 
     fn fixture() -> (tempfile::TempDir, TestServer, Remote) {
@@ -381,21 +299,20 @@ mod tests {
         (dir, server, remote)
     }
 
-    /// File 0 is a whole upload; file 1–2 a second one.
-    fn two_uploads(remote: &Remote, break_link: bool) -> u64 {
-        let a = put(remote, &header(0, 0, 1, (NO_FILE, 0)));
-        let link = if break_link { a ^ 1 } else { a };
-        let b1 = put(remote, &header(1, 1, 2, (0, link)));
-        put(remote, &header(2, 1, 2, (1, b1)));
-        a
+    /// File 0 is a whole batch; files 1–2 a second one.
+    fn two_batches(remote: &Remote) {
+        put(remote, &header(0, NO_FILE, true));
+        put(remote, &header(1, 0, false));
+        put(remote, &header(2, 1, true));
     }
 
     #[test]
-    fn the_newest_whole_upload_is_the_state() {
+    fn the_newest_whole_batch_is_the_state() {
         let (_dir, _server, remote) = fixture();
-        two_uploads(&remote, false);
-        let found = block_on(recover(&remote)).unwrap().unwrap();
-        assert_eq!(found.chain.tail.map(|t| t.0), Some(2));
+        two_batches(&remote);
+        let found = block_on(recover(&remote, &[SH])).unwrap().unwrap();
+        assert_eq!(found.chain.tail, Some(2));
+        assert_eq!(found.chain.last(SH), 2);
         let t = &found.types[0];
         assert_eq!(t.remote[0].raw(), page(2), "the newest entry wins");
         assert_eq!(t.remote[1], BlockDescriptor::EMPTY, "never written");
@@ -403,27 +320,63 @@ mod tests {
     }
 
     #[test]
-    fn an_upload_missing_a_file_is_not_the_state() {
+    fn a_batch_missing_a_header_is_not_the_state() {
         let (_dir, _server, remote) = fixture();
-        two_uploads(&remote, false);
+        two_batches(&remote);
         block_on(remote.bucket().delete(&remote.file_key(1))).unwrap();
-        let found = block_on(recover(&remote)).unwrap().unwrap();
-        assert_eq!(found.chain.tail.map(|t| t.0), Some(0));
+        let found = block_on(recover(&remote, &[SH])).unwrap().unwrap();
+        assert_eq!(found.chain.tail, Some(0));
         assert_eq!(found.types[0].remote[0].raw(), page(0));
         assert!(found.chain.end >= 3 * FILE_BLOCKS, "past the leftover too");
     }
 
+    /// A part of a backlog — the newest file, ending no batch — is stepped
+    /// over, and so is a header copied under another file's key.
     #[test]
-    fn an_upload_linked_to_another_header_is_not_the_state() {
+    fn a_header_ending_no_batch_or_not_its_file_is_not_the_state() {
         let (_dir, _server, remote) = fixture();
-        two_uploads(&remote, true);
-        let found = block_on(recover(&remote)).unwrap().unwrap();
-        assert_eq!(found.chain.tail.map(|t| t.0), Some(0));
+        two_batches(&remote);
+        put(&remote, &header(3, 2, false));
+        let found = block_on(recover(&remote, &[SH])).unwrap().unwrap();
+        assert_eq!(found.chain.tail, Some(2));
+
+        let mut copy = header(2, 1, true).encode();
+        copy.resize(HEADER_BYTES + 4096, 0);
+        let key = remote.file_key(4);
+        block_on(remote.bucket().put(&key, &copy, When::Always)).unwrap();
+        let found = block_on(recover(&remote, &[SH])).unwrap().unwrap();
+        assert_eq!(found.chain.tail, Some(2), "file 4 holds file 2's header");
+    }
+
+    /// A registered type the newest header does not name is found by going
+    /// down by `prev`, then followed along its own chain; one no header
+    /// names at all is simply empty.
+    #[test]
+    fn a_type_the_newest_header_does_not_name_is_found_further_down() {
+        let (_dir, _server, remote) = fixture();
+        two_batches(&remote);
+        let mut named = header(3, 2, true);
+        named.types.push(TypeEntry {
+            struct_hash: LATE,
+            buckets: 1,
+            last: NO_FILE,
+            dict: None,
+            changed: vec![(0, page(3))],
+        });
+        put(&remote, &named);
+        put(&remote, &header(4, 3, true));
+        put(&remote, &header(5, 4, true));
+        let found = block_on(recover(&remote, &[SH, LATE, 9])).unwrap();
+        let found = found.unwrap();
+        let late = found.types.iter().find(|t| t.struct_hash == LATE);
+        assert_eq!(late.map(|t| t.remote[0].raw()), Some(page(3)));
+        assert_eq!(found.chain.last(LATE), 3, "its newest header");
+        assert!(found.types.iter().all(|t| t.struct_hash != 9), "unnamed");
     }
 
     #[test]
     fn an_empty_prefix_holds_no_database() {
         let (_dir, _server, remote) = fixture();
-        assert!(block_on(recover(&remote)).unwrap().is_none());
+        assert!(block_on(recover(&remote, &[SH])).unwrap().is_none());
     }
 }
