@@ -201,8 +201,11 @@ impl PageStore {
         let had_files = file.has_files();
         // An object-backed store with no disk yet may have a database in its
         // object store already: it is recovered, never created over.
-        let found = crate::recover::found_for(had_files, &options)?;
         let types = crate::struct_storage::slots_of(types);
+        let registered: Vec<u64> =
+            types.iter().map(TypeSlot::struct_hash).collect();
+        let found =
+            crate::recover::found_for(had_files, &options, &registered)?;
 
         // Recover from the journal chain: the newest `Commit` frame roots
         // the directories/dictionaries/allocator (caches stay empty — reads
@@ -229,7 +232,7 @@ impl PageStore {
             && let Some(chain) = &recovered.chain
         {
             *object.chain.borrow_mut() =
-                crate::file_header::Chain::from_record(chain);
+                crate::header::Chain::from_record(chain);
         }
         store.prepare_object(had_files)?;
         if !facts.object_backed() {
