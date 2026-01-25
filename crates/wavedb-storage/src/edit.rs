@@ -85,7 +85,7 @@ pub struct EditChunk {
     pub remote: Vec<SlotEdit>,
     /// Where the object store's chain of files stands (RFC 0070 §6) — in a
     /// snapshot, and in a delta that carries upload results.
-    pub chain: Option<crate::file_header::ChainRecord>,
+    pub chain: Option<crate::header::ChainRecord>,
 }
 
 /// Walk the chain back from `head`, newest first, returning every live chunk
