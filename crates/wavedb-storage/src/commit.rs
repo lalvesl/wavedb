@@ -64,7 +64,7 @@ pub struct Recovered {
     pub replay: Vec<Vec<Write>>,
     pub meta: MetaLog,
     /// Where the object store's chain of files stood (RFC 0070).
-    pub chain: Option<crate::file_header::ChainRecord>,
+    pub chain: Option<crate::header::ChainRecord>,
 }
 
 /// Recover engine state from the journals under `dir` (see module docs).
@@ -169,11 +169,8 @@ fn load_commit(
     types: &[TypeSlot],
     commit: &CommitFrame,
     file_bytes: u64,
-) -> StorageResult<(
-    BlockAllocator,
-    MetaLog,
-    Option<crate::file_header::ChainRecord>,
-)> {
+) -> StorageResult<(BlockAllocator, MetaLog, Option<crate::header::ChainRecord>)>
+{
     let mut used = Vec::new();
     let mut replay = Replay::default();
     let chain = walk(file, BlockDescriptor::from_raw(commit.head))?;
