@@ -6,7 +6,7 @@
 //!    goes into the pages, then the flagged pages are taken, up to
 //!    [`UPLOAD_INPUT_BLOCKS`] — each the whole truth about its disk bucket,
 //!    removals included. A take that leaves nothing flagged behind is a
-//!    **cut** (`FileHeader::cut`): with the uploads before it, it holds
+//!    **cut** (`Header::end_of_batch`): with the uploads before it, it holds
 //!    every batch up to here and no batch in part, and only a cut is ever
 //!    recovered (`crate::recover`).
 //! 2. **Fetch** the remote pages that share records with them, all at once.
@@ -37,7 +37,7 @@ use futures::stream::{self, StreamExt, TryStreamExt};
 use crate::block::BlockDescriptor;
 use crate::directory::Directory;
 use crate::error::{StorageError, StorageResult};
-use crate::file_header::Chain;
+use crate::header::Chain;
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
 use crate::remote::weight;
@@ -158,16 +158,7 @@ impl PageStore {
                 dict: carried.then(|| dict.image()),
             });
         }
-        let types = self
-            .types
-            .iter()
-            .enumerate()
-            .filter(|(idx, slot)| {
-                work.iter().any(|w| w.idx == *idx)
-                    || slot.remote_directory().borrow().is_some()
-            })
-            .count();
-        let mut packed = layout(object.chain.borrow().end, &slots, types);
+        let mut packed = layout(object.chain.borrow().end, &slots);
         packed.cut = cut;
         let mut placed_dicts = vec![None; work.len()];
         for placed in &packed.placed {
@@ -194,9 +185,10 @@ impl PageStore {
         Ok(self.publish_upload(work, &slots, &carried, &packed, chain))
     }
 
-    /// Write every file's header ([`finish`]): each names every type the
-    /// object store holds once this upload is in — the work's new
-    /// directories, the others as they stand.
+    /// Write every file's header ([`finish`]) over a view of every
+    /// registered type as the object store holds it once this upload is in
+    /// — the work's new directories, the others as they stand, a type never
+    /// uploaded with none.
     fn write_headers(
         &self,
         packed: &mut Packed,
@@ -215,7 +207,7 @@ impl PageStore {
             let slots = match (at, guards[idx].as_ref()) {
                 (Some(w), _) => work[w].remote.slots(),
                 (None, Some(dir)) => dir.slots(),
-                (None, None) => continue,
+                (None, None) => &[],
             };
             let dict = at
                 .and_then(|w| placed_dicts[w])
