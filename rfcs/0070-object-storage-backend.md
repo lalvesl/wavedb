@@ -188,9 +188,11 @@ starts on the worker and moves to the helper when measurement says so.
   closes a file when the next page's entry would not fit its header. A
   header can never overflow, whatever the schema. The file is assembled in
   RAM before its PUT, so the header is written once, exact.
-- **The headers form a chain** (§6): each names the file before it and the
-  hash of that file's header. A number a large page ran over (§3) has no
-  object; a GET of it answers `404`.
+- **The headers form a chain** (§6): each names the file before it
+  (`prev`). A number a large page ran over (§3) has no object; a GET of it
+  answers `404`. (Until RFC 0072 the link carried the hash of that header
+  too; a number is never written twice and every PUT is create-only, so a
+  header's crc and its own number are the whole check.)
 - After the PUTs, the upload publishes in RAM: the new remote directories,
   and the flag cleared on each disk page still at the descriptor it was
   taken at (one a settle rewrote meanwhile is newer and keeps its flag).
@@ -216,34 +218,39 @@ starts on the worker and moves to the helper when measurement says so.
 - **object**, and a disk lost in the other mode — **from the headers alone,
   no snapshot object** (decided 2026-10-10: more GETs, which are cheap,
   instead of more PUTs and objects). Built in phase 5 (`recover.rs`):
-  - **Every header names every type** the object store holds: its bucket
-    count, its dictionary's remote descriptor, and `last` — the newest
-    earlier file with entries for it. The header also carries
-    `start` (`first_file`), the remote end, its own number, its
-    upload (`group`, `group_files`), and `prev` with the hash of that
-    file's header.
+  - **A header names the types its upload changed** (RFC 0072 §3, which
+    made this the disk's header too): each with its bucket count, its
+    dictionary's remote descriptor, and `last` — the newest earlier file
+    with entries for it. The header also carries `start` (`first_file`),
+    the remote end, its own number (`at`), `prev`, and `end_of_batch` on
+    the last file of a cut.
   - **Spare room restates old entries**: after its own pages, a header
     spends what is left (typically ~31 KiB, ~2 600 entries) on the type
-    whose last whole rotation is oldest (one that never finished one since
-    the store opened goes first), from a **rotating cursor** —
+    restated longest ago (one never restated goes first, an empty one
+    before any, so a type never written is named in the first header),
+    from a **rotating cursor** —
     not at random, which would need `(B/S)·ln B` files to cover `B` buckets
     instead of `B/S` (1 TB: ~49 000 files against ~3 100). Every type keeps
     appearing near the tail, so a recovery reads a bounded number of
     headers. (Phase 5 ordered by smallest `last`, but a type written in
     every upload is mentioned in every header and could lose every tie, its
     untouched buckets never restated and the horizon stuck below them;
-    phase 7 orders by rotation, `Chain::rotated`, RAM only.)
+    phase 7 ordered by rotation; RFC 0072 orders by the header that last
+    restated the type, `Rotation::shifted`, RAM only.)
   - **The newest whole cut**: `LIST 1seg/ max-keys=1` names the highest
-    file. It is taken only if its upload ends a cut (§9) and is whole —
-    every file of the group present, linked by header hash, it the last of
-    them, and the group linked to the file before. Otherwise the next
-    number down is tried. So the files a crashed upload left above the
+    file. It is taken only if it ends a batch — the last file of an upload
+    that is a cut (§9) — and the batch is whole: every header back to the
+    one ending the batch before present. Otherwise the next number down is
+    tried. So the files a crashed upload left above the
     recorded end, a part of a backlog, a copy under another key, or bytes
     that are no header are never taken for the newest.
-  - **The type walk**: newest first, always the nearest file some incomplete
-    type's `last` points at; the first value seen for a bucket is its newest.
-    A type is done when every bucket is known or its chain ends (a bucket no
-    header names was never written: empty). Headers come 32 per round.
+  - **The type walk** (RFC 0072 §6): every type the newest header names
+    starts there and follows its `last`; while a registered type is not
+    named yet, the headers are read down by `prev` until one names it.
+    Always the highest header first, so the first value seen for a bucket
+    is its newest. A type is done when every bucket is known or its chain
+    ends (a bucket no header names was never written: empty). Headers come
+    32 per round.
   - **Adoption**: an object-backed store opening with no data file asks the
     object store first, and if it holds files the database is recovered —
     never created over. The store opens with the `MANIFEST`'s seed (the object store keeps a
@@ -252,8 +259,8 @@ starts on the worker and moves to the helper when measurement says so.
     cache), the dictionaries written to disk, then one snapshot and one
     checkpoint make the disk a root of its own.
   - **The recovery horizon** is the lowest file a recovery asks a header
-    of — the cut's group, the file before it whose hash it names, and the
-    walk. Compaction by file (§8) deletes only below it.
+    of — the batch's headers back to the one ending the batch before, and
+    the walk. Compaction by file (§8) deletes only below it.
   - In disk + object mode, losing the disk loses what was not uploaded yet
     (the flagged pages and the journal); in object mode a crash loses what
     was not uploaded either, which `upload_interval` bounds (§9).
