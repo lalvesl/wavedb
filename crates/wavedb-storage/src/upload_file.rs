@@ -7,22 +7,21 @@
 //!   starts inside its file's window and is read from that one object.
 //! - The next file starts at the first file boundary at or after the cursor
 //!   — the numbers a large page ran over are never used.
-//! - The header is always [`HEADER_BYTES`]. [`layout`] budgets it for every
-//!   type's entry plus the file's own items and closes a file that would
-//!   outgrow it; [`finish`] then writes it ([`FileHeader`]): chained to the
-//!   file before, and its spare room restating the entries of the type
-//!   mentioned longest ago.
+//! - The header is always [`HEADER_BYTES`]. [`layout`] budgets it for the
+//!   entries of the types the file holds pages of and their items, and
+//!   closes a file that would outgrow it; [`finish`] then writes it
+//!   ([`Header`]): linked to the file before, and its spare room restating
+//!   the addresses of the types restated longest ago ([RFC 0072] §5).
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
 
 use std::collections::BTreeMap;
 
-use wavedb_core::wire::{CRC_PREFIX_LEN, WaveWire};
-
 use crate::block::{BLOCK_SIZE, BlockDescriptor};
 use crate::error::{StorageError, StorageResult};
-use crate::file_header::{
-    Chain, ENTRY_BYTES, FileHeader, ITEM_BYTES, NO_FILE, TypeEntry, header_hash,
+use crate::header::{
+    BARE_BYTES, Chain, ENTRY_BYTES, Header, ITEM_BYTES, NO_FILE, TypeEntry,
 };
 use crate::plan::blocks_of;
 use crate::remote::{FILE_BLOCKS, HEADER_BLOCKS, HEADER_BYTES};
@@ -37,7 +36,8 @@ pub struct SlotImages {
 }
 
 /// A type's remote directory as it stands once the upload is in — what a
-/// header names, and restates from.
+/// header names, and restates from. Every registered type has one, a type
+/// never uploaded with no slots: it is named too, in its turn.
 pub struct TypeView<'a> {
     pub(crate) struct_hash: u64,
     pub(crate) slots: &'a [BlockDescriptor],
@@ -62,7 +62,8 @@ pub enum Placed {
 /// One file: its pages laid out, its header written by [`finish`].
 pub struct File {
     pub(crate) number: u64,
-    /// Struct hash → the `(bucket, descriptor)` items of the pages it holds.
+    /// Struct hash → the `(bucket, descriptor)` items of the pages it holds;
+    /// a type whose dictionary it holds has an entry, items or not.
     items: BTreeMap<u64, Vec<(u32, u64)>>,
     /// The header's encoded length, budgeted as items are added.
     len: usize,
@@ -76,13 +77,12 @@ pub struct Packed {
     pub(crate) files: Vec<File>,
     pub(crate) placed: Vec<Placed>,
     pub(crate) end: u64,
-    /// Whether the upload ends a cut ([`FileHeader::cut`]).
+    /// Whether the upload ends a batch ([`Header::end_of_batch`]).
     pub(crate) cut: bool,
 }
 
-/// Lay `slots` out in files from remote block `end` on, budgeting each
-/// header for `types` type entries.
-pub fn layout(end: u64, slots: &[SlotImages], types: usize) -> Packed {
+/// Lay `slots` out in files from remote block `end` on.
+pub fn layout(end: u64, slots: &[SlotImages]) -> Packed {
     let mut packed = Packed {
         files: Vec::new(),
         placed: Vec::new(),
@@ -90,10 +90,12 @@ pub fn layout(end: u64, slots: &[SlotImages], types: usize) -> Packed {
         cut: true,
     };
     for (slot, images) in slots.iter().enumerate() {
+        let hash = images.struct_hash;
         let dict = images.dict.iter().map(|bytes| (None, bytes));
         let pages = images.pages.iter().map(|(&b, bytes)| (Some(b), bytes));
         for (bucket, bytes) in dict.chain(pages) {
-            open_room(&mut packed, types);
+            let item = if bucket.is_some() { ITEM_BYTES } else { 0 };
+            open_room(&mut packed, hash, item);
             // An emptied bucket takes an item and no bytes.
             let desc = if bytes.is_empty() {
                 BlockDescriptor::EMPTY
@@ -104,10 +106,10 @@ pub fn layout(end: u64, slots: &[SlotImages], types: usize) -> Packed {
             let Some(file) = packed.files.last_mut() else {
                 continue;
             };
+            file.len += cost(file, hash, item);
+            let items = file.items.entry(hash).or_default();
             if let Some(bucket) = bucket {
-                let items = file.items.entry(images.struct_hash).or_default();
                 items.push((bucket as u32, desc.raw()));
-                file.len += ITEM_BYTES;
                 packed.placed.push(Placed::Page { slot, bucket, desc });
             } else {
                 packed.placed.push(Placed::Dict { slot, desc });
@@ -120,13 +122,24 @@ pub fn layout(end: u64, slots: &[SlotImages], types: usize) -> Packed {
     packed
 }
 
-/// Make sure the last file can take the next image, opening a new one when
-/// the cursor has passed its 8 MiB mark or one more item would outgrow its
-/// header.
-fn open_room(packed: &mut Packed, types: usize) {
+/// What adding `item` bytes of `hash` costs `file`'s header: the item, and
+/// the type's entry if the file has none yet.
+fn cost(file: &File, hash: u64, item: usize) -> usize {
+    let entry = if file.items.contains_key(&hash) {
+        0
+    } else {
+        ENTRY_BYTES
+    };
+    entry + item
+}
+
+/// Make sure the last file can take the next image of `hash`, opening a new
+/// one when the cursor has passed its 8 MiB mark or the image would outgrow
+/// its header.
+fn open_room(packed: &mut Packed, hash: u64, item: usize) {
     let fits = packed.files.last().is_some_and(|file| {
         packed.end < (file.number + 1) * FILE_BLOCKS
-            && file.len + ITEM_BYTES <= HEADER_BYTES
+            && file.len + cost(file, hash, item) <= HEADER_BYTES
     });
     if !fits {
         let number = packed.end.div_ceil(FILE_BLOCKS);
@@ -134,119 +147,117 @@ fn open_room(packed: &mut Packed, types: usize) {
         packed.files.push(File {
             number,
             items: BTreeMap::new(),
-            len: bare_len() + types * ENTRY_BYTES,
+            len: BARE_BYTES,
             bytes: vec![0; HEADER_BYTES],
         });
     }
 }
 
-/// A header's length with no type in it.
-const fn bare_len() -> usize {
-    4 + CRC_PREFIX_LEN + FileHeader::STACK_SIZE
-}
-
 /// Write every file's header, in order, advancing `chain` as it goes: each
-/// header links to the one before, names every type in `views`, and spends
-/// its spare room restating old entries. `chain` ends at the last file.
+/// header links to the one before, names the types it holds pages of, and
+/// spends its spare room restating old addresses; the last ends the batch
+/// if the upload is a cut. `chain` ends at the last file.
 ///
 /// # Errors
-/// [`StorageError::Corrupt`] when a header outgrew [`HEADER_BYTES`] — more
-/// types than one header holds (about 990).
+/// [`StorageError::Corrupt`] when a header outgrew [`HEADER_BYTES`]
+/// (unreachable: the layout budgeted every entry and item).
 pub fn finish(
     packed: &mut Packed,
     views: &[TypeView<'_>],
     chain: &mut Chain,
 ) -> StorageResult<()> {
-    let group = packed.files.first().map_or(NO_FILE, |f| f.number);
-    let group_files = packed.files.len() as u32;
-    for file in &mut packed.files {
-        let (prev, prev_hash) = chain.tail.unwrap_or((NO_FILE, 0));
-        let mut header = FileHeader {
-            file: file.number,
-            group,
-            group_files,
-            cut: packed.cut,
-            prev,
-            prev_hash,
+    let files = packed.files.len();
+    for (i, file) in packed.files.iter_mut().enumerate() {
+        let mut header = Header {
+            at: file.number,
+            prev: chain.tail.unwrap_or(NO_FILE),
+            end_of_batch: packed.cut && i + 1 == files,
             start: chain.start,
             end: packed.end,
-            types: views
-                .iter()
-                .map(|v| TypeEntry {
-                    struct_hash: v.struct_hash,
-                    buckets: v.slots.len() as u32,
-                    last: chain
-                        .last
-                        .get(&v.struct_hash)
-                        .copied()
-                        .unwrap_or(NO_FILE),
-                    dict: v.dict,
-                    changed: file
-                        .items
-                        .remove(&v.struct_hash)
-                        .unwrap_or_default(),
+            types: std::mem::take(&mut file.items)
+                .into_iter()
+                .map(|(hash, changed)| {
+                    let view = views.iter().find(|v| v.struct_hash == hash);
+                    TypeEntry {
+                        struct_hash: hash,
+                        buckets: view.map_or(0, |v| v.slots.len() as u32),
+                        last: chain.last(hash),
+                        dict: view.and_then(|v| v.dict),
+                        changed,
+                    }
                 })
                 .collect(),
         };
         refresh(&mut header, views, chain);
-        for entry in header.types.iter().filter(|e| !e.changed.is_empty()) {
-            chain.last.insert(entry.struct_hash, file.number);
+        for entry in &header.types {
+            chain.types.entry(entry.struct_hash).or_default().last =
+                file.number;
         }
         let encoded = header.encode();
         if encoded.len() > HEADER_BYTES {
-            return Err(StorageError::Corrupt(
-                "a file header outgrew its room",
-            ));
+            return Err(StorageError::Corrupt("a header outgrew its room"));
         }
         file.bytes[..encoded.len()].copy_from_slice(&encoded);
-        chain.tail = Some((file.number, header_hash(&encoded)));
+        chain.tail = Some(file.number);
     }
     chain.end = packed.end;
     Ok(())
 }
 
-/// Spend `header`'s spare room restating entries: the type whose last
-/// whole rotation is oldest first, from its rotating cursor, then the next,
-/// until the room runs out or every type had its turn in this header.
+/// Spend `header`'s spare room restating addresses: the type restated
+/// longest ago first — one never restated before any — from its rotating
+/// cursor, then the next, until the room runs out or every type had its turn
+/// in this header.
 ///
-/// The order is by rotation, not by mention: a type written in every upload
-/// is always mentioned, yet its untouched buckets are restated only on its
-/// turn — ordered by mention, it could lose every tie for ever, and the
-/// recovery horizon would never pass the files its old entries are in
-/// (RFC 0070 §8). A type that never finished a rotation since the store
-/// opened goes first.
-fn refresh(header: &mut FileHeader, views: &[TypeView<'_>], chain: &mut Chain) {
+/// By restatement, not by mention: a collection's `Pivot` and its B+tree
+/// nodes keep their ids, so the same few buckets of a type change in every
+/// batch while the rest hold still. Ordered by mention, that type would
+/// never be restated, and its quiet buckets would be known only from ever
+/// older headers (RFC 0072 §5).
+fn refresh(header: &mut Header, views: &[TypeView<'_>], chain: &mut Chain) {
     let mut spare = HEADER_BYTES.saturating_sub(header.encoded_len());
-    let mut order: Vec<usize> = (0..views.len()).collect();
-    order.sort_by_key(|&i| {
-        chain
-            .rotated
-            .get(&views[i].struct_hash)
-            .map_or(0, |&f| f.saturating_add(1))
+    let mut order: Vec<&TypeView<'_>> = views.iter().collect();
+    // Ties go to the smaller directory: the types never restated tie, and
+    // the empty ones among them take an entry and no item, so the first
+    // header names them all.
+    order.sort_by_key(|v| {
+        let shifted = chain.types.get(&v.struct_hash).and_then(|r| r.shifted);
+        (shifted.map_or(0, |at| at.saturating_add(1)), v.slots.len())
     });
-    for i in order {
-        let view = &views[i];
+    for view in order {
         let buckets = view.slots.len();
-        if spare < ITEM_BYTES {
-            break;
-        }
-        let n = (spare / ITEM_BYTES).min(buckets);
-        if n == 0 {
+        let at = header
+            .types
+            .iter()
+            .position(|e| e.struct_hash == view.struct_hash);
+        let entry = if at.is_some() { 0 } else { ENTRY_BYTES };
+        let least = entry + if buckets > 0 { ITEM_BYTES } else { 0 };
+        if least == 0 || spare < least {
             continue;
         }
-        let cursor = chain.cursor.entry(view.struct_hash).or_insert(0);
-        let entry = &mut header.types[i];
+        let n = ((spare - entry) / ITEM_BYTES).min(buckets);
+        let idx = at.unwrap_or_else(|| {
+            header.types.push(TypeEntry {
+                struct_hash: view.struct_hash,
+                buckets: buckets as u32,
+                last: chain.last(view.struct_hash),
+                dict: view.dict,
+                changed: Vec::new(),
+            });
+            header.types.len() - 1
+        });
+        let rotation = chain.types.entry(view.struct_hash).or_default();
         for k in 0..n {
-            let bucket = (*cursor + k) % buckets;
-            entry
+            let bucket = (rotation.shift + k) % buckets;
+            header.types[idx]
                 .changed
                 .push((bucket as u32, view.slots[bucket].raw()));
         }
-        if *cursor + n >= buckets {
-            chain.rotated.insert(view.struct_hash, header.file);
+        if buckets > 0 {
+            rotation.shift = (rotation.shift + n) % buckets;
         }
-        *cursor = (*cursor + n) % buckets;
-        spare -= n * ITEM_BYTES;
+        rotation.shifted = Some(header.at);
+        spare -= entry + n * ITEM_BYTES;
     }
 }
 
@@ -254,7 +265,7 @@ fn refresh(header: &mut FileHeader, views: &[TypeView<'_>], chain: &mut Chain) {
 mod tests {
     use super::{Packed, Placed, SlotImages, TypeView, finish, layout};
     use crate::block::{BLOCK_SIZE, BlockDescriptor};
-    use crate::file_header::{Chain, FileHeader, NO_FILE};
+    use crate::header::{Chain, Header, NO_FILE, Rotation};
     use crate::remote::{FILE_BLOCKS, HEADER_BLOCKS, HEADER_BYTES};
 
     fn images(hash: u64, pages: &[(usize, usize)]) -> SlotImages {
@@ -285,8 +296,8 @@ mod tests {
         }
     }
 
-    fn header(packed: &Packed, i: usize) -> FileHeader {
-        FileHeader::decode(&packed.files[i].bytes).unwrap().0
+    fn header(packed: &Packed, i: usize) -> Header {
+        Header::decode(&packed.files[i].bytes).unwrap()
     }
 
     fn page_desc(placed: &[Placed], want: usize) -> BlockDescriptor {
@@ -302,10 +313,11 @@ mod tests {
     }
 
     /// Pages follow the header, block-aligned, and the header names each
-    /// with its final descriptor — plus every type the store holds.
+    /// with its final descriptor; a type the upload did not touch is named
+    /// only to restate it.
     #[test]
     fn pages_follow_the_header_and_the_header_names_them() {
-        let mut packed = layout(0, &[images(9, &[(0, 2), (3, 1)])], 2);
+        let mut packed = layout(0, &[images(9, &[(0, 2), (3, 1)])]);
         assert_eq!(packed.files.len(), 1);
         assert_eq!(packed.files[0].bytes.len(), HEADER_BYTES + 3 * BLOCK_SIZE);
         let first = page_desc(&packed.placed, 0);
@@ -319,18 +331,18 @@ mod tests {
         let mut chain = Chain::default();
         finish(&mut packed, &views, &mut chain).unwrap();
         let h = header(&packed, 0);
-        assert_eq!((h.file, h.group, h.group_files), (0, 0, 1));
-        assert_eq!((h.prev, h.end), (NO_FILE, packed.end));
-        assert_eq!(h.types.len(), 2, "every type, placed or not");
-        let nine_entry = &h.types[1];
-        assert_eq!(nine_entry.buckets, 4);
+        assert_eq!((h.at, h.prev, h.end_of_batch), (0, NO_FILE, true));
+        assert_eq!(h.end, packed.end);
+        assert_eq!(h.types[0].struct_hash, 9, "the changed type first");
+        assert_eq!(h.types[0].buckets, 4);
         assert!(
-            nine_entry
+            h.types[0]
                 .changed
                 .starts_with(&[(0, first.raw()), (3, second.raw())])
         );
-        assert_eq!(chain.tail.map(|t| t.0), Some(0));
-        assert_eq!(chain.last.get(&9), Some(&0));
+        assert_eq!(h.types[1].struct_hash, 5, "then the restated one");
+        assert_eq!(chain.tail, Some(0));
+        assert_eq!(chain.last(9), 0);
     }
 
     /// The bound is on where a page starts: the one starting before 8 MiB
@@ -339,7 +351,7 @@ mod tests {
     #[test]
     fn a_page_starting_before_the_mark_runs_past_it() {
         let big = (FILE_BLOCKS * 3) as usize; // 24 MiB
-        let packed = layout(0, &[images(9, &[(0, 1), (1, big), (2, 1)])], 1);
+        let packed = layout(0, &[images(9, &[(0, 1), (1, big), (2, 1)])]);
         assert_eq!(packed.files.len(), 2);
         let first = page_desc(&packed.placed, 1);
         assert_eq!(first.start(), HEADER_BLOCKS + 1);
@@ -355,7 +367,7 @@ mod tests {
 
     #[test]
     fn an_upload_starts_on_the_next_file_boundary() {
-        let packed = layout(HEADER_BLOCKS + 5, &[images(9, &[(0, 1)])], 1);
+        let packed = layout(HEADER_BLOCKS + 5, &[images(9, &[(0, 1)])]);
         assert_eq!(packed.files[0].number, 1);
         let start = page_desc(&packed.placed, 0).start();
         assert_eq!(start, FILE_BLOCKS + HEADER_BLOCKS);
@@ -368,7 +380,7 @@ mod tests {
     fn a_full_header_closes_the_file() {
         let slots: Vec<SlotImages> =
             (0..900).map(|h| images(h, &[(0, 1)])).collect();
-        let mut packed = layout(0, &slots, 900);
+        let mut packed = layout(0, &slots);
         assert!(packed.files.len() > 1, "{} files", packed.files.len());
         let one = dir(1);
         let views: Vec<TypeView<'_>> =
@@ -379,84 +391,95 @@ mod tests {
         }
     }
 
-    /// An upload's files link to each other and to the upload before, each
-    /// by the hash of the header it follows; the group says how many.
+    /// An upload's files link each to the one before, across uploads too,
+    /// and only the last file of a cut ends the batch.
     #[test]
-    fn headers_chain_by_hash_across_uploads() {
+    fn headers_link_back_and_only_the_last_ends_the_batch() {
         let one = dir(1);
         let views = [view(9, &one)];
         let mut chain = Chain::default();
         let big = FILE_BLOCKS as usize;
-        let mut first = layout(0, &[images(9, &[(0, big), (1, 1)])], 1);
+        let mut first = layout(0, &[images(9, &[(0, big), (1, 1)])]);
         finish(&mut first, &views, &mut chain).unwrap();
         assert_eq!(first.files.len(), 2);
         let (a, b) = (header(&first, 0), header(&first, 1));
-        assert_eq!((b.group, b.group_files, b.prev), (a.file, 2, a.file));
-        let a_hash = FileHeader::decode(&first.files[0].bytes).unwrap().1;
-        assert_eq!(b.prev_hash, a_hash);
+        assert_eq!((a.end_of_batch, b.end_of_batch), (false, true));
+        assert_eq!(b.prev, a.at);
 
-        let mut second = layout(chain.end, &[images(9, &[(0, 1)])], 1);
+        let mut second = layout(chain.end, &[images(9, &[(0, 1)])]);
+        second.cut = false;
         finish(&mut second, &views, &mut chain).unwrap();
         let c = header(&second, 0);
-        let b_hash = FileHeader::decode(&first.files[1].bytes).unwrap().1;
-        assert_eq!((c.prev, c.prev_hash), (b.file, b_hash));
-        assert_eq!((c.group, c.group_files), (c.file, 1));
-        assert_eq!(c.types[0].last, b.file, "the newest earlier entries");
+        assert_eq!(c.prev, b.at);
+        assert!(!c.end_of_batch, "a part of a backlog ends nothing");
+        assert_eq!(c.types[0].last, b.at, "the newest earlier entries");
     }
 
-    /// Spare room restates entries from a rotating cursor, the type
-    /// mentioned longest ago first — so a type nobody writes still shows
-    /// up near the head of the chain.
+    /// Spare room restates addresses from a rotating cursor, the type
+    /// restated longest ago first — so a type nobody writes still shows up
+    /// near the head of the chain.
     #[test]
     fn spare_room_restates_on_from_the_cursor() {
         let (busy, idle) = (dir(4), dir(5_000));
         let views = [view(1, &busy), view(2, &idle)];
         let mut chain = Chain::default();
-        chain.last.insert(1, 50);
-        chain.last.insert(2, 10);
+        for (hash, shifted) in [(1, 50), (2, 10)] {
+            let rotation = Rotation {
+                last: shifted,
+                shift: 0,
+                shifted: Some(shifted),
+            };
+            chain.types.insert(hash, rotation);
+        }
         chain.end = 60 * FILE_BLOCKS;
-        let mut packed = layout(chain.end, &[images(1, &[(0, 1)])], 2);
+        let mut packed = layout(chain.end, &[images(1, &[(0, 1)])]);
         finish(&mut packed, &views, &mut chain).unwrap();
         let h = header(&packed, 0);
         let idle_entry = &h.types[1];
-        assert_eq!(idle_entry.last, 10);
+        assert_eq!((idle_entry.struct_hash, idle_entry.last), (2, 10));
         let restated = idle_entry.changed.len();
         assert!(
             restated > 2_000,
             "the idle type filled the room: {restated}"
         );
         assert_eq!(idle_entry.changed[0], (0, idle[0].raw()));
-        assert_eq!(chain.last.get(&2), Some(&h.file));
-        assert_eq!(chain.cursor.get(&2), Some(&restated));
+        let rotation = chain.types[&2];
+        assert_eq!(rotation.last, h.at);
+        assert_eq!((rotation.shift, rotation.shifted), (restated, Some(h.at)));
 
-        // The next file continues where the cursor stopped.
-        let mut next = layout(chain.end, &[images(1, &[(0, 1)])], 2);
+        // The next file continues where the cursor stopped — the busy type,
+        // restated in file 50, ahead of the one restated just now.
+        let mut next = layout(chain.end, &[images(1, &[(0, 1)])]);
         finish(&mut next, &views, &mut chain).unwrap();
         let h = header(&next, 0);
-        let first = h.types[1].changed.first().copied();
+        let idle_entry = h.types.iter().find(|e| e.struct_hash == 2);
+        let first = idle_entry.and_then(|e| e.changed.first().copied());
         assert_eq!(first, Some((restated as u32, idle[restated].raw())));
     }
 
-    /// A type written in every upload is mentioned in every header, and
-    /// ties with the types restated there; ordered by mention it lost every
-    /// tie to the lower-indexed ones and its untouched buckets were never
-    /// restated — the recovery horizon stuck below them. Ordered by the
-    /// oldest whole rotation, every type comes round.
+    /// A type changed in every upload is named in every header, yet its
+    /// quiet buckets are restated only in its turn — ordered by mention it
+    /// would never get one. Ordered by restatement, every type comes round,
+    /// and a type never written is named in the very first header.
     #[test]
-    fn a_type_written_every_upload_still_comes_round() {
+    fn every_type_comes_round_a_busy_one_and_an_empty_one_too() {
         let (a, b, busy) = (dir(3_000), dir(3_000), dir(3_000));
-        let views = [view(1, &a), view(2, &b), view(3, &busy)];
+        let empty: [BlockDescriptor; 0] = [];
+        let views = [view(1, &a), view(2, &b), view(3, &busy), view(4, &empty)];
         let mut chain = Chain::default();
+        let mut packed = layout(chain.end, &[images(3, &[(0, 1)])]);
+        finish(&mut packed, &views, &mut chain).unwrap();
+        let first = header(&packed, 0);
+        let named = first.types.iter().find(|e| e.struct_hash == 4);
+        assert_eq!(named.map(|e| e.buckets), Some(0), "the empty type");
         for _ in 0..12 {
-            let mut packed = layout(chain.end, &[images(3, &[(0, 1)])], 3);
+            let mut packed = layout(chain.end, &[images(3, &[(0, 1)])]);
             finish(&mut packed, &views, &mut chain).unwrap();
         }
-        for hash in [1, 2, 3] {
-            assert!(
-                chain.rotated.contains_key(&hash),
-                "type {hash} never came round: {:?}",
-                chain.rotated
-            );
+        for hash in [1, 2, 3, 4] {
+            let shifted = chain.types.get(&hash).and_then(|r| r.shifted);
+            assert!(shifted.is_some(), "type {hash} never came round");
         }
+        assert!(chain.types[&3].shift > 0, "the busy type was restated");
     }
 }
