@@ -35,8 +35,8 @@ mod directory_pages;
 mod edit;
 pub mod error;
 mod evict;
-mod file_header;
 mod file_space;
+mod header;
 pub mod journal;
 mod journal_frame;
 pub mod manifest;
@@ -65,6 +65,7 @@ mod upload;
 mod upload_file;
 mod upload_plan;
 mod upload_publish;
+mod walk;
 mod window;
 
 pub use alloc::{Cut, DEFAULT_FILE_BYTES, FileUse};
