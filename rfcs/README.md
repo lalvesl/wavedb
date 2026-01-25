@@ -623,6 +623,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0068](0068-record-cache-as-a-log-WIP.md) | The record cache as a log | WIP |
 | [0070](0070-object-storage-backend.md) | Object storage as a page backend (three modes) | Implemented |
 | [0071](0071-data-files-by-address.md) | Data files named by address (append-only files, compaction forward; supersedes 0069's placement) | Implemented |
+| [0072](0072-the-settle-is-the-durability-point-WIP.md) | The settle is the durability point (no journal; `_durable` operations; one header for disk and object store) | WIP |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
