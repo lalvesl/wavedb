@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use futures::future::try_join_all;
 
 use crate::error::StorageResult;
-use crate::file_header::{FileHeader, NO_FILE};
+use crate::header::{Header, NO_FILE};
 use crate::remote::{HEADER_BYTES, Remote};
 
 /// Headers fetched per request round, newest first.
@@ -19,7 +19,7 @@ pub const BATCH: u64 = 32;
 /// file, or whose object is not this file's header.
 pub struct Headers<'a> {
     remote: &'a Remote,
-    seen: BTreeMap<u64, Option<(FileHeader, u64)>>,
+    seen: BTreeMap<u64, Option<Header>>,
     /// The lowest number asked for — not merely fetched along with one.
     lowest: u64,
 }
@@ -33,12 +33,9 @@ impl<'a> Headers<'a> {
         }
     }
 
-    /// File `file`'s header and its hash, reading it and the [`BATCH`] − 1
-    /// numbers below it first if it was not read yet.
-    pub async fn get(
-        &mut self,
-        file: u64,
-    ) -> StorageResult<Option<(FileHeader, u64)>> {
+    /// File `file`'s header, reading it and the [`BATCH`] − 1 numbers below
+    /// it first if it was not read yet.
+    pub async fn get(&mut self, file: u64) -> StorageResult<Option<Header>> {
         self.lowest = self.lowest.min(file);
         if !self.seen.contains_key(&file) {
             let from = file.saturating_sub(BATCH - 1);
@@ -51,8 +48,8 @@ impl<'a> Headers<'a> {
                     .get(&key, Some(0..HEADER_BYTES as u64))
                     .await?;
                 let header = bytes
-                    .and_then(|b| FileHeader::decode(&b).ok())
-                    .filter(|(h, _)| h.file == n);
+                    .and_then(|b| Header::decode(&b).ok())
+                    .filter(|h| h.at == n);
                 StorageResult::Ok((n, header))
             }))
             .await?;
@@ -67,39 +64,23 @@ impl<'a> Headers<'a> {
         self.lowest
     }
 
-    /// Whether `top` ends a whole upload: its group's files all present and
-    /// linked by hash, `top` the last of them, and the group linked to the
-    /// file before it.
-    pub async fn whole(
-        &mut self,
-        top: &(FileHeader, u64),
-    ) -> StorageResult<bool> {
-        let head = &top.0;
-        if head.group > head.file {
-            return Ok(false);
-        }
-        let mut cur = head.clone();
-        let mut members = 1u32;
-        loop {
-            if cur.prev == NO_FILE {
-                return Ok(
-                    cur.file == head.group && members == head.group_files
-                );
+    /// Whether the batch `top` ends is whole: every header back to the one
+    /// ending the batch before — or to the first — present, each linking to
+    /// a lower number than its own.
+    pub async fn whole(&mut self, top: &Header) -> StorageResult<bool> {
+        let (mut at, mut prev) = (top.at, top.prev);
+        while prev != NO_FILE {
+            if prev >= at {
+                return Ok(false);
             }
-            let Some((prev, hash)) = self.get(cur.prev).await? else {
+            let Some(header) = self.get(prev).await? else {
                 return Ok(false);
             };
-            if hash != cur.prev_hash {
-                return Ok(false);
+            if header.end_of_batch {
+                return Ok(true);
             }
-            if cur.file == head.group {
-                return Ok(members == head.group_files);
-            }
-            if prev.group != head.group {
-                return Ok(false);
-            }
-            cur = prev;
-            members += 1;
+            (at, prev) = (header.at, header.prev);
         }
+        Ok(true)
     }
 }
