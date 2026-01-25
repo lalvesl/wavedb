@@ -25,7 +25,7 @@ use crate::error::{StorageError, StorageResult};
 use crate::manifest::Manifest;
 use crate::page_store::{PageStore, StoreOptions};
 use crate::struct_storage::StructStorage;
-use crate::struct_storage::slots_of;
+use crate::struct_storage::{TypeSlot, slots_of};
 
 impl PageStore {
     /// Open the database kept in `options.remote`, with no disk: recovered
@@ -67,14 +67,19 @@ impl PageStore {
             .remote
             .clone()
             .ok_or(StorageError::NotObjectBacked)?;
-        let found =
-            futures::executor::block_on(crate::recover::recover(&remote))?;
+        let types = slots_of(types);
+        let registered: Vec<u64> =
+            types.iter().map(TypeSlot::struct_hash).collect();
+        let found = futures::executor::block_on(crate::recover::recover(
+            &remote,
+            &registered,
+        ))?;
         let file = BlockFile::in_memory(facts.seed());
         let alloc = BlockAllocator::new(options.file_bytes);
         let store = Self::assemble(
             file,
             None,
-            slots_of(types),
+            types,
             (alloc, crate::meta_log::MetaLog::default()),
             options,
         );
