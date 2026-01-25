@@ -25,7 +25,7 @@ pub struct Replayed {
     /// The object store's directories' raw descriptors (RFC 0070).
     pub remote: BTreeMap<u64, Vec<u64>>,
     /// The object store's chain, as the newest chunk naming it left it.
-    pub chain: Option<crate::file_header::ChainRecord>,
+    pub chain: Option<crate::header::ChainRecord>,
     /// The remote descriptors of the types' dictionary images.
     pub remote_dicts: BTreeMap<u64, u64>,
 }
