@@ -9,7 +9,7 @@ use wavedb_platform::s3::{Put, When};
 
 use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
-use crate::file_header::Chain;
+use crate::header::Chain;
 use crate::page_store::PageStore;
 use crate::upload::{IN_FLIGHT, Uploaded};
 use crate::upload_file::{Packed, SlotImages};
