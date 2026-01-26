@@ -118,9 +118,14 @@ where
     };
 
     let data = dir.join("data");
-    let store = wavedb_adapter::open(&data, d)?;
-    let factory =
-        drivers::wavedb::Factory::<E>::new(store, sidecar, cfg.rows as usize);
+    let store = wavedb_adapter::open(&data)?;
+    let durable = d == Durability::Durable;
+    let factory = drivers::wavedb::Factory::<E>::new(
+        store,
+        sidecar,
+        cfg.rows as usize,
+        durable,
+    );
 
     let points = RefCell::new(Points::of(&data, wavedb_is_log));
     let phases =
@@ -132,8 +137,8 @@ where
     // Reopened as a plain `PageStore`, whichever seam the row measured. The
     // footprint is bytes on disk, and the actor changes none of them — while
     // going back through it would ask a second engine to exist for work that
-    // is not being timed. The reopen also proves the store replays.
-    let engine_after = wavedb_adapter::open(&data, d)?;
+    // is not being timed. The reopen also proves the store reconstructs.
+    let engine_after = wavedb_adapter::open(&data)?;
     quiesce(&engine_after, &points)?;
     points.take(Point::Settled)?;
     Engineish::compact(&engine_after)?;
@@ -157,21 +162,18 @@ where
     ))
 }
 
-/// Drain and checkpoint **until the footprint stops moving**.
+/// Settle **until the footprint stops moving**.
 ///
-/// One checkpoint is not quiescence: journal retirement is generational
-/// (RFC 0047), so the journal a checkpoint supersedes is deleted by the one
-/// after it. Measuring after a single round counts a whole retained journal as
-/// stored data — which is how a 1.4 MB database first measured as 34 MB.
+/// One settle is not quiescence: what a batch frees becomes a hole only once
+/// the next one is durable (RFC 0072 §8), so the footprint can still move
+/// after the first.
 fn quiesce<E: Engineish>(engine: &E, points: &Points) -> Result<(), String> {
     const MAX_ROUNDS: usize = 6;
-    // `u64::MAX` forces at least two rounds: the first checkpoint supersedes
-    // the journal, the second is the one that may delete it, so a size that
-    // merely failed to grow proves nothing yet.
+    // `u64::MAX` forces at least two rounds, so a size that merely failed to
+    // grow proves nothing yet.
     let mut last = u64::MAX;
     for _ in 0..MAX_ROUNDS {
         engine.drain()?;
-        engine.checkpoint()?;
         let now = points.probe()?;
         if now == last && !engine.has_pending() {
             return Ok(());
@@ -198,9 +200,11 @@ fn settings(engine: Engine, d: Durability) -> Vec<(String, String)> {
         (
             "barrier".into(),
             match d {
-                Durability::Durable => "fsync per apply batch".to_string(),
+                Durability::Durable => {
+                    "a settle and its fsync per write (RFC 0072)".to_string()
+                }
                 Durability::Relaxed => {
-                    format!("one fsync per elapsed {:?}", crate::RELAXED_WINDOW)
+                    format!("a settle per elapsed {:?}", crate::RELAXED_WINDOW)
                 }
             },
         ),
