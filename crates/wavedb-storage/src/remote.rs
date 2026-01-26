@@ -21,7 +21,7 @@
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ops::Range;
 use std::time::Instant;
 
@@ -113,9 +113,6 @@ pub(crate) struct ObjectState {
     /// Blocks of disk pages the object store has not received yet (an
     /// emptied bucket counts one) — what the upload trigger reads.
     pub(crate) pending_blocks: Cell<u64>,
-    /// What uploads changed that no addressing chunk on disk records yet —
-    /// written by the next window, whatever it carries (RFC 0070 §5).
-    pub(crate) unrecorded: RefCell<Unrecorded>,
     /// One upload at a time.
     pub(crate) uploading: Cell<bool>,
     /// How recently each disk bucket was read or written — what eviction
@@ -136,24 +133,10 @@ pub(crate) struct ObjectState {
     /// Files deleted above the chain's oldest live one — not deleted
     /// again. RAM only: after a reopen they are deleted once more.
     pub(crate) deleted: RefCell<BTreeSet<u64>>,
-    /// The files the disk's recovery roots name — the newest checkpoint's,
-    /// and the one before while its successor's frame is unproven, as the
-    /// allocator protects their runs (RFC 0047). Not deleted.
+    /// The files the disk's reconstruction roots name — the newest batch's,
+    /// and the one before while the newest is not durable yet. Not
+    /// deleted.
     pub(crate) rooted: RefCell<[BTreeSet<u64>; 2]>,
-}
-
-/// Buckets whose descriptors an upload changed, per slot index: disk ones
-/// (a flag cleared) and remote ones (a page placed or emptied).
-#[derive(Debug, Default)]
-pub(crate) struct Unrecorded {
-    pub(crate) slots: BTreeMap<usize, Touched>,
-}
-
-/// One slot's unrecorded buckets.
-#[derive(Debug, Default)]
-pub(crate) struct Touched {
-    pub(crate) disk: BTreeSet<usize>,
-    pub(crate) remote: BTreeSet<usize>,
 }
 
 impl ObjectState {
@@ -162,7 +145,6 @@ impl ObjectState {
             remote,
             chain: RefCell::default(),
             pending_blocks: Cell::new(0),
-            unrecorded: RefCell::new(Unrecorded::default()),
             uploading: Cell::new(false),
             heat: RefCell::default(),
             wanted: RefCell::default(),
@@ -195,13 +177,6 @@ impl PageStore {
     /// for a disk-only one.
     pub(crate) fn object(&self) -> StorageResult<&ObjectState> {
         self.object.as_ref().ok_or(StorageError::NotObjectBacked)
-    }
-
-    /// Whether uploads or evictions changed something no chunk records yet.
-    pub(crate) fn has_unrecorded(&self) -> bool {
-        self.object
-            .as_ref()
-            .is_some_and(|o| !o.unrecorded.borrow().slots.is_empty())
     }
 
     /// Whether this store's pages live in an object store (RFC 0070).
