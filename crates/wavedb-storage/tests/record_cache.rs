@@ -9,23 +9,24 @@
 #![allow(clippy::future_not_send)]
 
 use futures::executor::block_on;
-use std::time::Duration;
 use wavedb_core::{Id, Store, U48, Write};
 
-use wavedb_storage::{PageStore, Progress, StoreOptions, StructStorage};
+use wavedb_storage::{PageStore, Progress, StructStorage};
 
 const SH: u64 = 0x5EED_0068_CAC4_E001;
 static SLOT: StructStorage = StructStorage::new(SH);
 
-/// A store whose batches share barriers (RFC 0061): these tests are about
-/// memory, and a barrier per write would make them about the disk. The one
-/// that reopens flushes first.
 fn open(dir: &std::path::Path) -> PageStore {
-    let options = StoreOptions {
-        relax_window: Duration::from_secs(3_600),
-        ..StoreOptions::default()
-    };
-    PageStore::open_with(dir, &[&SLOT], options).unwrap()
+    PageStore::open(dir, &[&SLOT]).unwrap()
+}
+
+/// One bounded round of a settle cycle, opening one if none is open — a
+/// node's step.
+fn step(s: &PageStore, budget: usize) -> Progress {
+    if !s.is_cycling() {
+        s.begin_cycle().unwrap();
+    }
+    s.cycle_step(budget).unwrap()
 }
 
 fn id(key: u64) -> Id {
@@ -58,7 +59,7 @@ fn eviction_drops_the_settled_and_keeps_the_unsettled() {
     for k in 0..2_000 {
         put(&s, k, 1, 200);
     }
-    assert_eq!(s.settle_step(1_000).unwrap(), Progress::Settled);
+    assert_eq!(step(&s, 1_000), Progress::Settled);
     let before = s.cache_len();
     s.evict_settled(0);
     assert!(s.cache_len() < before, "settled chunks must go");
@@ -94,9 +95,9 @@ fn rewrites_settle_at_their_newest_and_removes_stay_removed() {
     assert_eq!(read(&s, 8), None, "the page agrees after the settle");
 }
 
-/// Unsettled and evicted alike come back on reopen: the journal replays into
-/// the logs and the settle writes them, so what was read before is read
-/// after.
+/// Unsettled and evicted alike come back on reopen: a close settles what
+/// was not, and the reconstruction finds both, so what was read before is
+/// read after.
 #[test]
 fn a_reopen_rebuilds_what_eviction_and_the_settle_left() {
     let d = tempfile::tempdir().unwrap();
@@ -105,15 +106,14 @@ fn a_reopen_rebuilds_what_eviction_and_the_settle_left() {
         for k in 0..500 {
             put(&s, k, 1, 100);
         }
-        s.settle_step(200).unwrap();
+        step(&s, 200);
         s.evict_settled(0);
         for k in 0..250 {
             put(&s, k, 2, 100);
         }
-        s.flush().unwrap();
     }
     let s = open(d.path());
-    assert!(!s.has_pending(), "a reopen settles what it replays");
+    assert!(!s.has_pending(), "a reopen replays nothing");
     for k in 0..500 {
         let version = if k < 250 { 2 } else { 1 };
         assert_eq!(read(&s, k), Some(record(k, version, 100)), "record {k}");
@@ -137,7 +137,7 @@ fn steady_writes_stay_inside_the_budget() {
         // The node's shape: a bounded settle step, then the upkeep evicts.
         // The step scans past this round's writes, so what stays unsettled
         // between steps is never more than one round of them.
-        s.settle_step(600).unwrap();
+        step(&s, 600);
         s.evict_settled(BUDGET);
         peak = peak.max(s.cache_bytes());
     }
