@@ -19,7 +19,7 @@
   [0046](0046-directory-deltas-in-the-window.md) (the checkpoint whose blocking
   is the motivation), [0057](0057-page-arena-and-checkpoint-staging.md) (the
   arena that removes many of the reads mapped here),
-  [0061](0061-relaxed-durability-window.md) (the one place the engine already
+  [0061](0061-relaxed-durability-window-DEPRECATED.md) (the one place the engine already
   chooses when to block), [0002](0002-architectural-hard-rules.md) (the
   non-`Send` stance the *elaboration* eventually amends — this RFC does not)
 
