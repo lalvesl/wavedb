@@ -1,6 +1,5 @@
 //! Where a [`Server`]'s database lives and how it keeps it: the data
-//! directory, the durability window, the object store, and the checkpoint
-//! and cache numbers. Split from the crate root, which keeps the rest of
+//! directory, the object store, and the file and cache numbers. Split from the crate root, which keeps the rest of
 //! the builder and the serving.
 
 use std::path::PathBuf;
@@ -15,27 +14,10 @@ where
     E: NodeTasks + StorageRegistry,
 {
     /// Set the directory holding the database: its `MANIFEST` and one
-    /// directory per shard under `shards/`, each with its data files and
-    /// journal.
+    /// directory per shard under `shards/`, each with its data files.
     #[must_use]
     pub fn data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.data_dir = dir.into();
-        self
-    }
-
-    /// Group-commit writes: allow an acknowledged batch to sit unsynced for
-    /// up to `window`, so a burst costs one `fsync` instead of one each
-    /// (RFC 0061).
-    ///
-    /// **Default zero — one barrier per batch**, which is the promise the
-    /// engine is built around. Setting this weakens what `Ok` means for
-    /// every write the node serves: a crash then loses a *suffix* of
-    /// acknowledged writes (never a corrupt store). Set it when the
-    /// application can say how much recent work it is willing to lose, and
-    /// not otherwise.
-    #[must_use]
-    pub const fn relax_window(mut self, window: Duration) -> Self {
-        self.store.relax_window = window;
         self
     }
 
@@ -57,7 +39,7 @@ where
     /// (RFC 0070 §9): pages not uploaded yet and the ones read lately live
     /// in RAM, up to
     /// [`object_ram_bytes`](crate::Maintenance::object_ram_bytes), and
-    /// there is no journal — a write is durable once uploaded, which happens
+    /// no settle to disk — a write is durable once uploaded, which happens
     /// past [`upload_after_bytes`](crate::Maintenance::upload_after_bytes) or
     /// after [`upload_interval`](Self::upload_interval), whichever comes
     /// first.
@@ -101,14 +83,6 @@ where
     #[must_use]
     pub const fn victim_free_percent(mut self, percent: u8) -> Self {
         self.store.victim_free_percent = percent;
-        self
-    }
-
-    /// Checkpoint (persist the pages' metadata and truncate the journal)
-    /// once the journal exceeds `bytes`. Default 64 MiB.
-    #[must_use]
-    pub const fn checkpoint_after_bytes(mut self, bytes: u64) -> Self {
-        self.maintenance.checkpoint_after_bytes = bytes;
         self
     }
 
