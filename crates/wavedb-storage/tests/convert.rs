@@ -57,7 +57,7 @@ fn a_disk_database_moves_to_the_object_store() {
     {
         let s = fx.open_disk();
         fill(&s, 0..RECORDS, 0);
-        s.commit_journal().unwrap();
+        s.drain().unwrap();
     }
     fx.convert(Backend::ObjectStore).unwrap();
     fx.convert(Backend::ObjectStore).unwrap(); // done is done
@@ -122,14 +122,14 @@ fn evicted_pages_come_back_before_the_mode_changes() {
         fill(&s, 0..RECORDS, 0);
         upload_all(&s);
         s.evict_cold(0).unwrap();
-        s.commit_journal().unwrap();
+        s.drain().unwrap();
     }
     fx.convert(Backend::Disk).unwrap();
     let s = fx.open_disk();
     assert_reads(&s, 0);
     // And it carries on as a disk database.
     fill(&s, 0..RECORDS, 1);
-    s.commit_journal().unwrap();
+    s.drain().unwrap();
     drop(s);
     assert_reads(&fx.open_disk(), 1);
 }
@@ -181,7 +181,7 @@ fn every_shard_of_a_sharded_database_is_converted() {
         let shards = open(StoreOptions::default()).unwrap();
         for (i, s) in shards.iter().enumerate() {
             fill(s, (0..RECORDS).filter(|k| shard_of(*k) == i), 0);
-            s.commit_journal().unwrap();
+            s.drain().unwrap();
         }
     }
     fx.convert(Backend::ObjectStore).unwrap();
