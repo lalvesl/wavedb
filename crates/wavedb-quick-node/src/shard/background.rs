@@ -6,13 +6,14 @@
 //! through the bounded job queue, and maintenance regulates itself here. BG
 //! is one task that takes a single bounded step ([`Owned::step`]) only when the valve
 //! ([`Priority`]) says maintenance goes next — which, with jobs executing or
-//! queued, is only once the journal has grown into the valve's band — and
-//! yields after every step. A job waits behind maintenance for at most one
-//! step: one settle round of `SETTLE_BUDGET_IDS` ids, or one checkpoint's
-//! close.
+//! queued, is only once what is not settled has grown into the valve's band —
+//! and yields after every step. A job waits behind maintenance for at most
+//! one step: one settle round of `SETTLE_BUDGET_IDS` ids.
 //!
-//! On a timer it applies the node's policy to each store in turn
-//! ([`Owned::upkeep`]): open a checkpoint, evict, compact — each bounded,
+//! Every [`UPKEEP_PERIOD`] (200 ms) it applies the node's policy to each
+//! store in turn ([`Owned::upkeep`]): open a settle cycle — the tick that
+//! makes writes durable (RFC 0072), skipped when nothing was written —,
+//! evict, compact — each bounded,
 //! with a yield between stores — and an object-backed store brings back the
 //! buckets reads wanted and uploads what it holds back past the threshold
 //! ([`Owned::object_upkeep`], RFC 0070). An
@@ -78,8 +79,10 @@ async fn run(bg: &Background) {
             reads: busy,
             maintenance: bg.owned.owes(),
         };
-        if valve.next(avail, bg.owned.journal_bytes())
-            == Some(Class::Maintenance)
+        // A durable write waits on the open batch: it goes first.
+        if bg.owned.urgent()
+            || valve.next(avail, bg.owned.unsettled_bytes())
+                == Some(Class::Maintenance)
         {
             bg.owned.step(&mut cursor);
             yield_now().await;
@@ -89,8 +92,8 @@ async fn run(bg: &Background) {
         if let Either::Second(_) = select(sleep(wait), bg.halt.recv()).await {
             return;
         }
-        // Due regardless of load: the policy is what opens a checkpoint, and
-        // a node that only checkpointed when idle would grow its journal
+        // Due regardless of load: the policy is what opens a settle cycle,
+        // and a node that only settled when idle would grow its record cache
         // without bound under steady traffic.
         if last.elapsed() >= UPKEEP_PERIOD {
             for i in 0..bg.owned.len() {
