@@ -6,7 +6,7 @@
 - **Supersedes:** [RFC 0044](0044-page-cache-PLANNED-LOW.md) — same cache, given
   a concrete allocation shape and a decision about the write path
 - **Builds on:** [RFC 0041](0041-single-barrier-checkpoint.md) (the settle's one
-  read per touched page is what this removes), [RFC 0047](0047-generational-journal-retirement.md)
+  read per touched page is what this removes), [RFC 0047](0047-generational-journal-retirement-DEPRECATED.md)
   (the retirement boundary the safety argument below rests on)
 
 ## Summary
