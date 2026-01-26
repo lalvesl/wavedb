@@ -20,7 +20,7 @@ use std::process::ExitCode;
 use wavedb_bench_gen::seed;
 
 const USAGE: &str = "\
-usage: bench-gen <emit-tsv|fill-wavedb> --rows N --seed S --out PATH\n       fill-wavedb also takes --page-cache-bytes N, --record-cache-bytes N\n       and --checkpoint-after-bytes N";
+usage: bench-gen <emit-tsv|fill-wavedb> --rows N --seed S --out PATH\n       fill-wavedb also takes --page-cache-bytes N, --record-cache-bytes N\n       and --settle-after-bytes N";
 
 fn main() -> ExitCode {
     match run() {
@@ -68,10 +68,10 @@ fn run() -> Result<String, String> {
                     .parse()
                     .map_err(|e| format!("--record-cache-bytes: {e}"))?;
             }
-            "--checkpoint-after-bytes" => {
-                profile.checkpoint_after_bytes = next()?
+            "--settle-after-bytes" => {
+                profile.settle_after_bytes = next()?
                     .parse()
-                    .map_err(|e| format!("--checkpoint-after-bytes: {e}"))?;
+                    .map_err(|e| format!("--settle-after-bytes: {e}"))?;
             }
             other => return Err(format!("unknown argument {other}")),
         }
