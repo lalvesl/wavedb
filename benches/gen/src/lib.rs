@@ -21,40 +21,27 @@
     clippy::doc_markdown
 )]
 
-/// The durability window every **fill** in this suite opens its WaveDB store
-/// with (RFC 0061).
-///
-/// A fill is not a measurement, and one op is one batch is one barrier, so a
-/// durable fill of a few million records is a few million `fsync`s: the reason
-/// the WaveDB seed took minutes where the others took seconds, and the reason
-/// a very large shop preload is not affordable at all. This buys build time;
-/// which window a *measured* phase runs under is the durability row's
-/// question, not this one. The other four systems get the same courtesy under
-/// different names — `.import`, `\copy`, `LOAD DATA` and `mongoimport` are not
-/// the per-statement commit path either.
-pub const FILL_WINDOW: std::time::Duration =
-    std::time::Duration::from_millis(200);
-
-/// Journal bytes that trigger a checkpoint during a **seed fill** — and it is
+/// Unsettled bytes that trigger a settle during a **seed fill** — and it is
 /// deliberately enormous.
 ///
 /// A bare `PageStore` has no background maintenance, so a fill that never
-/// checkpoints grows its journal for the whole fill (4.8 GB at 200 000 rows)
-/// and its record cache with it. Both have to be bounded somewhere.
+/// settles grows its record cache for the whole fill. It has to be bounded
+/// somewhere.
 ///
 /// But bounding them *tightly* is worse than not bounding them at all. Page
 /// writes are copy-on-write (RFC 0041): every intermediate settle rewrites
-/// pages that the next settle rewrites again, so a frequent checkpoint is a
-/// write amplifier. Measured at 200 000 rows: a 64 MiB trigger (~75 rounds)
+/// pages that the next settle rewrites again, so a frequent settle is a
+/// write amplifier. Measured at 200 000 rows (with the journal of the time):
+/// a 64 MiB trigger (~75 rounds)
 /// took **4:25 and left a 303 MB store**; no trigger at all took **2:17 and
 /// left 20 MB**. The end-of-fill settle writes each page once, and that is
-/// the fill's optimum — the threshold exists only to stop the journal and the
-/// cache from running away before it.
+/// the fill's optimum — the threshold exists only to stop the cache from
+/// running away before it.
 ///
 /// So: as rare as the disk allows. In **bytes**, never in operations —
 /// per-operation log size depends on the data, and an earlier 5 000-op
 /// trigger never fired once while 649 MB accumulated.
-pub const FILL_CHECKPOINT_BYTES: u64 = 4 << 30;
+pub const FILL_SETTLE_BYTES: u64 = 4 << 30;
 
 pub mod schema;
 pub mod seed;
