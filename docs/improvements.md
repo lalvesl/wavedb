@@ -96,7 +96,7 @@ order of cost:
 
 - **Now.** The `large` seed's `data.bin` was 9.6 GB for 5 million inserts:
   ~1 920 bytes per row against ~260 in the dataset, where the 200 000-row
-  tier suggests ~100 bytes live. Every checkpoint relocates pages
+  tier suggests ~100 bytes live. Every settle relocates pages
   copy-on-write, and the bench fill never compacts.
 - **Since** 2026-10-10 the storage half exists
   ([RFC 0069](../rfcs/0069-compaction-into-the-holes-DEPRECATED.md)): `PageStore::space()`
