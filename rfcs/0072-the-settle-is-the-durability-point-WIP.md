@@ -1,6 +1,7 @@
 # RFC 0072 — The settle is the durability point
 
-- **Status:** WIP — opened 2026-10-16
+- **Status:** WIP — opened 2026-10-16; phases 1–3 landed 2026-10-16, phase 4
+  open (see Progress)
 - **Crates:** `wavedb-storage` (the cycle, the header, the reconstruction),
   `wavedb-quick-node` (the tick, the barrier), `wavedb-core` + `wavedb-macros`
   + `wavedb-net` + `wavedb` (the `_durable` operations, the client cache's
@@ -10,9 +11,9 @@
   [0043](0043-descriptors-in-the-commit-frame.md),
   [0046](0046-directory-deltas-in-the-window.md)'s `Commit` frame (the delta
   riding the window is kept, as the header),
-  [0047](0047-generational-journal-retirement.md),
-  [0048](0048-chained-addressing-log.md),
-  [0061](0061-relaxed-durability-window.md); changes
+  [0047](0047-generational-journal-retirement-DEPRECATED.md),
+  [0048](0048-chained-addressing-log-DEPRECATED.md),
+  [0061](0061-relaxed-durability-window-DEPRECATED.md); changes
   [0070](0070-object-storage-backend.md) §5–§6 (the file header and the
   recovery walk become the disk's) and
   [0071](0071-data-files-by-address.md) §5–§7 (protection and sealing go)
@@ -114,6 +115,10 @@ struct Header {
     prev: u64,
     /// The last header of a batch (§2).
     end_of_batch: bool,
+    /// The object store's files: the oldest file not deleted, and the
+    /// remote end once the batch is in. Zero on disk.
+    start: u64,
+    end: u64,
     /// The types this batch changed, then the types the spare room restates.
     types: Vec<TypeEntry>,
     /// Disk + object mode: the object store's directories, the same way,
@@ -137,7 +142,10 @@ struct TypeEntry {
 An item is 12 bytes, so a header holds about 2 700 addresses. Overflowing it
 takes a shard rewriting 2 700 pages in 200 ms — 10 to 85 MB, 50 to
 400 MB/s per shard — which a bulk import or a compaction pass may do, and
-which only makes the cycle take one more round.
+which only makes the cycle take one more round: a header names as much of
+what its window changed as it holds, the rest stays **unrecorded** for the
+next header, and only a header that leaves nothing unrecorded may end a
+batch. What uploads and evictions change between windows waits the same way.
 
 No hash chain: nothing is ever rewritten in place — the disk only appends,
 the object store only creates — so a header's crc and its own `at` are the
@@ -210,17 +218,28 @@ block to the newest valid one — after a crash only.
 
 ### 8. Space
 
-- **A free is a hole, at once.** The disk only appends, so a freed address is
-  never written again. No protected generations, no deferred frees.
-- **The reclaim runs between cycles**, never with one open: everything free
-  then was freed by a batch already durable, so no root names it. It is
-  idempotent — a crash in the middle leaves holes the next reconstruction
-  sees free and the next compaction cuts.
-- **Compaction** starts with a **full restatement**: a cycle whose headers
-  name every bucket of every type, in the active file. Every older header is
-  then dead, so the victims — older files — hold nothing the reconstruction
-  reads, and their pages are carried forward as today. They are cut or
-  deleted at a reclaim after that cycle's `fsync`.
+- **A free waits for its batch.** The disk only appends, so a freed address
+  is never written again; what must wait is giving it back — a free tail cut,
+  an emptied file deleted. A free is deferred, and becomes a hole once the
+  batch that stopped naming it is durable (a mark per batch, released when
+  its barrier answers). The reclaim cuts only holes, at any time, and is
+  idempotent: a crash in the middle leaves holes the next reconstruction
+  sees free.
+- **Headers die below the horizon.** A header run is live while a
+  reconstruction from the newest batch may read it: for a type, at or above
+  where its last whole rotation of the spare room began (or the newest header
+  naming it, for a type with no address); before any rotation since the open,
+  at or above the lowest header the open read; and never below the header
+  ending the batch before, which the check of §7 reads. At each batch's end
+  the headers below that line are freed, deferred like any run.
+- **Compaction** starts with a **full restatement** (`record_all`): every
+  address of every type unrecorded, so the headers of the next batch name
+  them all — and once that batch and the next have ended, every older header
+  is dead. A file holding a live header is never a victim (a header cannot
+  move); the active file, if worth emptying, is closed first so the
+  restatement lands in a new one. The victims' runs are carried forward as
+  before; they become holes once a batch over the moves is durable, and the
+  reclaim then cuts and deletes. Phases: restating, moving, sealing.
 - `convert` and the adoption of a database recovered from the object store
   use the same full restatement where they wrote a snapshot and a
   checkpoint.
@@ -236,7 +255,8 @@ Object mode is unchanged otherwise: no disk, durable once uploaded.
 ### 10. The node
 
 - BG opens a cycle every 200 ms on each store with something to settle, and
-  steps it when the valve says; the valve weighs the bytes not settled.
+  steps it when the valve says; the valve weighs the bytes not settled. A
+  durable write waiting on an open batch goes ahead of the valve.
 - The barrier helper takes the cycle's `fsync`.
 - `close` settles every store and waits for its `fsync`.
 - Gone: `relax_window`, `checkpoint_after_bytes`.
@@ -262,11 +282,11 @@ transaction's commit: untouched by this RFC.
 
 ## Gone
 
-`journal.rs`, `journal_frame.rs`, `commit.rs`, `retire.rs`, `meta_log.rs`,
-the edit chunk and its replay; `commit_journal`, `force_retirement`,
+`journal.rs`, `journal_frame.rs`, `commit.rs`, `commit_steps.rs`, `retire.rs`,
+`meta_log.rs`, the edit chunk and its replay; `commit_journal`, `force_retirement`,
 `begin_checkpoint`/`checkpoint_step`, `flush`, `journal_len`; the allocator's
-protected sets; `StoreOptions::relax_window`. `drain()` becomes one whole
-cycle, `fsync` included.
+protected sets; `StoreOptions::relax_window`. `drain()` becomes whole cycles,
+`fsync` included, and a store dropped drains.
 
 ## Phases
 
@@ -276,6 +296,36 @@ cycle, `fsync` included.
    compaction's full restatement, `convert`, the adoption.
 3. **The node**: the tick, the helper, the valve, the configuration.
 4. **The surface and the client**: §11–§12.
+
+## Progress
+
+- **Phase 1 — landed 2026-10-16** (`header`, `restate`, `walk`,
+  `upload_file`, `recover`, `recover_headers`): one `Header` for the object
+  store's files, no hash chain, the spare room by the oldest restatement,
+  empty types first; the linear walk with the way down by `prev`.
+- **Phases 2–3 — landed 2026-10-16** (`cycle`, `disk_header`, `disk_chain`,
+  `reopen`, `checkpoint`, `barrier`, `alloc`, `compact`, `defrag`;
+  `wavedb-quick-node`'s `shard::{owned,background}`):
+  - `apply` commits and returns; `apply_durable` waits for its batch — on a
+    store with no helper it settles the batch itself; in object mode it waits
+    for an upload. A store dropped settles what it holds.
+  - Reconstruction as §6–§7, the root's header and every header the walk read
+    kept live, the torn tail cut.
+  - The node ticks a cycle every 200 ms (`Owned::upkeep`), steps it from BG,
+    and a durable write waiting is urgent; `close` drains. `relax_window` and
+    `checkpoint_after_bytes` are gone.
+  - The benchmarks keep their durable and relaxed rows: the driver settles
+    after every write (inside the timed window) or once per window.
+  - Tested by crashes as the disk is left: the files copied while the store
+    holds them open (`tests/durability.rs`, `compaction`, `eviction`,
+    `object_store`, `remote_compaction`, `counts_survive_recovery`) — a
+    write not yet settled lost, a batch cut before its end not back at all,
+    a torn page or header giving way to the batch before.
+- **Phase 4 — open.** Until it lands, nothing above the engine asks for a
+  durable write, and the native client cache settles only when it is closed:
+  its mirrors survive a clean exit, not a crash (the node is the truth, and
+  catch-up refills it). The end-to-end tests that kill a node wait a tick
+  first.
 
 ## Testing
 
