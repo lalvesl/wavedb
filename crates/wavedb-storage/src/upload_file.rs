@@ -25,6 +25,8 @@ use crate::header::{
 };
 use crate::plan::blocks_of;
 use crate::remote::{FILE_BLOCKS, HEADER_BLOCKS, HEADER_BYTES};
+pub use crate::restate::TypeView;
+use crate::restate::restate;
 
 /// One type's images for an upload.
 pub struct SlotImages {
@@ -33,16 +35,6 @@ pub struct SlotImages {
     pub(crate) pages: BTreeMap<usize, Vec<u8>>,
     /// The dictionary, when the object store's copy is behind.
     pub(crate) dict: Option<Vec<u8>>,
-}
-
-/// A type's remote directory as it stands once the upload is in — what a
-/// header names, and restates from. Every registered type has one, a type
-/// never uploaded with no slots: it is named too, in its turn.
-pub struct TypeView<'a> {
-    pub(crate) struct_hash: u64,
-    pub(crate) slots: &'a [BlockDescriptor],
-    /// Its dictionary's remote descriptor, if it has one.
-    pub(crate) dict: Option<u64>,
 }
 
 /// Where an image landed.
@@ -187,6 +179,8 @@ pub fn finish(
                     }
                 })
                 .collect(),
+            remote: Vec::new(),
+            chain: None,
         };
         refresh(&mut header, views, chain);
         for entry in &header.types {
@@ -204,61 +198,10 @@ pub fn finish(
     Ok(())
 }
 
-/// Spend `header`'s spare room restating addresses: the type restated
-/// longest ago first — one never restated before any — from its rotating
-/// cursor, then the next, until the room runs out or every type had its turn
-/// in this header.
-///
-/// By restatement, not by mention: a collection's `Pivot` and its B+tree
-/// nodes keep their ids, so the same few buckets of a type change in every
-/// batch while the rest hold still. Ordered by mention, that type would
-/// never be restated, and its quiet buckets would be known only from ever
-/// older headers (RFC 0072 §5).
+/// Spend `header`'s spare room restating old addresses (`crate::restate`).
 fn refresh(header: &mut Header, views: &[TypeView<'_>], chain: &mut Chain) {
-    let mut spare = HEADER_BYTES.saturating_sub(header.encoded_len());
-    let mut order: Vec<&TypeView<'_>> = views.iter().collect();
-    // Ties go to the smaller directory: the types never restated tie, and
-    // the empty ones among them take an entry and no item, so the first
-    // header names them all.
-    order.sort_by_key(|v| {
-        let shifted = chain.types.get(&v.struct_hash).and_then(|r| r.shifted);
-        (shifted.map_or(0, |at| at.saturating_add(1)), v.slots.len())
-    });
-    for view in order {
-        let buckets = view.slots.len();
-        let at = header
-            .types
-            .iter()
-            .position(|e| e.struct_hash == view.struct_hash);
-        let entry = if at.is_some() { 0 } else { ENTRY_BYTES };
-        let least = entry + if buckets > 0 { ITEM_BYTES } else { 0 };
-        if least == 0 || spare < least {
-            continue;
-        }
-        let n = ((spare - entry) / ITEM_BYTES).min(buckets);
-        let idx = at.unwrap_or_else(|| {
-            header.types.push(TypeEntry {
-                struct_hash: view.struct_hash,
-                buckets: buckets as u32,
-                last: chain.last(view.struct_hash),
-                dict: view.dict,
-                changed: Vec::new(),
-            });
-            header.types.len() - 1
-        });
-        let rotation = chain.types.entry(view.struct_hash).or_default();
-        for k in 0..n {
-            let bucket = (rotation.shift + k) % buckets;
-            header.types[idx]
-                .changed
-                .push((bucket as u32, view.slots[bucket].raw()));
-        }
-        if buckets > 0 {
-            rotation.shift = (rotation.shift + n) % buckets;
-        }
-        rotation.shifted = Some(header.at);
-        spare -= entry + n * ITEM_BYTES;
-    }
+    let spare = HEADER_BYTES.saturating_sub(header.encoded_len());
+    restate(&mut header.types, spare, views, &mut chain.types, header.at);
 }
 
 #[cfg(test)]
@@ -426,8 +369,8 @@ mod tests {
         for (hash, shifted) in [(1, 50), (2, 10)] {
             let rotation = Rotation {
                 last: shifted,
-                shift: 0,
                 shifted: Some(shifted),
+                ..Rotation::default()
             };
             chain.types.insert(hash, rotation);
         }
