@@ -12,32 +12,28 @@
 //!
 //! ## In steps
 //!
-//! A compaction is stepped like a checkpoint ([`PageStore::compact_step`]),
-//! the caller choosing when; the store keeps where it is ([`Phase`]):
+//! A compaction is stepped ([`PageStore::compact_step`]), the caller
+//! choosing when; the store keeps where it is ([`Phase`]):
 //!
-//! 1. **Moving.** Bounded passes, each a few rounds of one window write —
-//!    the same write a settle round makes, carrying its own addressing delta
-//!    ([RFC 0046]). A file holding nothing but the addressing log's chunks
-//!    gets one snapshot in the active file, which releases them all
-//!    ([RFC 0048]).
-//! 2. **The old addressing goes.** The moves leave a chain of delta chunks;
-//!    one snapshot replaces it.
-//! 3. **Sealing.** The vacated runs are still named by the last `Commit`
-//!    frame — a crash would reopen from it — so the allocator holds them back
-//!    ([RFC 0047]). One checkpoint names the moved state; the next one's
-//!    opening proves that frame durable and releases the old generation.
+//! 1. **Restating.** A header cannot move — the others name where it is —
+//!    so a file holding one a reconstruction may still read is never a
+//!    victim. The compaction first has every address restated
+//!    (`record_all`): once that batch, and the one after it, have ended,
+//!    no header older than the restatement is live.
+//! 2. **Moving.** Bounded passes, each a few rounds of one window write —
+//!    the same write a settle round makes, ending with its header.
+//! 3. **Sealing.** The vacated runs are still named by the newest durable
+//!    batch — a crash would reopen from it — so they are only deferred
+//!    frees. The next batch to end names the moved state; once it is
+//!    durable they are holes ([RFC 0072] §8).
 //! 4. **Reclaiming.** Every file's free tail is cut off, and a file left
-//!    empty is deleted ([`reclaim`](PageStore::reclaim)). Every checkpoint's
-//!    opening does the same (`crate::retire`), so a long compaction gives
-//!    space back as it goes, not only at its end.
+//!    empty is deleted ([`reclaim`](PageStore::reclaim)).
 //!
-//! Safety is the checkpoint's: a moved run is written before any descriptor
-//! names it, and nothing is cut while a recovery root names it.
+//! Safety is the batch's: a moved run is written before any header names
+//! it, and nothing is cut while a durable batch names it.
 //!
-//! [RFC 0046]: ../../../rfcs/0046-directory-deltas-in-the-window.md
-//! [RFC 0047]: ../../../rfcs/0047-generational-journal-retirement.md
-//! [RFC 0048]: ../../../rfcs/0048-chained-addressing-log.md
 //! [RFC 0071]: ../../../rfcs/0071-data-files-by-address.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
 
 use crate::error::StorageResult;
 use crate::page_store::PageStore;
@@ -49,7 +45,7 @@ pub struct Space {
     pub file_blocks: u64,
     /// Free: holes no run will use again.
     pub free_blocks: u64,
-    /// Freed, but named by a recovery root until the next checkpoints.
+    /// Freed, but named by the newest durable batch until the next one is.
     pub deferred_blocks: u64,
 }
 
@@ -58,8 +54,9 @@ pub struct Space {
 pub enum Compacting {
     /// A pass moved this much; more passes or the sealing follow.
     Moved { images: usize, blocks: u64 },
-    /// Waiting for a checkpoint to close — the caller steps it
-    /// ([`checkpoint_step`](PageStore::checkpoint_step)).
+    /// Waiting for a batch to end and be durable — the restatement before
+    /// the moves, or the one over them. The caller steps the cycle
+    /// ([`cycle_step`](PageStore::cycle_step)).
     Sealing,
     /// Finished: the emptied files are cut and deleted.
     Done { reclaimed_blocks: u64 },
@@ -74,19 +71,21 @@ pub struct Compacted {
 }
 
 /// Where a store's compaction is between steps (see the module docs);
-/// `since` is what [`reclaimed`](PageStore::reclaimed) read when it began.
+/// `since` is what [`reclaimed`](PageStore::reclaimed) read when it began,
+/// `mark` where the deferred frees stood when the moves ended.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     #[default]
     Idle,
+    Restating {
+        since: u64,
+    },
     Moving {
         since: u64,
     },
     Sealing {
         since: u64,
-    },
-    Releasing {
-        since: u64,
+        mark: u64,
     },
 }
 
@@ -115,9 +114,9 @@ impl PageStore {
     }
 
     /// One step of a compaction, starting one if none is under way: a pass
-    /// copying about `budget_blocks` (at least one image), or the next move
-    /// of the sealing. A [`Compacting::Sealing`] step leaves a checkpoint
-    /// open for the caller to step closed.
+    /// copying about `budget_blocks` (at least one image), or a look at
+    /// whether the moves are sealed. While [`Compacting::Sealing`], the
+    /// caller steps the cycle.
     ///
     /// # Errors
     /// Read, write or sync faults. A move that faults has repointed nothing;
@@ -129,36 +128,40 @@ impl PageStore {
         match self.compaction.get() {
             Phase::Idle => {
                 let since = self.reclaimed();
+                if self.has_disk() {
+                    self.roll_if_worth_emptying();
+                    self.record_all();
+                    self.compaction.set(Phase::Restating { since });
+                } else {
+                    self.compaction.set(Phase::Moving { since });
+                }
+                self.compact_step(budget_blocks)
+            }
+            Phase::Restating { since } => {
+                self.settle_durable();
+                let restated = {
+                    let chain = self.chain.borrow();
+                    !chain.restating && !chain.outlived()
+                };
+                if !restated {
+                    return Ok(Compacting::Sealing);
+                }
                 self.compaction.set(Phase::Moving { since });
                 self.compact_step(budget_blocks)
             }
             Phase::Moving { since } => {
                 let (images, blocks, finished) = self.shift(budget_blocks)?;
                 if finished {
-                    if self.meta.borrow().has_deltas() {
-                        self.rewrite_addressing()?;
-                    }
-                    self.compaction.set(Phase::Sealing { since });
+                    let mark = self.alloc.borrow().mark();
+                    self.compaction.set(Phase::Sealing { since, mark });
                 }
                 Ok(Compacting::Moved { images, blocks })
             }
-            Phase::Sealing { since } => {
-                // An open checkpoint closes over the moved state as well as a
-                // fresh one would.
-                if !self.is_checkpointing() {
-                    self.begin_checkpoint()?;
-                }
-                self.compaction.set(Phase::Releasing { since });
-                Ok(Compacting::Sealing)
-            }
-            Phase::Releasing { since } => {
-                if self.is_checkpointing() {
+            Phase::Sealing { since, mark } => {
+                self.settle_durable();
+                if !self.alloc.borrow().released(mark) {
                     return Ok(Compacting::Sealing);
                 }
-                // Opening the next checkpoint proves that frame durable and
-                // drops the generation that still named the vacated runs —
-                // and reclaims what that released.
-                self.begin_checkpoint()?;
                 self.reclaim()?;
                 self.compaction.set(Phase::Idle);
                 Ok(Compacting::Done {
@@ -168,7 +171,7 @@ impl PageStore {
         }
     }
 
-    /// Compact to the end, stepping the checkpoints itself — for a caller with
+    /// Compact to the end, settling the batches itself — for a caller with
     /// nothing else to do meanwhile (a bench phase, a test, a maintenance
     /// tool). A node steps [`compact_step`](Self::compact_step) between its
     /// jobs instead.
@@ -183,10 +186,9 @@ impl PageStore {
                     out.moved_images += images;
                     out.moved_blocks += blocks;
                 }
-                Compacting::Sealing => self.close_open_checkpoint()?,
+                Compacting::Sealing => self.drain()?,
                 Compacting::Done { reclaimed_blocks } => {
                     out.reclaimed_blocks += reclaimed_blocks;
-                    self.close_open_checkpoint()?;
                     return Ok(out);
                 }
             }
@@ -194,9 +196,9 @@ impl PageStore {
     }
 
     /// Cut the free tail off every data file but the active one, and delete
-    /// the files left empty, returning the blocks reclaimed. Only free blocks
-    /// are in a tail — a run a recovery root names is held back, not freed —
-    /// so no reopen can need them.
+    /// the files left empty, returning the blocks reclaimed. Only holes are
+    /// in a tail — a run the newest durable batch names is a deferred free,
+    /// not a hole — so no reopen can need them.
     ///
     /// # Errors
     /// [`StorageError::Io`](crate::StorageError::Io) if a resize or an unlink
@@ -211,12 +213,5 @@ impl PageStore {
             self.reclaimed.set(self.reclaimed.get() + cut.was - cut.end);
         }
         Ok(blocks)
-    }
-
-    fn close_open_checkpoint(&self) -> StorageResult<()> {
-        while self.checkpoint_step(usize::MAX)?
-            == crate::commit_steps::Checkpointing::Settling
-        {}
-        Ok(())
     }
 }
