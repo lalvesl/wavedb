@@ -243,7 +243,7 @@ For a NonUnique collection, permission is **two-level** — stored in both the
   record may diverge from its collection default (override).
 
 The per-record copy keeps an `Update`/`Remove`/`Get(id)` **atomic and
-Pivot-free**: the single journal entry validates and rewrites permission from the
+Pivot-free**: the single batch validates and rewrites permission from the
 record alone, no `Pivot` read. The `Pivot` default keeps `Insert`/`All`
 checkable before any record is read, and seeds new records. Changing the `Pivot`
 default does **not** rewrite existing records — it is the default for *new*
@@ -344,12 +344,12 @@ pub enum Write {
 }
 ```
 
-- **native node** impl: the page engine (`wavedb-storage`) — `apply` = one journal
-  entry + cache; durability + atomicity.
+- **native node** impl: the page engine (`wavedb-storage`) — `apply` = one batch
+  committed to the record cache, atomic; durable at the next settle (RFC 0072).
 - **web** impl: IndexedDB — `apply` = one IDB readwrite transaction.
 - **native client** impl: a file-backed key→value store.
 
-The pages/journal/allocator live **behind** this trait, inside the native page
+The pages/headers/allocator live **behind** this trait, inside the native page
 `Store`. The `Pivot`/`BpTree` logic sits **above** it (the `index` contracts below)
 and is `Store`-generic — so the **same index code runs on the node (PageStore) and
 on web (IndexedDB)**; only the backend swaps.
@@ -362,7 +362,7 @@ which is `Store`-generic, so it runs **wherever the engine is linked**: on the n
 ## Index contracts — `Pivot`, `BpTree`, `IndexKey`
 
 The index lives **above** `Store` and depends only on it (`get` + `apply`), so it is
-**portable** — pages and journal are `PageStore` internals, never named here. Core
+**portable** — pages and headers are `PageStore` internals, never named here. Core
 declares the contracts; the same code compiles for the node (PageStore) and the web
 (IndexedDB).
 
