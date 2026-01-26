@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use crate::block::{BLOCK_SIZE, BlockDescriptor, Run};
 use crate::plan::{SlotPlan, blocks_of};
-use crate::remote::ObjectState;
+use crate::remote::{HEADER_BLOCKS, ObjectState};
 
 /// Where a placed image's descriptor is installed once the window is written.
 pub enum Target {
@@ -19,12 +19,12 @@ pub enum Target {
     Dict {
         plan: usize,
     },
-    /// The round's addressing delta — always last, always exactly one.
-    Edit,
+    /// The window's header — always last, always exactly one on disk.
+    Header,
 }
 
-/// Everything this round places, in window order (the edit chunk is appended
-/// by the caller once its size is known).
+/// Everything this round places, in window order (the header is appended by
+/// the caller on disk).
 pub fn targets_of(plans: &[SlotPlan]) -> Vec<Target> {
     let mut targets = Vec::new();
     for (plan, work) in plans.iter().enumerate() {
@@ -43,7 +43,7 @@ pub fn targets_of(plans: &[SlotPlan]) -> Vec<Target> {
 
 /// Blocks a target occupies. An emptied page occupies none — its bucket
 /// simply becomes vacant.
-pub fn size_of(plans: &[SlotPlan], target: &Target, chunk: &[u8]) -> u64 {
+pub fn size_of(plans: &[SlotPlan], target: &Target) -> u64 {
     match target {
         Target::Page { plan, bucket } => {
             plans[*plan].pages.get(bucket).map_or(0, |b| blocks_of(b))
@@ -51,7 +51,7 @@ pub fn size_of(plans: &[SlotPlan], target: &Target, chunk: &[u8]) -> u64 {
         Target::Dict { plan } => {
             plans[*plan].dict.as_deref().map_or(0, blocks_of)
         }
-        Target::Edit => blocks_of(chunk),
+        Target::Header => HEADER_BLOCKS,
     }
 }
 
@@ -140,7 +140,7 @@ pub fn assemble(
     plans: &[SlotPlan],
     targets: &[Target],
     runs: &[Option<Run>],
-    chunk: &[u8],
+    header: &[u8],
 ) -> Vec<u8> {
     let mut buf = vec![0u8; window.byte_len() as usize];
     for (target, run) in targets.iter().zip(runs) {
@@ -152,7 +152,7 @@ pub fn assemble(
             Target::Dict { plan } => {
                 plans[*plan].dict.as_deref().unwrap_or(&[])
             }
-            Target::Edit => chunk,
+            Target::Header => header,
         };
         let at = ((run.start - window.start) * BLOCK_SIZE as u64) as usize;
         buf[at..at + bytes.len()].copy_from_slice(bytes);
