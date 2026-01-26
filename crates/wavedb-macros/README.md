@@ -58,7 +58,7 @@ because both compile this crate.
    command frame over the network** to the node. On the **node** the macro emits
    the matching compile-time **engine fns** (`get`/`save` for Unique;
    `insert`/`update`/`remove` for NonUnique) that the registry's `match command`
-   calls — these drive the storage internals (block allocator, journal, the
+   calls — these drive the storage internals (block allocator, record cache, the
    object's page directory, `Pivot`/`BpTree`) directly, monomorphized, no `dyn`.
    So the write half of the wire command set is `Get`/`Save` (Unique) and
    `Insert`/`Update`/`Remove` (NonUnique); the client-side `save()` method emits
