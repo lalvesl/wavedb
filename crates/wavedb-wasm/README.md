@@ -30,14 +30,14 @@ The WASM build swaps the native runtime (Embassy carriers, RFC 0066): futures
 run via `wasm_bindgen_futures`, HTTP goes through the browser `fetch` API, WebSockets
 through `gloo_net::websocket`, and persistence through IndexedDB.
 
-## Storage: key→value, not pages, no journal
+## Storage: key→value, not pages
 
-The native engine manages 4 KiB pages and a write-ahead journal because it owns
+The native engine manages 4 KiB pages and settles them with headers because it owns
 the physical disk layout. In the browser it owns none of that — IndexedDB is
 already a durable, ordered key→value store doing its own block management and
 crash safety. Emulating WaveDB pages on top would stack two block managers and
 pay write amplification for zero IO benefit. So the WASM build **skips the page
-layer and the journal entirely**:
+layer entirely**:
 
 - **Key = the 128-bit `Id`** (big-endian). The Unique anchor lives at its
   directly computable key; NonUnique records, Pivots, and BpTree nodes at their
@@ -58,7 +58,7 @@ schema-evolution hooks, and the `Pivot`/`BpTree` index — are identical on both
 targets, because they are the `Store`-generic
 [index contracts](../wavedb-core/README.md#index-contracts--pivot-bptree-indexkey)
 in `wavedb-core`. The web build supplies an **IndexedDB `Store`** and the _same_
-`BpTree`/`Pivot` code runs on it — pages and journal are `PageStore` internals, not
+`BpTree`/`Pivot` code runs on it — pages and headers are `PageStore` internals, not
 the index. A thin client still ships filtered reads to a node; a **serverless** app
 (static files from a CDN, no node) links the engine and runs the `BpTree` walk +
 `#[server]` bodies **in-browser over IndexedDB**, authoritative locally. Sync needs no page parity either: the sync
