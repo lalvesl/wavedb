@@ -64,12 +64,11 @@ pub fn emit_tsv(out: &Path, rows: u64, seed: u64) -> Result<(), String> {
 pub struct FillProfile {
     pub page_cache_bytes: usize,
     pub record_cache_bytes: usize,
-    /// Journal bytes that trigger a checkpoint. The third number of the same
+    /// Unsettled bytes that trigger a settle. The third number of the same
     /// decision, not a tuning knob beside it: it is what turns the two cache
-    /// budgets into ceilings, since nothing may be evicted until a checkpoint
-    /// has settled it. See [`crate::FILL_CHECKPOINT_BYTES`] for why it is
-    /// large.
-    pub checkpoint_after_bytes: u64,
+    /// budgets into ceilings, since nothing may be evicted until it is
+    /// settled. See [`crate::FILL_SETTLE_BYTES`] for why it is large.
+    pub settle_after_bytes: u64,
 }
 
 impl Default for FillProfile {
@@ -80,7 +79,7 @@ impl Default for FillProfile {
         Self {
             page_cache_bytes: o.page_cache_bytes,
             record_cache_bytes: o.record_cache_bytes,
-            checkpoint_after_bytes: crate::FILL_CHECKPOINT_BYTES,
+            settle_after_bytes: crate::FILL_SETTLE_BYTES,
         }
     }
 }
@@ -101,15 +100,12 @@ pub fn fill_wavedb(
     let data = dir.join("data");
     std::fs::create_dir_all(&data).map_err(|e| format!("mkdir: {e}"))?;
 
-    // A fill, not a measurement: the durability window (RFC 0061) turns one
-    // `fsync` per row into one per elapsed window. The measured store reopens
-    // at the default — `systems::wavedb::open` — so no recorded number is
-    // taken against a relaxed engine. See `crate::FILL_WINDOW`.
+    // A fill, not a measurement: its writes are durable at the settles below
+    // (RFC 0072), not one by one.
     let store = PageStore::open_with(
         &data,
         &Thing::storage_entries(),
         wavedb_storage::StoreOptions {
-            relax_window: crate::FILL_WINDOW,
             page_cache_bytes: profile.page_cache_bytes,
             record_cache_bytes: profile.record_cache_bytes,
             ..Default::default()
@@ -129,36 +125,28 @@ pub fn fill_wavedb(
                 .map_err(|e| format!("insert {n}: {e}"))?,
         );
         // A bare `PageStore` has no background maintenance, so without this
-        // both the journal and the record cache grow for the whole fill —
+        // the record cache grows for the whole fill —
         // fine at 200 000 rows, fatal at 50 million.
         //
         // This is a **safety valve, not a schedule**. The threshold is sized
-        // so it fires rarely (see `FILL_CHECKPOINT_BYTES`): every settle
-        // rewrites pages a later settle rewrites again, so checkpointing
+        // so it fires rarely (see `FILL_SETTLE_BYTES`): every settle
+        // rewrites pages a later settle rewrites again, so settling
         // often makes a fill slower *and* the store bigger. The one settle
         // after the loop is what a fill actually wants.
         //
-        // Evicting is only possible *after* the checkpoint: `evict_settled`
-        // refuses while anything is pending, and `commit_journal` drains.
+        // Evicting is only possible *after* the settle: `evict_settled` drops
+        // only what is settled.
         // Nor is evicting to zero an option — it drops the hot B+tree
         // interior nodes with everything else, and the shop preload measured
         // that as 11 s becoming 164 s.
-        if store.journal_len() > profile.checkpoint_after_bytes {
-            store
-                .commit_journal()
-                .map_err(|e| format!("checkpoint: {e}"))?;
+        if store.unsettled_bytes() > profile.settle_after_bytes {
+            store.drain().map_err(|e| format!("settle: {e}"))?;
             store.evict_to_budget();
         }
     }
     // Leave the store quiesced so the first measured operation does not pay
     // for a settle round the fill postponed.
     store.drain().map_err(|e| format!("drain: {e}"))?;
-    store
-        .commit_journal()
-        .map_err(|e| format!("checkpoint: {e}"))?;
-    store
-        .commit_journal()
-        .map_err(|e| format!("checkpoint: {e}"))?;
 
     let mut bytes = Vec::with_capacity(ids.len() * 16);
     for id in &ids {
