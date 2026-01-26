@@ -7,9 +7,8 @@
 //! its slot already names the type, and one index per type would be one
 //! mostly empty segment per type per shard.
 //!
-//! Everything here is memory work; the store wraps it in one lock, taken
-//! after the journal's on the commit path and never held across a page read
-//! or write.
+//! Everything here is memory work, never borrowed across a page read or
+//! write.
 //!
 //! [RFC 0068]: ../../../rfcs/0068-record-cache-as-a-log-WIP.md
 
@@ -39,6 +38,8 @@ pub type Records = Vec<(Id, Option<Vec<u8>>)>;
 pub struct Round {
     pub work: Vec<(usize, Records)>,
     marks: Vec<Mark>,
+    /// Whether it reached every log's limit — the budget cut it nowhere.
+    pub complete: bool,
 }
 
 impl Round {
@@ -139,23 +140,27 @@ impl RecordCache {
             + self.logs.iter().map(TypeLog::footprint).sum::<usize>()
     }
 
+    /// Bytes of log not settled yet, across every type.
+    pub fn unsettled_bytes(&self) -> u64 {
+        self.logs.iter().map(TypeLog::unsettled).sum()
+    }
+
     /// Whether anything committed may still be owed to a page.
     pub fn has_pending(&self) -> bool {
         self.logs.iter().any(TypeLog::pending)
     }
 
-    /// Whether the open checkpoint still owes a settle.
+    /// Whether the open batch still owes a settle.
     pub fn owes(&self) -> bool {
         self.logs.iter().any(TypeLog::owes)
     }
 
-    /// A checkpoint rotated the journal: everything written is owed. Called
-    /// under the journal lock, with the rotation.
+    /// A batch opened: everything written is owed to it.
     pub fn rotate(&mut self) {
         self.logs.iter_mut().for_each(TypeLog::rotate);
     }
 
-    /// Copy out a round of at most `budget` entries: what the open checkpoint
+    /// Copy out a round of at most `budget` entries: what the open batch
     /// owes while it owes anything, else whatever is pending. Entries the
     /// index no longer names are dead — a newer copy follows — and are
     /// skipped, though they count against the budget and the cursor passes
@@ -163,13 +168,17 @@ impl RecordCache {
     pub fn round(&self, budget: usize) -> Round {
         let owed = self.owes();
         let mut left = budget;
-        let mut round = Round::default();
+        let mut round = Round {
+            complete: true,
+            ..Round::default()
+        };
         for (slot, log) in self.logs.iter().enumerate() {
             let until = if owed { log.rotated() } else { log.written() };
             let mut records = Records::new();
             let mut mark = None;
             for (at, entry, next) in log.scan(until) {
                 if left == 0 {
+                    round.complete = false;
                     break;
                 }
                 left -= 1;
