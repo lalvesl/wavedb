@@ -8,12 +8,12 @@
 //!
 //! - **To the object store** ([`Backend::ObjectStore`]): the prefix must
 //!   hold no database. Its `MANIFEST` goes up first, then every page on disk
-//!   is flagged "not uploaded yet" and a checkpoint names the flags, and the
+//!   is flagged "not uploaded yet" and a durable batch names the flags, and the
 //!   local `MANIFEST` says object-backed last. The next open with the object
 //!   store uploads it all, as it uploads any backlog.
 //! - **To the disk** ([`Backend::Disk`]): opened object-backed — recovered
 //!   from the object store when there is no disk yet — every evicted page is
-//!   brought back, the flags cleared, a checkpoint names it, and the local
+//!   brought back, the flags cleared, a durable batch names it, and the local
 //!   `MANIFEST` says disk-only last. The object store's files stay where
 //!   they are, as they were; nothing reads them any more.
 //!
@@ -123,15 +123,14 @@ fn to_disk(
 
 impl PageStore {
     /// Flag every page on disk "not uploaded yet", and make it durable: a
-    /// snapshot of the addressing names the flags, a checkpoint the
-    /// snapshot.
+    /// batch whose headers name every bucket names the flags.
     fn flag_every_page(&self) -> StorageResult<()> {
         // Everything committed into the pages first: a settle round after
         // this would write pages without the flag.
         self.drain()?;
         self.set_every_flag(true);
-        self.rewrite_addressing()?;
-        self.commit_journal()
+        self.record_all();
+        self.drain()
     }
 
     /// Clear every page's flag, and make it durable as
@@ -139,8 +138,8 @@ impl PageStore {
     fn clear_every_flag(&self) -> StorageResult<()> {
         self.drain()?;
         self.set_every_flag(false);
-        self.rewrite_addressing()?;
-        self.commit_journal()
+        self.record_all();
+        self.drain()
     }
 
     fn set_every_flag(&self, pending: bool) {
@@ -178,8 +177,8 @@ impl PageStore {
     }
 
     /// A disk-only store keeps no remote directory: a database converted to
-    /// the disk drops the ones its addressing log still carries, and the
-    /// next snapshot leaves them out.
+    /// the disk drops the ones its headers still name, and the next headers
+    /// leave them out.
     pub(crate) fn forget_remote(&self) {
         for slot in &self.types {
             *slot.remote_directory().borrow_mut() = None;
