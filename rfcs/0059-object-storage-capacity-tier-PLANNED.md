@@ -133,7 +133,7 @@ What it buys, before any tier exists:
 - **And a whole page becomes tierable**, which is the rest of this RFC.
 
 Cost: one more directory per type in the addressing log. That is the log
-[0048](0048-chained-addressing-log.md) made a fixed 16 bytes in the frame plus
+[0048](0048-chained-addressing-log-DEPRECATED.md) made a fixed 16 bytes in the frame plus
 deltas, so the marginal cost is a second delta stream, not a second snapshot.
 
 This phase changes on-disk layout and does **not** change any `STRUCT_HASH`: the
