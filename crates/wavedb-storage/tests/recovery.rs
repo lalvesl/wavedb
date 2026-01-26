@@ -143,7 +143,7 @@ fn a_crashed_uploads_leftover_files_are_not_the_newest() {
             }
         });
         s.drain().unwrap();
-        s.commit_journal().unwrap();
+        s.drain().unwrap();
         upload_all(&s);
         // Dropped: nothing records the upload.
     }
@@ -158,7 +158,7 @@ fn a_crashed_uploads_leftover_files_are_not_the_newest() {
         });
         s.drain().unwrap();
         upload_all(&s);
-        s.commit_journal().unwrap();
+        s.drain().unwrap();
     }
     assert!(
         fx.newest_number() > crashed,
