@@ -1,6 +1,6 @@
 //! A sharded database ([RFC 0067] §2): a `MANIFEST` and `shards/00` …
 //! `shards/xx`, each shard a whole [`PageStore`] — its own data files,
-//! journal, allocator, directories and dictionaries.
+//! headers, allocator, directories and dictionaries.
 //!
 //! The shard count is fixed when the database is created and read back from
 //! the `MANIFEST` on every open ([`crate::manifest`]), because it is part of
@@ -8,8 +8,8 @@
 //! database is created with. A database of one shard has the same shape —
 //! it is what [`PageStore::open`] opens.
 //!
-//! The shards share nothing, so each one replays its own journal and nothing
-//! about recovery ever spans two of them.
+//! The shards share nothing, so each one is reconstructed from its own
+//! headers and nothing about it ever spans two of them.
 //!
 //! [RFC 0067]: ../../../../rfcs/0067-thread-per-core-shards-WIP.md
 
@@ -43,7 +43,7 @@ pub fn open_shards(
 
 /// [`open_shards`], recovering on `threads` threads.
 ///
-/// The shards share nothing, so their journals replay independently: thread
+/// The shards share nothing, so each is reconstructed on its own: thread
 /// `t` opens the contiguous range of shards `p` with `p · threads / P = t` —
 /// the ranges a node's workers will own — and the database is open once the
 /// slowest range is. The stores are returned in shard order whichever thread
@@ -203,20 +203,20 @@ mod tests {
             .unwrap()
     }
 
-    /// Recovery on three threads hands back every shard, in shard order,
-    /// each having replayed its own journal and no other.
+    /// Reconstruction on three threads hands back every shard, in shard
+    /// order, each from its own headers and no other.
     #[test]
-    fn parallel_recovery_replays_every_shard_into_its_place() {
+    fn parallel_reconstruction_puts_every_shard_in_its_place() {
         let dir = tempfile::tempdir().unwrap();
         for (k, store) in (0u64..).zip(open_on(dir.path(), 1)) {
             block_on(store.apply(&[put(k)])).unwrap();
-        } // dropped unsettled: only the journals hold the records
+        } // dropped: each settles its own batch
         let stores = open_on(dir.path(), 3);
         assert_eq!(stores.len(), 8);
         for (i, store) in stores.iter().enumerate() {
             assert_eq!(
-                store.disk.as_ref().unwrap().dir,
-                shard_dir(dir.path(), i)
+                store.file.dir.as_deref(),
+                Some(shard_dir(dir.path(), i).as_path())
             );
             for k in 0..8u64 {
                 let found = block_on(store.get_of(SH, id(k))).unwrap();
@@ -235,13 +235,14 @@ mod tests {
     fn a_shard_that_fails_releases_the_others() {
         let dir = tempfile::tempdir().unwrap();
         drop(open_on(dir.path(), 4));
-        // Another process holding shard 5: its journal locked.
-        let journal = crate::journal::scan(&shard_dir(dir.path(), 5))
+        // Another process holding shard 5: its data file locked.
+        let file = std::fs::read_dir(shard_dir(dir.path(), 5))
             .unwrap()
-            .pop()
+            .next()
             .unwrap()
-            .1;
-        let held = std::fs::File::open(journal).unwrap();
+            .unwrap()
+            .path();
+        let held = std::fs::File::open(file).unwrap();
         held.try_lock().unwrap();
         let err = open_shards_with(
             dir.path(),
