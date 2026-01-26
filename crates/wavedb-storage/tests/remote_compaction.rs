@@ -84,8 +84,7 @@ fn a_disk_and_object_store_compacts_and_reopens_both_ways() {
     let fx = Fixture::new();
     let s = fx.open();
     rewrite_three_times(&s);
-    s.commit_journal().unwrap();
-    s.commit_journal().unwrap();
+    s.drain().unwrap();
     let before = fx.files();
     let done = block_on(s.compact_remote()).unwrap();
     assert!(done.deleted_files > 0, "{done:?}");
@@ -198,33 +197,31 @@ fn a_file_the_last_cut_names_is_kept() {
 static PLAIN: wavedb_storage::StructStorage =
     wavedb_storage::StructStorage::without_compression(SH);
 
-/// With a disk, the newest checkpoint is what a crash reopens from, and its
-/// remote directories name files the store has since moved past. They stay
-/// until two checkpoints say otherwise: reopened from the disk, the store
-/// uploads on from those directories and every record reads.
+/// With a disk, the newest durable batch is what a crash reopens from, and
+/// its remote directories name files the store has since moved past. They
+/// stay until a newer batch is durable: reopened from what a crash leaves,
+/// the store uploads on from those directories and every record reads.
 #[test]
-fn a_file_the_disk_s_checkpoint_names_is_kept() {
+fn a_file_the_disk_s_durable_batch_names_is_kept() {
     let fx = Fixture::new();
     let options = || StoreOptions {
-        relax_window: std::time::Duration::from_secs(3_600),
         remote: Some(fx.remote()),
         victim_free_percent: 100,
         ..StoreOptions::default()
     };
-    {
+    let crashed = {
         let s = PageStore::open_with(fx.db(), &[&PLAIN], options()).unwrap();
         fill(&s, 0..RECORDS, 0);
         upload_all(&s);
-        s.commit_journal().unwrap();
-        s.commit_journal().unwrap();
+        s.drain().unwrap();
         for version in 1..3 {
             fill(&s, 0..RECORDS, version);
             upload_all(&s);
         }
-        s.flush().unwrap();
         block_on(s.compact_remote()).unwrap();
-    } // the crash: the disk reopens from the checkpoint of version 0
-    let s = PageStore::open_with(fx.db(), &[&PLAIN], options()).unwrap();
+        fx.crashed()
+    };
+    let s = PageStore::open_with(crashed, &[&PLAIN], options()).unwrap();
     upload_all(&s);
     assert_reads(&s, |k| Some(record(k, 2)));
 }
