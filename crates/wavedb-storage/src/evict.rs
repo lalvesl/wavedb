@@ -126,7 +126,7 @@ impl PageStore {
         }
         cold.sort_unstable();
         let mut evicted = 0;
-        let mut unrecorded = object.unrecorded.borrow_mut();
+        let mut unrecorded = self.unrecorded.borrow_mut();
         let mut alloc = self.alloc.borrow_mut();
         for (_, idx, bucket) in cold {
             if live <= target_blocks {
@@ -137,13 +137,13 @@ impl PageStore {
             let run = dir.descriptor(bucket).run();
             dir.set_descriptor(bucket, BlockDescriptor::EVICTED);
             self.file.page_cache().invalidate(run);
-            alloc.free(run);
+            self.retire_run(&mut alloc, run);
             unrecorded.slots.entry(idx).or_default().disk.insert(bucket);
             live = live.saturating_sub(run.count);
             evicted += run.count;
         }
-        if self.disk.is_none() {
-            unrecorded.slots.clear(); // no addressing log to record it in
+        if !self.has_disk() {
+            unrecorded.slots.clear(); // no header to record it in
         }
         Ok(evicted)
     }
@@ -261,21 +261,6 @@ impl PageStore {
             object.wanted.borrow_mut().remove(&(idx, bucket));
         }
         Ok(wanted.len())
-    }
-
-    /// Restore every evicted bucket the replayed batches write to, before
-    /// the open's settle — waiting on the object store, since an open has
-    /// no executor to yield to yet.
-    pub(crate) fn restore_replayed(
-        &self,
-        batches: &[Vec<Write>],
-    ) -> StorageResult<()> {
-        for batch in batches {
-            for (idx, bucket) in self.evicted_in(batch) {
-                futures::executor::block_on(self.restore(idx, bucket))?;
-            }
-        }
-        Ok(())
     }
 
     /// `id`'s bytes from the object store, for a read whose disk bucket was
