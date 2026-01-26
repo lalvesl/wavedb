@@ -1,6 +1,9 @@
 # RFC 0046 — Directory deltas in the settle window
 
 - **Status:** Implemented (landed 2026-07-29)
+- **Superseded in part by:** [RFC 0072](0072-the-settle-is-the-durability-point-WIP.md) (2026-10-16) — the delta riding the window
+  stays, as the 32 KiB header every window ends with; the `Commit` frame and
+  the edit chunk are gone.
 - **Amends:** [RFC 0043](0043-descriptors-in-the-commit-frame.md) (which put the
   *whole* addressing state in every `Commit` frame)
 - **Builds on:** [RFC 0041](0041-single-barrier-checkpoint.md) (the one
@@ -156,7 +159,7 @@ The cost of deferral is that a retired journal lingers until the next write.
 Recovery already handles a retained-but-covered journal (it deletes it), and on
 an idle node the maintenance tick forces within one period.
 
-> **Followed by [RFC 0047](0047-generational-journal-retirement.md)**
+> **Followed by [RFC 0047](0047-generational-journal-retirement-DEPRECATED.md)**
 > (Implemented 2026-07-29).
 > That forcing is the one barrier this design still pays on a checkpoint's
 > behalf, just from a different call site — and completing the retirement from
@@ -307,7 +310,7 @@ own fsync completing the retirement.
   the threshold is raised far enough that the list is no longer trivial — a
   back-pointer per chunk restores O(1) frame size at the cost of ordering
   constraints on frees. The list is the better default; the chain is the escape
-  hatch. *(Taken up by [RFC 0048](0048-chained-addressing-log.md), which
+  hatch. *(Taken up by [RFC 0048](0048-chained-addressing-log-DEPRECATED.md), which
   reaches the condition from the other side: the threshold cannot be raised
   while the list is in the frame, because the log's write cost is quadratic in
   the interval. The free-ordering objection is answered by RFC 0047's
