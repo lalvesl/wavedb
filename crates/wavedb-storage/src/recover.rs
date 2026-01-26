@@ -22,8 +22,8 @@
 //! 3. **Adoption.** The store opens with the `MANIFEST`'s seed; every bucket
 //!    is evicted, so reads go to the object store and the disk — or, in
 //!    object mode, RAM — fills again as a cache. The dictionaries come
-//!    down, and with a disk, one snapshot and one checkpoint make it a root
-//!    of its own.
+//!    down, and with a disk, one durable batch naming all of it makes it a
+//!    root of its own.
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
@@ -39,7 +39,7 @@ use crate::page_store::{PageStore, StoreOptions};
 use crate::plan::SlotPlan;
 use crate::recover_headers::Headers;
 use crate::remote::{FILE_BLOCKS, Remote};
-use crate::walk::walk;
+use crate::walk::{Lane, walk};
 
 /// What a recovery found in the object store.
 pub struct Found {
@@ -108,7 +108,7 @@ pub async fn recover(
         tail: Some(top.at),
         ..Chain::default()
     };
-    let walked = walk(&mut headers, &top, registered).await?;
+    let walked = walk(&mut headers, &top, registered, Lane::Types).await?;
     for w in &walked {
         let rotation = Rotation {
             last: w.newest,
@@ -164,7 +164,8 @@ impl PageStore {
 
     /// Take what a recovery found: the remote directories and the chain as
     /// they are, every disk bucket evicted, the dictionaries written to disk,
-    /// then a snapshot and a checkpoint, so the disk is a root of its own.
+    /// then a durable batch naming all of it, so the disk is a root of its
+    /// own.
     ///
     /// # Errors
     /// A type the registry does not list; dictionary and write faults.
@@ -198,8 +199,8 @@ impl PageStore {
         }
         *object.chain.borrow_mut() = found.chain;
         self.place_plans(plans)?;
-        self.rewrite_addressing()?;
-        self.commit_journal()
+        self.record_all();
+        self.drain()
     }
 }
 
@@ -277,6 +278,8 @@ mod tests {
                 dict: None,
                 changed: vec![(0, page(file))],
             }],
+            remote: Vec::new(),
+            chain: None,
         }
     }
 
