@@ -18,8 +18,8 @@ clients, and (compiled to WASM) browsers.
 > plus native
 > `Db::open_at(…, dir)` and `db.local()` (the cache's direct typed surface).
 > The cache is **node-first**, not local-first: every op goes to the node,
-> acknowledged results mirror into the local engine (journal + data files
-> native / IndexedDB wasm, under node-minted ids via `Collection::adopt`),
+> acknowledged results mirror into the local engine (data files native /
+> IndexedDB wasm, under node-minted ids via `Collection::adopt`),
 > and reads serve locally only on a transport fault the cache can answer —
 > absence propagates the fault, refusals never fall back. An offline **Unique**
 > save no longer refuses: it queues for node-first replay on reconnect
