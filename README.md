@@ -110,9 +110,8 @@ lies for the length of one iteration.
 3.3 is answered the conservative way — `record_cache_bytes` is **carried, not
 applied**. The store hands out the number (`record_cache_bytes()`,
 `evict_to_budget()`) and evicts only when a caller asks, exactly as today.
-Eviction takes the journal lock, so a `PageStore` that dropped entries on a
-schedule of its own would be stalling writers inside a window someone else is
-timing — the one thing this suite cannot have. Reversible in one commit if the
+A `PageStore` that dropped entries on a schedule of its own would be stalling
+writers inside a window someone else is timing — the one thing this suite cannot have. Reversible in one commit if the
 node ever wants a self-managing ceiling.
 
 3.4 is seven tests, each one **falsified before being believed**: hardcoding
