@@ -49,11 +49,12 @@ pub trait ShopEngine: Sized {
     fn build(shared: &Self::Shared, shard: usize) -> Result<Self, String>;
 
     fn store(&self) -> &Self::Store;
-    fn journal_len(&self) -> u64;
 
+    /// Settle everything committed into a durable batch (RFC 0072).
+    ///
     /// # Errors
-    /// A checkpoint that failed.
-    fn checkpoint(&self) -> Result<(), String>;
+    /// A settle that failed.
+    fn drain(&self) -> Result<(), String>;
     fn evict(&self, budget: usize);
 }
 
@@ -107,13 +108,8 @@ impl ShopEngine for PageStore {
         self
     }
 
-    fn journal_len(&self) -> u64 {
-        Self::journal_len(self)
-    }
-
-    fn checkpoint(&self) -> Result<(), String> {
-        self.commit_journal()
-            .map_err(|e| format!("checkpoint: {e}"))
+    fn drain(&self) -> Result<(), String> {
+        Self::drain(self).map_err(|e| format!("settle: {e}"))
     }
 
     fn evict(&self, budget: usize) {
@@ -148,14 +144,8 @@ impl ShopEngine for ShopShard {
         &self.0
     }
 
-    fn journal_len(&self) -> u64 {
-        self.0.journal_len()
-    }
-
-    fn checkpoint(&self) -> Result<(), String> {
-        self.0
-            .commit_journal()
-            .map_err(|e| format!("checkpoint: {e}"))
+    fn drain(&self) -> Result<(), String> {
+        self.0.drain().map_err(|e| format!("settle: {e}"))
     }
 
     fn evict(&self, budget: usize) {
