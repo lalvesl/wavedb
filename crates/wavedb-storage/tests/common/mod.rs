@@ -37,15 +37,27 @@ impl Fixture {
         Remote::new(self.server.bucket(), "db/")
     }
 
-    /// Batches share barriers (RFC 0061): what a reopen checks was covered
-    /// by a checkpoint first.
+    /// The database, disk + object (RFC 0070).
     pub fn open(&self) -> PageStore {
+        self.open_at(&self.db())
+    }
+
+    /// The database at `dir` — this fixture's, or a crash's copy of it.
+    pub fn open_at(&self, dir: &std::path::Path) -> PageStore {
         let options = StoreOptions {
-            relax_window: std::time::Duration::from_secs(3_600),
             remote: Some(self.remote()),
             ..StoreOptions::default()
         };
-        PageStore::open_with(self.db(), &[&SLOT], options).unwrap()
+        PageStore::open_with(dir, &[&SLOT], options).unwrap()
+    }
+
+    /// What a crash would leave of the database: its files as they are now,
+    /// copied while the store holds them open — the windows it wrote are
+    /// there, what it holds in RAM is not.
+    pub fn crashed(&self) -> PathBuf {
+        let to = self.dir.path().join("crashed");
+        copy_dir(&self.db(), &to);
+        to
     }
 
     /// The same database in object mode: no disk at all (RFC 0070 §9).
@@ -60,6 +72,20 @@ impl Fixture {
     /// The newest file's key, by the one-key listing recovery will use.
     pub fn newest_file(&self) -> Option<String> {
         block_on(self.server.bucket().first_key("db/shards/00/1seg/")).unwrap()
+    }
+}
+
+/// Copy the directory tree `from` to `to`.
+pub fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_dir() {
+            copy_dir(&path, &to.join(entry.file_name()));
+        } else {
+            std::fs::copy(&path, to.join(entry.file_name())).unwrap();
+        }
     }
 }
 
