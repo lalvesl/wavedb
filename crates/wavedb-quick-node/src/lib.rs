@@ -17,8 +17,8 @@
 //! # }
 //! ```
 //!
-//! **Single node for now.** Durability is the journal (a write is durable
-//! once journaled). The ring / gossip / replication / failover machinery the
+//! **Single node for now.** A write is durable once the settle carrying it
+//! is (RFC 0072): within a tick, or before it returns for a durable one. The ring / gossip / replication / failover machinery the
 //! README describes is the target design, deferred.
 //!
 //! [`Exposure`]: wavedb_core::expose::Exposure
@@ -243,8 +243,8 @@ where
 
     /// Accept and serve connections until the listener faults (runs forever
     /// under normal operation). A background maintenance task settles
-    /// queued writes into pages, checkpoints past the journal threshold,
-    /// and holds the caches to budget.
+    /// queued writes into durable batches every tick, and holds the caches
+    /// to budget.
     ///
     /// # Errors
     /// [`ServerError::Net`] on a fatal accept fault.
@@ -253,12 +253,12 @@ where
     }
 
     /// Accept and serve connections until `shutdown` resolves, then settle
-    /// and checkpoint (a clean restart replays nothing) and return —
+    /// everything into a durable batch and return —
     /// dropping the engine, which releases every data shard's lock.
     ///
     /// # Errors
     /// [`ServerError::Net`] or [`ServerError::Io`] on a fatal accept fault;
-    /// [`ServerError::Storage`] if the final checkpoint fails.
+    /// [`ServerError::Storage`] if the final settle fails.
     pub async fn run_with_shutdown(
         self,
         shutdown: impl Future<Output = ()>,
@@ -294,9 +294,9 @@ where
         // Every accept loop stops, then its connections; once none is left
         // anywhere, each worker finishes its last job and closes its stores.
         stop.close();
-        // Clean shutdown: everything settled and committed, each checkpoint's
-        // frame forced durable — a restart replays nothing — and every store
-        // dropped before its worker answers, so a restart can reopen at once.
+        // Clean shutdown: everything settled into a durable batch, and every
+        // store dropped before its worker answers, so a restart can reopen
+        // at once.
         let closed = shard::closed_all(closing).await;
         served?;
         closed.map_err(ServerError::Storage)
