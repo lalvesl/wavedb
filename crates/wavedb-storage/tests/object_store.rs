@@ -66,8 +66,8 @@ fn removals_and_rewrites_reach_the_object_store() {
     });
 }
 
-/// What an upload changed rides the next window into the disk's addressing
-/// log, so a reopen restores the remote directories and the flags — and the
+/// What an upload changed rides the next window's header, so a reopen
+/// restores the remote directories and the flags — and the
 /// next upload continues after the last file instead of over it.
 #[test]
 fn a_reopen_restores_what_was_uploaded() {
@@ -76,9 +76,9 @@ fn a_reopen_restores_what_was_uploaded() {
         let s = fx.open();
         fill(&s, 0..RECORDS, 0);
         upload_all(&s);
-        // A later round records the upload; the checkpoint roots it.
+        // A later batch records the upload.
         fill(&s, 0..10, 1);
-        s.commit_journal().unwrap();
+        s.drain().unwrap();
     }
     let s = fx.open();
     let pending = s.pending_upload_bytes();
@@ -98,14 +98,14 @@ fn a_reopen_restores_what_was_uploaded() {
 #[test]
 fn an_upload_lost_in_a_crash_is_made_again() {
     let fx = Fixture::new();
-    {
+    let crashed = {
         let s = fx.open();
         fill(&s, 0..RECORDS, 0);
-        s.commit_journal().unwrap();
+        s.drain().unwrap();
         upload_all(&s);
-        // Dropped with no window after the upload: nothing records it.
-    }
-    let s = fx.open();
+        fx.crashed() // no window after the upload: nothing records it
+    };
+    let s = fx.open_at(&crashed);
     assert!(
         s.pending_upload_bytes() > 1 << 20,
         "every flag is still set"
@@ -126,14 +126,13 @@ fn compaction_keeps_what_is_still_to_upload() {
     let fx = Fixture::new();
     let s = fx.open();
     fill(&s, 0..RECORDS, 0);
-    s.commit_journal().unwrap();
+    s.drain().unwrap();
     block_on(async {
         for k in (0..RECORDS).filter(|k| k % 3 != 0) {
             s.apply(&[Write::Remove(SH, id(k))]).await.unwrap();
         }
     });
-    s.commit_journal().unwrap();
-    s.commit_journal().unwrap();
+    s.drain().unwrap();
     let pending = s.pending_upload_bytes();
     let done = s.compact().unwrap();
     assert!(done.reclaimed_blocks > 0, "{done:?}");
