@@ -38,26 +38,30 @@ use crate::shop::{
 use super::SETTLE_AFTER;
 use super::engine::ShopEngine;
 
-/// Journal bytes above which a consumer checkpoints, between operations.
-const CHECKPOINT_AFTER_BYTES: u64 = 64 << 20;
-
-/// Cache budget the checkpoint evicts down to.
+/// Cache budget a settle evicts down to.
 const CACHE_BUDGET_BYTES: usize = 96 << 20;
 
 /// What a consumer needs to build its engine.
 pub struct Factory<E: ShopEngine> {
     shared: E::Shared,
     consumers: usize,
+    /// Whether every write is made durable before it returns (RFC 0072).
+    durable: bool,
 }
 
 impl<E: ShopEngine> Factory<E> {
     /// # Errors
     /// The shared engine could not be started.
-    pub fn new(stores: Vec<PageStore>, asked: usize) -> Result<Self, String> {
+    pub fn new(
+        stores: Vec<PageStore>,
+        asked: usize,
+        durable: bool,
+    ) -> Result<Self, String> {
         let consumers = E::consumers(asked);
         Ok(Self {
             shared: E::share(stores, consumers)?,
             consumers,
+            durable,
         })
     }
 
@@ -82,6 +86,8 @@ where
             engine: E::build(&self.shared, shard)?,
             shard,
             consumers: self.consumers,
+            durable: self.durable,
+            settled: std::time::Instant::now(),
         })
     }
 
@@ -104,6 +110,10 @@ pub struct ShopWavedb<E: ShopEngine> {
     /// partition rule can be checked rather than trusted.
     shard: usize,
     consumers: usize,
+    /// Whether every write is made durable before it returns.
+    durable: bool,
+    /// When the store was last settled.
+    settled: std::time::Instant,
 }
 
 impl<E: ShopEngine> Driver for ShopWavedb<E> {
@@ -130,17 +140,26 @@ impl<E: ShopEngine> Driver for ShopWavedb<E> {
         );
         let store = self.engine.store();
         let db = tenant(store, u);
-        block_on(run(&db, op))
+        let writes = op.writes();
+        block_on(run(&db, op))?;
+        // A durable row's write returns once it is durable: settled and
+        // synced on the spot — what `apply_durable` does on a store nobody
+        // ticks — inside the timed window.
+        if self.durable && writes {
+            self.engine.drain()?;
+            self.settled = std::time::Instant::now();
+        }
+        Ok(())
     }
 
-    /// Checkpoint and evict once the journal is large enough to matter — the
-    /// embedded bracket's counterpart to a server's background threads, and
-    /// outside the timed window for exactly that reason.
+    /// A relaxed row settles once per elapsed window — a node's tick, as the
+    /// embedded bracket's counterpart to a server's background threads,
+    /// outside the timed window — and evicts to the budget.
     fn after_op(&mut self) -> Result<(), String> {
-        if self.engine.journal_len() <= CHECKPOINT_AFTER_BYTES {
-            return Ok(());
+        if !self.durable && self.settled.elapsed() >= crate::RELAXED_WINDOW {
+            self.engine.drain()?;
+            self.settled = std::time::Instant::now();
         }
-        self.engine.checkpoint()?;
         self.engine.evict(CACHE_BUDGET_BYTES);
         Ok(())
     }
@@ -155,7 +174,7 @@ impl<E: ShopEngine> Driver for ShopWavedb<E> {
         if done != SETTLE_AFTER {
             return Ok(());
         }
-        self.engine.checkpoint()?;
+        self.engine.drain()?;
         // To zero: the per-type cache is a *write* cache, so everything the
         // write phases just wrote would otherwise still be warm and the read
         // phases would measure RAM. Every other adapter restarts its server
@@ -166,7 +185,7 @@ impl<E: ShopEngine> Driver for ShopWavedb<E> {
 
     /// Settle, and stop there: the store goes down with this driver.
     fn close(self) -> Result<(), String> {
-        self.engine.checkpoint()
+        self.engine.drain()
     }
 }
 
