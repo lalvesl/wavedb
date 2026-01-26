@@ -1,7 +1,7 @@
 //! End-to-end M2 proof: a `#[wavedb(NonUnique)]` type driven through its
 //! **derived collection API** (`create_pivot` / `collection` / insert / all /
 //! save / remove) over the durable [`PageStore`], surviving a reopen — records,
-//! index nodes, **and the `Pivot` record** all recovered from the journal.
+//! index nodes, **and the `Pivot` record** all reconstructed from the headers.
 //!
 //! The derived methods run over a [`LocalHandle`] — the `Store`-backed
 //! `DbHandle` — so this also proves the unified `T::get(&db)` spelling
@@ -81,7 +81,7 @@ fn collection_walk_and_durable_reopen() {
         pivot
     });
 
-    // Reopen: the data files are rebuilt from the journal — the same PivotId still
+    // Reopen: the directories are rebuilt from the headers — the same PivotId still
     // reaches the whole collection (roots come from the recovered Pivot record).
     block_on(async {
         let store = open(dir.path());
@@ -175,8 +175,8 @@ fn version_history_survives_reopen() {
         (pivot, id)
     });
 
-    // The archived versions and their chain links are ordinary journaled
-    // writes — a rebuild from the log must reproduce the whole timeline.
+    // The archived versions and their chain links are ordinary settled
+    // writes — a reconstruction must reproduce the whole timeline.
     block_on(async {
         let store = open(dir.path());
         let db = LocalHandle::new(&store, tenant);
@@ -220,7 +220,7 @@ fn secondary_index_survives_reopen() {
         pivot
     });
 
-    // Reopen: the secondary tree is rebuilt from the journal like everything
+    // Reopen: the secondary tree is rebuilt from the headers like everything
     // else; the same PivotId reaches it through the recovered Pivot record.
     block_on(async {
         let store =
