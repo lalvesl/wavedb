@@ -17,7 +17,6 @@ use crate::shop::{
     Product, Shopping, User, product_count, product_row, shopping_count,
     shopping_row, user_row,
 };
-use crate::systems::Durability;
 
 /// Fill: every user is a tenant, holding an order collection, each order
 /// holding a line-item collection. Not timed.
@@ -25,7 +24,7 @@ use crate::systems::Durability;
 /// The database is `shards` data shards — one per consumer the row will run —
 /// and user `u` goes to shard `u % shards`, the one its consumer owns.
 pub fn preload(cfg: &ShopCfg, dir: &Path, shards: usize) -> Result<(), String> {
-    let stores = open_relaxed(dir, shards)?;
+    let stores = open_db(dir, shards)?;
     let n = stores.len().max(1) as u64;
     for u in 0..cfg.users {
         let store = stores
@@ -36,35 +35,27 @@ pub fn preload(cfg: &ShopCfg, dir: &Path, shards: usize) -> Result<(), String> {
             block_on(create_order(store, cfg, u, s))?;
         }
         // A bare `PageStore` has no background maintenance — a node gets that
-        // from `quick-node`'s loop — so **two** things grow unbounded here,
-        // and an earlier version of this bounded only one: the write cache was
-        // evicted while the journal grew for the whole fill. At ~43 records a
-        // user this is millions of records against a 500 MB cage shared with
-        // the servers. The fill is untimed, so the cost lands nowhere
-        // measured; a node pays it on its own schedule.
+        // from `quick-node`'s loop — so what is written and not settled grows
+        // unbounded here: at ~43 records a user, millions of records against
+        // a 500 MB cage shared with the servers. The fill is untimed, so the
+        // cost lands nowhere measured; a node pays it on its own schedule.
         //
-        // Triggered by journal **bytes**, not by a user count, for the reason
-        // `quick-node`'s own policy is: per-operation log size depends on the
-        // data. In the micro adapter a 5 000-op trigger never fired once while
-        // 649 MB accumulated.
+        // Triggered by unsettled **bytes**, not by a user count: per-operation
+        // size depends on the data. In the micro adapter a 5 000-op trigger
+        // never fired once while 649 MB accumulated.
         //
         // NOT shared with the seed fill, which wants a threshold three orders
         // of magnitude larger: this preload runs inside the cage and against
         // a nesting shape, that one runs in a builder against a flat one. The
         // number that is right here is measurably wrong there (see
         // `PROGRESS.md`, "checkpointing often makes a fill worse").
-        if store.journal_len() > CHECKPOINT_AFTER_BYTES {
-            store
-                .commit_journal()
-                .map_err(|e| format!("checkpoint: {e}"))?;
+        if store.unsettled_bytes() > SETTLE_AFTER_BYTES {
+            store.drain().map_err(|e| format!("settle: {e}"))?;
             store.evict_settled(FILL_CACHE_BYTES / stores.len().max(1));
         }
     }
     for store in &stores {
         store.drain().map_err(|e| format!("drain: {e}"))?;
-        store
-            .commit_journal()
-            .map_err(|e| format!("checkpoint: {e}"))?;
     }
     Ok(())
 }
@@ -139,52 +130,19 @@ async fn create_order(
     Ok(())
 }
 
-/// The **measured** store, opened at the row's own durability: the default
-/// (one barrier per batch) or [`RELAXED_WINDOW`](crate::RELAXED_WINDOW).
+/// The **measured** store, reopened after the preload. Its durability is
+/// not an option of it any more (RFC 0072): the row's driver makes every write
+/// durable, or settles on a window (`drivers::shop::wavedb`).
 ///
 /// Each type contributes a different number of `StructStorage` slots — a
 /// Unique one, a NonUnique with a declared list six — so they are collected
 /// rather than concatenated as arrays.
 pub fn open_measured(
     dir: &Path,
-    d: Durability,
     shards: usize,
 ) -> Result<Vec<PageStore>, String> {
-    open_with(
-        dir,
-        shards,
-        StoreOptions {
-            relax_window: match d {
-                Durability::Durable => std::time::Duration::ZERO,
-                Durability::Relaxed => RELAXED_WINDOW,
-            },
-            ..Default::default()
-        },
-    )
+    open_db(dir, shards)
 }
-
-/// The **fill**'s store: always a durability window, whichever row is running,
-/// because a preload is not a measurement (RFC 0061).
-///
-/// This is the bulk-load-then-serve pattern the window exists for, and it is
-/// what makes a large preload affordable at all: one op is one batch is one
-/// barrier, so filling millions of records durably is millions of `fsync`s.
-/// The measured phases reopen through [`open_measured`], so the fill's window
-/// is never what a row reports. The other four systems do the same thing by
-/// different names: their bulk loaders are not running the per-statement
-/// commit path either.
-fn open_relaxed(dir: &Path, shards: usize) -> Result<Vec<PageStore>, String> {
-    open_with(
-        dir,
-        shards,
-        StoreOptions {
-            relax_window: PRELOAD_WINDOW,
-            ..Default::default()
-        },
-    )
-}
-
-use crate::{FILL_WINDOW as PRELOAD_WINDOW, RELAXED_WINDOW};
 
 /// What the fill's write cache is evicted **down to** — not to zero.
 ///
@@ -200,24 +158,18 @@ use crate::{FILL_WINDOW as PRELOAD_WINDOW, RELAXED_WINDOW};
 /// simply move the failure to whatever ceiling is in force.
 const FILL_CACHE_BYTES: usize = 192 << 20;
 
-/// Journal bytes that trigger a checkpoint during **this** preload — the same
-/// number `quick-node`'s own policy uses
-/// (`Maintenance::checkpoint_after_bytes`), and small because the preload
-/// shares a 500 MB cage with the row that follows it.
-const CHECKPOINT_AFTER_BYTES: u64 = 64 << 20;
+/// Unsettled bytes that trigger a settle during **this** preload — small
+/// because the preload shares a 500 MB cage with the row that follows it.
+const SETTLE_AFTER_BYTES: u64 = 64 << 20;
 
 /// The shop database: `shards` data shards (`MANIFEST` + `shards/xx`, RFC
-/// 0067), the budgets in `options` shared equally by them.
-fn open_with(
-    dir: &Path,
-    shards: usize,
-    options: StoreOptions,
-) -> Result<Vec<PageStore>, String> {
+/// 0067).
+fn open_db(dir: &Path, shards: usize) -> Result<Vec<PageStore>, String> {
     let mut entries = Vec::new();
     entries.extend_from_slice(&User::storage_entries());
     entries.extend_from_slice(&Shopping::storage_entries());
     entries.extend_from_slice(&Product::storage_entries());
-    wavedb_storage::open_shards(dir, &entries, options, shards)
+    wavedb_storage::open_shards(dir, &entries, StoreOptions::default(), shards)
         .map_err(|e| format!("open: {e}"))
 }
 
