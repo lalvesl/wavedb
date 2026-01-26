@@ -12,7 +12,7 @@ use crate::error::{StorageError, StorageResult};
 use crate::page_store::PageStore;
 use crate::plan::{SlotPlan, blocks_of};
 
-/// Images one round moves at most, so its delta chunk stays small (a moved
+/// Images one round moves at most, so its header names them all (a moved
 /// page costs it 12 bytes).
 const ROUND_IMAGES: usize = 128;
 
@@ -41,9 +41,6 @@ impl PageStore {
     ) -> StorageResult<(usize, u64, bool)> {
         let (mut images, mut blocks) = (0, 0);
         loop {
-            if self.meta.borrow().wants_snapshot() {
-                self.rewrite_addressing()?;
-            }
             let Some(victim) = self.victim() else {
                 return Ok((images, blocks, true));
             };
@@ -53,10 +50,8 @@ impl PageStore {
             }
             let movable = self.movable_in(&victim);
             if movable.is_empty() {
-                // Only the addressing log is left in it: one snapshot in
-                // the active file releases every chunk before it.
-                self.rewrite_addressing()?;
-                continue;
+                // Nothing left to carry: the sealing frees what it held.
+                return Ok((images, blocks, true));
             }
             // The budget bounds the pass, not progress: a pass moves at least
             // one image, however large.
@@ -103,13 +98,40 @@ impl PageStore {
 
     /// The data file to empty next: of those at least
     /// [`StoreOptions::victim_free_percent`](crate::StoreOptions) free or held
-    /// back and still holding a run, the one with the fewest live blocks —
-    /// the oldest on a tie.
+    /// back, still holding a page or a dictionary, and holding no header a
+    /// reconstruction may read — a header cannot move — the one with the
+    /// fewest live blocks, the oldest on a tie.
     fn victim(&self) -> Option<Victim> {
+        self.candidates(true)
+            .into_iter()
+            .min_by_key(|v| (v.live, v.start))
+    }
+
+    /// Close the active file if it is worth emptying, before a compaction
+    /// restates every address: the restatement's headers then land in a new
+    /// file, and this one can be emptied too — or a store smaller than one
+    /// file would never shrink.
+    pub(crate) fn roll_if_worth_emptying(&self) {
+        let active = self.alloc.borrow().active();
+        if active.is_some()
+            && self
+                .candidates(false)
+                .iter()
+                .any(|v| Some(v.start) == active)
+        {
+            self.alloc.borrow_mut().roll();
+        }
+    }
+
+    /// The files worth emptying — skipping those holding a live header, if
+    /// `headers` says so.
+    fn candidates(&self, headers: bool) -> Vec<Victim> {
         let percent = u64::from(self.victim_free_percent);
         let alloc = self.alloc.borrow();
-        let mut held: Vec<u64> = self.used_runs().map(|r| r.start).collect();
+        let mut held: Vec<u64> =
+            self.movable_runs().map(|m| m.run.start).collect();
         held.sort_unstable();
+        let chain = self.chain.borrow();
         alloc
             .files()
             .into_iter()
@@ -117,21 +139,18 @@ impl PageStore {
                 let size = f.end - f.start;
                 let holds = held.partition_point(|&s| s < f.start)
                     < held.partition_point(|&s| s < f.end);
-                holds && (f.free + f.deferred) * 100 >= size * percent
+                let header = headers
+                    && chain.live.range(f.start..f.end).next().is_some();
+                holds
+                    && !header
+                    && (f.free + f.deferred) * 100 >= size * percent
             })
             .map(|f| Victim {
                 start: f.start,
                 end: f.end,
                 live: f.end - f.start - f.free - f.deferred,
             })
-            .min_by_key(|v| (v.live, v.start))
-    }
-
-    /// Every run a recovery would need: pages, dictionaries and the
-    /// addressing log.
-    fn used_runs(&self) -> impl Iterator<Item = Run> + '_ {
-        let meta = self.meta.borrow().runs();
-        self.movable_runs().map(|m| m.run).chain(meta)
+            .collect()
     }
 
     /// The pages and dictionaries in `victim`, highest first.
