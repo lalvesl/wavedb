@@ -86,6 +86,10 @@ impl IoCounts {
     fn bump(cell: &Cell<u64>) {
         cell.set(cell.get() + 1);
     }
+
+    fn add(cell: &Cell<u64>, n: u64) {
+        cell.set(cell.get() + n);
+    }
 }
 
 impl BlockFile {
@@ -295,6 +299,32 @@ impl BlockFile {
             dirty.remove(&file);
         }
         Ok(())
+    }
+
+    /// Duplicates of the descriptors of every file written since the last
+    /// sync, for a barrier taken on another thread (`crate::barrier`) — and
+    /// the files no longer owed to [`sync`](Self::sync), the barrier now
+    /// owing them. Nothing in RAM: it needs no barrier.
+    ///
+    /// # Errors
+    /// [`StorageError::Io`] if a descriptor cannot be duplicated; the files
+    /// stay owed then.
+    pub(crate) fn take_dirty(&self) -> StorageResult<Vec<std::fs::File>> {
+        let files = self.files.borrow();
+        let mut dirty = self.dirty.borrow_mut();
+        let mut out = Vec::new();
+        for file in dirty.iter() {
+            if let Some(DataFile {
+                backing: Backing::File(handle),
+                ..
+            }) = files.get(file)
+            {
+                out.push(handle.try_clone()?);
+            }
+        }
+        IoCounts::add(&self.io.syncs, out.len() as u64);
+        dirty.clear();
+        Ok(out)
     }
 
     /// Disk operations issued on these files since they were opened.
