@@ -7,7 +7,7 @@
 ## What it proposed
 
 Reconnect catch-up as *"give me everything since sequence N."* The storage
-journal ([RFC 0019](0019-journal-rooted-recovery.md)) assigns a monotonic commit
+journal ([RFC 0019](0019-journal-rooted-recovery-DEPRECATED.md)) assigns a monotonic commit
 sequence; a watcher would remember the last sequence it saw and, on reconnect,
 ask the node to replay every commit after it. One global cursor, one replay path.
 
@@ -16,7 +16,7 @@ ask the node to replay every commit after it. One global cursor, one replay path
 Rejected the same day the DB-1 model landed (2026-07-17), for three reasons:
 
 1. **Rotated journals are deleted.** The journal truncates on checkpoint
-   ([RFC 0019](0019-journal-rooted-recovery.md)), so a cursor older than the
+   ([RFC 0019](0019-journal-rooted-recovery-DEPRECATED.md)), so a cursor older than the
    newest `Commit` names bytes that no longer exist — the replay can't answer.
 2. **`Batch` frames are physical, not logical.** A journal frame is blocks and
    roots, not "record X changed"; a chained save writes several
