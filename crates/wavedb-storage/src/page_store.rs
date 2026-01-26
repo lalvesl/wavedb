@@ -4,8 +4,6 @@
 //! `Pivot`/`BpTree` layer in [`wavedb_core`] runs over. It ties together the
 //! pieces built below it:
 //!
-//! - [`Journal`](crate::journal::Journal) — the write-ahead log;
-//!   **durability is here** (`apply` fsyncs before it returns).
 //! - one slot **per registered type** — that type's own [`Directory`] over
 //!   the shared [`BlockFile`] and its dictionary. The types are the
 //!   `#[wavedb]`-generated [`StructStorage`] declarations handed in as an
@@ -17,6 +15,11 @@
 //!   committed records per type, in chunks, and one index over them; reads
 //!   serve from it, the settle writes from it, eviction drops whole chunks
 //!   of it.
+//! - the **settle cycle** (`crate::cycle`, RFC 0072) — every write is
+//!   committed to the record cache and nothing else; a cycle settles what
+//!   was committed into one window per round at the end of the active data
+//!   file, each ending with a header naming the addresses it changed, and
+//!   the batch is durable once its barrier is taken.
 //!
 //! ## Cells, not locks
 //!
@@ -35,29 +38,16 @@
 //! page's copy in the object store (`crate::read_through`). Only settled
 //! chunks leave the cache, so a fallback sees the newest settled state.
 //!
-//! ## Recovery model
+//! ## Durability and reconstruction
 //!
-//! The data files are a **deterministic projection of the journal**; recovery
-//! roots in the newest valid `Commit` frame (journal-rooted — see
-//! [`PageStore::commit_journal`] and the `commit` module docs). On
-//! [`open`](PageStore::open): with a durable `Commit`, the
-//! directories/dictionaries/allocator replay from the addressing log it
-//! names, the caches start
-//! **empty** (reads fall through to the pages), and only the uncovered
-//! `Batch` frames replay; without one (first generation), the data file is
-//! cut back to nothing and every committed batch replays
-//! through the same commit + settle path a live `apply` uses. Either way a
-//! crash loses nothing that was acked. Settle writes each record's **newest
-//! entry** in its log and skips the copies it superseded, which makes it
-//! replay-idempotent: a repeated settle can only write the same state.
-//!
-//! The settle into pages is **deferred**: `apply` appends to the journal and
-//! the type's log; [`drain`](PageStore::drain) (driven by the node's
-//! maintenance task) writes the pages later and moves the log's settle
-//! cursor past them. A remove is a tombstone in the log, so the read
-//! fallback never resurrects the page's stale bytes until the settle has
-//! removed them too. [`PageStore::commit_journal`] settles everything its
-//! rotated journal holds before the frame it appends claims it.
+//! A write is durable once the batch carrying it is: at the next settle — a
+//! [`apply_durable`](PageStore::apply_durable) waits for it, an ordinary
+//! `apply` does not. There is no journal: on [`open`](PageStore::open) the
+//! newest whole batch's header, at the end of the newest data file, roots a
+//! walk back through the headers that rebuilds every directory
+//! (`crate::reopen`), the caches start empty, and nothing is replayed. A
+//! store dropped settles what it holds first; a crash loses the batch not
+//! yet durable.
 
 pub use crate::store_options::{DEFAULT_RECORD_CACHE_BYTES, StoreOptions};
 use std::path::Path;
@@ -84,38 +74,29 @@ const DEFAULT_TARGET_BLOCKS_PER_BUCKET: u64 = 8; // 32 KiB
 /// different directories share nothing and can be open side by side.
 #[derive(Debug)]
 pub struct PageStore {
+    /// The data files — in RAM in object mode, which has no disk
+    /// (RFC 0070 §9).
     pub(crate) file: BlockFile,
-    /// The data directory and its journal; `None` in object mode, which
-    /// has no disk (RFC 0070 §9).
-    pub(crate) disk: Option<Disk>,
     pub(crate) alloc: RefCell<BlockAllocator>,
-    /// The addressing log written into the settle windows (RFC 0046): the
-    /// last full snapshot chunk and every delta chunk after it.
-    pub(crate) meta: RefCell<crate::meta_log::MetaLog>,
-    /// A checkpoint whose `Commit` frame is written but not yet durable —
-    /// the retired journal and the protection roll it authorises (RFC 0046).
-    pub(crate) retiring: RefCell<Option<crate::retire::Retiring>>,
+    /// Where the disk's chain of headers stands (RFC 0072 §4).
+    pub(crate) chain: RefCell<crate::disk_chain::DiskChain>,
+    /// What no header names yet (RFC 0072 §3).
+    pub(crate) unrecorded: RefCell<crate::disk_chain::Unrecorded>,
+    /// Where the batches stand (RFC 0072 §2).
+    pub(crate) cycle: RefCell<crate::cycle::Cycle>,
     /// The registered types' state, sorted by `STRUCT_HASH` (deduped) — a
     /// lock-free, read-only route table after open.
     pub(crate) types: Vec<TypeSlot>,
     pub(crate) seed: [u64; 4],
     pub(crate) target_blocks_per_bucket: u64,
     /// Committed records, per type, in commit order — what reads serve from
-    /// and [`drain`](Self::drain) settles ([`crate::record_cache`]).
+    /// and a cycle settles ([`crate::record_cache`]).
     pub(crate) cache: RefCell<crate::record_cache::RecordCache>,
-    /// The open checkpoint's rotated-out journal, from its rotation until its
-    /// `Commit` frame is appended (RFC 0067 step 3). Outermost in the lock
-    /// order: a checkpoint step holds it across everything it does, and
-    /// nothing else takes it.
-    pub(crate) checkpoint: RefCell<Option<crate::journal::Journal>>,
-    /// The durability window this store was opened with (RFC 0061); zero is
-    /// one barrier per batch.
-    pub(crate) relax_window: std::time::Duration,
     /// The record-cache budget this store was opened with — carried, not
     /// applied (see [`StoreOptions::record_cache_bytes`]).
     pub(crate) record_cache_bytes: usize,
     /// The thread's `fsync` helper, once the store has one: batch barriers
-    /// are then taken there and waited for ([`crate::barrier`]).
+    /// are then taken there ([`crate::barrier`]).
     pub(crate) barrier: Option<crate::barrier::Barrier>,
     /// Where a compaction is between its steps (RFC 0069).
     pub(crate) compaction: std::cell::Cell<crate::compact::Phase>,
@@ -127,28 +108,19 @@ pub struct PageStore {
     pub(crate) object: Option<crate::remote::ObjectState>,
 }
 
-/// What a store with a disk keeps there besides its data files.
-#[derive(Debug)]
-pub(crate) struct Disk {
-    /// The directory holding the data files + the journal chain (rotation
-    /// creates new journal files here).
-    pub(crate) dir: std::path::PathBuf,
-    pub(crate) journal: RefCell<crate::journal::Journal>,
-}
-
 impl PageStore {
     /// Open (or create) a node store rooted at directory `dir`, holding
     /// its `MANIFEST` and `shards/00`, serving exactly the listed `types` (each
     /// a `#[wavedb]`-generated declaration — `T::storage_entries()`). The
-    /// reserved `BpTree`-node slot is always included. Replays the journal to
-    /// rebuild every slot's cache and pages.
+    /// reserved `BpTree`-node slot is always included.
     ///
     /// The registry is an allowlist: a write whose `STRUCT_HASH` has no listed
     /// slot fails with [`StorageError::UnregisteredStructHash`](crate::StorageError::UnregisteredStructHash).
     ///
     /// # Errors
     /// [`StorageError::EngineBusy`](crate::StorageError::EngineBusy) if the
-    /// directory is already open, in this process or another; otherwise any filesystem / corruption fault during open or replay.
+    /// directory is already open, in this process or another; otherwise any
+    /// filesystem / corruption fault during open.
     pub fn open(
         dir: impl AsRef<Path>,
         types: &[&'static StructStorage],
@@ -156,8 +128,8 @@ impl PageStore {
         Self::open_with(dir, types, StoreOptions::default())
     }
 
-    /// [`open`](Self::open), with the durability question answered explicitly
-    /// (RFC 0061). `StoreOptions::default()` is exactly [`open`](Self::open).
+    /// [`open`](Self::open), with the options answered explicitly.
+    /// `StoreOptions::default()` is exactly [`open`](Self::open).
     ///
     /// `dir` is a database of **one** shard: its `MANIFEST` and
     /// `shards/00` ([`crate::shard_set`]), created when missing.
@@ -184,8 +156,9 @@ impl PageStore {
     }
 
     /// Open (or create) one shard of the database `facts` describe, in
-    /// `dir`: recover from its journals and its files (RFC 0071), and from
-    /// the object store when the disk holds nothing of an object-backed one.
+    /// `dir`: reconstruct it from its data files' headers (RFC 0072 §6), and
+    /// from the object store when the disk holds nothing of an object-backed
+    /// one.
     pub(crate) fn open_shard(
         dir: &Path,
         types: &[&'static StructStorage],
@@ -199,88 +172,70 @@ impl PageStore {
             options.page_cache_bytes,
         )?;
         let had_files = file.has_files();
-        // An object-backed store with no disk yet may have a database in its
-        // object store already: it is recovered, never created over.
         let types = crate::struct_storage::slots_of(types);
         let registered: Vec<u64> =
             types.iter().map(TypeSlot::struct_hash).collect();
+        // An object-backed store with no disk yet may have a database in its
+        // object store already: it is recovered, never created over.
         let found =
             crate::recover::found_for(had_files, &options, &registered)?;
-
-        // Recover from the journal chain: the newest `Commit` frame roots
-        // the directories/dictionaries/allocator (caches stay empty — reads
-        // fall through to the pages); every uncovered `Batch` replays below.
-        let recovered = crate::commit::restore(
-            dir,
-            had_files,
+        let reopened = crate::reopen::reopen(
             &file,
             &types,
             options.file_bytes,
+            facts.object_backed(),
         )?;
-        let disk = Disk {
-            dir: dir.to_path_buf(),
-            journal: RefCell::new(recovered.journal),
-        };
-        let store = Self::assemble(
-            file,
-            Some(disk),
-            types,
-            (recovered.alloc, recovered.meta),
-            options,
-        );
+        let store = Self::assemble(file, types, reopened.alloc, options);
+        *store.chain.borrow_mut() = reopened.chain;
         if let Some(object) = &store.object
-            && let Some(chain) = &recovered.chain
+            && let Some(record) = &reopened.remote_chain
         {
             *object.chain.borrow_mut() =
-                crate::header::Chain::from_record(chain);
+                crate::header::Chain::from_record(record);
         }
         store.prepare_object(had_files)?;
         if !facts.object_backed() {
             store.forget_remote(); // converted to the disk (`crate::convert`)
         }
-        // Rebuild the logs in journal order, no re-journal, then settle them
-        // into the pages as the live engine would have.
-        for batch in &recovered.replay {
-            store.route_batch(batch)?;
-            store.commit_to_caches(batch);
-        }
-        if !recovered.replay.is_empty() {
-            store.note_unuploaded();
-        }
-        // An evicted bucket a replayed write lands in comes back first.
-        store.restore_replayed(&recovered.replay)?;
-        store.drain()?;
+        store.hold_directory()?;
         if let Some(found) = found {
             store.adopt(found)?;
         }
         Ok(store)
     }
 
-    /// A store over `file` and its recovered allocator and addressing log,
-    /// caches empty — what both opens build on.
+    /// Keep a data file in the directory, empty if nothing was written yet:
+    /// the data files' locks are what make a second open of it
+    /// [`EngineBusy`](crate::StorageError::EngineBusy).
+    fn hold_directory(&self) -> StorageResult<()> {
+        if !self.file.has_files() {
+            self.file.create(self.alloc.borrow().next_start())?;
+        }
+        Ok(())
+    }
+
+    /// A store over `file` and its reconstructed allocator, caches empty —
+    /// what both opens build on.
     pub(crate) fn assemble(
         file: BlockFile,
-        disk: Option<Disk>,
         types: Vec<TypeSlot>,
-        (alloc, meta): (BlockAllocator, crate::meta_log::MetaLog),
+        alloc: BlockAllocator,
         options: StoreOptions,
     ) -> Self {
         let type_count = types.len();
         Self {
             seed: file.seed(),
             file,
-            disk,
             alloc: RefCell::new(alloc),
-            meta: RefCell::new(meta),
-            retiring: RefCell::new(None),
+            chain: RefCell::default(),
+            unrecorded: RefCell::default(),
+            cycle: RefCell::default(),
             types,
             target_blocks_per_bucket: DEFAULT_TARGET_BLOCKS_PER_BUCKET,
             cache: RefCell::new(crate::record_cache::RecordCache::new(
                 type_count,
                 crate::block_file::random_seed(),
             )),
-            checkpoint: RefCell::new(None),
-            relax_window: options.relax_window,
             record_cache_bytes: options.record_cache_bytes,
             barrier: None,
             compaction: std::cell::Cell::default(),
@@ -290,25 +245,9 @@ impl PageStore {
         }
     }
 
-    /// Force the barrier now: every batch acknowledged so far is on the
-    /// platter when this returns.
-    ///
-    /// A no-op-shaped call on a zero-window store (each batch already synced,
-    /// so this just takes one more barrier over nothing) and the escape hatch
-    /// on a windowed one — the reason a window is a setting rather than a
-    /// wager. An application can be relaxed for the cart and strict for the
-    /// receipt (RFC 0061).
-    ///
-    /// A store in object mode has no journal to flush: its writes are
-    /// durable once uploaded ([`upload_all`](Self::upload_all)), and this
-    /// does nothing there.
-    ///
-    /// # Errors
-    /// [`StorageError::Io`](crate::StorageError::Io) if the sync fails.
-    pub fn flush(&self) -> StorageResult<()> {
-        self.disk
-            .as_ref()
-            .map_or(Ok(()), |disk| disk.journal.borrow_mut().sync())
+    /// Whether the pages live on a disk — every mode but object mode.
+    pub(crate) const fn has_disk(&self) -> bool {
+        !self.file.is_in_memory()
     }
 
     /// Number of records the cache indexes across every registered type —
@@ -345,6 +284,17 @@ impl PageStore {
     }
 }
 
+/// A store dropped settles what it holds and waits for it to be durable —
+/// a close, not a crash. A fault then is lost with the store: what it held
+/// is what a crash would have lost.
+impl Drop for PageStore {
+    fn drop(&mut self) {
+        if self.has_disk() {
+            let _ = self.drain();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{PageStore, StoreOptions};
@@ -352,7 +302,6 @@ mod tests {
     use crate::error::StorageError;
     use crate::struct_storage::StructStorage;
     use futures::executor::block_on;
-    use std::time::Duration;
     use wavedb_core::{Id, Store, U48, Write};
 
     const SH: u64 = 0x1122_3344_5566_7788;
@@ -380,13 +329,12 @@ mod tests {
 
     /// `Default` is today's engine, spelled out.
     ///
-    /// A canary rather than a tautology: these three numbers are what every
+    /// A canary rather than a tautology: these two numbers are what every
     /// caller that never asked already runs on, so changing one is changing
     /// every deployment's engine — which should cost a failing test.
     #[test]
     fn default_options_are_todays_engine() {
         let o = StoreOptions::default();
-        assert_eq!(o.relax_window, Duration::ZERO, "one barrier per batch");
         assert_eq!(o.page_cache_bytes, 64 << 20);
         assert_eq!(o.record_cache_bytes, 96 << 20);
     }
@@ -419,8 +367,8 @@ mod tests {
     /// store opened with a one-byte budget still holds every settled record
     /// until a caller asks it not to.
     ///
-    /// Asserted rather than assumed, because eviction takes the journal lock.
-    /// A store that evicted on a schedule of its own would be quiescing
+    /// Asserted rather than assumed: a store that evicted on a schedule of
+    /// its own would be quiescing
     /// writers at a moment nobody chose — inside a timed window, for the
     /// callers this budget exists for.
     #[test]
@@ -481,7 +429,6 @@ mod tests {
                 }
             });
             s.drain().unwrap();
-            s.commit_journal().unwrap();
         }
         let s = open(d.path()); // default budgets, same bytes
         block_on(async {
@@ -495,11 +442,11 @@ mod tests {
         });
     }
 
-    /// RFC 0041's accounting: whatever a round touched, settling it is **one**
-    /// positioned write — plus one read per page it had to modify, and no
-    /// barrier at all (durability is the journal's until a checkpoint).
+    /// RFC 0072's accounting: whatever a batch touched, settling it is
+    /// **one** positioned write — pages and header together — plus one read
+    /// per page it had to modify, and **one** barrier.
     #[test]
-    fn a_settle_round_is_one_write_and_one_read_per_touched_page() {
+    fn a_batch_is_one_write_one_barrier_and_one_read_per_touched_page() {
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -520,268 +467,13 @@ mod tests {
             let (r, w, sy) = s.file.io().snapshot();
 
             assert_eq!(w - writes, 1, "40 records must settle in ONE write");
-            assert_eq!(sy - syncs, 0, "a settle round takes no barrier");
+            assert_eq!(sy - syncs, 1, "and the batch takes ONE barrier");
             let buckets = s.bucket_count(SH) as u64;
             assert!(
                 r - reads <= buckets,
                 "read {} pages for {buckets} buckets — one per touched page \
                  is the floor",
                 r - reads
-            );
-        });
-    }
-
-    /// A checkpoint costs **one** write and **one** barrier, counting both
-    /// files: the pages, the dictionary and the round's descriptor delta share
-    /// the window write and its data-file sync, and the `Commit` frame takes
-    /// no barrier of its own — the next ordinary write carries it (RFC 0046).
-    ///
-    /// And nothing pays a barrier on that checkpoint's behalf afterwards: the
-    /// retirement it authorises is disposed of by the *following* checkpoint,
-    /// which is also one write and one barrier (RFC 0047).
-    #[test]
-    fn a_checkpoint_is_one_write_and_one_barrier() {
-        let d = tempfile::tempdir().unwrap();
-        let s = open(d.path());
-        block_on(async {
-            for k in 0..20u64 {
-                s.apply(&[Write::Put(nonunique(k), rec(SH, b"payload"))])
-                    .await
-                    .unwrap();
-            }
-            let (_, writes, syncs) = s.file.io().snapshot();
-            s.commit_journal().unwrap();
-            let (_, w, sy) = s.file.io().snapshot();
-            assert_eq!(w - writes, 1, "pages + delta ride one window write");
-            assert_eq!(sy - syncs, 1, "one data-file barrier…");
-            assert_eq!(
-                s.journal_barriers(),
-                0,
-                "…and none on the fresh journal: the frame is deferred"
-            );
-            assert!(s.is_retiring());
-
-            // The next ordinary write pays a barrier it was paying anyway,
-            // and that fsync carries the frame — no extra IO at all, and no
-            // retirement work on the write path (RFC 0047).
-            s.apply(&[Write::Put(nonunique(99), rec(SH, b"carrier"))])
-                .await
-                .unwrap();
-            assert_eq!(s.journal_barriers(), 1, "the batch's own fsync");
-            assert!(s.is_retiring(), "disposal belongs to the next checkpoint");
-            assert_eq!(journals(d.path()).len(), 2);
-
-            // Which disposes of it for free: the carrier's barrier count moved
-            // past the frame, so nothing needs syncing to prove it.
-            let (_, w, sy) = s.file.io().snapshot();
-            s.commit_journal().unwrap();
-            let (_, w2, sy2) = s.file.io().snapshot();
-            assert_eq!(w2 - w, 1, "one window write again");
-            assert_eq!(sy2 - sy, 1, "one data-file barrier again");
-            assert_eq!(
-                s.journal_barriers(),
-                0,
-                "the fresh journal took none: no barrier for housekeeping"
-            );
-            assert_eq!(journals(d.path()).len(), 2, "at most two generations");
-        });
-        // And the commit is a real recovery root.
-        drop(s);
-        let s = open(d.path());
-        block_on(async {
-            assert_eq!(
-                s.get(nonunique(7)).await.unwrap(),
-                Some(rec(SH, b"payload"))
-            );
-        });
-    }
-
-    /// A checkpoint's runs are protected from the moment it **publishes**, not
-    /// from the next write (RFC 0047). Its frame may become the recovery root
-    /// at any instant after that, so a settle round in between must not free —
-    /// and hand back for reuse — a run that frame still names.
-    #[test]
-    fn a_settle_after_a_checkpoint_cannot_reuse_its_runs() {
-        let d = tempfile::tempdir().unwrap();
-        let s = open(d.path());
-        block_on(async {
-            for k in 0..20u64 {
-                s.apply(&[Write::Put(nonunique(k), rec(SH, b"v1"))])
-                    .await
-                    .unwrap();
-            }
-            s.commit_journal().unwrap();
-            assert_eq!(
-                s.alloc.borrow_mut().deferred_blocks(),
-                0,
-                "nothing held yet — this checkpoint is the first root"
-            );
-
-            // Rewriting the same records supersedes the very pages the
-            // checkpoint just named, so the settle frees their runs.
-            for k in 0..20u64 {
-                s.apply(&[Write::Put(nonunique(k), rec(SH, b"v2"))])
-                    .await
-                    .unwrap();
-            }
-            s.drain().unwrap();
-            assert!(
-                s.alloc.borrow_mut().deferred_blocks() > 0,
-                "runs the live frame names must be held, not pooled"
-            );
-        });
-    }
-
-    /// The one case where disposal is not free (RFC 0047): two checkpoints
-    /// with no write in between. Nothing flushed the journal carrying the
-    /// first frame, so the second must sync it before deleting the journal
-    /// that frame retires — a barrier paid by a checkpoint that had no work.
-    #[test]
-    fn a_checkpoint_with_no_writes_syncs_the_carrier_before_disposing() {
-        let d = tempfile::tempdir().unwrap();
-        let s = open(d.path());
-        block_on(async {
-            s.apply(&[Write::Put(nonunique(1), rec(SH, b"acked"))])
-                .await
-                .unwrap();
-            s.commit_journal().unwrap();
-            assert_eq!(journals(d.path()).len(), 2);
-
-            // Not a single append since the frame — so its carrier has taken
-            // no barrier, and the next checkpoint cannot delete on its word.
-            s.commit_journal().unwrap();
-            assert_eq!(
-                journals(d.path()).len(),
-                2,
-                "one generation disposed of, this one's taken its place"
-            );
-            let carrier = s
-                .retiring
-                .borrow_mut()
-                .as_mut()
-                .map(|r| r.journal.barriers());
-            assert_eq!(
-                carrier,
-                Some(1),
-                "no batch touched that journal, so the barrier is the \
-                 fallback's — the proof the delete was authorised"
-            );
-        });
-        drop(s);
-        let s = open(d.path());
-        block_on(async {
-            assert_eq!(
-                s.get(nonunique(1)).await.unwrap(),
-                Some(rec(SH, b"acked"))
-            );
-        });
-    }
-
-    /// RFC 0046: the descriptors ride the settle window, so the `Commit` frame
-    /// only *names* the addressing log. Its cost must therefore stay below the
-    /// 8 bytes per bucket RFC 0043 spent carrying the directory itself — every
-    /// checkpoint, for every type, forever.
-    #[test]
-    fn a_commit_frame_tracks_the_log_not_the_directory() {
-        let d = tempfile::tempdir().unwrap();
-        let mut s = open(d.path());
-        // One block per bucket: a wide directory for little data, which is
-        // exactly the shape this claim is about.
-        s.target_blocks_per_bucket = 1;
-        block_on(async {
-            for chunk in (0..200u64).step_by(50) {
-                // Batched applies keep the fsync count sane.
-                let batch: Vec<Write> = (chunk..chunk + 50)
-                    .map(|k| Write::Put(nonunique(k), rec(SH, &noise(k))))
-                    .collect();
-                s.apply(&batch).await.unwrap();
-                s.drain().unwrap();
-            }
-            s.commit_journal().unwrap();
-
-            // The fresh journal holds exactly the Commit frame, so its length
-            // *is* the frame's cost.
-            let (buckets, frame) = (s.bucket_count(SH), s.journal_len());
-            assert!(buckets >= 16, "expected a wide directory, got {buckets}");
-            assert!(
-                frame < 8 * buckets as u64,
-                "a {buckets}-bucket directory framed in {frame} bytes — \
-                 carrying the descriptors would have cost {} plus overhead",
-                8 * buckets
-            );
-
-            // RFC 0048: and it does not grow with the log either. Each round
-            // adds a chunk to the chain; the frame keeps naming just the head,
-            // so every checkpoint costs the same handful of bytes.
-            for chunk in (200..600u64).step_by(50) {
-                let batch: Vec<Write> = (chunk..chunk + 50)
-                    .map(|k| Write::Put(nonunique(k), rec(SH, &noise(k))))
-                    .collect();
-                s.apply(&batch).await.unwrap();
-                s.drain().unwrap();
-                s.commit_journal().unwrap();
-                assert_eq!(
-                    s.journal_len(),
-                    frame,
-                    "the frame must not grow as the chain does"
-                );
-            }
-        });
-    }
-
-    /// Compaction keeps the log bounded: without it every checkpoint would
-    /// add another chunk address to the frame forever. And the whole chain —
-    /// snapshot plus the deltas folded over it — must still restore.
-    ///
-    /// A second type that only ever writes *before* the compaction guards the
-    /// snapshot's other half: a full chunk must carry the resident state of
-    /// the types its round never touched, or that type is lost at the next
-    /// reopen.
-    #[test]
-    fn compaction_bounds_the_log_and_the_chain_still_restores() {
-        const ROUNDS: u64 = 120;
-        let d = tempfile::tempdir().unwrap();
-        let open2 = |path: &std::path::Path| {
-            PageStore::open(path, &[&TEST_SLOT, &OTHER_SLOT]).unwrap()
-        };
-        block_on(async {
-            let s = open2(d.path());
-            s.apply(&[Write::Put(nonunique(7), rec(SH2, b"untouched"))])
-                .await
-                .unwrap();
-            s.drain().unwrap();
-
-            let mut widest = 0;
-            for k in 0..ROUNDS {
-                s.apply(&[Write::Put(nonunique(k), rec(SH, b"round"))])
-                    .await
-                    .unwrap();
-                s.commit_journal().unwrap(); // drains, then frames the log
-                widest = widest.max(s.journal_len());
-            }
-            // Unbounded growth would reach ~8 bytes per round on top of the
-            // frame's fixed head; compaction caps it far below that.
-            assert!(
-                widest < 8 * ROUNDS,
-                "the log must compact: widest frame was {widest} bytes over \
-                 {ROUNDS} checkpoints"
-            );
-            drop(s);
-
-            // Reopen: the snapshot chunk plus every delta after it.
-            let s = open2(d.path());
-            assert_eq!(s.cache_len(), 0, "a committed open starts cold");
-            for k in 0..ROUNDS {
-                assert_eq!(
-                    s.get(nonunique(k)).await.unwrap(),
-                    Some(rec(SH, b"round")),
-                    "record {k} lost across the delta chain"
-                );
-            }
-            assert_eq!(
-                s.get_of(SH2, nonunique(7)).await.unwrap(),
-                Some(rec(SH2, b"untouched")),
-                "a snapshot must carry the types its round did not touch"
             );
         });
     }
@@ -835,12 +527,12 @@ mod tests {
                 s.apply(&[Write::Put(nonunique(7), rec(SH, b"durable"))])
                     .await
                     .unwrap();
-            } // drop — no graceful flush beyond the journal fsync
+            } // a drop settles what the store holds
             let s = open(d.path());
             assert_eq!(
                 s.get(nonunique(7)).await.unwrap(),
                 Some(rec(SH, b"durable")),
-                "journal must survive a reopen"
+                "a closed store's writes survive a reopen"
             );
         });
     }
@@ -863,11 +555,10 @@ mod tests {
     }
 
     // The `Expect` guard: a satisfied guard commits its batch minus the
-    // guard (the journal never holds one, so replay re-applies only the
-    // effective writes); a violated guard refuses the whole batch as a
-    // typed conflict *before* the durability point.
+    // guard (the logs never hold one); a violated guard refuses the whole
+    // batch as a typed conflict before anything is committed.
     #[test]
-    fn expect_guard_commits_clean_and_conflicts_before_journaling() {
+    fn expect_guard_commits_clean_and_conflicts_before_committing() {
         let d = tempfile::tempdir().unwrap();
         block_on(async {
             {
@@ -909,8 +600,8 @@ mod tests {
 
     /// RFC 0063's A2. An `Expect` guard used to resolve its id's **type** by
     /// probing every registered slot in turn — so the guard on a first save,
-    /// which matches nothing, paid a page read per declared type, under the
-    /// journal lock that serializes all writers. The guard now carries the
+    /// which matches nothing, paid a page read per declared type, on the
+    /// path that serializes all writers. The guard now carries the
     /// STRUCT_HASH it routes by, so its cost is one lookup and cannot grow
     /// with the schema.
     #[test]
@@ -996,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn unregistered_struct_hash_is_refused_before_journaling() {
+    fn unregistered_struct_hash_is_refused_before_committing() {
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -1005,14 +696,14 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(err.to_string().contains("no StructStorage registered"));
-            // Nothing journaled: a reopen replays cleanly and stays empty.
+            // Nothing committed: a reopen stays empty.
         });
         drop(s);
         let s = open(d.path());
         assert_eq!(s.cache_len(), 0, "refused write must not reach the log");
     }
 
-    /// A bounded settle round takes its budget and leaves the rest queued —
+    /// A bounded cycle step takes its budget and leaves the rest queued —
     /// RFC 0063's interruptible drain, and the property a worker's
     /// priority valve needs in order to have anything to interleave between.
     ///
@@ -1021,7 +712,7 @@ mod tests {
     /// that only split at slot boundaries would pass every other assertion
     /// here and settle all 20 records in one round.
     #[test]
-    fn a_bounded_settle_step_leaves_the_rest_queued() {
+    fn a_bounded_cycle_step_leaves_the_rest_queued() {
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -1033,17 +724,22 @@ mod tests {
             assert!(s.has_pending(), "20 writes must queue a settle");
 
             // One bounded round: some settled, the remainder still queued.
-            assert_eq!(s.settle_step(5).unwrap(), Progress::Settled);
+            assert!(s.begin_cycle().unwrap());
+            assert_eq!(s.cycle_step(5).unwrap(), Progress::Settled);
             assert!(
                 s.has_pending(),
                 "a budget of 5 must not have settled all 20"
             );
 
             // Driving it to exhaustion reaches the same place `drain` would.
+            // The round that ends the batch reports `Done`.
             let mut rounds = 1;
-            while s.settle_step(5).unwrap() == Progress::Settled {
+            loop {
                 rounds += 1;
                 assert!(rounds < 100, "step made no progress");
+                if s.cycle_step(5).unwrap() == Progress::Done {
+                    break;
+                }
             }
             assert!(
                 rounds >= 4,
@@ -1063,13 +759,17 @@ mod tests {
         });
     }
 
-    /// The step reports `Done` on an empty queue rather than looping.
+    /// A tick with nothing to settle opens nothing — no window, no header,
+    /// no barrier — and a step with no batch open is done.
     #[test]
-    fn a_step_on_an_empty_queue_is_done() {
+    fn an_idle_tick_writes_nothing() {
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
-        assert_eq!(s.settle_step(usize::MAX).unwrap(), Progress::Done);
-        assert_eq!(s.settle_step(1).unwrap(), Progress::Done);
+        let before = s.file.io().snapshot();
+        assert!(!s.begin_cycle().unwrap());
+        assert_eq!(s.cycle_step(usize::MAX).unwrap(), Progress::Done);
+        s.drain().unwrap();
+        assert_eq!(s.file.io().snapshot(), before);
     }
 
     #[test]
@@ -1123,7 +823,7 @@ mod tests {
                 s.drain().unwrap();
                 assert_eq!(s.get(nonunique(3)).await.unwrap(), None);
             }
-            // And the journal agrees on replay.
+            // And the reconstruction agrees.
             let s = open(d.path());
             assert_eq!(s.get(nonunique(3)).await.unwrap(), None);
             assert_eq!(s.cache_len(), 0);
@@ -1197,12 +897,12 @@ mod tests {
                     "the cache serves an unsettled write"
                 );
                 assert_eq!(s.bucket_count(SH), 0, "no page written yet");
-            } // dropped with the queue never drained
+            } // dropped with the queue never drained: the drop settles it
             let s = open(d.path());
             assert_eq!(
                 s.get(nonunique(1)).await.unwrap(),
                 Some(rec(SH, b"queued")),
-                "the journal covers unsettled writes"
+                "a closed store settled its unsettled writes"
             );
         });
     }
@@ -1258,235 +958,8 @@ mod tests {
         });
     }
 
-    /// The journal files of a one-shard store at `dir`, sorted by ts.
-    fn journals(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-        crate::journal::scan(&crate::shard_set::shard_dir(dir, 0))
-            .unwrap()
-            .into_iter()
-            .map(|(_, p)| p)
-            .collect()
-    }
-
     #[test]
-    fn commit_retires_the_old_journal_and_reopen_is_cold() {
-        let d = tempfile::tempdir().unwrap();
-        block_on(async {
-            {
-                let s = open(d.path());
-                s.apply(&[Write::Put(nonunique(1), rec(SH, b"kept"))])
-                    .await
-                    .unwrap();
-                s.apply(&[
-                    Write::Put(nonunique(2), rec(SH, b"doomed")),
-                    Write::Put(nonunique(3), rec(SH, b"kept too")),
-                ])
-                .await
-                .unwrap();
-                s.apply(&[Write::Remove(SH, nonunique(2))]).await.unwrap();
-                s.commit_journal().unwrap();
-                // The frame is written but unsynced, so the retirement it
-                // authorises is still pending (RFC 0046) — the old journal
-                // stays until something makes the frame durable.
-                assert!(s.is_retiring());
-                assert_eq!(journals(d.path()).len(), 2);
-                s.force_retirement().unwrap();
-                assert!(!s.is_retiring());
-                assert_eq!(
-                    journals(d.path()).len(),
-                    1,
-                    "the retired journal must be deleted once the frame is \
-                     durable"
-                );
-            }
-            let s = open(d.path());
-            assert_eq!(s.cache_len(), 0, "a committed open starts cold");
-            assert_eq!(
-                s.get(nonunique(1)).await.unwrap(),
-                Some(rec(SH, b"kept"))
-            );
-            assert_eq!(
-                s.get_of(SH, nonunique(3)).await.unwrap(),
-                Some(rec(SH, b"kept too"))
-            );
-            assert_eq!(
-                s.get(nonunique(2)).await.unwrap(),
-                None,
-                "a pre-commit remove must hold after restore"
-            );
-        });
-    }
-
-    #[test]
-    fn writes_after_commit_replay_over_it() {
-        let d = tempfile::tempdir().unwrap();
-        block_on(async {
-            {
-                let s = open(d.path());
-                s.apply(&[Write::Put(nonunique(1), rec(SH, b"old"))])
-                    .await
-                    .unwrap();
-                s.commit_journal().unwrap();
-                // Post-commit traffic lands in the fresh journal.
-                s.apply(&[Write::Put(nonunique(1), rec(SH, b"new"))])
-                    .await
-                    .unwrap();
-                s.apply(&[Write::Put(nonunique(4), rec(SH, b"tail"))])
-                    .await
-                    .unwrap();
-            }
-            let s = open(d.path());
-            assert_eq!(
-                s.get(nonunique(1)).await.unwrap(),
-                Some(rec(SH, b"new")),
-                "the journal tail must win over committed state"
-            );
-            assert_eq!(
-                s.get(nonunique(4)).await.unwrap(),
-                Some(rec(SH, b"tail"))
-            );
-        });
-    }
-
-    #[test]
-    fn covered_journal_left_behind_is_skipped_and_cleaned() {
-        // Simulates a crash between the Commit frame and the old journal's
-        // delete: the covered journal is still on disk; recovery must skip
-        // it (its frames are already in the data files) and clean it up.
-        let d = tempfile::tempdir().unwrap();
-        block_on(async {
-            let (old_path, old_bytes) = {
-                let s = open(d.path());
-                s.apply(&[Write::Put(nonunique(1), rec(SH, b"v1"))])
-                    .await
-                    .unwrap();
-                s.apply(&[Write::Put(nonunique(1), rec(SH, b"v2"))])
-                    .await
-                    .unwrap();
-                s.apply(&[Write::Put(nonunique(5), rec(SH, b"other"))])
-                    .await
-                    .unwrap();
-                s.apply(&[Write::Remove(SH, nonunique(5))]).await.unwrap();
-                let old = journals(d.path()).pop().unwrap();
-                let bytes = std::fs::read(&old).unwrap();
-                s.commit_journal().unwrap();
-                (old, bytes)
-            };
-            // "Un-delete" the covered journal.
-            std::fs::write(&old_path, &old_bytes).unwrap();
-            assert_eq!(journals(d.path()).len(), 2);
-            let s = open(d.path());
-            assert_eq!(
-                s.get(nonunique(1)).await.unwrap(),
-                Some(rec(SH, b"v2"))
-            );
-            assert_eq!(s.get(nonunique(5)).await.unwrap(), None);
-            assert_eq!(
-                journals(d.path()).len(),
-                1,
-                "recovery must clean the covered leftover"
-            );
-        });
-    }
-
-    /// The deferral's safety net (RFC 0046): a `Commit` frame written without
-    /// a barrier may simply never reach the disk. Because the retirement waits
-    /// for it, the retired journal is still there — and every acked write
-    /// replays out of it.
-    #[test]
-    fn a_deferred_commit_that_never_lands_replays_the_retained_journal() {
-        let d = tempfile::tempdir().unwrap();
-        block_on(async {
-            {
-                let s = open(d.path());
-                for k in 0..5u64 {
-                    s.apply(&[Write::Put(nonunique(k), rec(SH, b"acked"))])
-                        .await
-                        .unwrap();
-                }
-                s.commit_journal().unwrap();
-                assert!(s.is_retiring(), "the frame must still be pending");
-            }
-            // The unsynced frame never made it: the new journal comes back
-            // empty, exactly as a crash in that window would leave it.
-            let mut files = journals(d.path());
-            assert_eq!(files.len(), 2, "the retired journal must be retained");
-            let newest = files.pop().unwrap();
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&newest)
-                .unwrap()
-                .set_len(0)
-                .unwrap();
-
-            let s = open(d.path());
-            for k in 0..5u64 {
-                assert_eq!(
-                    s.get(nonunique(k)).await.unwrap(),
-                    Some(rec(SH, b"acked")),
-                    "record {k} lost with the deferred commit"
-                );
-            }
-        });
-    }
-
-    #[test]
-    fn torn_commit_frame_falls_back_to_the_old_journal() {
-        // Simulates a crash mid-Commit-append: the frame is torn (crc
-        // fails) and the retired journal was never deleted — recovery must
-        // ignore the torn commit and rebuild from the old journal's frames.
-        let d = tempfile::tempdir().unwrap();
-        block_on(async {
-            let (old_path, old_bytes) = {
-                let s = open(d.path());
-                s.apply(&[Write::Put(nonunique(7), rec(SH, b"survives"))])
-                    .await
-                    .unwrap();
-                let old = journals(d.path()).pop().unwrap();
-                let bytes = std::fs::read(&old).unwrap();
-                s.commit_journal().unwrap();
-                (old, bytes)
-            };
-            // Tear the Commit frame (drop its last byte) and un-delete the
-            // old journal — the exact crash-mid-append disk state.
-            let new_path = journals(d.path()).pop().unwrap();
-            let len = std::fs::metadata(&new_path).unwrap().len();
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&new_path)
-                .unwrap()
-                .set_len(len - 1)
-                .unwrap();
-            std::fs::write(&old_path, &old_bytes).unwrap();
-            let s = open(d.path());
-            assert_eq!(
-                s.get(nonunique(7)).await.unwrap(),
-                Some(rec(SH, b"survives")),
-                "the old journal must rule when the commit is torn"
-            );
-        });
-    }
-
-    #[test]
-    fn missing_journal_with_data_refuses_to_open() {
-        let d = tempfile::tempdir().unwrap();
-        block_on(async {
-            let s = open(d.path());
-            s.apply(&[Write::Put(nonunique(1), rec(SH, b"x"))])
-                .await
-                .unwrap();
-            s.drain().unwrap(); // a data file, which only a journal roots
-        });
-        for j in journals(d.path()) {
-            std::fs::remove_file(j).unwrap();
-        }
-        assert!(matches!(
-            PageStore::open(d.path(), &[&TEST_SLOT]).unwrap_err(),
-            StorageError::Corrupt(_)
-        ));
-    }
-
-    #[test]
-    fn commit_restores_dictionary_compressed_pages() {
+    fn a_reopen_restores_dictionary_compressed_pages() {
         let d = tempfile::tempdir().unwrap();
         // Repetitive bodies → the dictionary warms and pages store Zstd, so
         // reading them back after restore needs the persisted dictionary.
@@ -1503,7 +976,7 @@ mod tests {
                         .await
                         .unwrap();
                 }
-                s.commit_journal().unwrap();
+                s.drain().unwrap();
             }
             let s = open(d.path());
             assert_eq!(s.cache_len(), 0);
@@ -1514,12 +987,12 @@ mod tests {
                     "record {k} must decompress against the restored dict"
                 );
             }
-            // The store keeps working: settle + a second commit over the
-            // restored state (untouched roots carry forward).
+            // The store keeps working: a second batch over the restored
+            // state (untouched addresses carry forward).
             s.apply(&[Write::Put(nonunique(60), body(60))])
                 .await
                 .unwrap();
-            s.commit_journal().unwrap();
+            s.drain().unwrap();
         });
         // Third generation open still serves everything.
         block_on(async {
@@ -1625,92 +1098,14 @@ mod tests {
             }
         });
         drop(s);
-        // And it all survives a rebuild from the journal.
+        // And it all survives a reconstruction.
         let s = open(d.path());
         block_on(async {
-            assert_eq!(s.cache_len(), 200);
+            assert_eq!(s.cache_len(), 0, "a reconstruction starts cold");
             assert_eq!(
                 s.get(nonunique(199)).await.unwrap().unwrap().len(),
                 8 + 1024
             );
         });
-    }
-
-    /// The default is the promise the engine was built around, and the one
-    /// thing a durability window must never quietly change (RFC 0061).
-    #[test]
-    fn a_zero_window_takes_one_barrier_per_batch() {
-        let d = tempfile::tempdir().unwrap();
-        let s = open(d.path()); // StoreOptions::default()
-        let before = s.journal_barriers();
-        block_on(async {
-            for k in 0..8u64 {
-                s.apply(&[Write::Put(nonunique(k), rec(SH, b"strict"))])
-                    .await
-                    .unwrap();
-            }
-        });
-        assert_eq!(s.journal_barriers(), before + 8);
-    }
-
-    /// The whole point of the window: a burst inside one costs no barrier,
-    /// and `flush` buys the strong answer back for exactly one.
-    #[test]
-    fn a_burst_inside_one_window_costs_one_barrier() {
-        let d = tempfile::tempdir().unwrap();
-        let s = PageStore::open_with(
-            d.path(),
-            &[&TEST_SLOT],
-            StoreOptions {
-                // Long enough that nothing elapses during the test — the
-                // window's *timing* is the clock's business, not this test's.
-                relax_window: Duration::from_hours(1),
-                ..StoreOptions::default()
-            },
-        )
-        .unwrap();
-        let before = s.journal_barriers();
-        block_on(async {
-            for k in 0..32u64 {
-                s.apply(&[Write::Put(nonunique(k), rec(SH, b"windowed"))])
-                    .await
-                    .unwrap();
-            }
-        });
-        assert_eq!(
-            s.journal_barriers(),
-            before,
-            "32 batches inside one window must take no barrier"
-        );
-        s.flush().unwrap();
-        assert_eq!(s.journal_barriers(), before + 1);
-    }
-
-    /// Elapsed window ⇒ the barrier is taken, and what was acked is on the
-    /// platter: a reopen replays it.
-    #[test]
-    fn an_elapsed_window_syncs_and_the_batch_replays() {
-        let d = tempfile::tempdir().unwrap();
-        {
-            let s = PageStore::open_with(
-                d.path(),
-                &[&TEST_SLOT],
-                // Elapsed before the first append finishes writing.
-                StoreOptions {
-                    relax_window: Duration::from_nanos(1),
-                    ..StoreOptions::default()
-                },
-            )
-            .unwrap();
-            let before = s.journal_barriers();
-            block_on(s.apply(&[Write::Put(nonunique(7), rec(SH, b"elapsed"))]))
-                .unwrap();
-            assert_eq!(s.journal_barriers(), before + 1);
-        }
-        let s = open(d.path());
-        assert_eq!(
-            block_on(s.get(nonunique(7))).unwrap(),
-            Some(rec(SH, b"elapsed"))
-        );
     }
 }
