@@ -11,9 +11,9 @@
 - **Related:** [RFC 0064](0064-pivot-owned-concurrency-PLANNED.md) (the sharded
   shape the multi-consumer row finally exercises),
   [RFC 0044](0044-page-cache-PLANNED-LOW.md) and
-  [RFC 0061](0061-relaxed-durability-window.md) (the two knobs the fill turns up),
+  [RFC 0061](0061-relaxed-durability-window-DEPRECATED.md) (the two knobs the fill turns up),
   [RFC 0041](0041-single-barrier-checkpoint.md) /
-  [RFC 0047](0047-generational-journal-retirement.md) (the barrier accounting
+  [RFC 0047](0047-generational-journal-retirement-DEPRECATED.md) (the barrier accounting
   this measures)
 
 ## Summary
@@ -369,7 +369,7 @@ constraints that make a measurement honest do not apply to it:
 - it runs **outside the cage** (it is a derivation; `nix-daemon` sandboxes it,
   and no timing is recorded from it);
 - it runs at the maximum relax window
-  ([0061](0061-relaxed-durability-window.md)) — already the case via
+  ([0061](0061-relaxed-durability-window-DEPRECATED.md)) — already the case via
   `benches/src/lib.rs`'s `FILL_WINDOW`;
 - and it gets **both** in-memory layers turned up, which is the part that does
   not exist yet.
