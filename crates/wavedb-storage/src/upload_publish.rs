@@ -49,7 +49,7 @@ impl PageStore {
     /// Step 4, after every PUT: adopt the remote directories and clear the
     /// flag of each page still at the descriptor it was taken at — one a
     /// settle round rewrote meanwhile is newer than what went up, and keeps
-    /// its flag. What changed waits in `unrecorded` for the next window.
+    /// its flag. What changed waits, unrecorded, for the next header.
     pub(crate) fn publish_upload(
         &self,
         work: Vec<SlotUpload>,
@@ -67,7 +67,7 @@ impl PageStore {
             bytes: packed.files.iter().map(|f| f.bytes.len() as u64).sum(),
             moved: 0,
         };
-        let mut unrecorded = object.unrecorded.borrow_mut();
+        let mut unrecorded = self.unrecorded.borrow_mut();
         for (w, upload) in work.into_iter().enumerate() {
             let slot = &self.types[upload.idx];
             let touched = unrecorded.slots.entry(upload.idx).or_default();
@@ -77,6 +77,7 @@ impl PageStore {
             {
                 slot.uploaded_dict().set(len);
                 slot.remote_dict().set(desc);
+                touched.remote_dict = true;
             }
             let mut live = slot.directory().borrow_mut();
             let Some(dir) = live.as_mut() else { continue };
@@ -91,8 +92,8 @@ impl PageStore {
                 done.pages += 1;
             }
         }
-        if self.disk.is_none() {
-            // Object mode keeps no addressing log to record it in.
+        if !self.has_disk() {
+            // Object mode keeps no header to record it in.
             unrecorded.slots.clear();
         }
         *object.chain.borrow_mut() = chain;
