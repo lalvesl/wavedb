@@ -194,6 +194,11 @@ impl TypeLog {
         self.r
     }
 
+    /// Bytes from `s` to the end.
+    pub const fn unsettled(&self) -> u64 {
+        self.w - self.s
+    }
+
     /// Whether anything from `s` on may still be owed to a page.
     pub const fn pending(&self) -> bool {
         self.s < self.w
