@@ -121,19 +121,20 @@ emitted once as TSV and each system loads that same file with its own bulk tool
 (`.import`, `\copy`, `LOAD DATA`, `mongoimport`) inside the builder, so those
 seeds are pinned and verified before the client code that will use them.
 
-**Every fill opens WaveDB with a durability window** (`FILL_WINDOW`,
-[RFC 0061](../rfcs/0061-relaxed-durability-window.md)) — the Nix seed and the
-shop preload both. A fill is not a measurement, and one op is one batch is one
-`fsync`, so a durable fill of a few million records is a few million barriers:
-that is why the WaveDB seed used to take minutes where the others took seconds,
-and why a very large preload is not affordable at all. The other four get the
-same courtesy under other names — `.import`, `\copy`, `LOAD DATA` and
-`mongoimport` are not the per-statement commit path either.
+**Every fill settles WaveDB in bulk** — the Nix seed and the shop preload both:
+its writes are durable at the settles a byte threshold triggers
+(`FILL_SETTLE_BYTES`, [RFC 0072](../rfcs/0072-the-settle-is-the-durability-point-WIP.md)),
+not one by one. A fill is not a measurement, and a durable write per record is
+a barrier per record: that is why the WaveDB seed used to take minutes where
+the others took seconds. The other four get the same courtesy under other
+names — `.import`, `\copy`, `LOAD DATA` and `mongoimport` are not the
+per-statement commit path either.
 
-The fill's window is **not** the row's: every measured store is reopened, and
-that reopen is where durability is chosen. WaveDB now reports **two rows** like
-everyone else — `durable` (the default, one barrier per batch) and `relaxed`
-(`RELAXED_WINDOW`, one barrier per elapsed second). One second lands mid-pack
+The fill's settles are **not** the row's: durability is the driver's choice
+in the measured phases. WaveDB reports **two rows** like everyone else —
+`durable` (every write settled and synced before it returns, inside the timed
+window — what `apply_durable` does on a store nobody ticks) and `relaxed`
+(a settle per elapsed `RELAXED_WINDOW`, one second). One second lands mid-pack
 rather than flattering: PostgreSQL's `synchronous_commit = off` risks ~600 ms,
 MySQL's `innodb_flush_log_at_trx_commit = 2` flushes once a second, and
 SQLite's `synchronous = NORMAL` holds until a checkpoint. None of those are
