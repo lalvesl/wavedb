@@ -232,7 +232,7 @@ slot belongs to the page actor, and there is only one page actor regardless.
 6. the batch goes to the journal actor; the shard awaits the ack
 7. the journal actor merges whatever else arrived while it was syncing —
    **group commit as such**, "everything that landed during the last fsync"
-   rather than [0061](0061-relaxed-durability-window.md)'s timer
+   rather than [0061](0061-relaxed-durability-window-DEPRECATED.md)'s timer
 8. on the ack, the shard commits to its own cache and queues the touched ids
 9. later, the page actor drains and settles
 
