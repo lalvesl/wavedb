@@ -146,15 +146,15 @@ fn a_bucket_read_from_the_object_store_comes_back() {
     assert_eq!(s.pending_upload_bytes(), 0, "what came back is uploaded");
 }
 
-/// The checkpoint records the eviction before its frame, so a reopen keeps
-/// it — and compaction then gives the room back to the filesystem.
+/// A batch records the eviction, so a reopen keeps it — and compaction then
+/// gives the room back to the filesystem.
 #[test]
 fn a_reopen_keeps_what_was_evicted_and_compaction_shrinks_the_file() {
     let fx = Fixture::new();
     {
         let s = uploaded(&fx);
         s.evict_cold(0).unwrap();
-        s.commit_journal().unwrap();
+        s.drain().unwrap();
     }
     let s = fx.open();
     assert!(sampled().all(|k| !s.is_resident(SH, id(k))));
@@ -167,33 +167,34 @@ fn a_reopen_keeps_what_was_evicted_and_compaction_shrinks_the_file() {
     assert_reads(&s, |k| Some(record(k, 0)));
 }
 
-/// An eviction no checkpoint recorded is simply undone by a crash: the
-/// last root still names the pages, and their runs were held back.
+/// An eviction no batch recorded is simply undone by a crash: the last
+/// durable batch still names the pages, and their runs were held back.
 #[test]
 fn an_eviction_lost_in_a_crash_loses_nothing() {
     let fx = Fixture::new();
-    {
+    let crashed = {
         let s = uploaded(&fx);
-        s.commit_journal().unwrap();
+        s.drain().unwrap();
         s.evict_cold(0).unwrap();
-        // Dropped before any window or checkpoint records it.
-    }
-    let s = fx.open();
+        s.reclaim().unwrap(); // cuts nothing the durable batch names
+        fx.crashed() // before any window records it
+    };
+    let s = fx.open_at(&crashed);
     assert!(sampled().all(|k| s.is_resident(SH, id(k))));
     assert_reads(&s, |k| Some(record(k, 0)));
 }
 
-/// A write the journal still holds, into a bucket the root says is
-/// evicted, brings the bucket back while the store opens.
+/// A write into an evicted bucket brings the bucket back before it
+/// commits, and the close settles both.
 #[test]
-fn a_replayed_write_brings_its_bucket_back_at_open() {
+fn a_write_brings_its_evicted_bucket_back() {
     let fx = Fixture::new();
     {
         let s = uploaded(&fx);
         s.evict_cold(0).unwrap();
-        s.commit_journal().unwrap();
+        s.drain().unwrap();
         block_on(s.apply(&[Write::Put(id(42), record(42, 1))])).unwrap();
-        // Dropped with the write only in the journal.
+        assert!(s.is_resident(SH, id(42)));
     }
     let s = fx.open();
     assert!(s.is_resident(SH, id(42)));
