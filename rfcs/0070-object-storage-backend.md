@@ -7,9 +7,9 @@
 - **Crates:** `wavedb-storage` (the backend), `wavedb-platform` (the S3 client
   half), `wavedb-quick-node` (configuration)
 - **Builds on:** [RFC 0046](0046-directory-deltas-in-the-window.md) /
-  [RFC 0048](0048-chained-addressing-log.md) (descriptors travel as chained
-  deltas), [RFC 0047](0047-generational-journal-retirement.md) (protection
-  generations), [RFC 0061](0061-relaxed-durability-window.md) (group commit),
+  [RFC 0048](0048-chained-addressing-log-DEPRECATED.md) (descriptors travel as chained
+  deltas), [RFC 0047](0047-generational-journal-retirement-DEPRECATED.md) (protection
+  generations), [RFC 0061](0061-relaxed-durability-window-DEPRECATED.md) (group commit),
   [RFC 0067](0067-thread-per-core-shards-WIP.md) (a shard is a database),
   [RFC 0068](0068-record-cache-as-a-log-WIP.md) (the record log),
   [RFC 0069](0069-compaction-into-the-holes-DEPRECATED.md) (compaction and its triggers)
