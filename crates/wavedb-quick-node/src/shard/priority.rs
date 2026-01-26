@@ -2,7 +2,7 @@
 //!
 //! Two classes reach the actor from outside. **Reads are high priority** —
 //! a shard missed its cache and something is waiting on the far end.
-//! **Maintenance is low** — settling and checkpointing; nobody is blocked on
+//! **Maintenance is low** — settling; only a durable write may wait on
 //! it. (Work the actor starts on its own behalf, such as reading a page in
 //! order to merge into it, never re-enters a queue at all: that would be a
 //! request waiting on a request in the same bounded queue, which is a
@@ -11,7 +11,7 @@
 //! ## Why strict priority is wrong
 //!
 //! Draining reads first, always, starves maintenance — and maintenance is not
-//! optional background work. Starve it and the journal is never checkpointed,
+//! optional background work. Starve it and nothing is ever settled,
 //! so it grows without bound, and recovery time grows with it. Starvation here
 //! is an out-of-memory, not an unfairness.
 //!
@@ -42,7 +42,7 @@
 pub enum Class {
     /// A shard's read — someone is waiting.
     Read,
-    /// Settle or checkpoint — nobody is waiting.
+    /// A settle step — nobody is waiting, but a durable write.
     Maintenance,
 }
 
@@ -58,8 +58,8 @@ pub const LOW_WATER_BYTES: u64 = 8 << 20;
 
 /// At or above this many, maintenance runs even with reads waiting.
 ///
-/// The same order as the node's own checkpoint policy: past here the journal
-/// is the thing at risk, and a read served now is a read replayed later.
+/// Past here what is not settled is the thing at risk: everything a crash
+/// would lose, and RAM the record cache cannot give back.
 pub const HIGH_WATER_BYTES: u64 = 64 << 20;
 
 /// Reads served per maintenance step inside the middle band.
@@ -101,9 +101,9 @@ impl Priority {
 
     /// The class to serve next, or `None` when nothing is queued.
     ///
-    /// `unsettled` is the volume behind the maintenance queue — the node's
-    /// journal length, which is the quantity that actually grows without
-    /// bound if maintenance never runs.
+    /// `unsettled` is the volume behind the maintenance queue — the bytes
+    /// committed and not settled yet, which is the quantity that actually
+    /// grows without bound if maintenance never runs.
     pub const fn next(
         &mut self,
         avail: Available,
@@ -224,7 +224,7 @@ mod tests {
 
     /// The property the whole valve exists for: under unrelenting read
     /// pressure, maintenance still runs. A strict-priority actor would score
-    /// zero here and grow its journal until the process died.
+    /// zero here and grow its record cache until the process died.
     #[test]
     fn maintenance_is_never_starved_under_constant_read_pressure() {
         let mut p = Priority::default();
