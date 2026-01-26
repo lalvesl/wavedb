@@ -199,6 +199,22 @@ impl SlotPage {
         Ok(out)
     }
 
+    /// Whether `buf` holds a whole page: its length prefix in range and its
+    /// envelope's crc right — what a reconstruction checks of the batch a
+    /// crash may have cut (RFC 0072 §7), without decompressing it.
+    #[must_use]
+    pub fn intact(buf: &[u8]) -> bool {
+        let Some(len) = buf
+            .get(..LEN_PREFIX)
+            .and_then(|s| s.try_into().ok())
+            .map(u32::from_le_bytes)
+        else {
+            return false;
+        };
+        buf.get(LEN_PREFIX..LEN_PREFIX + len as usize)
+            .is_some_and(|env| from_wire_checked::<PageEnvelope>(env).is_ok())
+    }
+
     /// Parse a page from bytes (typically a whole zero-padded run): length
     /// prefix, crc + envelope decode through the checked codec, then — for a
     /// `Zstd` payload — decompress against the dictionary
