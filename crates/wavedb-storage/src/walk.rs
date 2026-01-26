@@ -9,8 +9,32 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
-use crate::header::{Header, NO_FILE};
-use crate::recover_headers::Headers;
+use crate::header::{Header, NO_FILE, TypeEntry};
+
+/// Where a walk reads its headers from: the object store's files
+/// (`crate::recover_headers`) or the disk's windows (`crate::reopen`).
+pub trait HeaderSource {
+    /// The header at `at`, or `None` when nothing there is one.
+    async fn get(&mut self, at: u64) -> StorageResult<Option<Header>>;
+}
+
+/// Which directories of a header a walk rebuilds.
+#[derive(Clone, Copy)]
+pub enum Lane {
+    /// The directories the header's own pages are in.
+    Types,
+    /// On disk, in disk + object mode: the object store's.
+    Remote,
+}
+
+impl Lane {
+    fn of(self, header: &Header) -> &[TypeEntry] {
+        match self {
+            Self::Types => &header.types,
+            Self::Remote => &header.remote,
+        }
+    }
+}
 
 /// One type's directory being gathered.
 struct Gathering {
@@ -58,14 +82,15 @@ pub struct Walked {
 /// chain names is missing or does not name it. A header missing on the way
 /// down by `prev` ends the way down: a compaction deleted it, which it does
 /// only below every header naming a type.
-pub async fn walk(
-    headers: &mut Headers<'_>,
+pub async fn walk<S: HeaderSource>(
+    headers: &mut S,
     top: &Header,
     registered: &[u64],
+    lane: Lane,
 ) -> StorageResult<Vec<Walked>> {
     let mut types: BTreeMap<u64, Gathering> = BTreeMap::new();
     let mut unnamed: BTreeSet<u64> = registered.iter().copied().collect();
-    gather(&mut types, &mut unnamed, top);
+    gather(&mut types, &mut unnamed, top, lane);
     // The next header the way down reads.
     let mut below = top.prev;
     loop {
@@ -86,7 +111,7 @@ pub async fn walk(
         if file == below {
             below = header.prev;
         }
-        gather(&mut types, &mut unnamed, &header);
+        gather(&mut types, &mut unnamed, &header, lane);
         if types.values().any(|t| t.missing > 0 && t.next == file) {
             return Err(StorageError::Corrupt(
                 "a chain names a file without it",
@@ -120,8 +145,9 @@ fn gather(
     types: &mut BTreeMap<u64, Gathering>,
     unnamed: &mut BTreeSet<u64>,
     header: &Header,
+    lane: Lane,
 ) {
-    for entry in &header.types {
+    for entry in lane.of(header) {
         if let Some(t) = types.get_mut(&entry.struct_hash) {
             if t.next == header.at {
                 t.take(&entry.changed, entry.last);
