@@ -76,13 +76,7 @@ impl PageStore {
         ))?;
         let file = BlockFile::in_memory(facts.seed());
         let alloc = BlockAllocator::new(options.file_bytes);
-        let store = Self::assemble(
-            file,
-            None,
-            types,
-            (alloc, crate::meta_log::MetaLog::default()),
-            options,
-        );
+        let store = Self::assemble(file, types, alloc, options);
         if let Some(found) = found {
             store.adopt(found)?;
         }
@@ -92,7 +86,7 @@ impl PageStore {
     /// Whether this store has no disk (object mode).
     #[must_use]
     pub const fn is_object_mode(&self) -> bool {
-        self.disk.is_none()
+        !self.has_disk()
     }
 
     /// Note a committed write the object store has not received: the
