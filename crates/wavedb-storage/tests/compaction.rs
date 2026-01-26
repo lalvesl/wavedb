@@ -15,7 +15,8 @@ use futures::executor::block_on;
 use wavedb_core::{Id, Store, U48, Write};
 
 use wavedb_storage::{
-    BLOCK_SIZE, Compacting, PageStore, Space, StoreOptions, StructStorage,
+    BLOCK_SIZE, Compacting, PageStore, Progress, Space, StoreOptions,
+    StructStorage,
 };
 
 const SH: u64 = 0x5EED_0069_C0A4_0001;
@@ -23,12 +24,8 @@ static SLOT: StructStorage = StructStorage::new(SH);
 
 const RECORDS: u64 = 1_500;
 
-/// Batches share barriers (RFC 0061): these tests are about space, and a
-/// barrier per write would make them about the disk. Everything a reopen
-/// checks was covered by a checkpoint first.
 fn open_sized(dir: &Path, file_blocks: u64) -> PageStore {
     let options = StoreOptions {
-        relax_window: std::time::Duration::from_secs(3_600),
         file_bytes: file_blocks * BLOCK_SIZE as u64,
         ..StoreOptions::default()
     };
@@ -56,6 +53,21 @@ fn data_files(dir: &Path) -> Vec<(u64, u64)> {
     out
 }
 
+/// Copy the directory tree `from` to `to` — what a crash leaves on disk,
+/// taken while the store holds it open.
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_dir() {
+            copy_dir(&path, &to.join(entry.file_name()));
+        } else {
+            std::fs::copy(&path, to.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
 fn id(key: u64) -> Id {
     Id::new(key, U48::from(1u32), false, (SH & 0x7FFF) as u16)
 }
@@ -81,15 +93,13 @@ fn pock(s: &PageStore) {
         for k in 0..RECORDS {
             s.apply(&[Write::Put(id(k), record(k, 0))]).await.unwrap();
             if k % 100 == 99 {
-                s.commit_journal().unwrap(); // a window each, files apart
+                s.drain().unwrap(); // a window each, files apart
             }
         }
         for k in (0..RECORDS).filter(|k| k % 3 != 0) {
             s.apply(&[Write::Remove(SH, id(k))]).await.unwrap();
         }
-        // Two checkpoints: the second releases what the first superseded.
-        s.commit_journal().unwrap();
-        s.commit_journal().unwrap();
+        s.drain().unwrap();
     });
 }
 
@@ -175,7 +185,7 @@ fn a_store_of_one_file_compacts_too() {
 }
 
 /// Stepped as a node steps it — small passes, writes in between, the
-/// sealing checkpoints closed by the caller — it ends the same way.
+/// sealing batch settled by the caller — it ends the same way.
 #[test]
 fn compaction_in_steps_lets_writes_through() {
     let d = tempfile::tempdir().unwrap();
@@ -187,9 +197,8 @@ fn compaction_in_steps_lets_writes_through() {
         match s.compact_step(16).unwrap() {
             Compacting::Moved { .. } => {}
             Compacting::Sealing => {
-                while s.checkpoint_step(64).unwrap()
-                    == wavedb_storage::Checkpointing::Settling
-                {}
+                s.begin_cycle().unwrap();
+                while s.cycle_step(64).unwrap() == Progress::Settled {}
             }
             Compacting::Done { reclaimed_blocks } => break reclaimed_blocks,
         }
@@ -197,7 +206,7 @@ fn compaction_in_steps_lets_writes_through() {
         extra += 1;
     };
     assert!(reclaimed > 0);
-    s.commit_journal().unwrap();
+    s.drain().unwrap();
     assert!(s.space().file_blocks < before.file_blocks + (extra - RECORDS));
     assert_records(&s);
     drop(s);
@@ -209,23 +218,24 @@ fn compaction_in_steps_lets_writes_through() {
     }
 }
 
-/// A store dropped part-way — runs moved, nothing sealed — reopens from its
-/// last commit, whose runs the moves never cut.
+/// A crash part-way — runs moved, no batch over them durable — reopens
+/// from the batch before, whose runs the moves never cut.
 #[test]
-fn a_store_dropped_mid_compaction_reopens_whole() {
+fn a_crash_mid_compaction_reopens_whole() {
     let d = tempfile::tempdir().unwrap();
+    let crashed = d.path().join("crashed");
     {
-        let s = open(d.path());
+        let s = open(&d.path().join("db"));
         pock(&s);
         for _ in 0..3 {
             s.compact_step(8).unwrap();
         }
         assert!(s.is_compacting());
-        // What a checkpoint opening meanwhile would cut: nothing the last
-        // `Commit` still names.
+        // A reclaim meanwhile cuts nothing the durable batch names.
         s.reclaim().unwrap();
+        copy_dir(&d.path().join("db"), &crashed);
     }
-    let s = open(d.path());
+    let s = open(&crashed);
     assert!(!s.is_compacting(), "a reopen starts idle");
     assert_records(&s);
     // And it can still compact from there.
@@ -279,9 +289,9 @@ fn a_window_past_the_ceiling_lands_whole() {
             let batch: Vec<Write> =
                 (0..40).map(|k| Write::Put(id(k), record(k, 0))).collect();
             s.apply(&batch).await.unwrap();
-            s.commit_journal().unwrap();
+            s.drain().unwrap();
             s.apply(&[Write::Put(id(40), record(40, 0))]).await.unwrap();
-            s.commit_journal().unwrap();
+            s.drain().unwrap();
         });
     }
     let files = data_files(d.path());
