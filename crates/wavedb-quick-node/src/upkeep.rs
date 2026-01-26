@@ -1,19 +1,18 @@
 //! The node's maintenance **policy**.
 //!
-//! Plain numbers: when a worker opens a checkpoint, how far it evicts, when
-//! it compacts. Each worker applies them to the stores it owns, on its own
+//! Plain numbers: how far a worker evicts, when it compacts, when it
+//! uploads. Each worker applies them to the stores it owns, on its own
 //! thread, between its jobs (`shard::background`, RFC 0067 step 4).
 
 use std::time::Duration;
 
 use wavedb_storage::{BLOCK_SIZE, Space};
 
-/// The background maintenance policy: how the node settles, checkpoints,
-/// and bounds its caches and files while serving.
+/// The background maintenance policy: how the node bounds its caches and
+/// files while serving. Settling needs no number: every tick settles what
+/// was written (RFC 0072).
 #[derive(Debug, Clone, Copy)]
 pub struct Maintenance {
-    /// Journal bytes that trigger a checkpoint (journal truncates to zero).
-    pub checkpoint_after_bytes: u64,
     /// Cache bytes the settle task evicts down to (settled entries only).
     pub cache_budget_bytes: usize,
     /// When the data files are compacted (RFCs 0069, 0071).
@@ -44,8 +43,7 @@ pub struct Maintenance {
 impl Default for Maintenance {
     fn default() -> Self {
         Self {
-            checkpoint_after_bytes: 64 * 1024 * 1024, // 64 MiB of journal
-            cache_budget_bytes: 1024 * 1024 * 1024,   // 1 GiB — generous
+            cache_budget_bytes: 1024 * 1024 * 1024, // 1 GiB — generous
             compaction: Compaction::default(),
             upload_after_bytes: 8 << 20, // 8 MiB, about a file
             upload_interval: Some(Duration::from_secs(10)),
