@@ -7,10 +7,10 @@
 //! 1. **no live page is in it** — in the store's remote directories, in
 //!    what a recovery from the object store would rebuild today (which can
 //!    differ until a cut carries the store's state), and, with a disk, in
-//!    what the disk's recovery roots name: the newest checkpoint's remote
-//!    directories and, while its frame is unproven, the one's before
-//!    (RFC 0047) — so with a disk the files emptied are deleted after two
-//!    checkpoints, which the compaction takes itself;
+//!    what the disk's reconstruction roots name: the newest batch's remote
+//!    directories and, while it is not durable yet, the one's before
+//!    (RFC 0072) — so with a disk the files emptied are deleted after a
+//!    durable batch, which the compaction settles itself;
 //! 2. **no recovery reads its header** — it lies below the **horizon**, the
 //!    lowest file a recovery from the newest whole batch asks for: the
 //!    batch's headers back to the one ending the batch before, and every
@@ -48,7 +48,7 @@ use crate::recover::{newest_cut, newest_file};
 use crate::recover_headers::Headers;
 use crate::remote::{FILE_BLOCKS, Remote, file_of};
 use crate::upload::{IN_FLIGHT, Release};
-use crate::walk::walk;
+use crate::walk::{Lane, walk};
 
 /// Blocks of remote pages one upload carries forward at most (8 MiB), so
 /// that a compaction does not double every upload.
@@ -119,10 +119,9 @@ impl PageStore {
             }
         }
         drop(clear);
-        if self.disk.is_some() {
-            // Two checkpoints: the disk's roots stop naming the old files.
-            self.commit_journal()?;
-            self.commit_journal()?;
+        if self.has_disk() {
+            // A durable batch: the disk's roots stop naming the old files.
+            self.drain()?;
         }
         self.delete_unneeded(&mut done).await?;
         Ok(done)
@@ -228,11 +227,11 @@ impl PageStore {
         live
     }
 
-    /// A checkpoint names the store's addressing: the object store's files
+    /// A batch ended naming the store's addressing: the object store's files
     /// it names become the newest root's, the newest's the previous one's.
     pub(crate) fn root_remote(&self) {
         let Some(object) = &self.object else { return };
-        if self.disk.is_none() {
+        if !self.has_disk() {
             return; // nothing reopens from RAM
         }
         let named = self.remote_live().into_keys().collect();
@@ -240,8 +239,7 @@ impl PageStore {
         rooted[1] = std::mem::replace(&mut rooted[0], named);
     }
 
-    /// The newest checkpoint's frame is durable: the root before it is not
-    /// one any more.
+    /// The newest batch is durable: the root before it is not one any more.
     pub(crate) fn release_remote_root(&self) {
         if let Some(object) = &self.object {
             object.rooted.borrow_mut()[1].clear();
@@ -317,7 +315,7 @@ async fn survey(
     let Some(top) = newest_cut(&mut headers, newest).await? else {
         return Ok(None);
     };
-    let walked = walk(&mut headers, &top, registered).await?;
+    let walked = walk(&mut headers, &top, registered, Lane::Types).await?;
     let mut named = BTreeSet::new();
     for w in walked {
         for desc in w.slots.into_iter().chain(w.dict) {
@@ -366,6 +364,8 @@ mod tests {
                 dict: None,
                 changed,
             }],
+            remote: Vec::new(),
+            chain: None,
         };
         let mut bytes = header.encode();
         bytes.resize(HEADER_BYTES + 4096, 0);
