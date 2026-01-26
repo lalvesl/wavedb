@@ -1,7 +1,7 @@
 # RFC 0030 — Superblock-pointer checkpoint — DEPRECATED
 
 - **Status:** Deprecated — superseded by
-  [RFC 0019 — Journal-rooted recovery](0019-journal-rooted-recovery.md)
+  [RFC 0019 — Journal-rooted recovery](0019-journal-rooted-recovery-DEPRECATED.md)
 - **Was:** the interim S2/S3 checkpoint (landed then superseded, 2026-07-07)
 
 ## What it proposed
@@ -24,7 +24,7 @@ Superseded the same day it landed:
 
 ## What replaced it
 
-[RFC 0019](0019-journal-rooted-recovery.md): recovery **roots in the newest valid
+[RFC 0019](0019-journal-rooted-recovery-DEPRECATED.md): recovery **roots in the newest valid
 `Commit` frame** in the journal — a single frame naming every type's roots,
 written into a freshly rotated journal that retires the old one. The superblock
 goes back to **write-once**; there is one source of truth (the newest `Commit`),
