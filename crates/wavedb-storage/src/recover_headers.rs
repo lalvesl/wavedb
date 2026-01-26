@@ -11,6 +11,7 @@ use futures::future::try_join_all;
 use crate::error::StorageResult;
 use crate::header::{Header, NO_FILE};
 use crate::remote::{HEADER_BYTES, Remote};
+use crate::walk::HeaderSource;
 
 /// Headers fetched per request round, newest first.
 pub const BATCH: u64 = 32;
@@ -82,5 +83,11 @@ impl<'a> Headers<'a> {
             (at, prev) = (header.at, header.prev);
         }
         Ok(true)
+    }
+}
+
+impl HeaderSource for Headers<'_> {
+    async fn get(&mut self, at: u64) -> StorageResult<Option<Header>> {
+        Headers::get(self, at).await
     }
 }
