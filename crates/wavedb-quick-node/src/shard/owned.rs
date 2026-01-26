@@ -18,8 +18,8 @@ use crate::upkeep::{Armed, Compaction, Maintenance};
 
 use super::object_policy::{evict_past_ceiling, upload_due};
 
-/// Ids one settle or checkpoint round may take before the worker looks at
-/// its jobs again.
+/// Ids one settle round may take before the worker looks at its jobs
+/// again.
 ///
 /// This is what makes maintenance share the thread in practice: without a
 /// bound, one burst becomes one round. Unmeasured — small enough that a round
@@ -94,29 +94,35 @@ impl Owned {
         Busy(&self.inflight)
     }
 
+    /// Whether a durable write waits on an open batch of the range: its
+    /// steps then go ahead of the jobs, whatever the valve says (RFC 0072).
+    #[must_use]
+    pub fn urgent(&self) -> bool {
+        self.stores.iter().any(PageStore::is_awaited)
+    }
+
     /// Whether any job is executing.
     #[must_use]
     pub const fn working(&self) -> bool {
         self.inflight.get() > 0
     }
 
-    /// Whether any store has stepped work: a queue to settle or a
-    /// checkpoint open.
+    /// Whether any store has stepped work: a settle cycle open.
     #[must_use]
     pub fn owes(&self) -> bool {
         self.stores.iter().any(owes)
     }
 
-    /// Committed journal bytes across the range — what the valve weighs.
+    /// Bytes of committed writes not settled yet across the range — what
+    /// the valve weighs.
     #[must_use]
-    pub fn journal_bytes(&self) -> u64 {
-        self.stores.iter().map(PageStore::journal_len).sum()
+    pub fn unsettled_bytes(&self) -> u64 {
+        self.stores.iter().map(PageStore::unsettled_bytes).sum()
     }
 
-    /// One bounded step on the next store from `cursor` that owes one: a
-    /// round of its open checkpoint (or that checkpoint's close), else a
-    /// settle round. Faults are reported, not propagated — nobody is waiting,
-    /// and the journal still holds everything unsettled.
+    /// One bounded step on the next store from `cursor` with a settle cycle
+    /// open: a round of it, or its end. Faults are reported, not propagated:
+    /// a durable write waiting on the batch hears of it from the store.
     pub fn step(&self, cursor: &mut usize) {
         let n = self.stores.len();
         let next = (0..n)
@@ -128,32 +134,24 @@ impl Owned {
             return;
         };
         *cursor = (i + 1) % n;
-        let done = if store.is_checkpointing() {
-            store.checkpoint_step(SETTLE_BUDGET_IDS).map(|_| ())
-        } else {
-            store.settle_step(SETTLE_BUDGET_IDS).map(|_| ())
-        };
-        if let Err(e) = done {
+        if let Err(e) = store.cycle_step(SETTLE_BUDGET_IDS) {
             eprintln!("worker: maintenance step failed: {e}");
         }
     }
 
-    /// The policy's decisions for store `i`, each bounded: open a checkpoint
-    /// past this range's share of the journal threshold, evict to its share
-    /// of the cache budget, and compact when a trigger says so (RFC 0069) —
-    /// one pass per tick until it ends. The steps a checkpoint then owes,
-    /// the compaction's sealing ones included, are [`step`](Self::step)'s.
+    /// The policy's decisions for store `i`, each bounded: open a settle
+    /// cycle (RFC 0072 §2 — a tick with nothing to settle opens none), evict
+    /// to its share of the cache budget, and compact when a trigger says so
+    /// (RFC 0069) — one pass per tick until it ends. The steps a cycle then
+    /// owes, a compaction's sealing ones included, are
+    /// [`step`](Self::step)'s.
     pub fn upkeep(&self, i: usize, policy: &Maintenance, partitions: usize) {
         let Some(store) = self.stores.get(i) else {
             return;
         };
         let partitions = partitions.max(1);
-        let threshold = policy.checkpoint_after_bytes
-            / u64::try_from(partitions).unwrap_or(u64::MAX);
-        if store.journal_len() > threshold
-            && let Err(e) = store.begin_checkpoint()
-        {
-            eprintln!("worker: checkpoint failed: {e}");
+        if let Err(e) = store.begin_cycle() {
+            eprintln!("worker: settle failed: {e}");
         }
         let share = policy.cache_budget_bytes / partitions;
         store.evict_settled(share);
@@ -271,9 +269,9 @@ impl Owned {
         self.stores.is_empty()
     }
 
-    /// Close every store cleanly — settle, checkpoint, force the retirement
-    /// barrier, so a restart replays nothing; in object mode, upload every
-    /// write first, since nothing else keeps it — and **drop them before
+    /// Close every store cleanly — settle everything into a durable batch;
+    /// in object mode, upload every write, since nothing else keeps it —
+    /// and **drop them before
     /// returning**: a caller that resumes on the answer may reopen the
     /// directories at once, and a lock still held would be `EngineBusy`.
     ///
@@ -287,9 +285,7 @@ impl Owned {
             } else {
                 Ok(())
             };
-            let closed = uploaded
-                .and_then(|()| store.commit_journal())
-                .and_then(|()| store.force_retirement());
+            let closed = uploaded.and_then(|()| store.drain());
             if let Err(e) = closed {
                 first.get_or_insert(e);
             }
@@ -300,7 +296,7 @@ impl Owned {
 }
 
 fn owes(store: &PageStore) -> bool {
-    store.has_pending() || store.is_checkpointing()
+    store.is_cycling()
 }
 
 #[cfg(test)]
@@ -343,6 +339,7 @@ mod tests {
         let owned = Owned::new(0, open(d.path(), 3));
         for i in 0..3 {
             put(owned.store(i).unwrap(), 0..10);
+            owned.upkeep(i, &Maintenance::default(), 3); // the tick
         }
         assert!(owned.owes());
         let mut cursor = 0;
@@ -355,28 +352,45 @@ mod tests {
         assert_eq!(steps, 3);
     }
 
-    /// The policy opens a checkpoint past the range's share of the threshold,
-    /// and the steps then close it.
+    /// The tick opens a settle cycle over what was written, the steps end
+    /// it; a tick with nothing written opens none.
     #[test]
-    fn the_policy_opens_a_checkpoint_the_steps_close() {
+    fn the_tick_opens_a_cycle_the_steps_end() {
         let d = tempfile::tempdir().unwrap();
         let owned = Owned::new(0, open(d.path(), 1));
-        put(owned.store(0).unwrap(), 0..50);
-        let policy = Maintenance {
-            checkpoint_after_bytes: 1,
-            ..Maintenance::default()
-        };
+        let policy = Maintenance::default();
         owned.upkeep(0, &policy, 1);
-        assert!(owned.store(0).unwrap().is_checkpointing());
+        assert!(!owned.owes(), "nothing written, nothing opened");
+        put(owned.store(0).unwrap(), 0..50);
+        owned.upkeep(0, &policy, 1);
+        assert!(owned.store(0).unwrap().is_cycling());
         let mut cursor = 0;
         while owned.owes() {
             owned.step(&mut cursor);
         }
-        assert!(!owned.store(0).unwrap().is_checkpointing());
+        assert!(!owned.store(0).unwrap().has_pending());
+    }
+
+    /// A durable write waiting on the open batch makes it urgent, whatever
+    /// the valve would say of the bytes behind it.
+    #[test]
+    fn a_durable_write_waiting_is_urgent() {
+        let d = tempfile::tempdir().unwrap();
+        let mut stores = open(d.path(), 1);
+        let barrier = wavedb_storage::Barrier::spawn("urgent-test").unwrap();
+        stores[0].use_barrier(barrier);
+        let owned = Owned::new(0, stores);
+        let store = owned.store(0).unwrap();
+        assert!(!owned.urgent());
+        let batch = [Write::Put(id(1), SH.to_le_bytes().to_vec())];
+        let mut durable = Box::pin(store.apply_durable(&batch));
+        let _ = futures::FutureExt::now_or_never(&mut durable);
+        owned.upkeep(0, &Maintenance::default(), 1);
+        assert!(owned.urgent(), "the open batch carries a waiter");
     }
 
     /// A met trigger starts a compaction, and the ticks carry it to its end:
-    /// a pass per upkeep, the sealing checkpoints closed by the steps.
+    /// a pass per upkeep, the batches it waits on ended by the steps.
     #[test]
     fn a_met_trigger_compacts_the_store_to_its_end() {
         let d = tempfile::tempdir().unwrap();
@@ -394,16 +408,14 @@ mod tests {
                 }
                 store.apply(&[Write::Put(id(k), bytes)]).await.unwrap();
             }
-            store.commit_journal().unwrap();
+            store.drain().unwrap();
             for k in (0..600u64).filter(|k| k % 3 != 0) {
                 store.apply(&[Write::Remove(SH, id(k))]).await.unwrap();
             }
         });
-        store.commit_journal().unwrap();
-        store.commit_journal().unwrap();
+        store.drain().unwrap();
         let before = store.space().file_blocks;
         let policy = Maintenance {
-            checkpoint_after_bytes: u64::MAX,
             compaction: Compaction {
                 daily_at: None,
                 above_bytes: None,
@@ -512,11 +524,7 @@ mod tests {
         // Past the ceiling, the uploaded pages leave the disk and the
         // compaction it triggers cuts the room out of the file; the records
         // still read back, from the object store.
-        let live = |s: &PageStore| {
-            let space = s.space();
-            space.file_blocks - space.free_blocks - space.deferred_blocks
-        };
-        let before = live(store);
+        assert!(store.is_resident(SH, id(7)));
         let policy = Maintenance {
             compaction: Compaction {
                 above_bytes: Some(4096),
@@ -527,7 +535,10 @@ mod tests {
             ..Maintenance::default()
         };
         owned.upkeep(0, &policy, 1);
-        assert!(live(store) < before, "the uploaded pages left the disk");
+        assert!(
+            !store.is_resident(SH, id(7)),
+            "the uploaded pages left the disk"
+        );
         assert!(store.is_compacting(), "and the ceiling compacts the file");
         let got = wavedb_platform::carrier::block_on(store.get_of(SH, id(7)));
         assert!(got.unwrap().is_some());
