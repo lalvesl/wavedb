@@ -1,9 +1,12 @@
 # RFC 0041 — Single-barrier checkpoint
 
 - **Status:** Implemented (landed 2026-07-28)
+- **Superseded in part by:** [RFC 0072](0072-the-settle-is-the-durability-point-WIP.md) (2026-10-16) — the one-window settle round
+  stays; the checkpoint, its journal rotation and its `Commit` frame are gone:
+  the settle is the durability point.
 - **Crates:** `wavedb-storage` (`wavedb-quick-node`'s maintenance policy is the only affected caller)
 - **Code:** `crates/wavedb-storage/src/{plan,checkpoint,settle,commit}.rs`
-- **Builds on:** [RFC 0018](0018-storage-engine.md), [RFC 0019](0019-journal-rooted-recovery.md)
+- **Builds on:** [RFC 0018](0018-storage-engine.md), [RFC 0019](0019-journal-rooted-recovery-DEPRECATED.md)
 - **Companion:** [RFC 0042](0042-free-space-defragmentation-DEPRECATED.md) — supplies the large
   contiguous windows this checkpoint consumes (not a correctness dependency:
   without it the window falls back to growing the tail)
@@ -25,7 +28,7 @@ recovery discards it for free and re-settles from the retained journal.
 The scarce resources in a large database are **RAM and the disk's IOPS ceiling**,
 not disk space. The per-mutation path already respects that: `Journal::append`
 writes a whole batch with one `write_all_at` and fsyncs once, and `settle` is off
-the hot path behind the `pending` queue ([RFC 0019](0019-journal-rooted-recovery.md)).
+the hot path behind the `pending` queue ([RFC 0019](0019-journal-rooted-recovery-DEPRECATED.md)).
 The checkpoint does not respect it.
 
 `PageStore::settle` walks the pending queue **per `Id`**, and every id runs
@@ -197,7 +200,7 @@ must read back as free space), and a baseline in
 
 - **Commit record at the tail of `data.bin`**, so one write covers pages *and*
   commit. Rejected: recovery would need a backward scan with sequence numbers,
-  and the journal-rooted `Commit` ([RFC 0019](0019-journal-rooted-recovery.md))
+  and the journal-rooted `Commit` ([RFC 0019](0019-journal-rooted-recovery-DEPRECATED.md))
   already provides an atomic marker that now costs no barrier of its own.
 - **Fsync the `Commit` frame immediately** (two barriers per checkpoint).
   Rejected: it buys nothing except a cheaper crash path, which is the exception,
