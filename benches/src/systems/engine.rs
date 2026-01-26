@@ -62,11 +62,8 @@ pub trait Engineish {
     /// The `Store` the index layer runs against.
     fn store(&self) -> &Self::Store;
 
-    /// Settle the pending queue into pages, to completion.
+    /// Settle everything committed into a durable batch (RFC 0072).
     fn drain(&self) -> Result<(), String>;
-
-    /// Settle, sync the data files, frame the journal.
-    fn checkpoint(&self) -> Result<(), String>;
 
     /// Drop settled cache entries down to `budget`.
     fn evict(&self, budget: usize);
@@ -74,10 +71,6 @@ pub trait Engineish {
     /// Compact to the end: the live pages of the emptiest data files carried
     /// forward, what they leave cut off and deleted (RFC 0071).
     fn compact(&self) -> Result<(), String>;
-
-    /// Committed journal bytes — what the adapter's maintenance threshold
-    /// weighs.
-    fn journal_len(&self) -> u64;
 
     /// Is a committed batch still waiting for its page write?
     fn has_pending(&self) -> bool;
@@ -98,11 +91,6 @@ impl Engineish for PageStore {
         Self::drain(self).map_err(|e| format!("drain: {e}"))
     }
 
-    fn checkpoint(&self) -> Result<(), String> {
-        self.commit_journal()
-            .map_err(|e| format!("checkpoint: {e}"))
-    }
-
     fn evict(&self, budget: usize) {
         self.evict_settled(budget);
     }
@@ -111,10 +99,6 @@ impl Engineish for PageStore {
         Self::compact(self)
             .map(|_| ())
             .map_err(|e| format!("compact: {e}"))
-    }
-
-    fn journal_len(&self) -> u64 {
-        Self::journal_len(self)
     }
 
     fn has_pending(&self) -> bool {
