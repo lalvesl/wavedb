@@ -45,8 +45,9 @@ refused as an unknown hash; `WaveWire` encode/decode is property-tested.
 ## M2 — Storage engine
 
 The block manager, per-`STRUCT_HASH` linear-hashed page directory, page format,
-dictionaries, and the journal-first / `BTreeMap`-cache / background-settle
-pipeline. Crash recovery via journal replay.
+dictionaries, and the record-cache / settle pipeline. Since RFC 0072 there is no
+journal: the settle is the durability point, and a reopen reconstructs from the
+headers each batch ends with.
 
 **Exit:** durable single-node `get`/`save` for Unique and `insert`/`remove` for
 NonUnique through `Pivot`/`BpTree`; kill-during-write test recovers cleanly.
@@ -79,8 +80,7 @@ filtered read works through a `#[server]` function end to end.
 
 ## M5 — Browser target
 
-`wavedb` + `wavedb-net` compile for `wasm32`; IndexedDB key→value store (no pages,
-no journal); `gloo_net`/`fetch` transports behind the same async API. Measure the
+`wavedb` + `wavedb-net` compile for `wasm32`; IndexedDB key→value store (no pages); `gloo_net`/`fetch` transports behind the same async API. Measure the
 registry's per-struct wasm cost.
 
 **Exit:** a browser demo performs typed `save` + collection reads (and a
@@ -144,7 +144,7 @@ Versioning policy for the platform crates.
 ## Deferred (explicitly out of scope for this rebuild)
 
 - **Multi-node cluster** — ring ownership, replication, routing/failover. The
-  rebuild targets a **single node** first; durability is the journal. (So the
+  rebuild targets a **single node** first; durability is the settle. (So the
   async-replication durability window is moot for now.)
 - **Cold history tier (slow-node) — removed** for now (not just deferred).
   History stays single-tier in the data files, **grows unbounded**; no pruning,
