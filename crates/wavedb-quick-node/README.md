@@ -33,13 +33,14 @@ Server::bind("0.0.0.0:7700")
 ---
 
 > **Status: single-node for now.** The current rebuild targets one node.
-> Durability is the **journal** (a write is durable once journaled, before any
-> replica). The multi-node machinery below — ring ownership, replication,
+> Durability is the **settle** (RFC 0072): a write is durable once the batch
+> carrying it is — at the next 200 ms tick, or before it returns for a durable
+> one — before any replica. The multi-node machinery below — ring ownership, replication,
 > routing/failover — is the **target design, deferred** until the single-node
 > engine is solid. The async-replication durability window (owner crash before
-> replicating) is therefore moot for now: with one node the journal is the whole
-> guarantee. A node in **object mode** (`Server::object_mode`, RFC 0070 §9) has
-> no disk and no journal: a write is durable once uploaded, within
+> replicating) is therefore moot for now: with one node the settled batch is
+> the whole guarantee. A node in **object mode** (`Server::object_mode`, RFC 0070 §9) has
+> no disk: a write is durable once uploaded, within
 > `upload_interval` (default 10 s), and a shutdown uploads everything first.
 >
 > On disk the database is a `MANIFEST` and a directory per shard of **data
@@ -77,10 +78,10 @@ owner is the only writer: it validates and notifies replicas.
 ## Replication
 
 Each tenant lives on **≥ 2 nodes** (`MIN_REPLICAS`): the ring owner plus the next
-distinct nodes clockwise. After the owner's journal commit it pushes committed
+distinct nodes clockwise. After the owner's commit it pushes committed
 bytes to replicas (`POST /replicate`, fire-and-forget with per-peer ack
 watermarks) — the client's confirmation never waits on replicas. Durability to
-the caller is the owner's journal; redundancy is asynchronous. Replicas store
+the caller is the owner's settled batch; redundancy is asynchronous. Replicas store
 canonical (validated + preprocessed) bytes verbatim and never accept client
 writes. Rack-aware placement is a planned refinement of the same walk.
 
@@ -109,7 +110,7 @@ not a deployment.
 ## Node-side enforcement
 
 Every incoming command frame (`struct_hash` + `command` + payload) passes these
-gates **before the journal commit**, in order:
+gates **before the commit**, in order:
 
 1. **Identity** — the request's identity is the **verified Access token**, carried
    inside the WaveDB request envelope (no HTTP `Authorization` header) and trusted
@@ -154,7 +155,7 @@ Permission is checked at gate 4, by shape:
   (`Insert`, `All`). So the gate reads the record's own metadata for
   `Update`/`Remove`/`Get(id)`, and the `Pivot` default for the collection entry
   points. The per-record copy is what makes an `Update` **atomic** — the single
-  journal entry validates and rewrites the record's permission without reading
+  batch validates and rewrites the record's permission without reading
   the `Pivot`. Changing the `Pivot` default does **not** rewrite existing records;
   it only seeds new inserts. Model: [`wavedb-core`](../wavedb-core/README.md#permissions).
 
