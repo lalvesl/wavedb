@@ -53,7 +53,7 @@ pub fn absolute(path: &str) -> Result<std::path::PathBuf, String> {
 // The seed side lives in its own crate so that editing the harness cannot
 // change a seed's store path (see `wavedb_bench_gen`). Re-exported under
 // the old names: the harness reads the very schema the seeds were filled from.
-pub use wavedb_bench_gen::{FILL_CHECKPOINT_BYTES, FILL_WINDOW, schema, seed};
+pub use wavedb_bench_gen::{FILL_SETTLE_BYTES, schema, seed};
 
 pub mod cage;
 pub mod corpus;
