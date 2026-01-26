@@ -53,6 +53,13 @@ pub struct Header {
     pub end: u64,
     /// The types this header names: changed, then restated.
     pub types: Vec<TypeEntry>,
+    /// On disk, in disk + object mode: the object store's directories, the
+    /// same way — each entry's `last` the disk header before with an entry
+    /// for that type's remote directory. Empty in an object store's file.
+    pub remote: Vec<TypeEntry>,
+    /// On disk, in disk + object mode: where the object store's chain of
+    /// files stands. `None` in an object store's file.
+    pub chain: Option<ChainRecord>,
 }
 
 /// One type in a header.
@@ -113,9 +120,8 @@ impl Header {
 }
 
 /// Where a type stands in the chain of headers. RAM only but `last`, which
-/// the disk's addressing log records ([`ChainRecord`]); after a reopen the
-/// rotation simply starts over.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// the newest headers record; after a reopen the rotation starts over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rotation {
     /// The newest header with entries for the type.
     pub last: u64,
@@ -124,6 +130,24 @@ pub struct Rotation {
     /// The header in which spare room last restated it — what the spare
     /// room is handed out by, the oldest first. `None`: never.
     pub shifted: Option<u64>,
+    /// The header the running rotation began in.
+    pub began: Option<u64>,
+    /// The header the last whole rotation began in: every bucket of the type
+    /// is named at or after it, so a reconstruction reads nothing older for
+    /// it (`crate::restate::horizon`).
+    pub covered: Option<u64>,
+}
+
+impl Default for Rotation {
+    fn default() -> Self {
+        Self {
+            last: NO_FILE,
+            shift: 0,
+            shifted: None,
+            began: None,
+            covered: None,
+        }
+    }
 }
 
 /// Where an object-backed store's chain of files stands — in RAM, and
@@ -204,6 +228,8 @@ mod tests {
                 dict: Some(42),
                 changed: vec![(0, 1), (2, 3)],
             }],
+            remote: Vec::new(),
+            chain: None,
         }
     }
 
