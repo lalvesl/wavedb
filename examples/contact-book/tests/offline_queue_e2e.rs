@@ -115,6 +115,9 @@ fn a_unique_save_survives_offline_and_replays_on_reconnect() {
         assert_eq!(book.owner, "Ada");
 
         // ── Node down: a Unique save queues offline instead of refusing ──────
+        // The book is durable at the node's next settle tick (200 ms, RFC
+        // 0072): a kill before it would lose it, as a crash would.
+        std::thread::sleep(std::time::Duration::from_secs(1));
         node.kill().expect("kill the node");
         node.wait().expect("reap the node");
 
