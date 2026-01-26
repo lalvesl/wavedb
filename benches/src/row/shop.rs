@@ -173,10 +173,11 @@ where
     crate::systems::shop::wavedb::preload(cfg, &dir, shards)?;
     // Reopened: the per-type cache is a *write* cache, so everything the
     // preload just wrote would otherwise still be warm and the read phases
-    // would measure RAM. The reopen is also where the measured durability is
-    // chosen — the fill's window never survives it.
-    let stores = crate::systems::shop::wavedb::open_measured(&dir, d, shards)?;
-    let factory = drv::wavedb::Factory::<E>::new(stores, asked)?;
+    // would measure RAM. The measured durability is the driver's: every write
+    // durable, or a settle per window.
+    let stores = crate::systems::shop::wavedb::open_measured(&dir, shards)?;
+    let durable = d == Durability::Durable;
+    let factory = drv::wavedb::Factory::<E>::new(stores, asked, durable)?;
     let used = crate::harness::DriverFactory::consumers(&factory);
     // The consumer count is a **row-identity field**: it is in the digest, and
     // every table prints it. A row that was asked for three and ran on one
@@ -220,14 +221,16 @@ where
                 ("consumers".into(), used.to_string()),
                 ("mode".into(), engine.mode().into()),
                 (
-                    "relax_window".into(),
+                    "barrier".into(),
                     match d {
                         Durability::Durable => {
-                            "0 — one barrier per batch".to_string()
+                            "a settle and its fsync per write (RFC 0072)"
+                                .to_string()
                         }
-                        Durability::Relaxed => {
-                            format!("{:?}", crate::RELAXED_WINDOW)
-                        }
+                        Durability::Relaxed => format!(
+                            "a settle per elapsed {:?}",
+                            crate::RELAXED_WINDOW
+                        ),
                     },
                 ),
             ],
@@ -235,8 +238,9 @@ where
             retains_history: true,
             notes: vec![
             "A checkout is one order plus its line items, and WaveDB has no \
-             multi-record transaction: it costs one batch — one barrier — per \
-             record, where the other four commit the whole checkout once."
+             multi-record transaction: each record is its own atomic batch. \
+             The durable row makes the whole checkout durable once, at its \
+             end (RFC 0072) — one barrier, as the other four commit once."
                 .into(),
             "Retains every superseded version; the other four retain none. \
              Read the write phases beside the footprint, never alone."
