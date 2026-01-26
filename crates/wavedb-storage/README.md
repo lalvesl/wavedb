@@ -1,8 +1,8 @@
 # wavedb-storage
 
 The per-node **storage engine**: the block manager, the per-`STRUCT_HASH` page
-directory (linear-hashed), the page format, dictionaries, and the journal-backed
-write pipeline. This is where most of WaveDB's engineering energy lives.
+directory (linear-hashed), the page format, dictionaries, and the write
+pipeline whose settle is the durability point. This is where most of WaveDB's engineering energy lives.
 
 > For the project-wide idea and quickstart see the
 > [root README](../../readme.md). The browser does **not** use this engine — see
@@ -21,26 +21,29 @@ write pipeline. This is where most of WaveDB's engineering energy lives.
 | `dictionary`      | Per-`STRUCT_HASH` raw-content zstd dictionary (`Dictionary` + `DictState`): capped append-only buffer, version = prefix length, own run persistence. |
 | `directory`       | The per-`STRUCT_HASH` page directory container + the linear-hashing addressing math (pure addressing).                                               |
 | `directory_pages` | The directory's page **reads**: resolving a bucket to its `SlotPage`, decompressing against the passed-in `DictState`.                               |
-| `plan`            | A checkpoint's phase 1: touched ids → page images grouped per bucket, splits decided, nothing written.                                               |
-| `checkpoint`      | Phases 2–4: one window for every image at the end of the active file, one positioned write, then the descriptor swap.                              |
-| `edit`            | The addressing delta riding each window (`EditChunk`, chained by `prev`), its recovery fold (`Replay`), and the chain walk (`walk`).                 |
-| `meta_log`        | Which chunks are live, the `Commit` frame's `head`, and when a round should compact the chain into a fresh snapshot.                                 |
-| `retire`          | A checkpoint's deferred half: the retired journal + protection roll, held for the _next_ checkpoint to dispose of.                                   |
-| `settle`          | The drain queue: what a round is, when it retries, and the cache-eviction budget.                                                                    |
-| `chain`           | Directory chain blocks — the persisted address vector, copy-on-write, placed in the checkpoint's window.                                             |
+| `plan`            | A settle round's phase 1: touched ids → page images grouped per bucket, splits decided, nothing written.                                             |
+| `checkpoint`      | One window for every image at the end of the active file, ending with its header; one positioned write, then the descriptor swap.                  |
+| `header`          | The header every batch ends with, disk and object store alike (`Header`, `TypeEntry`), and where the object store's chain stands.                 |
+| `restate`         | The header's spare room: restating the addresses of the type restated longest ago, and the horizon that moves.                                     |
+| `disk_header`     | The disk's header for a window: what is unrecorded, named; the spare room; the headers a reconstruction no longer reaches.                         |
+| `disk_chain`      | What the disk's headers keep between windows: the unrecorded changes, the chain's tail, rotations, live headers, full restatements.                |
+| `cycle`           | The settle cycle: a batch opened by a mark, settled in bounded rounds, ended by a header, made durable by one barrier; `drain`.                    |
+| `barrier`         | The `fsync` helper thread, the batches asked of it, and a durable write's wait (`Durable`).                                                       |
+| `walk`            | The walk that rebuilds directories from headers, newest first, down by `prev` while a registered type is unnamed — disk and object store.          |
+| `reopen`          | Reconstruction on open: the newest whole batch's header, its pages checked, the walk, the allocator; nothing replayed.                             |
+| `settle`          | The record cache's side of a settle: what is unsettled, and the cache-eviction budget.                                                             |
 | `compact`         | Compaction's phases and surface (`compact_step`, `compact`, `reclaim`, `space`): move, drop the old addressing, seal, cut and delete.              |
 | `defrag`          | Compaction's moves: the emptiest data file's runs, highest first, verbatim, into the active file — one window write per round.                    |
 | `remote_compact`  | The object store's compaction (RFC 0070 §8): a survey run like a recovery, blind DELETEs below the horizon, mostly free files carried forward. |
 | `convert`         | Converting a database from or to disk mode, offline: the pages flagged for upload, or brought back from the object store.          |
 | `page`            | `SlotPage` — the homogeneous record page: `[len][to_wire_checked(PageEnvelope)]`, body raw or zstd.                                                  |
-| `journal`         | Append-only WAL of `Write` batches (checked wire frames); fsync = durability; torn-tail-tolerant replay.                                             |
 | `struct_storage`  | `StructStorage` — one type's own cache + directory slot (`#[wavedb]` emits one `static` per type).                                                   |
-| `page_store`      | `PageStore` — the node's authoritative `Store`: journal-first → per-type record logs → settle into pages.                                        |
+| `page_store`      | `PageStore` — the node's authoritative `Store`: per-type record logs → settle cycles into pages, each batch durable at its end.                   |
 | `error`           | `StorageError` / `StorageResult`; flattens to `wavedb_core::Error::Backend` at the `Store` seam.                                                     |
 
-Settle and rebalance are **off the mutation path**: `apply` only journals,
-commits to the caches, and queues the touched ids; the node's maintenance loop
-drains that queue and checkpoints on a journal-size threshold. The
+Settle and rebalance are **off the mutation path**: `apply` only commits to the
+caches; the node's maintenance loop opens a settle cycle every 200 ms, and
+`apply_durable` waits for it ([RFC 0072](../../rfcs/0072-the-settle-is-the-durability-point-WIP.md)). The
 `Pivot`/`BpTree` index layer lives in `wavedb_core::index`, not here.
 
 ---
@@ -48,15 +51,15 @@ drains that queue and checkpoints on a journal-size threshold. The
 ## Where this crate runs
 
 This crate is the **node's authoritative engine** — native only: per shard, the
-data files (block runs) + `journal`. It provides the native **`PageStore`** — the
+data files (block runs, each settle window ending with its header). It provides the native **`PageStore`** — the
 disk-optimised `Store` backend (`get` + atomic `apply`) — that the `Store`-generic
 `Pivot`/`BpTree` contracts in [`wavedb-core`](../wavedb-core/README.md#index-contracts--pivot-bptree-indexkey)
-run over. The index logic itself is portable; pages, blocks, journal, and the
+run over. The index logic itself is portable; pages, blocks, headers, and the
 allocator are this crate's internals, hidden behind the `Store` seam.
 
 It is **not** the client-side local store. The client's local key→value cache
 (`Store` trait) is a separate, lighter thing: a file kv on native, IndexedDB on
-web ([`wavedb-wasm`](../wavedb-wasm/README.md)) — no pages, no journal. See
+web ([`wavedb-wasm`](../wavedb-wasm/README.md)) — no pages, no headers. See
 [`wavedb-core` § the `Store` trait](../wavedb-core/README.md#store--the-local-backend-trait).
 
 ---
@@ -83,9 +86,11 @@ block.
   ([`reclaim`](#write-pipeline--concurrency)); compaction is what empties them.
 
 The allocator is a pure in-memory structure. On open it is rebuilt from the
-runs the recovered addressing names; what lies past a file's last used run —
-what settle rounds wrote after the last `Commit`, which the journal replay
-writes again — is cut, and a file no run names is deleted.
+runs the reconstruction names — pages, dictionaries, the headers it read;
+what lies past a file's last used run — what a crash cut before its batch
+ended — is cut, and a file no run names is deleted. A freed run becomes a
+hole only once the batch that stopped naming it is durable
+([RFC 0072](../../rfcs/0072-the-settle-is-the-durability-point-WIP.md) §8).
 
 ---
 
@@ -125,18 +130,18 @@ layout language records use. No structure gets its own bespoke byte format:
 - **page body** (`struct_hash` + the `(id, bytes)` entries) — a plain
   `WaveWire` struct (`PageBody`).
 
-Where a structure must survive disk corruption — **pages, journal frames** —
+Where a structure must survive disk corruption — **pages, headers** —
 it uses the wire crate's [`validation` feature](../wavedb-wire/README.md#feature-validation--crc32-framed-encoding):
 `to_wire_checked` / `from_wire_checked` frame the payload as
 `[crc32 (4 B LE)][wire bytes]`, so integrity verification is the codec's job —
 not a hand-patched CRC slot re-implemented in every format. A corrupted page
 surfaces as the wire `CrcMismatch` before any decode runs.
 
-> **Status.** Fully in effect: the `MANIFEST` body, journal frames, **and
+> **Status.** Fully in effect: the `MANIFEST` body, the headers, **and
 > pages** are all on checked `WaveWire`. No engine structure hand-rolls its
 > byte layout anymore; the only raw prefixes left are the 8-byte `MANIFEST`
 > magic (checkable before any decode) and the `u32` length that delimits a
-> payload inside a zero-padded run / append-only log.
+> payload inside a zero-padded run.
 
 ---
 
@@ -175,8 +180,8 @@ DoS-resistant. It is seeded with a **per-database random `[u64; 4]` seed persist
 in the `MANIFEST`**, read once at startup. The seed is
 per-database (not the fixed `STRUCT_HASH` seed): each node rebuilds its own
 directory consistently, and an attacker can't precompute bucket collisions. SeaHash
-is portable across architectures and endianness, so data files rebuilt by journal
-replay on another machine routes every record to the same bucket. The resulting
+is portable across architectures and endianness, so data files reopened on
+another machine route every record to the same bucket. The resulting
 `u64` feeds the linear-hashing reduction below.
 
 ### Linear hashing (not `%`)
@@ -272,8 +277,8 @@ PageBody (plain WaveWire struct):
 
 - **`payload_len`** — the only framing outside the codec: a page reads back
   from a run of whole blocks padded with zeros, and `from_wire_checked` must
-  get the exact payload slice for its crc to hold (same pattern as a journal
-  frame).
+  get the exact payload slice for its crc to hold (same pattern as a
+  header).
 - **crc + decode** — both the codec's job (`CrcMismatch` before any decode
   runs), surfaced as `StorageError::Corrupt`. The crc covers the **stored**
   bytes, so corruption is caught before zstd runs; `struct_hash` and the
@@ -343,11 +348,8 @@ recompression and no superseded-run bookkeeping** — one stored buffer serves
 all versions. (A background recompress-cold-pages pass remains possible later
 as a pure space optimisation, not a correctness need.)
 
-On open the dictionary is rebuilt exactly, for free: the data files are a
-journal-replay projection, and the settle path re-samples the same records in
-the same order — every `dict_len` a rebuilt page stamps resolves against the
-rebuilt buffer. Reading the persisted run back becomes load-bearing only when
-settling checkpoints.
+On open the dictionary is read back from the run the newest header names, so
+every `dict_len` a page stamps resolves against it.
 
 CPU is free here — there is no join processing competing for it. Per-value
 (strings/blobs) heap compression stays future work.
@@ -357,45 +359,51 @@ CPU is free here — there is no join processing competing for it. Per-value
 ## Write pipeline & concurrency
 
 ```
-mutation → journal append → the type's own BTreeMap<Id> cache → (client confirmed)
-                                          │
-                                          └─ background: settle into the data files,
-                                             then rebalance (split_next)
+mutation → the type's record log (RAM) → (client confirmed)
+                     │
+                     └─ every 200 ms: a settle cycle — rounds into the data
+                        files, each window ending with its header; one barrier
+                        ends the batch: durable (apply_durable waits for it)
 ```
 
-1. **Journal first.** Every insert/save/remove — and every block alloc/free — is
-   appended to the journal before anything else. This is what makes the durability
-   guarantee and prevents leaks.
-2. **Cache as a `BTreeMap<Id, …>` per type.** Confirmed mutations live in the
-   type's own in-memory `BTreeMap` (its `StructStorage` slot, below); reads
-   serve from it directly (and, because `Id` is ordered by `KEY`,
-   range/timeline reads are naturally ordered).
-3. **Background settle — one window per round.** A drain task takes the queued
-   ids, groups them by bucket, reads each touched page once, and writes every
-   resulting image into **one contiguous window** with a single positioned write
-   ([RFC 0041](../../rfcs/0041-single-barrier-checkpoint.md)). The descriptors
-   are swapped only after the write lands, so a reader sees either the old pages
-   (still allocated — page writes are copy-on-write) or the new ones.
+1. **The record cache first.** Every insert/save/remove commits to the type's
+   log in RAM and returns — durable at the next settle cycle, within a tick
+   (200 ms on a node) and a barrier. `apply_durable` waits for that cycle;
+   everything committed before a durable write is durable with it
+   ([RFC 0072](../../rfcs/0072-the-settle-is-the-durability-point-WIP.md)).
+2. **Cache as a log per type.** Confirmed mutations live in the type's own log
+   (RFC 0068); reads serve from it directly.
+3. **The settle cycle — one window per round.** A cycle marks every log's end
+   (the batch: every write before the mark), then settles it in bounded
+   rounds: the round's ids grouped by bucket, each touched page read once,
+   every resulting image written into **one contiguous window** with a single
+   positioned write ([RFC 0041](../../rfcs/0041-single-barrier-checkpoint.md)).
+   The descriptors are swapped only after the write lands, so a reader sees
+   either the old pages (still allocated — page writes are copy-on-write) or
+   the new ones. A tick with nothing written opens no cycle: no window, no
+   barrier.
 4. **Rebalance is part of that plan.** Splits are decided in RAM, before
    anything is serialised, so an over-sized bucket is repartitioned and both
    halves are written once — never a page written twice in one round.
-5. **The window describes itself.** Its last blocks carry an `EditChunk`: the
-   descriptor changes those pages just caused
-   ([RFC 0046](../../rfcs/0046-directory-deltas-in-the-window.md)). Metadata
-   therefore costs **no IOp of its own** — same `write_run`, same `fsync` — and
-   the `Commit` frame shrinks to one address: the chain's head.
-   Once the deltas outweigh the state they patch, a round emits a full chunk
-   instead and the superseded runs are freed.
+5. **The window ends with its header** — 32 KiB naming the addresses it
+   changed, type by type, and `last`, the header before with entries for that
+   type; its spare room restates the addresses of the type restated longest
+   ago, so every type keeps appearing near the newest header. The round that
+   settles the last of the batch marks its header `end_of_batch`, and the
+   batch's barrier is taken — inline, or on the worker's helper thread, whose
+   answer releases every durable write the batch carries. A cycle opens only
+   once the previous batch is durable.
 
 6. **Compaction.** Copy-on-write leaves a hole wherever a page used to be,
    and writing only appends, so nothing fills it. Compaction picks the data
    files that are mostly holes (`victim_free_percent`, 50 by default), the
    fewest live blocks first, and carries their runs — pages and dictionaries,
    verbatim, highest first — into the active file; the active file itself is
-   closed first when it is the one to empty. A snapshot replaces the
-   addressing chain, and every checkpoint's opening cuts the free tails that
-   the release left and deletes the emptied files, so space comes back during
-   a compaction, not only at its end
+   closed first when it is the one to empty. A header cannot move, so a
+   compaction first restates every address: once that batch and the next have
+   ended, no older header is live, and their files can be emptied. The moved
+   runs are holes once a batch over them is durable; then the free tails are
+   cut and the emptied files deleted
    ([RFC 0071](../../rfcs/0071-data-files-by-address.md), superseding
    [RFC 0069](../../rfcs/0069-compaction-into-the-holes-DEPRECATED.md)'s holes).
    It is stepped, a bounded pass at a time; the node starts one on a daily
@@ -408,18 +416,18 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
    object store's own linear hash of 128 KiB pages, packed into files of
    `[32 KiB header][pages…]` (every page starts within the file's first
    8 MiB), and clears the flags. The remote directories ride the disk's
-   addressing log, so a reopen restores them from the disk alone. Past the
+   headers (their own lane, and the object store's chain), so a reopen
+   restores them from the disk alone. Past the
    compaction ceiling the least recently used uploaded pages leave the disk
    (`BlockDescriptor::EVICTED`; phase 4): a read of one goes to the object
    store and marks it wanted back, and a write restores its bucket before it
    commits, so a page on disk is always the whole truth about its bucket.
-   A database whose disk is gone opens from its files alone (phase 5): every
-   header names every type and chains to the one before by hash, its spare
-   room restates the oldest entries, and the store adopts what the newest
-   whole **cut** says (an upload that left nothing waiting: every batch up
+   A database whose disk is gone opens from its files alone (phase 5): the
+   same header and the same walk as the disk's (RFC 0072), and the store
+   adopts what the newest whole **cut** says (an upload that left nothing waiting: every batch up
    to a point, none in part), every disk bucket evicted. In **object mode**
    (`PageStore::open_object`, phase 6) there is no disk at all: what would
-   be the data files sit in RAM, there is no journal — a write is durable once
+   be the data files sit in RAM, there is no settle to disk — a write is durable once
    an upload carries it, which happens on 8 MiB or an interval — and every
    open is such a recovery. Every file is created only if absent, so a
    second writer on the prefix is fenced (`StorageError::Fenced`), never
@@ -427,7 +435,7 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
    The object store compacts by file (phase 7, `compact_remote`): a survey
    run like a recovery finds the horizon — the lowest header a recovery
    reads — and the files nothing names (the store's directories, the
-   newest cut, the disk's two newest roots); those are DELETEd, and the
+   newest cut, the disk's two newest batches); those are DELETEd, and the
    mostly free files below the horizon have their pages carried forward
    by uploads of the compaction's own first. The node weighs it once a
    minute on the compaction triggers.
@@ -435,7 +443,13 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
    page flagged for upload; down, every evicted page brought back, the
    object store's files kept.
 
-On startup the directories and the block allocator rebuild by **journal replay**.
+On startup the directories and the block allocator are **reconstructed from the
+headers**: the newest whole batch's — the last 8 blocks of the newest data
+file — roots a walk back along each type's `last`, and down by `prev` while a
+registered type is still unnamed. Only the newest batch can be cut by a crash
+(a cycle opens once the previous batch is durable): its pages are checked by
+their crc, and a batch not whole gives way to the one before. Nothing is
+replayed; the caches start empty.
 
 ### Per-type routing is compile-time — `StructStorage`
 
@@ -470,81 +484,50 @@ the `STRUCT_HASH`.
 declared, not discovered, the same allowlist stance as exposure. A write whose
 `STRUCT_HASH` has no listed slot is refused (`UnregisteredStructHash`); the
 reserved `BpTree`-node slot is always included (compression off). A data
-directory has **one open `PageStore` at a time**: every data file and journal
-is locked while open, so a second open of the same directory — in this process or another —
+directory has **one open `PageStore` at a time**: every data file is locked
+while open (an empty one is kept for a database nothing was written to yet), so a second open of the same directory — in this process or another —
 fails with `EngineBusy`. Stores over different directories open side by side.
 
 **Threading.** A store is used from **one thread** — a node moves each onto the
 worker that owns it (RFC 0067) — so its state lives in plain cells (`RefCell`,
 `Cell`): no lock, no atomic. `PageStore` is `Send` and deliberately not `Sync`.
 Reads (`get_of`, routed by the compile-time-known hash) are one binary search
-over the sorted registry, one index probe, and a page read on a miss. The
-cache commit follows the journal append, so the logs' order is the journal's.
-A settle round copies each record's **newest entry** out of its log and skips
-the copies it superseded, so it is idempotent — the data files stay a pure
-projection of the journal. Eviction drops whole chunks the settle has passed,
+over the sorted registry, one index probe, and a page read on a miss. Commits
+run on the one thread, so the logs' order is the commits' order. A settle
+round copies each record's **newest entry** out of its log and skips the
+copies it superseded, so it is idempotent. Eviction drops whole chunks the settle has passed,
 measured against what the cache actually allocates.
 
-### Atomicity is the journal entry + cache commit
+### Atomicity is the batch
 
 A single operation can touch several records (a NonUnique insert writes the data
-record **and** a `BpTree` node). These are committed as **one journal entry**,
-and the cache commit runs under the journal lock — so commits are totally
-ordered, and a crash before the background settle replays the journal back into
-the record cache, whole batches or nothing. No separate transaction manager: the
-journal entry + cache commit _is_ the atomic unit. Visibility is per-`get`
-(each read sees a fully committed value, never a torn one); a multi-`get` walk
-was never snapshot-isolated — an apply can land between two gets, exactly as
-under the old store-wide mutex. (Multi-write **server-function** transactions —
-several operations as one unit — remain a separate, later concern.)
+record **and** a `BpTree` node). These are committed to the record cache as one
+batch, on the one thread — so commits are totally ordered — and a settle cycle's
+mark falls between two of them: a batch on disk is every write before its mark,
+and a reconstruction roots only in a batch whose end is written, so a crash
+brings back whole operations or nothing. No separate transaction manager.
+Visibility is per-`get` (each read sees a fully committed value, never a torn
+one); a multi-`get` walk was never snapshot-isolated. (Multi-write
+**server-function** transactions — several operations as one unit — remain a
+separate, later concern.)
 
 ### IO cost
 
-**Per mutation: one write, one barrier.** `Store::apply` appends the whole batch
-— the record, every touched `BpTree` node, the `Pivot` rewrite when a root moved
-— as **one** journal frame (`write_all_at` + `fsync`), commits it to the per-type
-caches, and queues the touched ids. Nothing else reaches the disk on that path,
-and how many records a batch carries changes its size, not its IO count.
+**Per mutation: memory only.** `Store::apply` commits the whole batch — the
+record, every touched `BpTree` node, the `Pivot` rewrite when a root moved — to
+the per-type logs. Nothing reaches the disk on that path.
 
-A store opened with a **durability window** (`StoreOptions { relax_window }`,
-[RFC 0061](../../rfcs/0061-relaxed-durability-window.md)) keeps the one write
-and drops the per-batch barrier: `apply` appends without `fsync` and syncs once
-per elapsed window, so a burst amortises to a single barrier. `Ok` then means
-_journalled, ordered, and durable within the window_ — a crash loses a suffix
-of acknowledged writes and never corrupts. `PageStore::flush` forces the
-barrier. **Default zero**: one barrier per batch, unchanged.
+**Per settle round: one write.** The round's ids are grouped by bucket, each
+touched page is read **once**, and every resulting image is placed in **one
+contiguous window**, ending with its 32 KiB header, written with a single
+positioned write ([RFC 0041](../../rfcs/0041-single-barrier-checkpoint.md)).
+Reads are the floor: one per page the round modifies.
 
-**Per settle round: one write, no barrier.** The pending ids are grouped by
-bucket, each touched page is read **once**, and every resulting image is placed
-in **one contiguous window** and written with a single positioned write
-([RFC 0041](../../rfcs/0041-single-barrier-checkpoint.md)). Reads are the floor:
-one per page the round modifies. No `fsync` — durability stays the journal's
-until a checkpoint.
-
-**Every window also carries its own descriptor delta** — an `EditChunk` naming
-the buckets that round moved, in the same write, for no extra IOp
-([RFC 0046](../../rfcs/0046-directory-deltas-in-the-window.md)).
-
-**Per checkpoint: one write, ONE barrier.** The window additionally carries a
-grown dictionary; then the data files it wrote are synced — and that is the
-only barrier. The
-`Commit` frame is a _pointer_ into state that sync already made durable, so it
-is appended **unsynced** and the next ordinary write's fsync carries it. Each
-chunk names the one before it, so the frame names only the head
-([RFC 0048](../../rfcs/0048-chained-addressing-log.md)): a fixed 16 bytes
-whatever the database's size **and** whatever the log's length — where
-carrying the descriptors cost 8 bytes per bucket, and carrying the chunk list
-made a compaction cycle quadratic in its own interval.
-
-Deleting the retired journal and rolling the allocator's protection wait for that
-durability, and are then done by the **next** checkpoint — which holds the
-journal carrying the frame and reads its barrier count to know
-([RFC 0047](../../rfcs/0047-generational-journal-retirement.md)). So two journals
-on disk is the steady state, nothing is chased from the write path, and **no
-barrier is paid anywhere on a checkpoint's behalf**; `force_retirement()` remains
-for shutdown, where there is no next checkpoint. `BlockFile::io()` and
-`Journal::barriers()` count all of this, and the accounting is asserted in
-`page_store`'s tests.
+**Per batch: one barrier.** The data files the cycle wrote are synced once — on
+the worker's helper thread on a node — and that is the only barrier: a durable
+write costs at most a tick of latency and shares its barrier with everything in
+its batch. `BlockFile::io()` counts all of this, and the accounting is asserted
+in `page_store`'s tests.
 
 What still scales with the work rather than with the batch is the _logical_ index
 maintenance above the store, which decides how many values a batch contains:
@@ -617,9 +600,9 @@ tier is left for later; nothing reclaims old versions today.
 
 ## Reliability
 
-- **Journal** — append-only, replayed on startup; record writes and the
-  alloc/free deltas are journaled together so a mid-mutation crash can't desync
-  the directory from the data.
+- **Headers** — every batch ends with one; a reopen roots in the newest whole
+  batch, its pages checked by their crc, so a crash loses at most the batch
+  it cut and never brings one back in part.
 - **Checksums** — every page carries a CRC32 verified on read (converging on
   the wire `validation` framing — see _the WaveWire rule_ above).
 - **Locks** — ID-scoped, in process memory.
