@@ -1,6 +1,8 @@
 //! [`PageStore`]'s commit path — the [`Store`] impl and the batch pipeline
-//! behind it: route, validate guards, journal (the durability point),
-//! append to the types' logs (RFC 0068).
+//! behind it: route, validate guards, append to the types' logs (RFC 0068).
+//! A batch is committed there and nothing else; it is durable once the
+//! settle cycle carrying it is (`crate::cycle`, RFC 0072), which
+//! [`apply_durable`](PageStore::apply_durable) waits for.
 //!
 //! Split from [`page_store`](crate::page_store) (which keeps open/recovery
 //! and the accessors) the same way the read fallback lives in
@@ -8,7 +10,7 @@
 
 use wavedb_core::{Id, Result as CoreResult, Store, Write};
 
-use crate::barrier::{Barrier, Durable};
+use crate::barrier::Barrier;
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::PageStore;
 use crate::record_log::MAX_RECORD;
@@ -16,113 +18,82 @@ use crate::struct_storage::TypeSlot;
 
 impl PageStore {
     /// Take batch barriers on `barrier`'s helper thread from now on, instead
-    /// of the thread calling [`apply`](Store::apply) ([`crate::barrier`]).
+    /// of the thread stepping the cycle ([`crate::barrier`]).
     ///
-    /// The store's futures then **suspend**: an `apply` returns once its
-    /// barrier is done, and its caller's executor runs other work meanwhile.
-    /// A caller that interleaves operations on one owner needs the owner
-    /// lock that makes that safe — the node holds it around every operation
-    /// (`CONCURRENCY_BRAKE.md`); a store without a helper never suspends.
+    /// A durable write then **suspends** until its batch's barrier is
+    /// answered, and its caller's executor runs other work meanwhile. A
+    /// caller that interleaves operations on one owner needs the owner lock
+    /// that makes that safe — the node holds it around every operation
+    /// (`CONCURRENCY_BRAKE.md`). A store without a helper takes the barrier
+    /// inline, and a durable write on it settles its batch itself.
     pub fn use_barrier(&mut self, barrier: Barrier) {
         self.barrier = Some(barrier);
     }
 
-    /// Barriers completed on the live journal, on any thread.
-    #[must_use]
-    pub fn journal_barriers(&self) -> u64 {
-        self.disk
-            .as_ref()
-            .map_or(0, |disk| disk.journal.borrow_mut().barriers())
-    }
-
-    /// Journal first, then append to the types' logs, where the settle drain
-    /// finds them. The page write happens later
-    /// ([`drain`](Self::drain)) — a crash before it replays from the journal.
+    /// Commit `batch` to the types' logs, where a settle cycle finds it —
+    /// durable once that cycle's batch is.
     ///
-    /// The batch is durable when this returns — or, with a barrier helper,
-    /// when the returned [`Durable`] resolves; a durability window (RFC 0061)
-    /// relaxes either to "within the window".
-    // The journal guard deliberately spans the cache commit — releasing it
-    // earlier (the lint's suggestion) would let two applies commit their
-    // caches in the opposite order to their journal frames, so replay could
-    // disagree with what live readers saw, and the logs' order is what the
-    // checkpoint's rotation mark (taken under this lock too) relies on.
-    #[allow(clippy::significant_drop_tightening)]
-    fn apply_inner(&self, batch: &[Write]) -> StorageResult<Option<Durable>> {
-        // Refuse unroutable writes *before* the journal sees the batch, so the
-        // log never holds a batch replay would choke on.
+    /// Synchronous, and memory work only: routing, the guards, the commit.
+    /// One commit at a time comes free: the store is used from one thread
+    /// and this does not suspend, so the logs' order is the commits' order,
+    /// which a cycle's mark relies on.
+    fn apply_inner(&self, batch: &[Write]) -> StorageResult<()> {
+        // Refuse unroutable writes before anything sees the batch.
         self.route_batch(batch)?;
         if self.is_fenced() {
             return Err(StorageError::Fenced);
         }
-        let Some(disk) = &self.disk else {
-            // Object mode (RFC 0070 §9): no journal — the upload that
-            // carries the batch is its durability point.
-            let effective = self.validate_guards(batch)?;
-            self.commit_to_caches(&effective);
-            self.note_unuploaded();
-            return Ok(None);
-        };
-        let mut journal = disk.journal.borrow_mut();
-        let effective = self.validate_guards(batch)?;
-        let frame = crate::journal::JournalFrame::Batch(effective.clone());
-        // The durability point, and the one place the window changes anything
-        // (RFC 0061). The check runs under the journal lock this function
-        // already holds, so a burst inside one window amortises to a single
-        // barrier with no timer and no flusher task. With a helper, the
-        // barrier is asked for here — after the write, so it covers it — and
-        // waited for by the caller, off this lock.
-        let mut wait = None;
-        if self.relax_window.is_zero() {
-            match &self.barrier {
-                None => journal.append(&frame)?, // write + fsync
-                Some(barrier) => {
-                    journal.append_deferred(&frame)?;
-                    wait = Some(barrier.sync(journal.synced()));
-                }
-            }
-        } else {
-            journal.append_deferred(&frame)?; // write, no barrier
-            if journal.since_last_sync() >= self.relax_window {
-                match &self.barrier {
-                    None => journal.sync()?, // one barrier for the window
-                    // Not asked (a descriptor could not be duplicated):
-                    // the window stays open, so the next batch asks again.
-                    Some(barrier) => {
-                        if barrier.flush(journal.synced()) {
-                            journal.flush_requested();
-                        }
-                    }
-                }
-            }
+        if self.has_disk() {
+            self.check_failed()?;
         }
-        // Commit under the journal lock: cache order == journal order.
+        let effective = self.validate_guards(batch)?;
         self.commit_to_caches(&effective);
         self.note_unuploaded();
-        // The append's fsync flushed the whole file, so a checkpoint's deferred
-        // `Commit` frame is now durable too — for free, and with nothing to do
-        // about it here. Acting on it (deleting the retired journal, rolling
-        // protection) belongs to the next checkpoint, which can see it in the
-        // journal's barrier count (RFC 0047); the write path stays a journal
-        // append and a cache commit.
-        Ok(wait)
+        Ok(())
+    }
+
+    /// [`apply`](Store::apply), and then wait until the batch is durable:
+    /// settled and its barrier taken — at the next settle cycle on a store
+    /// stepped by a node, at once (the cycle run here) on a store with no
+    /// barrier helper. In object mode, until an upload carries it.
+    ///
+    /// Everything committed before it is durable with it: a batch holds
+    /// every write before its mark.
+    ///
+    /// # Errors
+    /// What [`apply`](Store::apply) refuses; a settle or barrier fault.
+    pub async fn apply_durable(&self, batch: &[Write]) -> StorageResult<()> {
+        self.commit(batch).await?;
+        if !self.has_disk() {
+            return self.upload_all().await;
+        }
+        let wait = self.wait_for_batch();
+        if self.barrier.is_none() {
+            self.drain()?;
+        }
+        wait.await
+    }
+
+    /// Commit `batch`, restoring first every evicted bucket it writes to.
+    async fn commit(&self, batch: &[Write]) -> StorageResult<()> {
+        if self.evicted_in(batch).is_empty() {
+            return self.apply_inner(batch);
+        }
+        self.apply_restoring(batch).await
     }
 
     /// Check `batch`'s guards against the pre-batch state, returning its
     /// effective writes — the guards stripped.
     ///
-    /// Called under the same lock that orders commits; a mismatch refuses
-    /// the batch before the durability point. Guards are not state — the
-    /// journal never holds them, so replay re-applies only the effective
-    /// writes.
+    /// A mismatch refuses the whole batch before anything is committed.
+    /// Guards are not state: the logs never hold them.
     fn validate_guards(&self, batch: &[Write]) -> StorageResult<Vec<Write>> {
         for w in batch {
             // One routed lookup, not a scan. Before RFC 0063's yield map made
             // it visible, this read the id's *type* out of the store by
             // probing every registered slot in turn — so an
             // `Expect(id, None)`, the guard on every first save, matched
-            // nothing and paid a page read plus a zstd decode per type, here,
-            // under the lock that serializes all writers.
+            // nothing and paid a page read plus a zstd decode per type.
             if let Write::Expect(hash, id, expected) = w
                 && self.read_of(*hash, *id)? != *expected
             {
@@ -142,9 +113,8 @@ impl PageStore {
     /// the STRUCT_HASH at its bytes' head, `Remove` and `Expect` by the one
     /// they carry.
     ///
-    /// Checked before the journal sees the batch, so the log never holds a
-    /// batch replay would choke on; and it is what lets the commit path treat
-    /// a routing miss as unreachable rather than handling it twice.
+    /// Checked before anything is committed; it is what lets the commit path
+    /// treat a routing miss as unreachable rather than handling it twice.
     pub(crate) fn route_batch(&self, batch: &[Write]) -> StorageResult<()> {
         for w in batch {
             let sh = match w {
@@ -161,8 +131,7 @@ impl PageStore {
         Ok(())
     }
 
-    /// Append `batch` to the types' logs (routing validated beforehand). Runs
-    /// under the journal lock, so the logs' order is the journal's.
+    /// Append `batch` to the types' logs (routing validated beforehand).
     ///
     /// Every write here routes by a hash it already carries, so this touches
     /// no page and cannot fault: it is memory work under the commit lock, as
@@ -188,8 +157,7 @@ impl PageStore {
                         cache.put(idx, *id, None);
                     }
                 }
-                // Validated and stripped in `apply_inner`; never reaches a
-                // journaled batch (nor, therefore, replay).
+                // Validated and stripped in `apply_inner`.
                 Write::Expect(..) => {}
             }
         }
@@ -209,8 +177,8 @@ impl PageStore {
 // read-to-apply without interleaving on a current-thread executor
 // (`concurrent_node_clobber.rs`). An object-backed store suspends on the
 // object store, for a read of an evicted bucket or a write that restores one
-// (RFC 0070 §14), and a barrier helper makes `apply` wait (`use_barrier`): a
-// store that suspends is used under the owner lock, as on the node.
+// (RFC 0070 §14), and a durable write waits for its batch: a store that
+// suspends is used under the owner lock, as on the node.
 impl Store for PageStore {
     fn get(&self, id: Id) -> impl Future<Output = CoreResult<Option<Vec<u8>>>> {
         // Untyped fallback: the id alone names no type, so probe every slot —
@@ -233,10 +201,9 @@ impl Store for PageStore {
     }
 
     fn apply(&self, batch: &[Write]) -> impl Future<Output = CoreResult<()>> {
-        // The batch is written and committed now, on this call — unless it
-        // writes to an evicted bucket, which comes back to disk first, so
-        // that no settle round ever meets one. Then only the barrier, when a
-        // helper takes it, is left to wait for.
+        // The batch is committed now, on this call — unless it writes to an
+        // evicted bucket, which comes back to disk first, so that no settle
+        // round ever meets one.
         let staged = self
             .evicted_in(batch)
             .is_empty()
@@ -246,12 +213,7 @@ impl Store for PageStore {
                 Some(staged) => staged,
                 None => self.apply_restoring(batch).await,
             };
-            // StorageError → core::Error (typed seam)
-            match staged {
-                Ok(Some(durable)) => durable.await.map_err(Into::into),
-                Ok(None) => Ok(()),
-                Err(e) => Err(e.into()),
-            }
+            staged.map_err(Into::into) // StorageError → core::Error
         }
     }
 }
@@ -261,10 +223,7 @@ impl PageStore {
     /// checking again after the awaits, since an eviction may have run
     /// meanwhile; the commit itself is synchronous, so nothing can evict
     /// between that check and it.
-    async fn apply_restoring(
-        &self,
-        batch: &[Write],
-    ) -> StorageResult<Option<Durable>> {
+    async fn apply_restoring(&self, batch: &[Write]) -> StorageResult<()> {
         loop {
             let evicted = self.evicted_in(batch);
             if evicted.is_empty() {
