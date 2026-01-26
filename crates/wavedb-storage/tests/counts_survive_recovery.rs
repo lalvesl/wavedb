@@ -14,10 +14,11 @@
 //!
 //! ## What "crash" means here
 //!
-//! The store is dropped **without a checkpoint**, so the most recent batches
-//! exist only in the journal and recovery has to replay them. Earlier batches
-//! are forced out to the data files first, so the walk after reopen crosses both
-//! recovery paths — settled pages and replayed frames — inside one chain.
+//! The database's files are copied while the store holds them open, in the
+//! middle of a settle cycle: some rounds of the newest batch are written, its
+//! end is not. The copy reopens from the batch before (RFC 0072) — and the
+//! list it holds was built over two earlier batches, so the walk after
+//! reopen crosses pages each of them wrote, inside one chain.
 //!
 //! ## Why the check runs through the public surface
 //!
@@ -70,6 +71,19 @@ fn entry(n: u32) -> Entry {
     }
 }
 
+/// What a crash leaves: the database's files, copied as they are.
+fn crash(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().is_dir() {
+            crash(&entry.path(), &to.join(entry.file_name()));
+        } else {
+            std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
 /// The two answers, and the rows themselves.
 async fn observe(
     db: &LocalHandle<'_, PageStore>,
@@ -87,6 +101,7 @@ async fn observe(
 #[test]
 fn a_crash_cannot_leave_the_counts_disagreeing_with_the_segments() {
     let dir = tempfile::tempdir().unwrap();
+    let crashed = dir.path().with_extension("crashed");
     let tenant = U48::from(TENANT);
 
     let (pivot, before) = block_on(async {
@@ -103,9 +118,9 @@ fn a_crash_cannot_leave_the_counts_disagreeing_with_the_segments() {
         }
         store.drain().unwrap();
 
-        // Phase 2 — more traffic, deliberately *not* drained: saves that
-        // relocate a record inside both chains, removals that drive merges, and
-        // fresh inserts. These recover by journal replay.
+        // Phase 2 — more traffic: saves that relocate a record inside both
+        // chains, removals that drive merges, and fresh inserts. A batch of
+        // its own.
         for (i, id) in ids.iter().enumerate().take(6) {
             let renamed = Entry {
                 // Sorts below everything, so the list relocates the record to
@@ -129,14 +144,28 @@ fn a_crash_cannot_leave_the_counts_disagreeing_with_the_segments() {
             "counts already disagreed before any crash"
         );
         assert_eq!(before.0, 24, "24 inserted − 8 removed + 8 inserted");
+        store.drain().unwrap();
+
+        // Phase 3 — the batch the crash cuts: more of the same, a few rounds
+        // of it written, its end not.
+        for id in ids.iter().skip(1).take(4) {
+            assert!(col.remove(&db, *id).await.unwrap());
+        }
+        for n in 200..210u32 {
+            col.insert(&db, &entry(n)).await.unwrap();
+        }
+        assert!(store.begin_cycle().unwrap());
+        for _ in 0..2 {
+            store.cycle_step(4).unwrap();
+        }
+        assert!(store.is_cycling(), "the batch is cut mid-way");
+        crash(dir.path(), &crashed);
         (pivot, before)
-        // `store` drops here with the phase-2 batches still journal-only:
-        // the process "died" before a checkpoint.
     });
 
     // Recovery, and the same two questions.
     block_on(async {
-        let store = open(dir.path());
+        let store = open(&crashed);
         let db = LocalHandle::new(&store, tenant);
         let col = Entry::collection(pivot);
         let after = observe(&db, col).await;
@@ -149,7 +178,10 @@ fn a_crash_cannot_leave_the_counts_disagreeing_with_the_segments() {
             after.0,
             after.1.len()
         );
-        assert_eq!(after, before, "recovery changed the list");
+        assert_eq!(
+            after, before,
+            "recovery changed the list: the cut batch must not show"
+        );
 
         // The rows are in the declared order, and the relocated ones really did
         // move to the head — a count that agreed by coincidence (both halves
