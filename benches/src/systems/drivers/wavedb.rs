@@ -27,6 +27,7 @@
 //! counterpart to a server's background threads.
 
 use std::sync::Mutex;
+use std::time::Instant;
 
 use futures::executor::block_on;
 use wavedb_core::{Id, LocalHandle, U48};
@@ -38,10 +39,7 @@ use crate::schema::{Thing, ThingPivotId};
 use crate::seed::TENANT;
 use crate::systems::engine::Engineish;
 
-/// Journal bytes above which a row checkpoints, between operations.
-const CHECKPOINT_AFTER_BYTES: u64 = 64 << 20;
-
-/// Cache budget the checkpoint evicts down to.
+/// Cache budget a settle evicts down to.
 const CACHE_BUDGET_BYTES: usize = 96 << 20;
 
 /// Building one engine from the process's single store.
@@ -68,6 +66,8 @@ pub struct Factory<E> {
     /// Pre-reserved so an insert's `ids.push` can never reallocate inside a
     /// timed window.
     rows: usize,
+    /// Whether every write is made durable before it returns (RFC 0072).
+    durable: bool,
     engine: std::marker::PhantomData<fn() -> E>,
 }
 
@@ -77,11 +77,13 @@ impl<E> Factory<E> {
         store: PageStore,
         seeded: Option<(Vec<Id>, ThingPivotId)>,
         rows: usize,
+        durable: bool,
     ) -> Self {
         Self {
             store: Mutex::new(Some(store)),
             seeded,
             rows,
+            durable,
             engine: std::marker::PhantomData,
         }
     }
@@ -94,6 +96,10 @@ pub struct WavedbDriver<E: Engineish> {
     /// NonUnique anchor is minted from the clock at insert, so it cannot be
     /// recomputed from the seed — this table is how `n` becomes an `Id`.
     ids: Vec<Id>,
+    /// Whether every write is made durable before it returns.
+    durable: bool,
+    /// When the store was last settled.
+    settled: Instant,
 }
 
 // No `Send` bound on `E`: the engine is built on the consumer's thread and
@@ -137,7 +143,13 @@ where
                 (Vec::with_capacity(self.rows), pivot)
             }
         };
-        Ok(WavedbDriver { engine, pivot, ids })
+        Ok(WavedbDriver {
+            engine,
+            pivot,
+            ids,
+            durable: self.durable,
+            settled: Instant::now(),
+        })
     }
 
     fn route(&self, _op: &MicroOp) -> usize {
@@ -146,6 +158,17 @@ where
 }
 
 impl<E: Engineish> WavedbDriver<E> {
+    /// A durable row's write returns once it is durable: settled and synced
+    /// on the spot — what `apply_durable` does on a store nobody ticks — and
+    /// inside the timed window.
+    fn after_write(&mut self) -> Result<(), String> {
+        if self.durable {
+            self.engine.drain()?;
+            self.settled = Instant::now();
+        }
+        Ok(())
+    }
+
     /// The anchor for dataset row `n`.
     fn id_of(&self, n: u64) -> Result<Id, String> {
         self.ids
@@ -166,6 +189,7 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
                 let id = block_on(col.insert(&db, &row))
                     .map_err(|e| format!("insert {n}: {e}"))?;
                 self.ids.push(id);
+                self.after_write()?;
             }
             MicroOp::Read { n } => {
                 let id = self.id_of(n)?;
@@ -181,22 +205,20 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
                 let id = self.id_of(n)?;
                 block_on(col.save(&db, id, &row))
                     .map_err(|e| format!("save {n}: {e}"))?;
+                self.after_write()?;
             }
         }
         Ok(())
     }
 
-    /// Checkpoint and evict once the journal is large enough to matter.
-    ///
-    /// A byte threshold rather than an operation count: RFC 0060's adapter
-    /// used `MAINTAIN_EVERY = 5000` operations and never fired while 649 MB of
-    /// journal accumulated, because a count says nothing about how much log it
-    /// produced.
+    /// A relaxed row settles once per elapsed window — a node's tick, as
+    /// the embedded bracket's counterpart to a server's background threads,
+    /// outside the timed window — and evicts to the budget.
     fn after_op(&mut self) -> Result<(), String> {
-        if self.engine.journal_len() <= CHECKPOINT_AFTER_BYTES {
-            return Ok(());
+        if !self.durable && self.settled.elapsed() >= crate::RELAXED_WINDOW {
+            self.engine.drain()?;
+            self.settled = Instant::now();
         }
-        self.engine.checkpoint()?;
         self.engine.evict(CACHE_BUDGET_BYTES);
         Ok(())
     }
@@ -208,12 +230,9 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
         _next: &str,
     ) -> Result<(), String> {
         match done {
-            // Settle and frame the journal, so the read phase does not measure
-            // the insert phase's deferred work.
-            "insert" => {
-                self.engine.drain()?;
-                self.engine.checkpoint()
-            }
+            // Settle, so the read phase does not measure the insert phase's
+            // deferred work.
+            "insert" => self.engine.drain(),
             // Empty the engine's own cache — the counterpart of reopening the
             // SQLite connection. The OS page cache stays warm on both sides.
             "read_hot" => {
@@ -227,11 +246,10 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
     /// Settle and release, in that order.
     ///
     /// Required rather than tidy: the directory's lock has to be free before
-    /// anything opens the same directory again, and a footprint read
-    /// over an undrained settle queue counts a retained journal as stored data.
+    /// anything opens the same directory again, and a footprint read over
+    /// an undrained settle queue misses what is still in RAM.
     fn close(self) -> Result<(), String> {
         self.engine.drain()?;
-        self.engine.checkpoint()?;
         self.engine.close();
         Ok(())
     }
@@ -293,7 +311,8 @@ mod tests {
     where
         E: crate::systems::engine::Engineish + FromStore,
     {
-        let factory: Factory<E> = Factory::new(open(&scratch.0), None, 120);
+        let factory: Factory<E> =
+            Factory::new(open(&scratch.0), None, 120, false);
         run(&factory, workload()).expect("run")
     }
 
@@ -317,7 +336,7 @@ mod tests {
     fn a_second_build_is_refused_rather_than_sharing_the_store() {
         let scratch = Scratch::new();
         let factory: Factory<PageStore> =
-            Factory::new(open(&scratch.0), None, 10);
+            Factory::new(open(&scratch.0), None, 10, false);
 
         let first = factory.build(0);
         assert!(first.is_ok());
@@ -333,7 +352,7 @@ mod tests {
     fn micro_asks_for_exactly_one_consumer() {
         let scratch = Scratch::new();
         let direct: Factory<PageStore> =
-            Factory::new(open(&scratch.0), None, 1);
+            Factory::new(open(&scratch.0), None, 1, false);
         assert_eq!(direct.consumers(), 1);
     }
 }
