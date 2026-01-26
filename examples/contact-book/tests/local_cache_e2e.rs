@@ -150,6 +150,9 @@ fn client_survives_node_restart_with_warm_local_reads() {
         );
 
         // ── Node down: everything seen answers warm from the local engine ───
+        // Ordinary writes are durable at the node's next settle tick (200 ms,
+        // RFC 0072): a kill before it would lose them, as a crash would.
+        std::thread::sleep(std::time::Duration::from_secs(1));
         node.kill().expect("kill the node");
         node.wait().expect("reap the node");
 
@@ -194,7 +197,7 @@ fn client_survives_node_restart_with_warm_local_reads() {
                 .expect("fn call after restart")
                 .len(),
             2,
-            "the node replayed its journal — the data survived the restart"
+            "the node's settled batch survived the restart"
         );
         let edsger = contacts
             .insert(&db, &contact("Edsger", "555-0003", "Austin"))
