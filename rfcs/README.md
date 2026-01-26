@@ -16,8 +16,8 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 
 - **Shipped (M1–M7, M8):** the wire codec, type identity, the platform seam, the
   full data model (anchors + `Succession` history, B+tree collections, natural
-  keys), the macro & exposure system, the storage engine + journal-rooted
-  recovery, the HTTP + WebSocket transport, the connection manager, live sync by
+  keys), the macro & exposure system, the storage engine and its recovery
+  (journal-rooted until [0072](0072-the-settle-is-the-durability-point-WIP.md)), the HTTP + WebSocket transport, the connection manager, live sync by
   navigation catch-up over both poll and WebSocket (including W6 reconnect —
   [0034](0034-ws-reconnect-catchup.md)) and W7 poll efficiency (idle backoff +
   command piggyback — [0035](0035-http-piggyback-and-idle-backoff.md)), the
@@ -31,6 +31,17 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   exposure registry's **compile-time** collision guard (full-`STRUCT_HASH` clash
   = error, 15-bit `type_salt` clash = warning), recorded in
   [0040](0040-schema-migration-and-version-skew-DEPRECATED.md).
+- **The settle is the durability point (2026-10-16,
+  [0072](0072-the-settle-is-the-durability-point-WIP.md), WIP):** there is no
+  journal any more. A write commits to the record cache; a settle cycle every
+  200 ms writes each batch as windows ending with a 32 KiB header naming the
+  addresses it changed, and one barrier makes it durable — `apply_durable`
+  waits for it. A reopen walks the headers from the newest whole batch and
+  replays nothing; the object store's files carry the same header. Phases 1–3
+  (the header and walk, the engine, the node) landed; phase 4 — the
+  `_durable` operations across core, macros, the wire and the client, and the
+  client cache's tick — is next. It supersedes the journal-era designs below
+  (0019, 0047, 0048, 0061, 0062; 0041/0043/0046 in part).
 - **The storage write path (2026-07-28 → 07-29):**
   [0041](0041-single-barrier-checkpoint.md) *(Implemented)* replaced the per-id
   settle — which read-modify-wrote a bucket page once per record — with a
@@ -87,7 +98,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   needs no barrier of its own — a checkpoint costs **one**, the `data.bin`
   sync, with the retirement it authorises deferred until an ordinary write's
   fsync carries the frame.
-  [0047](0047-generational-journal-retirement.md) *(Implemented)* closed the
+  [0047](0047-generational-journal-retirement-DEPRECATED.md) *(Implemented)* closed the
   accounting: that retirement is now disposed of by the **next** checkpoint,
   which holds the journal carrying the frame and can read its barrier count,
   rather than being chased from the write path (a lock and an `unlink` inside a
@@ -103,7 +114,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   budget forever. The trigger now asks about the bucket whose turn it is, so a
   split only happens where it relieves something, an over-target bucket simply
   spans more blocks until its turn, and a large object is just a large page.
-  And [0048](0048-chained-addressing-log.md) *(Implemented)* took the last
+  And [0048](0048-chained-addressing-log-DEPRECATED.md) *(Implemented)* took the last
   recurring cost out of the frame: it was rewritten in full at every checkpoint
   to name state the previous frame already named, so a compaction cycle of N
   checkpoints cost 4N² journal bytes — quadratic in the interval, and therefore
@@ -472,7 +483,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   on an NVMe with the database in page cache, so the miss path is CPU and not
   IO, and it is the same defect as the update row (an update reads before it
   writes). It also showed the write cost is the **barrier, not the bytes**,
-  which is what [0061](0061-relaxed-durability-window.md) answers.
+  which is what [0061](0061-relaxed-durability-window-DEPRECATED.md) answers.
   **0065 supersedes the shape, not the method.** 0060 made *the run* the unit —
   one process, every system in sequence, one JSON — and that bound in three
   places: peers were remeasured on every ~50-minute pass although the WaveDB
@@ -495,7 +506,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   in-memory layers turned up, which is what makes the multi-million-row tiers
   affordable to build.
 - **The relaxed row exists now, landed 2026-08-21 —
-  [0061](0061-relaxed-durability-window.md) *(Implemented)*:** the measurement
+  [0061](0061-relaxed-durability-window-DEPRECATED.md) *(Implemented)*:** the measurement
   above showed the write cost is the **barrier, not the bytes** (SQLite pays
   84.7 kB per durable insert of a 255-byte record against WaveDB's 101.6 kB —
   the same number, because an `fsync` on btrfs costs ~85–100 kB whatever the
@@ -510,7 +521,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   the reason it is offerable at all. The refinements it left out —
   bounded loss when a store goes quiet, `fdatasync`, per-write strength, a
   relaxed client cache — are
-  [0062](0062-relaxed-mode-refinements-PLANNED.md).
+  [0062](0062-relaxed-mode-refinements-DEPRECATED.md).
 - **Deferred (low priority):**
   [0036](0036-offline-write-queue-PLANNED-LOW.md) — W8 offline write queue
   (slice 1, Unique offline, *shipped*; the NonUnique/durable/conflict-surface
@@ -570,7 +581,6 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | # | Title | Status |
 |---|-------|--------|
 | [0018](0018-storage-engine.md) | The storage engine | Implemented |
-| [0019](0019-journal-rooted-recovery.md) | Journal-rooted recovery | Implemented |
 
 ### Transport, node & sync
 | # | Title | Status |
@@ -596,13 +606,11 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0037](0037-multi-node-cluster-PLANNED-LOW.md) | Multi-node cluster | Planned (low) |
 | [0038](0038-argon2-and-oauth-credentials-PLANNED-LOW.md) | Argon2 & OAuth/OIDC credentials | Planned (low) |
 | [0039](0039-developer-experience-PLANNED-LOW.md) | Developer experience (M9) | Planned (low) |
-| [0041](0041-single-barrier-checkpoint.md) | Single-barrier checkpoint | Implemented |
-| [0043](0043-descriptors-in-the-commit-frame.md) | Descriptors in the `Commit` frame | Implemented |
+| [0041](0041-single-barrier-checkpoint.md) | Single-barrier checkpoint (its one-window settle round kept; the checkpoint superseded by [0072](0072-the-settle-is-the-durability-point-WIP.md)) | Implemented |
+| [0043](0043-descriptors-in-the-commit-frame.md) | Descriptors in the `Commit` frame (superseded by 0046, then [0072](0072-the-settle-is-the-durability-point-WIP.md)) | Implemented |
 | [0044](0044-page-cache-PLANNED-LOW.md) | The page cache | Planned (low) |
 | [0045](0045-vector-search-PLANNED.md) | Vector search | Planned |
-| [0046](0046-directory-deltas-in-the-window.md) | Directory deltas in the settle window | Implemented |
-| [0047](0047-generational-journal-retirement.md) | Generational journal retirement | Implemented |
-| [0048](0048-chained-addressing-log.md) | The addressing log as a chain | Implemented |
+| [0046](0046-directory-deltas-in-the-window.md) | Directory deltas in the settle window (the delta kept, as [0072](0072-the-settle-is-the-durability-point-WIP.md)'s header) | Implemented |
 | [0049](0049-elastic-pages-and-load-driven-splits.md) | Elastic pages and load-driven splits | Implemented |
 | [0050](0050-clustered-record-chains.md) | Clustered record chains (B+trees become opt-in) | Implemented |
 | [0051](0051-ordered-record-lists.md) | Declared lists: sorted chains + sparse index | Implemented |
@@ -613,8 +621,6 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0056](0056-fuzzy-string-search-WIP.md) | Fuzzy string search | In progress |
 | [0057](0057-page-arena-and-checkpoint-staging.md) | The page arena and checkpoint staging | Planned |
 | [0059](0059-object-storage-capacity-tier-PLANNED.md) | Object storage as the capacity tier (§1 archive lane; §2–§5 superseded by 0070) | Planned |
-| [0061](0061-relaxed-durability-window.md) | Relaxed durability: a group-commit window | Implemented |
-| [0062](0062-relaxed-mode-refinements-PLANNED.md) | Relaxed mode refinements | Planned |
 | [0063](0063-engine-yield-map-and-interruptible-engine-PLANNED.md) | The yield map, and an interruptible engine | Planned |
 | [0064](0064-pivot-owned-concurrency-PLANNED.md) | Pivot-owned concurrency | Planned (first slice built) |
 | [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) | Benchmark suite II: the row as the unit | Planned |
@@ -633,7 +639,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0027](0027-doubly-linked-modification-chain-DEPRECATED.md) | Doubly-linked modification chain | [0009](0009-anchors-succession-and-history.md) |
 | [0028](0028-journal-commit-cursor-sync-DEPRECATED.md) | Journal commit-cursor sync | [0022](0022-live-sync-navigation-catchup.md) |
 | [0029](0029-bloom-filter-screen-sync-DEPRECATED.md) | Bloom-filter screen-sync | [0022](0022-live-sync-navigation-catchup.md) |
-| [0030](0030-superblock-pointer-checkpoint-DEPRECATED.md) | Superblock-pointer checkpoint | [0019](0019-journal-rooted-recovery.md) |
+| [0030](0030-superblock-pointer-checkpoint-DEPRECATED.md) | Superblock-pointer checkpoint | [0019](0019-journal-rooted-recovery-DEPRECATED.md) |
 | [0031](0031-node-per-page-bptree-DEPRECATED.md) | One-node-per-page B+tree format | [0011](0011-bptree-index-and-collections.md) |
 | [0032](0032-node-side-poll-buffer-DEPRECATED.md) | Node-side stateful poll buffer | [0022](0022-live-sync-navigation-catchup.md) |
 | [0033](0033-cold-history-slow-node-tier-DEPRECATED.md) | Cold/history slow-node tier | removed |
@@ -641,6 +647,11 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0060](0060-comparative-benchmark-suite-DEPRECATED.md) | Comparative benchmark suite (vs MongoDB/PostgreSQL/MySQL/SQLite) | [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) (the row, not the run) |
 | [0042](0042-free-space-defragmentation-DEPRECATED.md) | Free-space defragmentation (tail relocation) | [0069](0069-compaction-into-the-holes-DEPRECATED.md) |
 | [0069](0069-compaction-into-the-holes-DEPRECATED.md) | Compaction into the holes | [0071](0071-data-files-by-address.md) (append-only data files, compaction forward) |
+| [0019](0019-journal-rooted-recovery-DEPRECATED.md) | Journal-rooted recovery | [0072](0072-the-settle-is-the-durability-point-WIP.md) (the settle is the durability point; reconstruction from headers) |
+| [0047](0047-generational-journal-retirement-DEPRECATED.md) | Generational journal retirement | [0072](0072-the-settle-is-the-durability-point-WIP.md) (frees deferred to the batch's barrier) |
+| [0048](0048-chained-addressing-log-DEPRECATED.md) | The addressing log as a chain | [0072](0072-the-settle-is-the-durability-point-WIP.md) (the header every window ends with) |
+| [0061](0061-relaxed-durability-window-DEPRECATED.md) | Relaxed durability: a group-commit window | [0072](0072-the-settle-is-the-durability-point-WIP.md) (durability per write: `_durable`) |
+| [0062](0062-relaxed-mode-refinements-DEPRECATED.md) | Relaxed mode refinements | [0072](0072-the-settle-is-the-durability-point-WIP.md) |
 
 ## Status vocabulary
 
