@@ -19,7 +19,6 @@ use std::path::Path;
 
 use wavedb_storage::PageStore;
 
-use super::Durability;
 use crate::schema::Thing;
 
 pub fn notes(seeded: bool) -> Vec<String> {
@@ -47,20 +46,10 @@ pub fn notes(seeded: bool) -> Vec<String> {
     notes
 }
 
-/// Opened at the row's own durability (RFC 0061). Unlike the shop workload
-/// there is no untimed preload to exempt here — the fill **is** the `insert`
-/// phase — so every open in this adapter takes the row's window.
-pub fn open(dir: &Path, d: Durability) -> Result<PageStore, String> {
-    PageStore::open_with(
-        dir,
-        &Thing::storage_entries(),
-        wavedb_storage::StoreOptions {
-            relax_window: match d {
-                Durability::Durable => std::time::Duration::ZERO,
-                Durability::Relaxed => crate::RELAXED_WINDOW,
-            },
-            ..Default::default()
-        },
-    )
-    .map_err(|e| format!("open: {e}"))
+/// The store. Its durability is not an option of it any more (RFC 0072):
+/// the row's driver makes every write durable, or settles on a window
+/// (`drivers::wavedb`).
+pub fn open(dir: &Path) -> Result<PageStore, String> {
+    PageStore::open(dir, &Thing::storage_entries())
+        .map_err(|e| format!("open: {e}"))
 }
