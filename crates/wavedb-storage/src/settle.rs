@@ -1,100 +1,36 @@
-//! The settle drain — feeding rounds of the types' logs to the checkpoint
-//! writer, plus the cache-eviction policy ([RFC 0068]).
+//! The record cache's side of a settle ([RFC 0068]): what is still to
+//! settle, and when a settled chunk may leave the cache.
 //!
-//! The work itself lives in [`crate::plan`] (page images, grouped per bucket)
-//! and [`crate::checkpoint`] (one window, one write, then the descriptor
-//! swap). This module owns only the log side: what a round is, when it
-//! retries, and when a settled chunk may leave the cache.
+//! The rounds themselves are the cycle's ([`crate::cycle`]); the work lives
+//! in [`crate::plan`] (page images, grouped per bucket) and
+//! [`crate::checkpoint`] (one window, one write, then the descriptor swap).
 //!
 //! [RFC 0068]: ../../../rfcs/0068-record-cache-as-a-log-WIP.md
 
-use crate::error::StorageResult;
 use crate::page_store::PageStore;
 
-/// What one [`settle_step`](PageStore::settle_step) did.
+/// What one [`cycle_step`](PageStore::cycle_step) did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Progress {
-    /// A round was settled. There may be more — including writes that landed
-    /// while this one ran.
+    /// A round of the open batch was settled; it owes more, or its end is
+    /// next.
     Settled,
-    /// Every log was observed settled. Nothing to do until another write
-    /// lands.
+    /// The batch ended — or none was open.
     Done,
 }
 
 impl PageStore {
-    /// Settle everything committed: step until every type's log is settled
-    /// to its end (writes landing while a round settles are picked up by the
-    /// next round).
-    ///
-    /// # Errors
-    /// A page write fault. Nothing acked is at risk — the journal still
-    /// holds every unsettled batch, and the failed round's settle cursors
-    /// did not move, so a later drain (or the reopen replay) retries it.
-    pub fn drain(&self) -> StorageResult<()> {
-        while self.settle_step(usize::MAX)? == Progress::Settled {}
-        Ok(())
-    }
-
-    /// **One** round, then return — the interruptible form of
-    /// [`drain`](Self::drain) ([RFC 0063] part 3).
-    ///
-    /// The caller drives it, and between two calls it may do anything: serve a
-    /// read, take a write, stop. That boundary is the engine's only legal
-    /// yield point.
-    ///
-    /// A round copies the live entries from each log's settle cursor out of
-    /// the cache, builds and writes their pages with nothing borrowed, and
-    /// only then moves the cursors past what it copied. So at every point a
-    /// caller can observe, everything before a cursor is in the pages — the
-    /// one fact eviction relies on. A write landing during the round appends
-    /// a newer copy after the cursor; the next round writes it. One round at
-    /// a time comes free: the store is used from one thread, and a step runs
-    /// to its end without suspending, so no older version can land after a
-    /// newer one.
-    ///
-    /// ## Why a `step` and not an `async fn`
-    ///
-    /// The engine contains no await point, so an `async fn drain` would be a
-    /// future that never yields — the machinery of suspension with nothing to
-    /// suspend on. The driver that makes a step useful (a node worker's BG
-    /// task, between its jobs) already exists.
-    ///
-    /// ## `budget`
-    ///
-    /// The most log entries a round may scan, so one burst does not become
-    /// one uninterruptible round. Superseded copies count — they are what the
-    /// cursor walks over — and are skipped: a record saved a thousand times
-    /// is written once, at its newest. `usize::MAX` means "no bound", which
-    /// is what [`drain`](Self::drain) asks for.
-    ///
-    /// # Errors
-    /// A page write fault. The cursors stay where they were, so a later
-    /// step — or the reopen replay — retries the round.
-    ///
-    /// [RFC 0063]: ../../../rfcs/0063-engine-yield-map-and-interruptible-engine-PLANNED.md
-    pub fn settle_step(&self, budget: usize) -> StorageResult<Progress> {
-        let mut round = self.cache.borrow().round(budget);
-        if round.is_empty() {
-            return Ok(Progress::Done);
-        }
-        self.settle(std::mem::take(&mut round.work))?;
-        self.cache.borrow_mut().advance(&round);
-        Ok(Progress::Settled)
-    }
-
-    /// Whether any committed batch still awaits its page write.
+    /// Whether any committed write still awaits its page write.
     #[must_use]
     pub fn has_pending(&self) -> bool {
         self.cache.borrow().has_pending()
     }
 
-    /// Bytes of committed journal frames — the checkpoint policy's input.
+    /// Bytes of committed writes not settled yet — what a node's
+    /// maintenance valve weighs.
     #[must_use]
-    pub fn journal_len(&self) -> u64 {
-        self.disk
-            .as_ref()
-            .map_or(0, |disk| disk.journal.borrow().len_bytes())
+    pub fn unsettled_bytes(&self) -> u64 {
+        self.cache.borrow().unsettled_bytes()
     }
 
     /// Drop settled chunks of the types' logs, oldest first, until the
