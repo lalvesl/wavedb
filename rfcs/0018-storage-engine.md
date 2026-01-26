@@ -60,7 +60,7 @@ that ripple through the whole test suite:
 ## Recovery
 
 Durability and open-time recovery are their own idea —
-[RFC 0019](0019-journal-rooted-recovery.md) (journal-first WAL, journal-rooted
+[RFC 0019](0019-journal-rooted-recovery-DEPRECATED.md) (journal-first WAL, journal-rooted
 commit).
 
 ## Deferred / dropped
