@@ -11,7 +11,7 @@
 //!                                   ├─ jobs: operations on its owners, as
 //!                                   │  calls on the owner's PageStore, and
 //!                                   │  the subscriptions to its topics
-//!                                   └─ BG: settle / checkpoint steps,
+//!                                   └─ BG: settle cycle steps,
 //!                                      upkeep policy
 //! ```
 //!
