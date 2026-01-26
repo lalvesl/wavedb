@@ -165,53 +165,64 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   listing the directory; writing only appends, a file closes at
   `StoreOptions::file_bytes`, 10 GiB — RFC 0071), per-STRUCT_HASH linear-hashed page directories, `SlotPage`
   (checked-wire envelope, per-type zstd dictionaries with version = prefix length),
-  journal-first WAL (append + cache commit under the journal lock = the atomic unit;
-  one barrier per batch by default, or one per elapsed `StoreOptions::relax_window`
-  — RFC 0061, `flush()` forces it; with `use_barrier(Barrier)` the barrier is
-  taken on a helper thread and `apply` waits for it, grouped per round — each
-  node worker has one, RFC 0067 §4),
-  replay on open. Per-type routing is compile-time (`StructStorage` statics are
+  **no journal** (RFC 0072): `apply` commits a batch to the record cache
+  and returns; a **settle cycle** (every 200 ms on a node — a tick with
+  nothing written opens none) marks the logs' ends and settles them in
+  bounded rounds, each one window `[pages][32 KiB header]` at the end of the
+  active file, the header naming the addresses the round changed (and in
+  its spare room restating those of the type restated longest ago); the
+  round that ends the batch says so, and **one barrier** makes the batch
+  durable — inline, or on the worker's helper thread (`use_barrier`,
+  RFC 0067 §4). `apply_durable` waits for it (a store nobody ticks settles
+  inline); everything committed before a durable write is durable with it.
+  On open, nothing is replayed: the newest whole batch's header — the last
+  8 blocks of the newest data file — roots a walk back along each type's
+  `last` and down by `prev` while a registered type is unnamed; only the
+  newest batch can be cut by a crash, its pages checked by crc. A store
+  dropped settles what it holds. The same header and walk serve the object
+  store. Per-type routing is compile-time (`StructStorage` statics are
   declarations: hash + compression policy); the per-type state (directory,
   dictionary) belongs to the open store (RFC 0067 step 1), and so does the
   record cache — one log per type in chunks + one Dashtable-shaped index;
   settledness is a cursor, eviction drops settled chunks (RFC 0068). Compaction
   carries the runs of the emptiest data files (≥ `victim_free_percent`
-  free, 50) forward into the active one, and every checkpoint's opening cuts
-  the free tails and deletes the emptied files; stepped, on the node's
+  free, 50) forward into the active one — after restating every address, so
+  no header in them is live — and once a batch over the moves is durable,
+  cuts the free tails and deletes the emptied files; stepped, on the node's
   triggers (daily UTC time, disk ceiling, free share — RFC 0071).
   A database created with `StoreOptions::remote` (`Server::object_store` on a
   node) keeps its pages in an S3-compatible object store, the disk caching
   them (RFC 0070 phase 3): settle rounds flag the pages they write, `upload`
   reassembles the flagged ones into the object store's own linear hash
   (128 KiB pages, files of `[32 KiB header][pages]`), and the remote
-  directories ride the disk's addressing log; the mode is fixed in the
+  directories ride the disk's headers; the mode is fixed in the
   `MANIFEST`. Past the compaction ceiling the least recently used uploaded
   pages leave the disk (phase 4): a read of one goes to the object store, a
   write brings its bucket back before it commits, so a settle never meets
   an evicted bucket. A database whose disk is gone opens from its files
-  alone (phase 5): chained headers name every type and restate the oldest
-  entries, so no snapshot object is needed; only a **cut** (an upload that
+  alone (phase 5): the same headers and walk, so no snapshot object is
+  needed; only a **cut** (an upload that
   left nothing waiting) is recovered, so no batch comes back in part.
   **Object mode** (`PageStore::open_object`, `Server::object_mode`; phase 6)
   has no disk at all: pages in RAM until uploaded and as a cache, no
-  journal — a write is durable once an upload carries it, on 8 MiB or
+  settle to disk — a write is durable once an upload carries it, on 8 MiB or
   `upload_interval` (10 s) — every open a recovery from the files; no
   lease, but every file is PUT create-only, so a second writer on the
   prefix is `Fenced`, never merged. The object store **compacts by file**
   (phase 7, `compact_remote`): a survey run like a recovery finds the
   horizon and the files nothing names (the store, the newest cut, the
-  disk's two roots), which are DELETEd blind; mostly free files below the
+  disk's two newest batches), which are DELETEd blind; mostly free files below the
   horizon have their pages carried forward first. `convert(dir, types,
   options, Backend)` moves a database from or to disk mode offline (the
   object store's files are kept on the way down). A store
   is used from one thread: plain cells, no lock, no atomic; `Send`, not `Sync`. **One open `PageStore`
-  per data directory** — every data file and journal is locked while open, a
+  per data directory** — every data file is locked while open, a
   second open is `EngineBusy` — and stores over different directories coexist
   in one process. A database is **sharded** (RFC 0067): `MANIFEST` (magic,
   version, the shard count `P` — 64 on a node, fixed at creation — the seed and
   the mode; RFC 0071 §2) + `shards/00..3f/`, each a whole `PageStore`; a single
   `PageStore::open(dir)` is a database of one shard, the same shape
-  (`open_shards`; the journals replay in parallel ranges, `open_shards_with`);
+  (`open_shards`; the shards reconstruct in parallel ranges, `open_shards_with`);
   a record lives in shard `seahash(owner bytes) % P` (`core::placement`).
 - **wavedb-net** — hand-rolled minimal HTTP/1.1 POST as a **dumb tunnel**: no headers,
   cookies, or status semantics as API; the body is a self-contained
@@ -232,7 +243,8 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
 - **wavedb-quick-node** — library (no bin): `Server::new(REGISTRY).data_dir(d).serve(addr)`;
   `.threads(n)` workers each **own** a contiguous range of the data shards — their
   `PageStore`s move onto the worker's thread, operations are plain calls there,
-  and a BG task beside the jobs steps settle/checkpoint when they leave room
+  and a BG task beside the jobs opens a settle cycle per 200 ms tick and steps
+  it when they leave room — first when a durable write waits on it
   (RFC 0067 step 4; one executor per thread, no `unsafe`). Each worker also
   **accepts its own connections** — one listener per worker, an
   `SO_REUSEPORT` group on Linux (`Listener::bind_many`; one listener
@@ -278,8 +290,7 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   **instants, addresses are computed**, so no archive is ever repointed; a forward
   walk that MISSes a derived slot has reached the live anchor. Bytes are never
   destroyed; only `remove` writes the `dead` tree. Every save batch opens with a
-  `Write::Expect` guard (validated pre-batch under the commit lock, stripped
-  before journaling) — a lost race is a typed `Error::Conflict`, never
+  `Write::Expect` guard (validated pre-batch, stripped before the commit) — a lost race is a typed `Error::Conflict`, never
   overwritten history. The chain records **who/when/permission per version**;
   it is state review, not domain data, and ends at the STRUCT_HASH boundary.
 - NonUnique record identity `Id` is minted at `insert` and never changes; `save`
