@@ -16,24 +16,18 @@
 //! [`BlockFile`](crate::BlockFile)'s, which creates one the first time a run
 //! in it is written, and cuts or deletes one when told to.
 //!
-//! ## Checkpoint protection
+//! ## Frees wait for a durable batch
 //!
-//! Runs a **recovery root** names must survive — a crash reopens *from* one,
-//! so cutting or deleting a run it points at would corrupt the reopened
-//! state. [`set_protected`](BlockAllocator::set_protected) registers those
-//! runs; freeing one is **deferred** (held in a pending list) and released
-//! once protection lifts. With no checkpoint (a fresh or rebuild-on-open
-//! store) nothing is protected and frees are immediate.
+//! A run freed by a batch is still named by the batch before it, the one a
+//! crash would reopen from until this one is durable ([RFC 0072] §8). No
+//! freed block is ever written again, so the run itself is safe; what must
+//! wait is giving it back to the filesystem — a file's free tail cut, an
+//! emptied file deleted. So a store **defers** a free
+//! ([`defer`](BlockAllocator::defer)) and [`release_to`](BlockAllocator::release_to)s
+//! the frees a batch covered once that batch is durable; only then does the
+//! run become a hole a [`reclaim`](BlockAllocator::reclaim) may cut.
 //!
-//! **Two generations, not one.** A checkpoint's `Commit` frame is written
-//! without a barrier ([RFC 0046]), so until an ordinary write flushes it there
-//! are *two* possible roots: the new frame and the one before it. Both sets are
-//! therefore protected — `set_protected` installs the new one and keeps the old
-//! as `previous`, which [`release_previous`](BlockAllocator::release_previous)
-//! drops once the next checkpoint proves the frame durable ([RFC 0047]).
-//!
-//! [RFC 0046]: ../../../rfcs/0046-directory-deltas-in-the-window.md
-//! [RFC 0047]: ../../../rfcs/0047-generational-journal-retirement.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
 //! [RFC 0071]: ../../../rfcs/0071-data-files-by-address.md
 
 use std::collections::BTreeMap;
@@ -57,13 +51,13 @@ pub struct BlockAllocator {
     next: u64,
     /// Whether the active file is closed to new runs ([`roll`](Self::roll)).
     rolled: bool,
-    /// start → count of the newest checkpoint's runs (see module docs).
-    protected: BTreeMap<u64, u64>,
-    /// The checkpoint before it, retained while its successor's frame is
-    /// unproven — the other root a crash could reopen from.
-    previous: BTreeMap<u64, u64>,
-    /// Frees deferred because the run was protected at the time.
+    /// Frees waiting for the batch that made them to be durable, oldest
+    /// first (see module docs).
     pending: Vec<Run>,
+    /// Frees deferred and released since the allocator was made — what a
+    /// [`mark`](Self::mark) counts in.
+    deferred_total: u64,
+    released_total: u64,
 }
 
 impl Default for BlockAllocator {
@@ -82,16 +76,15 @@ impl BlockAllocator {
             ceiling: (file_bytes / BLOCK_SIZE as u64).max(1),
             next: 0,
             rolled: false,
-            protected: BTreeMap::new(),
-            previous: BTreeMap::new(),
             pending: Vec::new(),
+            deferred_total: 0,
+            released_total: 0,
         }
     }
 
     /// Rebuild an allocator over existing data files — `(first block, end)`
     /// each — and the runs in use in them. Every gap between used runs is a
-    /// hole. The used runs are **not** protected: call
-    /// [`set_protected`](Self::set_protected) with the checkpoint's after.
+    /// hole.
     #[must_use]
     pub fn from_layout(
         files: &[(u64, u64)],
@@ -219,21 +212,14 @@ impl BlockAllocator {
     }
 
     /// Where a new file starts: past every file there is or was.
-    fn next_start(&self) -> u64 {
+    pub fn next_start(&self) -> u64 {
         let last = self.files.values().next_back().map_or(0, |f| f.end);
         self.next.max(last)
     }
 
-    /// Return a run to its file's holes, coalescing with its neighbours. A
-    /// run the last durable checkpoint still points at is **deferred**
-    /// instead (released by the next
-    /// [`set_protected`](Self::set_protected)).
+    /// Return a run to its file's holes, coalescing with its neighbours.
     pub fn free(&mut self, run: Run) {
         if run.count == 0 {
-            return;
-        }
-        if self.is_protected(run) {
-            self.pending.push(run);
             return;
         }
         let file = self.file_of(run.start);
@@ -243,26 +229,36 @@ impl BlockAllocator {
         }
     }
 
-    /// Install a checkpoint's runs as the newest protected set, demoting the
-    /// one it supersedes to `previous` — which stays protected until
-    /// [`release_previous`](Self::release_previous), because that older
-    /// checkpoint is still a reachable recovery root (see module docs).
-    pub fn set_protected(&mut self, runs: &[Run]) {
-        let fresh = runs
-            .iter()
-            .filter(|r| r.count > 0)
-            .map(|r| (r.start, r.count))
-            .collect();
-        self.previous = std::mem::replace(&mut self.protected, fresh);
-        self.retry_pending();
+    /// Free `run` once the batch freeing it is durable (see module docs).
+    pub fn defer(&mut self, run: Run) {
+        if run.count > 0 {
+            self.pending.push(run);
+            self.deferred_total += 1;
+        }
     }
 
-    /// Drop the older generation's protection and return whatever it alone was
-    /// holding to the pool. Called once the newest checkpoint's `Commit` frame
-    /// is known durable, which makes it the only reachable root.
-    pub fn release_previous(&mut self) {
-        self.previous.clear();
-        self.retry_pending();
+    /// Where the deferred frees stand — what a batch ending now covers.
+    #[must_use]
+    pub const fn mark(&self) -> u64 {
+        self.deferred_total
+    }
+
+    /// Whether every free deferred before `mark` is a hole by now.
+    #[must_use]
+    pub const fn released(&self, mark: u64) -> bool {
+        self.released_total >= mark
+    }
+
+    /// The batch that covered every free deferred before `mark` is
+    /// durable: those frees become holes.
+    pub fn release_to(&mut self, mark: u64) {
+        let count = mark.saturating_sub(self.released_total) as usize;
+        let count = count.min(self.pending.len());
+        let released: Vec<Run> = self.pending.drain(..count).collect();
+        self.released_total += count as u64;
+        for run in released {
+            self.free(run);
+        }
     }
 
     /// Cut every file's free tail off — the active file's too when
@@ -296,29 +292,6 @@ impl BlockAllocator {
             self.files.remove(&cut.file);
         }
         cuts
-    }
-
-    /// Re-offer every deferred free — anything no longer protected returns to
-    /// its holes.
-    fn retry_pending(&mut self) {
-        let pending = std::mem::take(&mut self.pending);
-        for run in pending {
-            self.free(run); // re-checks protection
-        }
-    }
-
-    /// Whether `run` intersects a run either live generation protects.
-    fn is_protected(&self, run: Run) -> bool {
-        Self::covers(&self.protected, run) || Self::covers(&self.previous, run)
-    }
-
-    /// Whether one generation's set covers any block of `run`. Within a single
-    /// set the runs are a snapshot of live allocations and so never overlap,
-    /// which is what lets a single probe decide it.
-    fn covers(set: &BTreeMap<u64, u64>, run: Run) -> bool {
-        set.range(..run.end())
-            .next_back()
-            .is_some_and(|(&start, &count)| start + count > run.start)
     }
 }
 
@@ -443,22 +416,23 @@ mod tests {
         assert_eq!(a.alloc(1), Run::new(1, 1), "nothing durable named them");
     }
 
+    /// A deferred free counts as deferred, not free, until its batch is
+    /// durable — and a reclaim does not cut it meanwhile.
     #[test]
-    fn protected_frees_defer_until_released() {
+    fn deferred_frees_wait_for_their_release() {
         let mut a = alloc(100);
-        let ckpt = a.alloc(2);
-        let page = a.alloc(3);
-        a.set_protected(&[ckpt]);
-        a.free(ckpt);
-        assert_eq!(a.free_blocks(), 0, "protected free must defer");
-        assert_eq!(a.files()[0].deferred, 2);
-        a.free(page);
-        assert_eq!(a.free_blocks(), 3);
-        // The next checkpoint only *demotes* the old set: still a root.
-        a.set_protected(&[Run::new(5, 2)]);
-        assert_eq!(a.free_blocks(), 3, "a demoted set still protects");
-        a.release_previous();
-        assert_eq!(a.free_blocks(), 5, "deferred free must release");
+        let (x, y) = (a.alloc(2), a.alloc(3));
+        a.alloc(1);
+        a.defer(x);
+        let first = a.mark();
+        a.defer(y);
+        assert_eq!((a.free_blocks(), a.deferred_blocks()), (0, 5));
+        a.release_to(first);
+        assert_eq!((a.free_blocks(), a.deferred_blocks()), (2, 3));
+        a.release_to(first);
+        assert_eq!(a.free_blocks(), 2, "a mark releases once");
+        a.release_to(a.mark());
+        assert_eq!((a.free_blocks(), a.deferred_blocks()), (5, 0));
     }
 
     #[test]
