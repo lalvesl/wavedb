@@ -1,37 +1,20 @@
 //! [`StoreOptions`] — what a [`PageStore`](crate::PageStore) is opened with:
-//! the durability window, the cache budgets, and the object store its pages
+//! the cache budgets, the data files' size, and the object store its pages
 //! live in, if any. Split from [`crate::page_store`].
 
-use std::time::Duration;
-
-/// How a store answers the durability question and how much RAM it may spend
-/// answering reads — chosen once at [`open_with`](crate::PageStore::open_with)
-/// (RFCs 0061, 0044, 0065 §6).
+/// How much RAM a store may spend answering reads, and where its pages live —
+/// chosen once at [`open_with`](crate::PageStore::open_with) (RFCs 0044,
+/// 0065 §6, 0070, 0071).
 ///
-/// Opened, never inferred: a durability mode that changes by itself is a
-/// guarantee nobody can reason about, and a cache budget that drifts is a
-/// memory ceiling nobody can hold a process to.
+/// Opened, never inferred: a cache budget that drifts is a memory ceiling
+/// nobody can hold a process to. Durability is not among them: it is chosen
+/// per write (`apply` or [`apply_durable`](crate::PageStore::apply_durable),
+/// RFC 0072).
 ///
-/// **None of these fields reaches stored bytes**, so none folds into a
-/// `STRUCT_HASH`: a window and two cache budgets change when work happens and
-/// what is held in RAM while it does, never what is written. Two stores opened
-/// with different options hold byte-identical files.
+/// **The cache budgets never reach stored bytes**, so they fold into no
+/// `STRUCT_HASH`: they change what is held in RAM, never what is written.
 #[derive(Debug, Clone)]
 pub struct StoreOptions {
-    /// Longest a `Batch` may sit unsynced. **Zero (the default) is one
-    /// barrier per batch** — the promise the engine was built around, and
-    /// what every existing caller keeps.
-    ///
-    /// Non-zero trades it for group commit: `apply` appends without a barrier
-    /// and syncs only once the window has elapsed, so a burst inside one
-    /// window amortises to a single `fsync`. `Ok` from a write then means *in
-    /// the journal, ordered, and durable within the window unless the process
-    /// dies first* — a crash loses a **suffix** of acknowledged writes and
-    /// never corrupts (frames are crc-framed, replay stops at the first torn
-    /// one). [`flush`](crate::PageStore::flush) forces the barrier when a
-    /// particular write does need the stronger answer.
-    pub relax_window: Duration,
-
     /// Bytes of **page images** the block file may hold (RFC 0044) — whole
     /// runs, still compressed, exactly as they sit on disk.
     ///
@@ -84,11 +67,10 @@ pub struct StoreOptions {
 pub const DEFAULT_RECORD_CACHE_BYTES: usize = 96 << 20;
 
 impl Default for StoreOptions {
-    /// Exactly today's engine: one barrier per batch, a 64 MiB page cache,
-    /// and a record-cache budget nothing applies unless asked.
+    /// A 64 MiB page cache, and a record-cache budget nothing applies
+    /// unless asked.
     fn default() -> Self {
         Self {
-            relax_window: Duration::ZERO,
             page_cache_bytes: crate::page_cache::DEFAULT_BUDGET_BYTES,
             record_cache_bytes: DEFAULT_RECORD_CACHE_BYTES,
             remote: None,
