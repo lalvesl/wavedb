@@ -2,7 +2,7 @@
 //! a [`BlockFile`].
 //!
 //! The addressing math and the container live in [`crate::directory`]. The
-//! write half is not here: pages are rewritten by the checkpoint
+//! write half is not here: pages are rewritten by the settle
 //! ([`crate::plan`] builds the images, [`crate::checkpoint`] places them all
 //! in one window), so no single-record page rewrite path exists.
 
@@ -78,7 +78,7 @@ mod tests {
         Id::new(key, U48::from(1u32), false, (key & 0x7FFF) as u16)
     }
 
-    /// A page written by hand (what the checkpoint's window does in bulk)
+    /// A page written by hand (what a settle window does in bulk)
     /// resolves back through the directory's read path.
     #[test]
     fn a_placed_page_resolves_through_the_directory() {
