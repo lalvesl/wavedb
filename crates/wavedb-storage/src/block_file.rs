@@ -66,9 +66,9 @@ pub struct BlockFile {
 
 /// Disk operations issued on one [`BlockFile`] since it was opened.
 ///
-/// The accounting behind RFC 0041's claim: a settle round is **one** write,
-/// a checkpoint one write plus one sync per file written, and reads are one
-/// per touched page.
+/// The accounting behind RFC 0041's and RFC 0072's claims: a settle round is
+/// **one** write, a batch one sync per file written, and reads are one per
+/// touched page.
 #[derive(Debug, Default)]
 pub struct IoCounts {
     reads: Cell<u64>,
