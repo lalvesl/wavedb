@@ -39,7 +39,7 @@ pub enum StorageError {
     #[error("corrupt {0}")]
     Corrupt(&'static str),
     /// A record larger than the record cache can hold
-    /// (`record_log::MAX_RECORD`), refused before the journal sees it.
+    /// (`record_log::MAX_RECORD`), refused before anything is committed.
     #[error("a record of {0} bytes is too large to commit")]
     RecordTooLarge(usize),
     /// A write named a `STRUCT_HASH` with no registered [`StructStorage`] slot
@@ -55,10 +55,10 @@ pub enum StorageError {
     /// another process. Its files are locked while a store has it open.
     #[error("the data directory is already open")]
     EngineBusy,
-    /// A journal barrier failed: the file's durable state is unknown, so the
-    /// store refuses further writes until it is reopened and recovers from
-    /// what is on disk (`crate::barrier`).
-    #[error("a journal barrier failed; reopen the store")]
+    /// A settle's write or barrier failed: the files' durable state is
+    /// unknown, so the store refuses further writes until it is reopened and
+    /// reconstructed from what is on disk (`crate::barrier`).
+    #[error("a settle's write or barrier failed; reopen the store")]
     BarrierFailed,
     /// The object store failed a request (RFC 0070) — a socket fault, or an
     /// answer the client does not take for success.
@@ -94,7 +94,7 @@ pub enum StorageError {
     Core(#[from] wavedb_core::Error),
 }
 
-/// A held lock on a data file or a journal means another store has the directory open
+/// A held lock on a data file means another store has the directory open
 /// ([`StorageError::EngineBusy`]); any other failure to lock is I/O.
 impl From<std::fs::TryLockError> for StorageError {
     fn from(e: std::fs::TryLockError) -> Self {
