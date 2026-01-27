@@ -19,12 +19,8 @@
 //! The dictionary is stored in the data files like a page: a block run handed out
 //! by the allocator, holding `[len (u32 LE)][to_wire_checked(buf)]`, repointed
 //! by its [`Directory`](crate::directory::Directory) whenever the buffer
-//! grows (which stops at the cap). On open, the data files are a journal-replay
-//! projection: the settle path re-samples the same records in the same order,
-//! so the buffer — and every `dict_len` a rebuilt page stamps — is reproduced
-//! deterministically and re-persisted. Reading the stored run back becomes
-//! load-bearing only when settling checkpoints (stops truncating the data files
-//! on open).
+//! grows (which stops at the cap). On open the run the newest header names is
+//! read back, so every `dict_len` a page stamps resolves against it.
 
 use wavedb_core::wire::{from_wire_checked, to_wire_checked};
 
@@ -168,7 +164,7 @@ impl DictState {
 
     /// Warm the dictionary with a settling record (append-only, capped),
     /// reporting whether the buffer actually grew — a grown buffer must be
-    /// re-persisted, which the checkpoint does by placing [`image`](Self::image)
+    /// re-persisted, which the settle does by placing [`image`](Self::image)
     /// in its window and then [`repoint`](Self::repoint)ing this state at it.
     /// A disabled state never samples and never allocates a run.
     pub(crate) fn sample(&mut self, record: &[u8]) -> bool {
@@ -194,9 +190,8 @@ impl DictState {
         std::mem::replace(&mut self.desc, desc)
     }
 
-    /// Adopt a checkpoint-persisted dictionary and the run it lives in —
-    /// the open-from-checkpoint path, where the buffer is loaded instead of
-    /// re-sampled by replay.
+    /// Adopt a persisted dictionary and the run it lives in — the open's
+    /// path, where the buffer is read back from the run the headers name.
     pub(crate) fn load(&mut self, dict: Dictionary, desc: BlockDescriptor) {
         self.dict = dict;
         self.desc = desc;
@@ -208,7 +203,7 @@ mod tests {
     use super::{DICT_CAP, DictState, Dictionary};
     use crate::block::{BlockDescriptor, Run};
 
-    // Sampling reports growth so the checkpoint knows to place a fresh image;
+    // Sampling reports growth so the settle knows to place a fresh image;
     // the image round-trips byte-identically and `repoint` hands back the run
     // to free. A disabled state never samples and never claims a run.
     #[test]
