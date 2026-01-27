@@ -28,8 +28,8 @@
 //!
 //! ## Not cached
 //!
-//! Only page reads go through here. The dictionary image, the addressing log's
-//! chunks and the defragmenter's relocation reads all want owned, mutable
+//! Only page reads go through here. The dictionary image, the headers and the
+//! defragmenter's relocation reads all want owned, mutable
 //! buffers and are read straight from the file — caching them would hold bytes
 //! that are read once.
 //!
