@@ -5,7 +5,7 @@
 //! [`BlockAllocator`] (in [`crate::alloc`], re-exported here) hands out
 //! contiguous runs and reclaims them, coalescing adjacent free space so large
 //! pages always have somewhere to land. It is a **pure in-memory structure** —
-//! durability (journaling every alloc/free) is the pipeline's job, not this
+//! durability (the headers naming every run) is the settle's job, not this
 //! module's.
 
 pub use crate::alloc::BlockAllocator;
