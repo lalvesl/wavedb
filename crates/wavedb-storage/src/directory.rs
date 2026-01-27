@@ -14,17 +14,17 @@
 //! `hash_of` is **SeaHash** over the `Id`'s 16 little-endian bytes. The seed is a
 //! per-database random `[u64; 4]` (persisted in the database's `MANIFEST`), which gives the
 //! DoS resistance (an attacker can't precompute bucket collisions). SeaHash is
-//! portable across architecture and endianness, so the directory — rebuilt by
-//! **journal replay** — routes every record to the same bucket even if the data files
-//! is opened on a different machine.
+//! portable across architecture and endianness, so the directory — rebuilt from
+//! the headers on open — routes every record to the same bucket even if the data
+//! files are opened on a different machine.
 use crate::block::BlockDescriptor;
 use seahash::hash_seeded;
 
 /// A SeaHash of a 128-bit `Id` under a per-database seed.
 ///
 /// Portable across every machine, architecture, and endianness (the `seahash`
-/// crate guarantees it), so data files rebuilt by journal replay on a different
-/// machine routes every record to the same bucket. The `Id` is fed as its 16
+/// crate guarantees it), so data files reopened on a different machine route
+/// every record to the same bucket. The `Id` is fed as its 16
 /// little-endian bytes; the per-database `seed` randomises bucket placement so
 /// collisions can't be precomputed.
 #[must_use]
@@ -83,7 +83,7 @@ impl Directory {
         }
     }
 
-    /// Rebuild a directory from already-known descriptors (e.g. journal replay).
+    /// Rebuild a directory from already-known descriptors (a reconstruction).
     ///
     /// # Panics
     /// Panics if `slots` is empty — a directory always has at least one bucket.
