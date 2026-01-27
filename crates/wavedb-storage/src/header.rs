@@ -151,7 +151,7 @@ impl Default for Rotation {
 }
 
 /// Where an object-backed store's chain of files stands — in RAM, and
-/// recorded in the disk's addressing log ([`ChainRecord`]).
+/// recorded in the disk's headers ([`ChainRecord`]).
 #[derive(Debug, Default, Clone)]
 pub struct Chain {
     /// The next remote block an upload writes at.
