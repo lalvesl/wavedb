@@ -2,14 +2,14 @@
 //!
 //! Its pages live in the object store, and what it holds besides — the
 //! pages not uploaded yet and those it caches — is laid out in RAM exactly
-//! as data files on disk would lay it out (`crate::backing`). There is no journal:
+//! as data files on disk would lay it out (`crate::backing`). Nothing settles to disk:
 //! **a write is durable once an upload has carried it.** The store uploads
 //! when it holds a file's worth of pages or when its oldest write has
 //! waited the caller's interval ([`unuploaded_for`](PageStore::unuploaded_for)),
 //! so a crash loses at most that interval's writes, and a close that uploads
 //! everything first ([`upload_all`](PageStore::upload_all)) loses nothing.
 //!
-//! No addressing log either: nothing ever reopens from RAM. Every open is a
+//! No header either: nothing ever reopens from RAM. Every open is a
 //! recovery from the files (`crate::recover`), which take only a **cut** —
 //! an upload carrying every batch up to a point, whole — so what a crash
 //! leaves is always the database as it stood at some acknowledged batch.
