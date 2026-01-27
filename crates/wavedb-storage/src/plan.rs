@@ -1,4 +1,4 @@
-//! Phase 1 of a checkpoint ([RFC 0041]) — turning a round of touched ids into
+//! Phase 1 of a settle round ([RFC 0041]) — turning a round of touched ids into
 //! page **images**, grouped per bucket, writing nothing.
 //!
 //! The pre-0041 settle walked a round **per `Id`**, and every id did a whole
@@ -12,7 +12,7 @@
 //! only ever moves keys out of the bucket being split, so a record placed
 //! against the pre-split directory keeps its address (or is repartitioned by
 //! the split itself). Nothing is written until the whole shape is decided, so
-//! no page is ever written twice in one checkpoint.
+//! no page is ever written twice in one round.
 //!
 //! [RFC 0041]: ../../../rfcs/0041-single-barrier-checkpoint.md
 
@@ -29,14 +29,14 @@ use crate::record_cache::Records;
 use crate::struct_storage::TypeSlot;
 
 /// Splits one round may perform — a pacing budget on how fast the directory
-/// grows in one checkpoint. Page size is a target, not an invariant: a bucket
+/// grows in one round. Page size is a target, not an invariant: a bucket
 /// still over target is split when its turn next comes round, or never, if
 /// splitting cannot relieve it ([RFC 0049]).
 ///
 /// [RFC 0049]: ../../../rfcs/0049-elastic-pages-and-load-driven-splits.md
 const MAX_SPLITS_PER_ROUND: usize = 64;
 
-/// One slot's planned contribution to a checkpoint.
+/// One slot's planned contribution to a settle round.
 pub struct SlotPlan {
     /// Index into [`PageStore::types`].
     pub(crate) idx: usize,
@@ -97,7 +97,7 @@ impl PageStore {
     // The dictionary guard spans the whole plan by design: every page this
     // slot serialises must bind the same (possibly grown) buffer state, so
     // dropping it early — the lint's suggestion — would let two pages of one
-    // checkpoint stamp different `dict_len`s.
+    // round stamp different `dict_len`s.
     #[allow(clippy::significant_drop_tightening)]
     pub(crate) fn plan_slot(
         &self,
