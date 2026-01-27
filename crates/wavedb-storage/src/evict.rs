@@ -7,9 +7,8 @@
 //!   resident type's pages never leave (§10): what navigation reads stays,
 //!   so only the record bytes it leads to are ever fetched.
 //! - **What it leaves behind**: [`BlockDescriptor::EVICTED`], and a run
-//!   freed like any superseded one. The change rides the next window, and a
-//!   checkpoint records it before its `Commit` frame, so no recovery root
-//!   ever names a freed run that is not still held back.
+//!   freed like any superseded one: a hole once a batch whose headers name
+//!   the eviction is durable, so no reconstruction ever names a cut run.
 //! - **Coming back**: a read of an evicted bucket goes to the object store
 //!   and marks the bucket wanted; a write restores it before it commits, so a
 //!   settle round never meets an evicted bucket and a page on disk is always
