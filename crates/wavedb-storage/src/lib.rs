@@ -1,10 +1,7 @@
 //! `wavedb-storage` — the per-node engine: block manager, per-`STRUCT_HASH`
-//! page directory (linear hashing), page format, dictionaries, journal pipeline.
-//!
-//! Built bottom-up. The [`block`] layer (descriptor + allocator), the
-//! [`directory`] addressing math, and the [`block_file`] I/O seam are in place;
-//! the page format, dictionaries, and journal pipeline follow. See
-//! `crates/wavedb-storage/README.md` for the target design.
+//! page directory (linear hashing), page format, dictionaries, and the settle
+//! pipeline whose batches are the durability point (RFC 0072). See
+//! `crates/wavedb-storage/README.md` for the design.
 
 // Byte-precise packing/hashing code casts deliberately between integer widths.
 #![allow(
