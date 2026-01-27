@@ -133,9 +133,8 @@ impl BlockAllocator {
         self.files.values().map(|f| f.free_blocks).sum()
     }
 
-    /// Blocks held back by deferred frees — runs a live generation still
-    /// protects. Zero when no checkpoint is reachable (a fresh store), and the
-    /// gauge that says protection is actually engaged.
+    /// Blocks held back by deferred frees — runs the newest durable batch
+    /// still names, holes once the next one is durable.
     #[must_use]
     pub fn deferred_blocks(&self) -> u64 {
         self.pending.iter().map(|r| r.count).sum()
