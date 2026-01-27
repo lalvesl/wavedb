@@ -18,7 +18,7 @@
 //! - `w` — where the next entry goes;
 //! - `s` — how far the settle has reached: before it, every entry's page is
 //!   written;
-//! - `r` — `w` when a checkpoint last rotated the journal: it owes a settle
+//! - `r` — `w` when a settle cycle last opened a batch: it owes a settle
 //!   while `s < r`.
 //!
 //! [RFC 0068]: ../../../rfcs/0068-record-cache-as-a-log-WIP.md
@@ -109,7 +109,7 @@ impl TypeLog {
     /// went. `clock` stamps a chunk started for it, and ticks.
     ///
     /// `bytes` must not exceed [`MAX_RECORD`]; the commit path refuses such a
-    /// record before the journal sees it.
+    /// record before anything is committed.
     pub fn append(
         &mut self,
         id: u128,
@@ -204,12 +204,12 @@ impl TypeLog {
         self.s < self.w
     }
 
-    /// Whether the open checkpoint still owes a settle here.
+    /// Whether the open batch still owes a settle here.
     pub const fn owes(&self) -> bool {
         self.s < self.r
     }
 
-    /// A checkpoint rotated the journal: what is written so far is owed.
+    /// A batch opened: what is written so far is owed to it.
     pub const fn rotate(&mut self) {
         self.r = self.w;
     }
