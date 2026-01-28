@@ -55,22 +55,11 @@ impl NetClient {
     async fn exchange(
         &self,
         auth: Auth,
-        struct_hash: u64,
-        command: Command,
-        payload: Vec<u8>,
+        frame: CommandFrame,
     ) -> Result<PostFrames> {
         // The manager assembles the `Request` (it owns the poll cursors it
         // piggybacks onto the frame — W7), so the client hands it the parts.
-        crate::manager::post(
-            &self.addr,
-            auth,
-            CommandFrame {
-                struct_hash,
-                command,
-                payload,
-            },
-        )
-        .await
+        crate::manager::post(&self.addr, auth, frame).await
     }
 
     /// Send one scalar command under `auth` and await the node's answer.
@@ -86,8 +75,21 @@ impl NetClient {
         command: Command,
         payload: Vec<u8>,
     ) -> Result<Executed> {
-        let mut frames =
-            self.exchange(auth, struct_hash, command, payload).await?;
+        let frame = CommandFrame::new(struct_hash, command, payload);
+        self.call_frame(auth, frame).await
+    }
+
+    /// [`call`](Self::call) with the frame built by the caller — a durable
+    /// write's ([`CommandFrame::durable`]).
+    ///
+    /// # Errors
+    /// As [`call`](Self::call).
+    pub async fn call_frame(
+        &self,
+        auth: Auth,
+        frame: CommandFrame,
+    ) -> Result<Executed> {
+        let mut frames = self.exchange(auth, frame).await?;
         loop {
             let bytes = frames
                 .next_frame()
@@ -139,7 +141,8 @@ impl NetClient {
         command: Command,
         payload: Vec<u8>,
     ) -> Result<impl Stream<Item = Result<Vec<u8>>> + use<>> {
-        let frames = self.exchange(auth, struct_hash, command, payload).await?;
+        let frame = CommandFrame::new(struct_hash, command, payload);
+        let frames = self.exchange(auth, frame).await?;
         Ok(futures::stream::unfold(Some(frames), |state| async move {
             let mut frames = state?;
             loop {
