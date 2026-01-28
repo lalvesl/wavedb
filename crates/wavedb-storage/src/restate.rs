@@ -2,7 +2,7 @@
 //! after the addresses its batch changed restates old ones — on disk and in
 //! the object store alike — and the horizon that restating moves.
 //!
-//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
 use std::collections::BTreeMap;
 
