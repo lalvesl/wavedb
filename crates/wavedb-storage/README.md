@@ -43,7 +43,7 @@ pipeline whose settle is the durability point. This is where most of WaveDB's en
 
 Settle and rebalance are **off the mutation path**: `apply` only commits to the
 caches; the node's maintenance loop opens a settle cycle every 200 ms, and
-`apply_durable` waits for it ([RFC 0072](../../rfcs/0072-the-settle-is-the-durability-point-WIP.md)). The
+`apply_durable` waits for it ([RFC 0072](../../rfcs/0072-the-settle-is-the-durability-point.md)). The
 `Pivot`/`BpTree` index layer lives in `wavedb_core::index`, not here.
 
 ---
@@ -90,7 +90,7 @@ runs the reconstruction names — pages, dictionaries, the headers it read;
 what lies past a file's last used run — what a crash cut before its batch
 ended — is cut, and a file no run names is deleted. A freed run becomes a
 hole only once the batch that stopped naming it is durable
-([RFC 0072](../../rfcs/0072-the-settle-is-the-durability-point-WIP.md) §8).
+([RFC 0072](../../rfcs/0072-the-settle-is-the-durability-point.md) §8).
 
 ---
 
@@ -370,7 +370,7 @@ mutation → the type's record log (RAM) → (client confirmed)
    log in RAM and returns — durable at the next settle cycle, within a tick
    (200 ms on a node) and a barrier. `apply_durable` waits for that cycle;
    everything committed before a durable write is durable with it
-   ([RFC 0072](../../rfcs/0072-the-settle-is-the-durability-point-WIP.md)).
+   ([RFC 0072](../../rfcs/0072-the-settle-is-the-durability-point.md)).
 2. **Cache as a log per type.** Confirmed mutations live in the type's own log
    (RFC 0068); reads serve from it directly.
 3. **The settle cycle — one window per round.** A cycle marks every log's end
