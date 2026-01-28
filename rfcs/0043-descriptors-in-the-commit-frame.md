@@ -2,7 +2,7 @@
 
 - **Status:** Implemented (landed 2026-07-28)
 - **Superseded by:** [RFC 0046](0046-directory-deltas-in-the-window.md), then
-  [RFC 0072](0072-the-settle-is-the-durability-point-WIP.md) (2026-10-16) — there is no `Commit` frame any more.
+  [RFC 0072](0072-the-settle-is-the-durability-point.md) (2026-10-16) — there is no `Commit` frame any more.
 - **Supersedes:** the directory-chain blocks of
   [RFC 0019](0019-journal-rooted-recovery-DEPRECATED.md) (the `Commit` frame's *roots*)
 - **Amended by:** [RFC 0046](0046-directory-deltas-in-the-window.md)
