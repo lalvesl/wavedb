@@ -15,24 +15,22 @@
 
 use futures::Stream;
 
-use crate::collection::Collection;
 use crate::error::{Error, Result};
 use crate::fuzzy::{Fuzzy, Scored};
 use crate::handle::DbHandle;
 use crate::id::Id;
 use crate::index::Bound;
-use crate::lease::{Leases, Locked, Reach};
+use crate::lease::{Leases, Locked};
 use crate::local_id::LocalId;
 use crate::metadata::Metadata;
 use crate::node_op::{NodeOp, NodeReply};
 use crate::placement::Owner;
 use crate::route::Route;
-use crate::route_reply::{
-    buffered, decode, done, mismatch, value, values, versions,
-};
+use crate::route_reply::{buffered, decode, mismatch, value, values, versions};
 use crate::traits::{NonUniqueStruct, UniqueStruct};
 use crate::u48::U48;
-use crate::wire::to_wire;
+
+mod ops;
 
 /// A borrowed [`Route`] bound to a tenant, and — for a `#[server]` body —
 /// the owners that body holds.
@@ -119,36 +117,6 @@ impl<'a, R: Route> RouteHandle<'a, R> {
         }
         Ok(locked)
     }
-
-    /// Run `op` on `struct_hash`'s owner: under its lease when the body
-    /// holds it, plainly when the body holds nothing, refused when the body
-    /// holds a lock that does not cover it.
-    async fn run(&self, struct_hash: u64, op: NodeOp) -> Result<NodeReply> {
-        let Some(leases) = self.leases else {
-            return self.route.run(self.tenant, struct_hash, op).await;
-        };
-        let owner = op.owner(self.tenant, struct_hash);
-        let creates = matches!(op, NodeOp::CreatePivot(_));
-        match leases.reach(self.tenant, owner, creates) {
-            Reach::Plain => self.route.run(self.tenant, struct_hash, op).await,
-            Reach::Leased(lease) => {
-                self.route
-                    .run_leased(&lease, self.tenant, struct_hash, op)
-                    .await
-            }
-            Reach::Created => {
-                let reply =
-                    self.route.run(self.tenant, struct_hash, op).await?;
-                if creates {
-                    leases.created(self.tenant, owner);
-                }
-                Ok(reply)
-            }
-            Reach::Refused => Err(Error::LockOrder(
-                "an owner outside the held lock: take every owner in one lock",
-            )),
-        }
-    }
 }
 
 impl<R: Route> DbHandle for RouteHandle<'_, R> {
@@ -171,8 +139,14 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
     }
 
     async fn save_unique<T: UniqueStruct>(&self, value: &T) -> Result<()> {
-        let op = NodeOp::SaveUnique(to_wire(value));
-        done(&self.run(T::STRUCT_HASH, op).await?)
+        self.save_unique_with(value, false).await
+    }
+
+    async fn save_unique_durable<T: UniqueStruct>(
+        &self,
+        value: &T,
+    ) -> Result<()> {
+        self.save_unique_with(value, true).await
     }
 
     fn unique_history<T: UniqueStruct + 'static>(
@@ -184,11 +158,13 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
     }
 
     async fn create_pivot<T: NonUniqueStruct>(&self) -> Result<LocalId> {
-        // Minted here, created where the id places it: the owner of a new
-        // collection is known before the collection exists.
-        let pivot = Collection::<T>::mint_pivot(self.tenant);
-        done(&self.run(T::STRUCT_HASH, NodeOp::CreatePivot(pivot)).await?)?;
-        Ok(pivot)
+        self.create_pivot_with::<T>(false).await
+    }
+
+    async fn create_pivot_durable<T: NonUniqueStruct>(
+        &self,
+    ) -> Result<LocalId> {
+        self.create_pivot_with::<T>(true).await
     }
 
     async fn insert<T: NonUniqueStruct>(
@@ -196,14 +172,15 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
         pivot: LocalId,
         value: &T,
     ) -> Result<Id> {
-        let body = to_wire(value);
-        match self
-            .run(T::STRUCT_HASH, NodeOp::Insert { pivot, body })
-            .await?
-        {
-            NodeReply::Inserted(id) => Ok(id),
-            _ => Err(mismatch()),
-        }
+        self.insert_with(pivot, value, false).await
+    }
+
+    async fn insert_durable<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        value: &T,
+    ) -> Result<Id> {
+        self.insert_with(pivot, value, true).await
     }
 
     async fn get_record<T: NonUniqueStruct>(
@@ -223,9 +200,16 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
         id: Id,
         value: &T,
     ) -> Result<()> {
-        let body = to_wire(value);
-        let op = NodeOp::Update { pivot, id, body };
-        done(&self.run(T::STRUCT_HASH, op).await?)
+        self.update_with(pivot, id, value, false).await
+    }
+
+    async fn update_durable<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        id: Id,
+        value: &T,
+    ) -> Result<()> {
+        self.update_with(pivot, id, value, true).await
     }
 
     async fn remove<T: NonUniqueStruct>(
@@ -233,13 +217,15 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
         pivot: LocalId,
         id: Id,
     ) -> Result<bool> {
-        match self
-            .run(T::STRUCT_HASH, NodeOp::Remove { pivot, id })
-            .await?
-        {
-            NodeReply::Removed(removed) => Ok(removed),
-            _ => Err(mismatch()),
-        }
+        self.remove_with::<T>(pivot, id, false).await
+    }
+
+    async fn remove_durable<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        id: Id,
+    ) -> Result<bool> {
+        self.remove_with::<T>(pivot, id, true).await
     }
 
     fn all<T: NonUniqueStruct + 'static>(
