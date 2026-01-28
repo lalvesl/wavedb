@@ -1,7 +1,7 @@
 # RFC 0071 — Data files named by address
 
 - **Status:** Implemented (accepted and landed 2026-10-15)
-- **Amended by:** [RFC 0072](0072-the-settle-is-the-durability-point-WIP.md) (2026-10-16) — §5–§7's protected generations and
+- **Amended by:** [RFC 0072](0072-the-settle-is-the-durability-point.md) (2026-10-16) — §5–§7's protected generations and
   two-checkpoint sealing give way to frees deferred to the batch's barrier, and
   a compaction restates every address before it moves anything.
 - **Supersedes:** [RFC 0069](0069-compaction-into-the-holes-DEPRECATED.md)'s placement
