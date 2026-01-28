@@ -2,7 +2,7 @@
 //! the changes no header names yet, and where the chain of headers stands.
 //! Split from [`crate::disk_header`], which writes the headers.
 //!
-//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
 use std::collections::{BTreeMap, BTreeSet};
 
