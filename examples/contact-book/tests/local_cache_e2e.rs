@@ -134,8 +134,10 @@ fn client_survives_node_restart_with_warm_local_reads() {
             .insert(&db, &contact("Alan", "555-0002", "London"))
             .await
             .expect("insert alan");
+        // Durable: the node answers once the collection's shard settled it,
+        // and the two inserts before it with it (RFC 0072).
         contacts
-            .save(&db, grace, &contact("Grace", "555-0001", "London"))
+            .save_durable(&db, grace, &contact("Grace", "555-0001", "London"))
             .await
             .expect("update grace");
         let walked: Vec<Contact> =
@@ -150,9 +152,8 @@ fn client_survives_node_restart_with_warm_local_reads() {
         );
 
         // ── Node down: everything seen answers warm from the local engine ───
-        // Ordinary writes are durable at the node's next settle tick (200 ms,
-        // RFC 0072): a kill before it would lose them, as a crash would.
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        // No wait before the kill: what the restart needs was written
+        // durably — the book by `open_book`, the contacts by the update.
         node.kill().expect("kill the node");
         node.wait().expect("reap the node");
 
