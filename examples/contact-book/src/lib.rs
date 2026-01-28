@@ -63,13 +63,17 @@ pub struct Contact {
 
 /// Ensure this tenant's book exists (idempotent): first call creates the
 /// `Contact` pivot and saves the `ContactBook` holding it.
+///
+/// Both durably, in that order: the book and its collection live on
+/// different shards of the node, and a book that outlived a crash its
+/// collection did not would name nothing.
 #[server]
 pub async fn open_book(db: &Db, owner: String) -> Result<()> {
     if ContactBook::get(db).await?.is_some() {
         return Ok(());
     }
-    let contacts = Contact::create_pivot(db).await?;
-    ContactBook { owner, contacts }.save(db).await?;
+    let contacts = Contact::create_pivot_durable(db).await?;
+    ContactBook { owner, contacts }.save_durable(db).await?;
     Ok(())
 }
 
