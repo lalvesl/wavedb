@@ -333,6 +333,9 @@ pub trait Store {                  // key→value over Id + wire bytes
     // type's slot. Default = plain `get` — flat backends need nothing extra.
     async fn get_of(&self, struct_hash: u64, id: Id) -> Result<Option<Vec<u8>>>;
     async fn apply(&self, batch: &[Write]) -> Result<()>;  // atomic: all-or-nothing
+    // …and resolved only once durable (RFC 0072). Default = `apply`: a store
+    // with no settle of its own (IndexedDB) is durable when `apply` resolves.
+    async fn apply_durable(&self, batch: &[Write]) -> Result<()>;
 }
 // `Put`'s type is the STRUCT_HASH at the head of its bytes; the other two
 // carry it, because an Id names no type and a per-type backend would
@@ -345,9 +348,20 @@ pub enum Write {
 ```
 
 - **native node** impl: the page engine (`wavedb-storage`) — `apply` = one batch
-  committed to the record cache, atomic; durable at the next settle (RFC 0072).
+  committed to the record cache, atomic; durable at the next settle (RFC 0072),
+  and `apply_durable` waits for that settle.
 - **web** impl: IndexedDB — `apply` = one IDB readwrite transaction.
-- **native client** impl: a file-backed key→value store.
+- **native client** impl: the same page engine on a carrier thread of its own,
+  reached by channel through a proxy store (`wavedb::cache::CacheStore`).
+
+**Durable operations.** Every write of the typed surface has a `_durable`
+twin — `save_durable`, `insert_durable`, `update_durable`,
+`remove_durable`, `create_pivot_durable` — answered once its batch is
+durable. None of them is written twice: `Durability<S>` is a store whose
+`apply` goes to `apply_durable` on a flag, and a durable operation is the
+plain one over it (`LocalHandle`), a `NodeOp` carrying the flag
+(`RouteHandle`, `ServerDb`), or a `CommandFrame` with its `durable` bit set
+(the client `Db`).
 
 The pages/headers/allocator live **behind** this trait, inside the native page
 `Store`. The `Pivot`/`BpTree` logic sits **above** it (the `index` contracts below)
