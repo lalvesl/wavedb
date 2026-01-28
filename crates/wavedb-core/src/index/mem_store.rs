@@ -13,11 +13,17 @@ use crate::u48::U48;
 use super::node::NodeBody;
 use super::tree::BpTree;
 
-/// In-memory `Store` for exercising the index layer.
+/// In-memory `Store` for exercising the index layer — counting the batches
+/// asked durable, which it applies like any other.
 #[derive(Default)]
-pub struct MemStore(Mutex<BTreeMap<u128, Vec<u8>>>);
+pub struct MemStore(Mutex<BTreeMap<u128, Vec<u8>>>, Mutex<usize>);
 
 impl MemStore {
+    /// How many batches came through `apply_durable`.
+    pub fn durable_batches(&self) -> usize {
+        *self.1.lock().unwrap()
+    }
+
     /// Number of stored values (in tree-only tests: the live node count).
     pub fn len(&self) -> usize {
         self.0.lock().unwrap().len()
@@ -41,6 +47,14 @@ impl Store for MemStore {
     }
 
     fn apply(&self, batch: &[Write]) -> impl Future<Output = Result<()>> {
+        std::future::ready(self.apply_now(batch))
+    }
+
+    fn apply_durable(
+        &self,
+        batch: &[Write],
+    ) -> impl Future<Output = Result<()>> {
+        *self.1.lock().unwrap() += 1;
         std::future::ready(self.apply_now(batch))
     }
 }
