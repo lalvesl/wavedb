@@ -123,7 +123,7 @@ seeds are pinned and verified before the client code that will use them.
 
 **Every fill settles WaveDB in bulk** — the Nix seed and the shop preload both:
 its writes are durable at the settles a byte threshold triggers
-(`FILL_SETTLE_BYTES`, [RFC 0072](../rfcs/0072-the-settle-is-the-durability-point-WIP.md)),
+(`FILL_SETTLE_BYTES`, [RFC 0072](../rfcs/0072-the-settle-is-the-durability-point.md)),
 not one by one. A fill is not a measurement, and a durable write per record is
 a barrier per record: that is why the WaveDB seed used to take minutes where
 the others took seconds. The other four get the same courtesy under other
