@@ -141,6 +141,7 @@ const fn frame(
     payload: Vec<u8>,
 ) -> CommandFrame {
     CommandFrame {
+        durable: false,
         struct_hash,
         command,
         payload,
