@@ -153,6 +153,7 @@ async fn navigate<X: Exec>(
     for declared in topics {
         let topic = declared.topic;
         let frame = CommandFrame {
+            durable: false,
             struct_hash: topic.struct_hash,
             command: Command::Changes,
             payload: to_wire(&(topic.pivot, declared.since)),
