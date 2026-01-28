@@ -26,7 +26,7 @@
 //!    root of its own.
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
-//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
 use futures::future::try_join_all;
 
