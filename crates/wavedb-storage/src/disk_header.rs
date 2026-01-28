@@ -8,7 +8,7 @@
 //! it as its 32 KiB hold; what does not fit waits for the next header, and
 //! only a header that leaves nothing unrecorded may end a batch.
 //!
-//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
 use std::cell::Ref;
 use std::collections::BTreeMap;
