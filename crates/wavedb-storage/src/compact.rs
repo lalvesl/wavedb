@@ -33,7 +33,7 @@
 //! it, and nothing is cut while a durable batch names it.
 //!
 //! [RFC 0071]: ../../../rfcs/0071-data-files-by-address.md
-//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
 use crate::error::StorageResult;
 use crate::page_store::PageStore;
