@@ -1,7 +1,7 @@
 # RFC 0041 — Single-barrier checkpoint
 
 - **Status:** Implemented (landed 2026-07-28)
-- **Superseded in part by:** [RFC 0072](0072-the-settle-is-the-durability-point-WIP.md) (2026-10-16) — the one-window settle round
+- **Superseded in part by:** [RFC 0072](0072-the-settle-is-the-durability-point.md) (2026-10-16) — the one-window settle round
   stays; the checkpoint, its journal rotation and its `Commit` frame are gone:
   the settle is the durability point.
 - **Crates:** `wavedb-storage` (`wavedb-quick-node`'s maintenance policy is the only affected caller)
