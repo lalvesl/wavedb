@@ -21,7 +21,7 @@
 //!    dictionaries name and every header the walk read; the rest is holes,
 //!    and the tail past the root — what a crash left — is cut.
 //!
-//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
 use std::collections::BTreeMap;
 
