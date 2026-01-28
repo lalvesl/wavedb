@@ -1,7 +1,7 @@
 # RFC 0048 — The addressing log as a chain — DEPRECATED
 
 - **Status:** Deprecated — superseded by
-  [RFC 0072 — The settle is the durability point](0072-the-settle-is-the-durability-point-WIP.md) (2026-10-16)
+  [RFC 0072 — The settle is the durability point](0072-the-settle-is-the-durability-point.md) (2026-10-16)
 - **Was:** Implemented (landed 2026-07-29)
 
 ## What it proposed
@@ -19,6 +19,6 @@ window instead.
 
 ## What replaced it
 
-[RFC 0072](0072-the-settle-is-the-durability-point-WIP.md) §3–§6: the 32 KiB header every window ends with — the same one
+[RFC 0072](0072-the-settle-is-the-durability-point.md) §3–§6: the 32 KiB header every window ends with — the same one
 the object store's files carry — chained by `prev` and per type by `last`,
 walked on open.
