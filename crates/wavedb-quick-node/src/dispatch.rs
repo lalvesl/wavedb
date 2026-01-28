@@ -26,7 +26,7 @@
 //! [`wavedb-quick-node` README]: https://docs.rs/wavedb-quick-node
 
 use wavedb_core::expose::{Caller, Exposure};
-use wavedb_core::{Error, Store};
+use wavedb_core::{Durability, Error, Store};
 use wavedb_net::auth::{self, TokenPurpose};
 use wavedb_net::frame::{
     Auth, CommandFrame, NodeError, NodeErrorKind, Response,
@@ -140,7 +140,11 @@ where
         ));
     }
 
-    // Gate 3 — decode (inside the generated step) + engine dispatch.
+    // Gate 3 — decode (inside the generated step) + engine dispatch. A
+    // durable frame runs the same step over a durable store: its batch is
+    // answered once the shard's settle made it durable (RFC 0072 §12), the
+    // owner held meanwhile.
+    let store = &Durability::new(store, frame.durable);
     match registry
         .execute(
             store,
@@ -199,8 +203,9 @@ mod tests {
 
     const SECRET: [u8; 32] = [9; 32];
 
+    /// The records, and per batch applied whether it was asked durable.
     #[derive(Default)]
-    struct MemStore(Mutex<BTreeMap<u128, Vec<u8>>>);
+    struct MemStore(Mutex<BTreeMap<u128, Vec<u8>>>, Mutex<Vec<bool>>);
 
     // A test double, written in the trait's own (async) shape.
     #[allow(clippy::unused_async_trait_impl)]
@@ -209,6 +214,16 @@ mod tests {
             Ok(self.0.lock().unwrap().get(&id.raw()).cloned())
         }
         async fn apply(&self, batch: &[Write]) -> Result<()> {
+            self.write(batch, false)
+        }
+        async fn apply_durable(&self, batch: &[Write]) -> Result<()> {
+            self.write(batch, true)
+        }
+    }
+
+    impl MemStore {
+        fn write(&self, batch: &[Write], durable: bool) -> Result<()> {
+            self.1.lock().unwrap().push(durable);
             let mut m = self.0.lock().unwrap();
             for w in batch {
                 if let Write::Expect(_, id, expected) = w
@@ -255,7 +270,7 @@ mod tests {
         }
         async fn execute<S: Store>(
             &self,
-            _: &S,
+            store: &S,
             caller: Caller,
             struct_hash: u64,
             command: Command,
@@ -263,6 +278,11 @@ mod tests {
         ) -> Result<Reply> {
             if struct_hash != 0x1234 {
                 return Err(Error::UnknownStructHash(struct_hash));
+            }
+            // A write step: one batch, whichever way the store applies it.
+            if command == Command::Save {
+                store.apply(&[]).await?;
+                return Ok(Reply::Done);
             }
             if command == Command::Changes {
                 use wavedb_core::expose::Change;
@@ -301,12 +321,33 @@ mod tests {
         Request {
             auth,
             frame: CommandFrame {
+                durable: false,
                 struct_hash,
                 command: Command::Get,
                 payload: Vec::new(),
             },
             sync: Vec::new(),
         }
+    }
+
+    /// A durable frame runs its step over a durable store: the step's one
+    /// `apply` reaches the engine's `apply_durable`, and an ordinary frame's
+    /// does not (RFC 0072 §12).
+    #[test]
+    fn a_durable_frame_applies_its_batch_durably() {
+        wavedb_platform::carrier::block_on(async {
+            let store = MemStore::default();
+            let auth =
+                Auth::Token(token(42, unix_now() + 60, TokenPurpose::Access));
+            for durable in [false, true] {
+                let mut save = request(auth.clone(), 0x1234);
+                save.frame.command = Command::Save;
+                save.frame.durable = durable;
+                let response = handle(&OneHash, &store, &SECRET, save).await;
+                assert_eq!(response, Response::Ok(Reply::Done));
+            }
+            assert_eq!(*store.1.lock().unwrap(), [false, true]);
+        });
     }
 
     fn token(user: u32, expires_at: u64, purpose: TokenPurpose) -> Vec<u8> {
@@ -336,6 +377,7 @@ mod tests {
         Request {
             auth,
             frame: CommandFrame {
+                durable: false,
                 struct_hash: SYNC_STRUCT_HASH,
                 command: Command::Get,
                 payload: wavedb_core::wire::to_wire(&SyncRequest {
