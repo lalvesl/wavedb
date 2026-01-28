@@ -33,7 +33,7 @@
 //! and reconstructed from what is actually on disk.
 //!
 //! [RFC 0067]: ../../../rfcs/0067-thread-per-core-shards-WIP.md
-//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
 use std::fs::File;
 use std::future::Future;
