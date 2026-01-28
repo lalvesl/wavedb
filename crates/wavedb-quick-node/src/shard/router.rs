@@ -299,6 +299,7 @@ mod tests {
                 tenant: U48::from(tenant),
             },
             frame: CommandFrame {
+                durable: false,
                 struct_hash,
                 command: Command::Get,
                 payload: Vec::new(),
