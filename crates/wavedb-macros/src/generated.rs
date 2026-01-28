@@ -253,6 +253,21 @@ pub fn nonunique_types(
             ) -> ::core::result::Result<#pivot_id, D::Error> {
                 db.create_pivot::<Self>().await.map(#pivot_id::new)
             }
+
+            /// [`create_pivot`](Self::create_pivot), resolving once the new
+            /// collection is durable — before the record that will hold its
+            /// `PivotId` is saved durably (on a node, the two usually live
+            /// on different shards).
+            ///
+            /// # Errors
+            /// The context's failure (backend/transport), or a failed
+            /// settle.
+            #[allow(clippy::future_not_send)]
+            pub async fn create_pivot_durable<D: ::wavedb_core::DbHandle>(
+                db: &D,
+            ) -> ::core::result::Result<#pivot_id, D::Error> {
+                db.create_pivot_durable::<Self>().await.map(#pivot_id::new)
+            }
         }
 
         #pivot_storage
