@@ -219,6 +219,7 @@ async fn topic_tail<E: Exposure>(
     topic: Topic,
 ) -> u64 {
     let frame = CommandFrame {
+        durable: false,
         struct_hash: topic.struct_hash,
         command: Command::Changes,
         payload: to_wire(&(topic.pivot, None::<u64>)),
