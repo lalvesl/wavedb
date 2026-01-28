@@ -17,9 +17,9 @@ use std::sync::Arc;
 
 use wavedb_core::expose::{Command, Reply};
 use wavedb_core::{LocalHandle, U48};
-use wavedb_net::NetClient;
+use wavedb_net::{CommandFrame, NetClient};
 
-use crate::cache::CacheStore;
+use crate::cache::{Cache, CacheStore};
 use crate::error::{Error, Result};
 
 /// A handle to a WaveDB node, bound to one `user`/`tenant` identity.
@@ -36,8 +36,9 @@ pub struct Db {
     access_token: Option<Vec<u8>>,
     /// The local write-through cache (`Db::open`); `None` = pure transport
     /// handle (`Db::connect`). Shared by clones — one engine per client, used
-    /// from one thread, as the engine is (an `Rc`, like the browser's store).
-    cache: Option<Rc<CacheStore>>,
+    /// from one thread (natively by channel to its carrier), with the turn
+    /// its mirrors take.
+    cache: Option<Rc<Cache>>,
     /// How watches transport their events (WebSocket push by default;
     /// [`watch_via_polling`](Self::watch_via_polling) switches to POSTs).
     watch_mode: wavedb_net::WatchMode,
@@ -74,8 +75,8 @@ impl Db {
     }
 
     /// [`connect`](Self::connect) plus a local write-through cache at the
-    /// **default location** for `app`: natively the journal + data files
-    /// engine under the platform cache base (`<base>/<app>` — `app` is the
+    /// **default location** for `app`: natively the node's engine, on a
+    /// carrier of its own, under the platform cache base (`<base>/<app>` — `app` is the
     /// leaf directly under the base, created automatically; see
     /// [`crate::cache::default_dir`]); in the browser the IndexedDB database
     /// named exactly `app`.
@@ -117,9 +118,9 @@ impl Db {
         tenant: U48,
         dir: impl AsRef<std::path::Path>,
     ) -> Result<Self> {
-        let store = crate::cache::open_native(&registry, dir.as_ref())?;
+        let cache = crate::cache::open_native(&registry, dir.as_ref())?;
         let mut db = Self::connect(addr, user, tenant).await?;
-        db.cache = Some(Rc::new(store));
+        db.cache = Some(Rc::new(cache));
         Ok(db)
     }
 
@@ -144,7 +145,7 @@ impl Db {
         let _ = registry;
         let store = CacheStore::open(app).await.map_err(Error::Core)?;
         let mut db = Self::connect(addr, user, tenant).await?;
-        db.cache = Some(Rc::new(store));
+        db.cache = Some(Rc::new(Cache::new(store)));
         Ok(db)
     }
 
@@ -156,7 +157,13 @@ impl Db {
     pub fn local(&self) -> Option<LocalHandle<'_, CacheStore>> {
         self.cache
             .as_deref()
-            .map(|store| LocalHandle::new(store, self.tenant))
+            .map(|cache| LocalHandle::new(&cache.store, self.tenant))
+    }
+
+    /// The local cache, when attached — what a mirror takes the turn of.
+    #[allow(clippy::redundant_pub_crate)]
+    pub(crate) fn cache(&self) -> Option<&Cache> {
+        self.cache.as_deref()
     }
 
     /// The same handle authenticating with `token` (the access half of a
@@ -256,8 +263,22 @@ impl Db {
         command: Command,
         payload: Vec<u8>,
     ) -> Result<Reply> {
+        let frame = CommandFrame::new(struct_hash, command, payload);
+        self.command_frame(frame).await
+    }
+
+    /// [`command`](Self::command) with the frame built by the caller — a
+    /// durable write's.
+    ///
+    /// # Errors
+    /// As [`command`](Self::command).
+    #[allow(clippy::redundant_pub_crate)]
+    pub(crate) async fn command_frame(
+        &self,
+        frame: CommandFrame,
+    ) -> Result<Reply> {
         self.client
-            .call(self.auth(), struct_hash, command, payload)
+            .call_frame(self.auth(), frame)
             .await?
             .map_err(Error::Node)
     }
