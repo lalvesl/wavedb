@@ -636,6 +636,7 @@ mod tests {
             // Issue an ordinary command; the manager attaches the live cursor and
             // routes the returned delta back to the watch.
             let frame = CommandFrame {
+                durable: false,
                 struct_hash: 0x1234,
                 command: Command::Get,
                 payload: Vec::new(),
