@@ -125,7 +125,11 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   every disk/transport boundary uses it; no structure hand-rolls a byte layout.
 - **wavedb-core** — `Id` (`KEY u64 · TENANT u48 · FLAG 1 · SALT 15`), `LocalId`
   (80-bit, tenant-stripped), `U48`, `Metadata` (version chain + `pivot_id` back-link +
-  permission), the `Store` trait (`get`/`get_of`/atomic `apply`), the `Store`-generic
+  permission), the `Store` trait (`get`/`get_of`/atomic `apply`, and
+  `apply_durable` — resolves once the batch is durable; defaults to `apply`,
+  and every forwarding store must forward it), `Durability<S>` (a store
+  whose `apply` goes durable on a flag — every `_durable` operation is its
+  plain twin over it, RFC 0072 §12), the `Store`-generic
   `BpTree<K: NodeKey>` index, `Collection<T>` (the developer surface over the tree),
   `record.rs` (envelopes, id minting, `plan_chained_save`), `Overlay` (batch-pending
   read view so multiple plans on one tree compose into one atomic batch), and the
@@ -174,7 +178,8 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   round that ends the batch says so, and **one barrier** makes the batch
   durable — inline, or on the worker's helper thread (`use_barrier`,
   RFC 0067 §4). `apply_durable` waits for it (a store nobody ticks settles
-  inline); everything committed before a durable write is durable with it.
+  inline); everything committed before a durable write on the same store is
+  durable with it — on a node, the same shard.
   On open, nothing is replayed: the newest whole batch's header — the last
   8 blocks of the newest data file — roots a walk back along each type's
   `last` and down by `prev` while a registered type is unnamed; only the
@@ -245,7 +250,10 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   `PageStore`s move onto the worker's thread, operations are plain calls there,
   and a BG task beside the jobs opens a settle cycle per 200 ms tick and steps
   it when they leave room — first when a durable write waits on it
-  (RFC 0067 step 4; one executor per thread, no `unsafe`). Each worker also
+  (RFC 0067 step 4; one executor per thread, no `unsafe`). A frame with its
+  `durable` bit set (and a durable `NodeOp`) runs its step over
+  `Durability::new(store, true)`, the owner held until the shard's batch is
+  durable (RFC 0072 §12). Each worker also
   **accepts its own connections** — one listener per worker, an
   `SO_REUSEPORT` group on Linux (`Listener::bind_many`; one listener
   elsewhere) — and routes every operation by owner, to its own queue or
@@ -260,16 +268,25 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   **write-through cache** — WaveDB caching WaveDB, cfg-switched like the platform
   seam: native = `PageStore` under `~/.cache|XDG_CACHE_HOME|%LOCALAPPDATA%`
   `/<app>` (the app is the leaf directly under the base, XDG-style, no shared
-  `wavedb/` parent; auto-created; `open_at` for an explicit dir), wasm =
-  `wavedb::cache::IdbStore` (`wavedb-wasm` only re-exports it). Semantics
+  `wavedb/` parent; auto-created; `open_at` for an explicit dir) on a
+  **carrier of its own** with the 200 ms settle tick, reached through a
+  proxy `CacheStore` by channel at the `Store` seam (`cache::native`,
+  RFC 0072 §11; dropping the last `Db` settles and closes it before
+  returning), wasm =
+  `wavedb::cache::IdbStore` (`wavedb-wasm` only re-exports it). Both
+  suspend, so every mirror takes the cache's turn (`cache::Turn`). Semantics
   (`client_cache.rs`): **node-first** — acknowledged ops mirror best-effort under
   node-minted ids (`Collection::adopt`; `All` frames carry `(Id, T)` for this);
   reads fall back only on `Error::Transport` and only when the cache holds the
-  answer (absence propagates the fault; refusals never fall back); offline writes
-  refuse (queueing is M7). `db.local()` is the cache's direct `LocalHandle`. One
+  answer (absence propagates the fault; refusals never fall back); an offline
+  Unique save queues (W8), other offline writes refuse, and a `_durable` one
+  always refuses offline. `db.local()` is the cache's direct `LocalHandle`. One
   engine per process ⇒ a `Db::open` client and a node never share one (tests run
   the node as a child process — see `local_cache_e2e.rs`). Typed calls spell
-  `T::get(&db)` / `v.save(&db)` / `T::collection(pivot)` via the `DbHandle` seam;
+  `T::get(&db)` / `v.save(&db)` / `T::collection(pivot)` via the `DbHandle` seam,
+  every write with a `_durable` twin (`v.save_durable(&db)`,
+  `col.insert_durable(&db, v)`, `T::create_pivot_durable(&db)`, …) answered
+  once durable on the node — one `durable` bit on the `CommandFrame`;
   `ServerDb` mirrors it node-side for `#[server]` bodies, plus
   `db.lock(&[Owner])`: owners held across awaits (leases, RFC 0067 §5) — all
   in one call, nothing reached past them (`Error::LockOrder`). Live sync (M7):
