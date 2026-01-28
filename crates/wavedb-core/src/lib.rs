@@ -35,6 +35,7 @@ mod collection_reindex;
 mod collection_remove;
 mod collection_roots;
 mod collection_write;
+pub mod durability;
 pub mod error;
 pub mod expose;
 mod expose_changes;
@@ -70,6 +71,7 @@ pub mod wire;
 
 pub use collection::Collection;
 pub use collection_handle::CollectionHandle;
+pub use durability::Durability;
 pub use error::{Error, Result};
 pub use expose::Caller;
 pub use fn_identity::FnArgTag;
