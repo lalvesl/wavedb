@@ -27,7 +27,7 @@
 //! the frees a batch covered once that batch is durable; only then does the
 //! run become a hole a [`reclaim`](BlockAllocator::reclaim) may cut.
 //!
-//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 //! [RFC 0071]: ../../../rfcs/0071-data-files-by-address.md
 
 use std::collections::BTreeMap;
