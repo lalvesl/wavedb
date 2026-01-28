@@ -20,7 +20,7 @@
 //! find cut by a crash (`crate::reopen`). A tick with nothing to settle opens
 //! nothing: no window, no header, no `fsync`.
 //!
-//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
 use crate::barrier::{Durable, Syncs, Waiter};
 use crate::error::{StorageError, StorageResult};
