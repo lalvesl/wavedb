@@ -135,6 +135,7 @@ mod tests {
                 tenant: U48::from(9u32),
             }),
             ClientMsg::Call(CommandFrame {
+                durable: false,
                 struct_hash: 0xABCD,
                 command: Command::Save,
                 payload: vec![1, 2, 3],
