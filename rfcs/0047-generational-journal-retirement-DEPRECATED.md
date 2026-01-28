@@ -1,7 +1,7 @@
 # RFC 0047 — Generational journal retirement — DEPRECATED
 
 - **Status:** Deprecated — superseded by
-  [RFC 0072 — The settle is the durability point](0072-the-settle-is-the-durability-point-WIP.md) (2026-10-16)
+  [RFC 0072 — The settle is the durability point](0072-the-settle-is-the-durability-point.md) (2026-10-16)
 - **Was:** Implemented (landed 2026-07-29)
 
 ## What it proposed
@@ -20,5 +20,5 @@ deferred free, released once the batch that stopped naming it is durable.
 
 ## What replaced it
 
-[RFC 0072](0072-the-settle-is-the-durability-point-WIP.md) §8: frees deferred to the batch's barrier; the reclaim cuts only
+[RFC 0072](0072-the-settle-is-the-durability-point.md) §8: frees deferred to the batch's barrier; the reclaim cuts only
 holes.
