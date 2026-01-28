@@ -21,7 +21,7 @@
 //! `at` are the whole check.
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
-//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
 use std::collections::BTreeMap;
 
