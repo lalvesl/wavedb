@@ -65,6 +65,12 @@ because both compile this crate.
    the `Update` command for NonUnique. The read half adds `All`, `History`,
    `Changes` (catch-up) and — for declared lists — `Listed`/`ListLen`. Same typed calls compile native and wasm —
    only the local [`Store`](../wavedb-core/README.md#store--the-local-backend-trait) swaps.
+   Every write has a `_durable` twin — `save_durable` (Unique),
+   `create_pivot_durable` (NonUnique), and on the collection handle
+   `insert_durable` / `save_durable` / `remove_durable` — answered once the
+   write is durable; on the wire it is the same command with the frame's
+   `durable` bit set, so the engine steps are not duplicated
+   ([RFC 0072](../../rfcs/0072-the-settle-is-the-durability-point.md) §12).
 6. **Wires up the schema-evolution hooks** — the optional `first_try` /
    `fallback_not_found` functions; see
    [`wavedb-core`](../wavedb-core/README.md#schema-evolution--lookup-hooks).
