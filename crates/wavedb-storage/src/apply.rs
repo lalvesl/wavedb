@@ -216,6 +216,11 @@ impl Store for PageStore {
             staged.map_err(Into::into) // StorageError → core::Error
         }
     }
+
+    async fn apply_durable(&self, batch: &[Write]) -> CoreResult<()> {
+        // The inherent one: commit, then wait for the batch's barrier.
+        Ok(Self::apply_durable(self, batch).await?)
+    }
 }
 
 impl PageStore {
