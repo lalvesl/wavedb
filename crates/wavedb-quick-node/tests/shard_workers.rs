@@ -55,6 +55,7 @@ fn request(struct_hash: u64, command: Command, payload: Vec<u8>) -> Request {
     Request {
         auth: auth(),
         frame: CommandFrame {
+            durable: false,
             struct_hash,
             command,
             payload,
