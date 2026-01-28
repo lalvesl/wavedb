@@ -31,6 +31,7 @@ pub(super) async fn sync_once(
     let request = Request {
         auth: auth.clone(),
         frame: CommandFrame {
+            durable: false,
             struct_hash: SYNC_STRUCT_HASH,
             // Like a function call, sync ignores the frame command.
             command: Command::Get,
