@@ -1,7 +1,7 @@
 # RFC 0019 — Journal-rooted recovery — DEPRECATED
 
 - **Status:** Deprecated — superseded by
-  [RFC 0072 — The settle is the durability point](0072-the-settle-is-the-durability-point-WIP.md) (2026-10-16)
+  [RFC 0072 — The settle is the durability point](0072-the-settle-is-the-durability-point.md) (2026-10-16)
 - **Was:** Implemented (landed 2026-07-07 — the journal work J1–J5)
 - **Supersedes:** [RFC 0030 — superblock-pointer checkpoint](0030-superblock-pointer-checkpoint-DEPRECATED.md)
 
@@ -23,6 +23,6 @@ recovery from file headers alone.
 
 ## What replaced it
 
-[RFC 0072](0072-the-settle-is-the-durability-point-WIP.md): the settle writes each batch into one window ending with a
+[RFC 0072](0072-the-settle-is-the-durability-point.md): the settle writes each batch into one window ending with a
 header naming the addresses it changed; one barrier makes the batch durable;
 a reopen walks the headers from the newest whole batch, replaying nothing.
