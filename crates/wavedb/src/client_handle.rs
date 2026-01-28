@@ -25,7 +25,7 @@
 
 use futures::{Stream, StreamExt, TryStreamExt};
 use wavedb_core::expose::Command;
-use wavedb_core::wire::{WaveWire, from_wire, to_wire, to_wire_pair};
+use wavedb_core::wire::{WaveWire, from_wire, to_wire};
 use wavedb_core::{
     Bound, DbHandle, Id, LocalId, Metadata, NonUniqueStruct, U48, UniqueStruct,
 };
@@ -56,6 +56,14 @@ pub(crate) fn streamed<'a, V: WaveWire + 'a>(
             from_wire::<V>(&bytes)
                 .map_err(|e| Error::Core(wavedb_core::Error::from(e)))
         })
+}
+
+/// `create_pivot`'s answer: a collection is bootstrapped node-side, so the
+/// wire has no command for it and the node's uniform refusal stands in.
+fn refuse_pivot<T: NonUniqueStruct>() -> std::future::Ready<Result<LocalId>> {
+    std::future::ready(Err(Error::Core(wavedb_core::Error::UnknownStructHash(
+        <T::Pivot as wavedb_core::Pivot>::STRUCT_HASH,
+    ))))
 }
 
 /// The uniform refusal for an op the wire cannot carry yet — the same answer
@@ -96,30 +104,14 @@ impl DbHandle for Db {
     }
 
     async fn save_unique<T: UniqueStruct>(&self, value: &T) -> Result<()> {
-        // Node-first: flush any older offline writes before this one (W8).
-        self.drain_offline_queue().await;
-        match self
-            .command(T::STRUCT_HASH, Command::Save, to_wire(value))
-            .await
-        {
-            Ok(r) => {
-                reply::done(&r)?;
-                cache::mirror_unique(self, value).await;
-                Ok(())
-            }
-            // Offline with a cache: queue for replay and mirror locally, so the
-            // save succeeds provisionally instead of losing the work (W8).
-            Err(err) if cache::is_transport(&err) && self.local().is_some() => {
-                self.enqueue_offline(
-                    T::STRUCT_HASH,
-                    Command::Save,
-                    to_wire(value),
-                );
-                cache::mirror_unique(self, value).await;
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
+        self.save_unique_with(value, false).await
+    }
+
+    async fn save_unique_durable<T: UniqueStruct>(
+        &self,
+        value: &T,
+    ) -> Result<()> {
+        self.save_unique_with(value, true).await
     }
 
     fn unique_history<T: UniqueStruct + 'static>(
@@ -134,11 +126,13 @@ impl DbHandle for Db {
     ) -> impl Future<Output = Result<LocalId>> {
         // Not wire-reachable: a collection is bootstrapped node-side (inside
         // a `#[server]` body via `ServerDb`), never by a raw client command.
-        std::future::ready(Err(Error::Core(
-            wavedb_core::Error::UnknownStructHash(
-                <T::Pivot as wavedb_core::Pivot>::STRUCT_HASH,
-            ),
-        )))
+        refuse_pivot::<T>()
+    }
+
+    fn create_pivot_durable<T: NonUniqueStruct>(
+        &self,
+    ) -> impl Future<Output = Result<LocalId>> {
+        refuse_pivot::<T>()
     }
 
     async fn insert<T: NonUniqueStruct>(
@@ -146,14 +140,15 @@ impl DbHandle for Db {
         pivot: LocalId,
         value: &T,
     ) -> Result<Id> {
-        // `(pivot, value)` as the wire tuple the node's insert step decodes.
-        let payload = to_wire_pair(&pivot, value);
-        let r = self
-            .command(T::STRUCT_HASH, Command::Insert, payload)
-            .await?;
-        let id = reply::inserted(&r)?;
-        cache::mirror_record(self, pivot, id, value).await;
-        Ok(id)
+        self.insert_with(pivot, value, false).await
+    }
+
+    async fn insert_durable<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        value: &T,
+    ) -> Result<Id> {
+        self.insert_with(pivot, value, true).await
     }
 
     async fn get_record<T: NonUniqueStruct>(
@@ -182,16 +177,16 @@ impl DbHandle for Db {
         id: Id,
         value: &T,
     ) -> Result<()> {
-        // The pivot leads: it owns the operation, so the node places and
-        // serialises the update by it (and refuses a record of another
-        // collection). Byte-identical to the triple `(pivot, id, value)`.
-        let payload = to_wire_pair(&(pivot, id), value);
-        let r = self
-            .command(T::STRUCT_HASH, Command::Update, payload)
-            .await?;
-        reply::done(&r)?;
-        cache::mirror_record(self, pivot, id, value).await;
-        Ok(())
+        self.update_with(pivot, id, value, false).await
+    }
+
+    async fn update_durable<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        id: Id,
+        value: &T,
+    ) -> Result<()> {
+        self.update_with(pivot, id, value, true).await
     }
 
     async fn remove<T: NonUniqueStruct>(
@@ -199,14 +194,15 @@ impl DbHandle for Db {
         pivot: LocalId,
         id: Id,
     ) -> Result<bool> {
-        let r = self
-            .command(T::STRUCT_HASH, Command::Remove, to_wire(&(pivot, id)))
-            .await?;
-        let removed = reply::removed(&r)?;
-        if removed {
-            cache::mirror_remove::<T>(self, pivot, id).await;
-        }
-        Ok(removed)
+        self.remove_with::<T>(pivot, id, false).await
+    }
+
+    async fn remove_durable<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        id: Id,
+    ) -> Result<bool> {
+        self.remove_with::<T>(pivot, id, true).await
     }
 
     fn all<T: NonUniqueStruct + 'static>(
