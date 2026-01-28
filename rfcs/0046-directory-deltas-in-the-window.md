@@ -1,7 +1,7 @@
 # RFC 0046 — Directory deltas in the settle window
 
 - **Status:** Implemented (landed 2026-07-29)
-- **Superseded in part by:** [RFC 0072](0072-the-settle-is-the-durability-point-WIP.md) (2026-10-16) — the delta riding the window
+- **Superseded in part by:** [RFC 0072](0072-the-settle-is-the-durability-point.md) (2026-10-16) — the delta riding the window
   stays, as the 32 KiB header every window ends with; the `Commit` frame and
   the edit chunk are gone.
 - **Amends:** [RFC 0043](0043-descriptors-in-the-commit-frame.md) (which put the
