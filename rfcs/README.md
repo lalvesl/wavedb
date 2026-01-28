@@ -17,7 +17,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 - **Shipped (M1–M7, M8):** the wire codec, type identity, the platform seam, the
   full data model (anchors + `Succession` history, B+tree collections, natural
   keys), the macro & exposure system, the storage engine and its recovery
-  (journal-rooted until [0072](0072-the-settle-is-the-durability-point-WIP.md)), the HTTP + WebSocket transport, the connection manager, live sync by
+  (journal-rooted until [0072](0072-the-settle-is-the-durability-point.md)), the HTTP + WebSocket transport, the connection manager, live sync by
   navigation catch-up over both poll and WebSocket (including W6 reconnect —
   [0034](0034-ws-reconnect-catchup.md)) and W7 poll efficiency (idle backoff +
   command piggyback — [0035](0035-http-piggyback-and-idle-backoff.md)), the
@@ -32,16 +32,18 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   = error, 15-bit `type_salt` clash = warning), recorded in
   [0040](0040-schema-migration-and-version-skew-DEPRECATED.md).
 - **The settle is the durability point (2026-10-16,
-  [0072](0072-the-settle-is-the-durability-point-WIP.md), WIP):** there is no
-  journal any more. A write commits to the record cache; a settle cycle every
-  200 ms writes each batch as windows ending with a 32 KiB header naming the
-  addresses it changed, and one barrier makes it durable — `apply_durable`
-  waits for it. A reopen walks the headers from the newest whole batch and
-  replays nothing; the object store's files carry the same header. Phases 1–3
-  (the header and walk, the engine, the node) landed; phase 4 — the
-  `_durable` operations across core, macros, the wire and the client, and the
-  client cache's tick — is next. It supersedes the journal-era designs below
-  (0019, 0047, 0048, 0061, 0062; 0041/0043/0046 in part).
+  [0072](0072-the-settle-is-the-durability-point.md), Implemented):** there
+  is no journal any more. A write commits to the record cache; a settle cycle
+  every 200 ms writes each batch as windows ending with a 32 KiB header naming
+  the addresses it changed, and one barrier makes it durable. A reopen walks
+  the headers from the newest whole batch and replays nothing; the object
+  store's files carry the same header. Durability is per call: every write
+  has a `_durable` twin (`save_durable`, `insert_durable`, …) answered once
+  its batch is durable — over `Durability<S>` locally, a `NodeOp` flag on a
+  route, one `durable` bit on the command frame over the wire. The native
+  client cache runs on a carrier of its own with the same tick. It supersedes
+  the journal-era designs below (0019, 0047, 0048, 0061, 0062; 0041/0043/0046
+  in part).
 - **The storage write path (2026-07-28 → 07-29):**
   [0041](0041-single-barrier-checkpoint.md) *(Implemented)* replaced the per-id
   settle — which read-modify-wrote a bucket page once per record — with a
@@ -606,11 +608,11 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0037](0037-multi-node-cluster-PLANNED-LOW.md) | Multi-node cluster | Planned (low) |
 | [0038](0038-argon2-and-oauth-credentials-PLANNED-LOW.md) | Argon2 & OAuth/OIDC credentials | Planned (low) |
 | [0039](0039-developer-experience-PLANNED-LOW.md) | Developer experience (M9) | Planned (low) |
-| [0041](0041-single-barrier-checkpoint.md) | Single-barrier checkpoint (its one-window settle round kept; the checkpoint superseded by [0072](0072-the-settle-is-the-durability-point-WIP.md)) | Implemented |
-| [0043](0043-descriptors-in-the-commit-frame.md) | Descriptors in the `Commit` frame (superseded by 0046, then [0072](0072-the-settle-is-the-durability-point-WIP.md)) | Implemented |
+| [0041](0041-single-barrier-checkpoint.md) | Single-barrier checkpoint (its one-window settle round kept; the checkpoint superseded by [0072](0072-the-settle-is-the-durability-point.md)) | Implemented |
+| [0043](0043-descriptors-in-the-commit-frame.md) | Descriptors in the `Commit` frame (superseded by 0046, then [0072](0072-the-settle-is-the-durability-point.md)) | Implemented |
 | [0044](0044-page-cache-PLANNED-LOW.md) | The page cache | Planned (low) |
 | [0045](0045-vector-search-PLANNED.md) | Vector search | Planned |
-| [0046](0046-directory-deltas-in-the-window.md) | Directory deltas in the settle window (the delta kept, as [0072](0072-the-settle-is-the-durability-point-WIP.md)'s header) | Implemented |
+| [0046](0046-directory-deltas-in-the-window.md) | Directory deltas in the settle window (the delta kept, as [0072](0072-the-settle-is-the-durability-point.md)'s header) | Implemented |
 | [0049](0049-elastic-pages-and-load-driven-splits.md) | Elastic pages and load-driven splits | Implemented |
 | [0050](0050-clustered-record-chains.md) | Clustered record chains (B+trees become opt-in) | Implemented |
 | [0051](0051-ordered-record-lists.md) | Declared lists: sorted chains + sparse index | Implemented |
@@ -629,7 +631,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0068](0068-record-cache-as-a-log-WIP.md) | The record cache as a log | WIP |
 | [0070](0070-object-storage-backend.md) | Object storage as a page backend (three modes) | Implemented |
 | [0071](0071-data-files-by-address.md) | Data files named by address (append-only files, compaction forward; supersedes 0069's placement) | Implemented |
-| [0072](0072-the-settle-is-the-durability-point-WIP.md) | The settle is the durability point (no journal; `_durable` operations; one header for disk and object store) | WIP |
+| [0072](0072-the-settle-is-the-durability-point.md) | The settle is the durability point (no journal; `_durable` operations; one header for disk and object store) | Implemented |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
@@ -647,11 +649,11 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0060](0060-comparative-benchmark-suite-DEPRECATED.md) | Comparative benchmark suite (vs MongoDB/PostgreSQL/MySQL/SQLite) | [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) (the row, not the run) |
 | [0042](0042-free-space-defragmentation-DEPRECATED.md) | Free-space defragmentation (tail relocation) | [0069](0069-compaction-into-the-holes-DEPRECATED.md) |
 | [0069](0069-compaction-into-the-holes-DEPRECATED.md) | Compaction into the holes | [0071](0071-data-files-by-address.md) (append-only data files, compaction forward) |
-| [0019](0019-journal-rooted-recovery-DEPRECATED.md) | Journal-rooted recovery | [0072](0072-the-settle-is-the-durability-point-WIP.md) (the settle is the durability point; reconstruction from headers) |
-| [0047](0047-generational-journal-retirement-DEPRECATED.md) | Generational journal retirement | [0072](0072-the-settle-is-the-durability-point-WIP.md) (frees deferred to the batch's barrier) |
-| [0048](0048-chained-addressing-log-DEPRECATED.md) | The addressing log as a chain | [0072](0072-the-settle-is-the-durability-point-WIP.md) (the header every window ends with) |
-| [0061](0061-relaxed-durability-window-DEPRECATED.md) | Relaxed durability: a group-commit window | [0072](0072-the-settle-is-the-durability-point-WIP.md) (durability per write: `_durable`) |
-| [0062](0062-relaxed-mode-refinements-DEPRECATED.md) | Relaxed mode refinements | [0072](0072-the-settle-is-the-durability-point-WIP.md) |
+| [0019](0019-journal-rooted-recovery-DEPRECATED.md) | Journal-rooted recovery | [0072](0072-the-settle-is-the-durability-point.md) (the settle is the durability point; reconstruction from headers) |
+| [0047](0047-generational-journal-retirement-DEPRECATED.md) | Generational journal retirement | [0072](0072-the-settle-is-the-durability-point.md) (frees deferred to the batch's barrier) |
+| [0048](0048-chained-addressing-log-DEPRECATED.md) | The addressing log as a chain | [0072](0072-the-settle-is-the-durability-point.md) (the header every window ends with) |
+| [0061](0061-relaxed-durability-window-DEPRECATED.md) | Relaxed durability: a group-commit window | [0072](0072-the-settle-is-the-durability-point.md) (durability per write: `_durable`) |
+| [0062](0062-relaxed-mode-refinements-DEPRECATED.md) | Relaxed mode refinements | [0072](0072-the-settle-is-the-durability-point.md) |
 
 ## Status vocabulary
 
