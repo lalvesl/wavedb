@@ -9,7 +9,7 @@
 //!   whose page or header the crash tore gives way to the batch before it;
 //! - nothing is replayed: a reopen starts cold.
 //!
-//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
 // The engine is used from one thread; its futures are not `Send` (lib.rs).
 #![allow(clippy::future_not_send)]
@@ -129,6 +129,19 @@ fn a_durable_write_without_a_helper_settles_its_batch() {
     block_on(s.apply_durable(&[put(3, 1)])).unwrap();
     assert!(!s.has_pending());
     assert_eq!(read(&open(&crash(&db)), SH, 3), Some(record(SH, 3, 1)));
+}
+
+/// The `Store` seam's durable apply is the engine's: a write made durable
+/// through it — as every `_durable` operation is, over
+/// [`Durability`](wavedb_core::Durability) — is on disk when it resolves.
+#[test]
+fn the_store_seams_durable_apply_is_the_engines() {
+    let d = tempfile::tempdir().unwrap();
+    let db = d.path().join("db");
+    let s = open(&db);
+    let durable = wavedb_core::Durability::new(&s, true);
+    block_on(durable.apply(&[put(4, 1)])).unwrap();
+    assert_eq!(read(&open(&crash(&db)), SH, 4), Some(record(SH, 4, 1)));
 }
 
 /// A batch the crash cut before its end — rounds written, no header saying
