@@ -164,6 +164,21 @@ fn unique_ops(name: &Ident) -> TokenStream {
                 db.save_unique(self).await
             }
 
+            /// [`save`](Self::save), resolving once the save is durable —
+            /// on the node that answers it, or in the store a local context
+            /// drives. Everything committed before it there is durable with
+            /// it.
+            ///
+            /// # Errors
+            /// As [`save`](Self::save), or a failed settle.
+            #[allow(clippy::future_not_send)]
+            pub async fn save_durable<D: ::wavedb_core::DbHandle>(
+                &self,
+                db: &D,
+            ) -> ::core::result::Result<(), D::Error> {
+                db.save_unique_durable(self).await
+            }
+
             /// Stream this tenant's record versions **newest-first** (the
             /// live record, then each archived version along the
             /// modification chain). Empty when never saved.
