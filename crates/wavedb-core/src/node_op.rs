@@ -22,6 +22,7 @@
 use futures::{StreamExt, TryStreamExt};
 
 use crate::collection::Collection;
+use crate::durability::Durability;
 use crate::error::{Error, Result};
 use crate::fuzzy::{Fuzzy, Scored};
 use crate::handle::DbHandle;
@@ -37,17 +38,27 @@ use crate::u48::U48;
 use crate::wire::{from_wire, to_wire};
 
 /// One operation of a [`DbHandle`], as data. Bodies are wire bytes.
+///
+/// A write carries `durable`: its `_durable` twin, answered once the batch
+/// is durable on the owner's shard ([`Durability`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeOp {
     GetUnique,
-    SaveUnique(Vec<u8>),
+    SaveUnique {
+        body: Vec<u8>,
+        durable: bool,
+    },
     UniqueHistory,
     /// Create a collection at a pivot minted by the caller
     /// ([`Collection::mint_pivot`]), so the owner is known before it exists.
-    CreatePivot(LocalId),
+    CreatePivot {
+        pivot: LocalId,
+        durable: bool,
+    },
     Insert {
         pivot: LocalId,
         body: Vec<u8>,
+        durable: bool,
     },
     GetRecord {
         pivot: LocalId,
@@ -57,10 +68,12 @@ pub enum NodeOp {
         pivot: LocalId,
         id: Id,
         body: Vec<u8>,
+        durable: bool,
     },
     Remove {
         pivot: LocalId,
         id: Id,
+        durable: bool,
     },
     All {
         pivot: LocalId,
@@ -99,8 +112,10 @@ impl NodeOp {
     #[must_use]
     pub const fn pivot(&self) -> Option<LocalId> {
         match self {
-            Self::GetUnique | Self::SaveUnique(_) | Self::UniqueHistory => None,
-            Self::CreatePivot(pivot)
+            Self::GetUnique | Self::SaveUnique { .. } | Self::UniqueHistory => {
+                None
+            }
+            Self::CreatePivot { pivot, .. }
             | Self::Insert { pivot, .. }
             | Self::GetRecord { pivot, .. }
             | Self::Update { pivot, .. }
@@ -111,6 +126,19 @@ impl NodeOp {
             | Self::ListLen { pivot, .. }
             | Self::Fuzzy { pivot, .. }
             | Self::RecordHistory { pivot, .. } => Some(*pivot),
+        }
+    }
+
+    /// Whether this is a write that answers only once it is durable.
+    #[must_use]
+    pub const fn is_durable(&self) -> bool {
+        match self {
+            Self::SaveUnique { durable, .. }
+            | Self::CreatePivot { durable, .. }
+            | Self::Insert { durable, .. }
+            | Self::Update { durable, .. }
+            | Self::Remove { durable, .. } => *durable,
+            _ => false,
         }
     }
 
@@ -160,13 +188,15 @@ where
     T: UniqueStruct + 'static,
     S: Store,
 {
+    // A durable write is the same write over a durable store.
+    let store = &Durability::new(store, op.is_durable());
     let db = LocalHandle::new(store, tenant);
     match op {
         NodeOp::GetUnique => {
             let value = db.get_unique::<T>().await?;
             Ok(NodeReply::Value(value.as_ref().map(to_wire)))
         }
-        NodeOp::SaveUnique(body) => {
+        NodeOp::SaveUnique { body, .. } => {
             db.save_unique(&from_wire::<T>(&body)?).await?;
             Ok(NodeReply::Done)
         }
@@ -196,26 +226,29 @@ where
     T: NonUniqueStruct + 'static,
     S: Store,
 {
+    let store = &Durability::new(store, op.is_durable());
     let db = LocalHandle::new(store, tenant);
     let values =
         |items: Vec<T>| NodeReply::Values(items.iter().map(to_wire).collect());
     Ok(match op {
-        NodeOp::CreatePivot(pivot) => {
+        NodeOp::CreatePivot { pivot, .. } => {
             Collection::<T>::create_at(store, tenant, pivot).await?;
             NodeReply::Done
         }
-        NodeOp::Insert { pivot, body } => NodeReply::Inserted(
+        NodeOp::Insert { pivot, body, .. } => NodeReply::Inserted(
             db.insert(pivot, &from_wire::<T>(&body)?).await?,
         ),
         NodeOp::GetRecord { pivot, id } => {
             let value = db.get_record::<T>(pivot, id).await?;
             NodeReply::Value(value.as_ref().map(to_wire))
         }
-        NodeOp::Update { pivot, id, body } => {
+        NodeOp::Update {
+            pivot, id, body, ..
+        } => {
             db.update(pivot, id, &from_wire::<T>(&body)?).await?;
             NodeReply::Done
         }
-        NodeOp::Remove { pivot, id } => {
+        NodeOp::Remove { pivot, id, .. } => {
             NodeReply::Removed(db.remove::<T>(pivot, id).await?)
         }
         NodeOp::All { pivot } => {
@@ -270,7 +303,9 @@ where
                 .try_collect()
                 .await?,
         ),
-        NodeOp::GetUnique | NodeOp::SaveUnique(_) | NodeOp::UniqueHistory => {
+        NodeOp::GetUnique
+        | NodeOp::SaveUnique { .. }
+        | NodeOp::UniqueHistory => {
             return refuse::<T>();
         }
     })
