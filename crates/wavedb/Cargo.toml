@@ -34,9 +34,14 @@ futures.workspace = true
 
 # `wavedb::auth` declares its session records with #[wavedb], whose native
 # expansion emits per-type storage slots; `Db::open`'s native cache is the
-# same journal + data.bin engine.
+# node's engine, on a carrier of its own that ticks its settle (RFC 0072
+# §11): an Embassy task from `wavedb-platform`, reached across threads by
+# `async-channel`, selecting with `embassy-futures`.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wavedb-storage = { path = "../wavedb-storage" }
+wavedb-platform.workspace = true
+async-channel.workspace = true
+embassy-futures.workspace = true
 
 # `Db::open`'s browser cache is the IndexedDB `Store` backend (`IdbStore`:
 # one `kv` object store, `Id → wire bytes`, event-driven requests bridged
