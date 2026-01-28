@@ -92,8 +92,13 @@ CommandFrame {
     struct_hash: u64,     // a #[wavedb] struct OR a #[server] fn — ONE hash space
     command:     Command, // struct op; ignored for a function (the hash IS the op)
     payload:     Wire,    // record / Id (struct op) or the args tuple (server fn)
+    durable:     bool,    // a write's `_durable` twin: answered once durable
 }
 ```
+
+`durable` is one bit rather than four more commands (RFC 0072 §12): the node
+runs the same step over a durable store and answers once the owner's shard
+settled the batch. A read and a function call ignore it.
 
 **From the frame alone you cannot tell a server-fn call from an object save** —
 and you don't need to. The sole discriminator is the generated **`match
