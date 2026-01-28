@@ -25,6 +25,34 @@ pub struct CommandFrame {
     pub command: Command,
     /// The op's wire payload, decoded by the matched arm.
     pub payload: Vec<u8>,
+    /// A write's `_durable` twin (RFC 0072 §12): the node answers once the
+    /// batch is durable on the owner's shard. One bit rather than four more
+    /// commands; a read and a function ignore it.
+    pub durable: bool,
+}
+
+impl CommandFrame {
+    /// A frame for `command` on `struct_hash`, answered once committed.
+    #[must_use]
+    pub const fn new(
+        struct_hash: u64,
+        command: Command,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            struct_hash,
+            command,
+            payload,
+            durable: false,
+        }
+    }
+
+    /// The same frame, answered only once its write is durable.
+    #[must_use]
+    pub const fn durable(mut self) -> Self {
+        self.durable = true;
+        self
+    }
 }
 
 /// The request's identity claim — verified node-side (gate 1) into the
@@ -228,6 +256,7 @@ mod tests {
                 tenant: U48::from(42u32),
             },
             frame: CommandFrame {
+                durable: false,
                 struct_hash: 0xABCD,
                 command: Command::Save,
                 payload: vec![1, 2, 3],
