@@ -11,6 +11,16 @@
 //! sending command frames, and the node-side `ServerDb` a `#[server]` body
 //! runs against.
 //!
+//! Every write has a `_durable` twin ([RFC 0072] §12): the same operation,
+//! resolving only once it is durable — on the node that answers it, or in
+//! the store a local context drives. The plain write resolves once it is
+//! committed, durable at that store's next settle (a 200 ms tick on a node);
+//! a durable one also makes durable everything committed before it on the
+//! same store — on a node, the same shard, which is why a body that writes
+//! two owners makes the write it relies on durable on each of them.
+//!
+//! [RFC 0072]: https://github.com/wavedb/wavedb/blob/main/rfcs/0072-the-settle-is-the-durability-point.md
+//!
 //! Two deliberate signature choices:
 //!
 //! - **`type Error: From<Error>`** — the client's error is richer than
@@ -77,6 +87,16 @@ pub trait DbHandle: Sized {
         value: &T,
     ) -> Result<(), Self::Error>;
 
+    /// [`save_unique`](Self::save_unique), resolving once the save is
+    /// durable.
+    ///
+    /// # Errors
+    /// As [`save_unique`](Self::save_unique), or a failed settle.
+    async fn save_unique_durable<T: UniqueStruct>(
+        &self,
+        value: &T,
+    ) -> Result<(), Self::Error>;
+
     /// Stream this tenant's `Unique` record versions **newest-first** (the
     /// live record, then each archive along the modification chain). Empty
     /// when never saved.
@@ -98,12 +118,32 @@ pub trait DbHandle: Sized {
         &self,
     ) -> Result<LocalId, Self::Error>;
 
+    /// [`create_pivot`](Self::create_pivot), resolving once the new
+    /// collection is durable — before a record naming it is written durably
+    /// elsewhere (on a node, its holder usually lives on another shard).
+    ///
+    /// # Errors
+    /// As [`create_pivot`](Self::create_pivot), or a failed settle.
+    async fn create_pivot_durable<T: NonUniqueStruct>(
+        &self,
+    ) -> Result<LocalId, Self::Error>;
+
     /// Insert `value` into the collection at `pivot`, returning its stable
     /// identity [`Id`] (the anchor references point at — it never changes).
     ///
     /// # Errors
     /// A backend/transport failure, or a stale/foreign `pivot`.
     async fn insert<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        value: &T,
+    ) -> Result<Id, Self::Error>;
+
+    /// [`insert`](Self::insert), resolving once the record is durable.
+    ///
+    /// # Errors
+    /// As [`insert`](Self::insert), or a failed settle.
+    async fn insert_durable<T: NonUniqueStruct>(
         &self,
         pivot: LocalId,
         value: &T,
@@ -134,12 +174,33 @@ pub trait DbHandle: Sized {
         value: &T,
     ) -> Result<(), Self::Error>;
 
+    /// [`update`](Self::update), resolving once the new version is durable.
+    ///
+    /// # Errors
+    /// As [`update`](Self::update), or a failed settle.
+    async fn update_durable<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        id: Id,
+        value: &T,
+    ) -> Result<(), Self::Error>;
+
     /// Move the record at `id` from the living set to the dead tree; returns
     /// whether it was living. Bytes are kept — nothing is erased.
     ///
     /// # Errors
     /// A backend/transport failure.
     async fn remove<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        id: Id,
+    ) -> Result<bool, Self::Error>;
+
+    /// [`remove`](Self::remove), resolving once the removal is durable.
+    ///
+    /// # Errors
+    /// As [`remove`](Self::remove), or a failed settle.
+    async fn remove_durable<T: NonUniqueStruct>(
         &self,
         pivot: LocalId,
         id: Id,
