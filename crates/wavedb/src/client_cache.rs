@@ -13,6 +13,10 @@
 //!   authoritative-looking `None`. Node refusals ([`Error::Node`]) are
 //!   authoritative and never fall back.
 //!
+//! Mirrors take the cache's turn ([`Turn`](crate::cache::Turn)): each is a
+//! read-plan-apply over a store that suspends, and two interleaved would
+//! lose an index entry.
+//!
 //! Offline writes (W8): a Unique `save` is **queued** for node-first replay
 //! ([`crate::offline_queue`]) and mirrored locally, so it succeeds
 //! provisionally instead of losing the work; the queue drains FIFO when the
@@ -27,11 +31,24 @@ use wavedb_core::expose::Command;
 use wavedb_core::index::Pivot;
 use wavedb_core::wire::{from_wire, to_wire};
 use wavedb_core::{
-    Collection, DbHandle, Id, LocalId, NonUniqueStruct, Store, UniqueStruct,
+    Collection, DbHandle, Id, LocalHandle, LocalId, NonUniqueStruct, Store,
+    UniqueStruct,
 };
 
+use crate::cache::CacheStore;
 use crate::db::Db;
 use crate::error::{Error, Result};
+
+/// The cache's local handle with its turn taken — what every mirror writes
+/// through, one at a time ([`Turn`](crate::cache::Turn)). `None` without a
+/// cache.
+async fn mirroring(
+    db: &Db,
+) -> Option<(LocalHandle<'_, CacheStore>, crate::cache::Taken<'_>)> {
+    let cache = db.cache()?;
+    let turn = cache.turn.take().await;
+    Some((LocalHandle::new(&cache.store, db.tenant()), turn))
+}
 
 /// The faults that mean "the node could not answer" (fall back), as opposed
 /// to "the node answered no" (authoritative).
@@ -43,7 +60,9 @@ pub const fn is_transport(err: &Error) -> bool {
 /// The read paths' mirror — their replies carry no metadata, so the local
 /// copy authors its own; the watch path uses [`mirror_unique_meta`].
 pub async fn mirror_unique<T: UniqueStruct>(db: &Db, value: &T) {
-    let Some(local) = db.local() else { return };
+    let Some((local, _turn)) = mirroring(db).await else {
+        return;
+    };
     let unchanged = matches!(
         local.get_unique::<T>().await,
         Ok(Some(existing)) if to_wire(&existing) == to_wire(value)
@@ -62,7 +81,9 @@ pub async fn mirror_unique_meta<T: UniqueStruct>(
     meta: wavedb_core::Metadata,
     value: &T,
 ) {
-    let Some(local) = db.local() else { return };
+    let Some((local, _turn)) = mirroring(db).await else {
+        return;
+    };
     let _ = wavedb_core::collection::adopt_unique::<T, _>(
         local.store(),
         db.tenant(),
@@ -95,7 +116,9 @@ pub async fn mirror_record<T: NonUniqueStruct>(
     id: Id,
     value: &T,
 ) {
-    let Some(local) = db.local() else { return };
+    let Some((local, _turn)) = mirroring(db).await else {
+        return;
+    };
     let (store, tenant) = (local.store(), DbHandle::tenant(&local));
     if Collection::<T>::adopt_pivot(store, tenant, pivot)
         .await
@@ -119,7 +142,9 @@ pub async fn mirror_record_meta<T: NonUniqueStruct>(
     meta: wavedb_core::Metadata,
     value: &T,
 ) {
-    let Some(local) = db.local() else { return };
+    let Some((local, _turn)) = mirroring(db).await else {
+        return;
+    };
     let (store, tenant) = (local.store(), DbHandle::tenant(&local));
     if Collection::<T>::adopt_pivot(store, tenant, pivot)
         .await
@@ -138,7 +163,7 @@ pub async fn mirror_remove<T: NonUniqueStruct>(
     pivot: LocalId,
     id: Id,
 ) {
-    if let Some(local) = db.local() {
+    if let Some((local, _turn)) = mirroring(db).await {
         let _ = local.remove::<T>(pivot, id).await;
     }
 }
