@@ -129,6 +129,13 @@ impl<R: Route> DbHandle for ServerDb<'_, R> {
         Ok(self.local.save_unique(value).await?)
     }
 
+    async fn save_unique_durable<T: UniqueStruct>(
+        &self,
+        value: &T,
+    ) -> Result<()> {
+        Ok(self.local.save_unique_durable(value).await?)
+    }
+
     fn unique_history<T: UniqueStruct + 'static>(
         &self,
     ) -> impl Stream<Item = Result<(Metadata, T)>> {
@@ -139,12 +146,26 @@ impl<R: Route> DbHandle for ServerDb<'_, R> {
         Ok(self.local.create_pivot::<T>().await?)
     }
 
+    async fn create_pivot_durable<T: NonUniqueStruct>(
+        &self,
+    ) -> Result<LocalId> {
+        Ok(self.local.create_pivot_durable::<T>().await?)
+    }
+
     async fn insert<T: NonUniqueStruct>(
         &self,
         pivot: LocalId,
         value: &T,
     ) -> Result<Id> {
         Ok(self.local.insert(pivot, value).await?)
+    }
+
+    async fn insert_durable<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        value: &T,
+    ) -> Result<Id> {
+        Ok(self.local.insert_durable(pivot, value).await?)
     }
 
     async fn get_record<T: NonUniqueStruct>(
@@ -164,12 +185,29 @@ impl<R: Route> DbHandle for ServerDb<'_, R> {
         Ok(self.local.update(pivot, id, value).await?)
     }
 
+    async fn update_durable<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        id: Id,
+        value: &T,
+    ) -> Result<()> {
+        Ok(self.local.update_durable(pivot, id, value).await?)
+    }
+
     async fn remove<T: NonUniqueStruct>(
         &self,
         pivot: LocalId,
         id: Id,
     ) -> Result<bool> {
         Ok(self.local.remove::<T>(pivot, id).await?)
+    }
+
+    async fn remove_durable<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        id: Id,
+    ) -> Result<bool> {
+        Ok(self.local.remove_durable::<T>(pivot, id).await?)
     }
 
     fn all<T: NonUniqueStruct + 'static>(
