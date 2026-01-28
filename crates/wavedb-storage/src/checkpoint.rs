@@ -16,7 +16,7 @@
 //!
 //! [RFC 0041]: ../../../rfcs/0041-single-barrier-checkpoint.md
 //! [RFC 0071]: ../../../rfcs/0071-data-files-by-address.md
-//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point-WIP.md
+//! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
 use std::collections::BTreeMap;
 
