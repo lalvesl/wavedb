@@ -11,6 +11,7 @@
 use futures::{Stream, StreamExt, TryStreamExt};
 
 use crate::collection::Collection;
+use crate::durability::Durability;
 use crate::error::Error;
 use crate::fuzzy::{Fuzzy, Scored};
 use crate::handle::DbHandle;
@@ -59,6 +60,12 @@ impl<'a, S: Store> LocalHandle<'a, S> {
     fn col<T: NonUniqueStruct>(&self, pivot: LocalId) -> Collection<T> {
         Collection::at(pivot, self.tenant)
     }
+
+    /// The backing store, its batches applied durably — what the
+    /// `_durable` operations write through.
+    const fn durable(&self) -> Durability<&'a S> {
+        Durability::new(self.store, true)
+    }
 }
 
 impl<S: Store> DbHandle for LocalHandle<'_, S> {
@@ -86,6 +93,13 @@ impl<S: Store> DbHandle for LocalHandle<'_, S> {
         record::save_unique(self.store, self.tenant, value).await
     }
 
+    async fn save_unique_durable<T: UniqueStruct>(
+        &self,
+        value: &T,
+    ) -> Result<(), Error> {
+        record::save_unique(&self.durable(), self.tenant, value).await
+    }
+
     fn unique_history<T: UniqueStruct + 'static>(
         &self,
     ) -> impl Stream<Item = Result<(Metadata, T), Error>> {
@@ -96,12 +110,26 @@ impl<S: Store> DbHandle for LocalHandle<'_, S> {
         Collection::<T>::create(self.store, self.tenant).await
     }
 
+    async fn create_pivot_durable<T: NonUniqueStruct>(
+        &self,
+    ) -> Result<LocalId, Error> {
+        Collection::<T>::create(&self.durable(), self.tenant).await
+    }
+
     async fn insert<T: NonUniqueStruct>(
         &self,
         pivot: LocalId,
         value: &T,
     ) -> Result<Id, Error> {
         self.col::<T>(pivot).insert(self.store, value).await
+    }
+
+    async fn insert_durable<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        value: &T,
+    ) -> Result<Id, Error> {
+        self.col::<T>(pivot).insert(&self.durable(), value).await
     }
 
     async fn get_record<T: NonUniqueStruct>(
@@ -121,12 +149,29 @@ impl<S: Store> DbHandle for LocalHandle<'_, S> {
         self.col::<T>(pivot).save(self.store, id, value).await
     }
 
+    async fn update_durable<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        id: Id,
+        value: &T,
+    ) -> Result<(), Error> {
+        self.col::<T>(pivot).save(&self.durable(), id, value).await
+    }
+
     async fn remove<T: NonUniqueStruct>(
         &self,
         pivot: LocalId,
         id: Id,
     ) -> Result<bool, Error> {
         self.col::<T>(pivot).remove(self.store, id).await
+    }
+
+    async fn remove_durable<T: NonUniqueStruct>(
+        &self,
+        pivot: LocalId,
+        id: Id,
+    ) -> Result<bool, Error> {
+        self.col::<T>(pivot).remove(&self.durable(), id).await
     }
 
     fn all<T: NonUniqueStruct + 'static>(
@@ -366,6 +411,66 @@ mod tests {
                 Some(note("red", 1)),
                 "removed record bytes survive (history)"
             );
+        });
+    }
+
+    /// Each `_durable` twin is its plain write as one durable batch, and
+    /// the plain writes ask nothing of the store's durability.
+    #[test]
+    fn durable_twins_apply_one_durable_batch_each() {
+        block_on(async {
+            let store = MemStore::default();
+            let db = LocalHandle::new(&store, tenant());
+            let note = Note {
+                label: "red".into(),
+                n: 1,
+            };
+            let pivot = db.create_pivot::<Note>().await.unwrap();
+            db.save_unique(&Settings { volume: 1 }).await.unwrap();
+            let a = db.insert(pivot, &note).await.unwrap();
+            db.update(pivot, a, &note).await.unwrap();
+            assert!(db.remove::<Note>(pivot, a).await.unwrap());
+            assert_eq!(store.durable_batches(), 0);
+
+            let pivot = db.create_pivot_durable::<Note>().await.unwrap();
+            db.save_unique_durable(&Settings { volume: 2 })
+                .await
+                .unwrap();
+            let b = db.insert_durable(pivot, &note).await.unwrap();
+            db.update_durable(pivot, b, &note).await.unwrap();
+            assert!(db.remove_durable::<Note>(pivot, b).await.unwrap());
+            assert_eq!(store.durable_batches(), 5);
+            assert_eq!(
+                db.get_unique::<Settings>().await.unwrap(),
+                Some(Settings { volume: 2 })
+            );
+        });
+    }
+
+    /// A durable node operation runs over a durable store: the route a
+    /// `#[server]` body uses keeps the promise to the engine.
+    #[test]
+    fn a_durable_node_op_applies_durably() {
+        use crate::node_op::{NodeOp, NodeReply, run_nonunique};
+        block_on(async {
+            let store = MemStore::default();
+            let db = LocalHandle::new(&store, tenant());
+            let pivot = db.create_pivot::<Note>().await.unwrap();
+            let body = crate::wire::to_wire(&Note {
+                label: "red".into(),
+                n: 1,
+            });
+            for durable in [false, true] {
+                let op = NodeOp::Insert {
+                    pivot,
+                    body: body.clone(),
+                    durable,
+                };
+                let reply =
+                    run_nonunique::<Note, _>(&store, tenant(), op).await;
+                assert!(matches!(reply, Ok(NodeReply::Inserted(_))));
+            }
+            assert_eq!(store.durable_batches(), 1);
         });
     }
 }
