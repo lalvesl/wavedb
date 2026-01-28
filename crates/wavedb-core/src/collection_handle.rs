@@ -73,6 +73,18 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
         db.insert(self.pivot, value).await
     }
 
+    /// [`insert`](Self::insert), resolving once the record is durable.
+    ///
+    /// # Errors
+    /// As [`insert`](Self::insert), or a failed settle.
+    pub async fn insert_durable<D: DbHandle>(
+        &self,
+        db: &D,
+        value: &T,
+    ) -> Result<Id, D::Error> {
+        db.insert_durable(self.pivot, value).await
+    }
+
     /// Fetch the record at `id`. `None` = no such record; a removed record
     /// still resolves (history stays navigable).
     ///
@@ -100,6 +112,19 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
         db.update(self.pivot, id, value).await
     }
 
+    /// [`save`](Self::save), resolving once the new version is durable.
+    ///
+    /// # Errors
+    /// As [`save`](Self::save), or a failed settle.
+    pub async fn save_durable<D: DbHandle>(
+        &self,
+        db: &D,
+        id: Id,
+        value: &T,
+    ) -> Result<(), D::Error> {
+        db.update_durable(self.pivot, id, value).await
+    }
+
     /// Move the record at `id` to the dead tree; returns whether it was
     /// living. Bytes are kept.
     ///
@@ -111,6 +136,18 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
         id: Id,
     ) -> Result<bool, D::Error> {
         db.remove::<T>(self.pivot, id).await
+    }
+
+    /// [`remove`](Self::remove), resolving once the removal is durable.
+    ///
+    /// # Errors
+    /// As [`remove`](Self::remove), or a failed settle.
+    pub async fn remove_durable<D: DbHandle>(
+        &self,
+        db: &D,
+        id: Id,
+    ) -> Result<bool, D::Error> {
+        db.remove_durable::<T>(self.pivot, id).await
     }
 
     // The stream-returning reads capture `db`'s lifetime but deliberately
