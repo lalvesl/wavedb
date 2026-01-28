@@ -158,6 +158,10 @@ impl<S: Store> Store for NotifyStore<'_, S> {
         self.inner.apply(batch).await
     }
 
+    async fn apply_durable(&self, batch: &[Write]) -> wavedb_core::Result<()> {
+        self.inner.apply_durable(batch).await
+    }
+
     fn note_mutation(&self, mutation: impl FnOnce() -> Mutation) {
         // Building the event costs a body clone; only the node pays it (an
         // ordinary store's default drops the closure unbuilt), and only on
