@@ -15,9 +15,8 @@ use crate::wire::WaveWire;
 
 /// One write inside an atomic [`Store::apply`] batch.
 ///
-/// Derives [`WaveWire`], so a batch (`Vec<Write>`) is itself a wire value — the
-/// journal in `wavedb-storage` persists batches with the checked encoding
-/// instead of a hand-rolled format.
+/// Derives [`WaveWire`], so a batch (`Vec<Write>`) is itself a wire value
+/// with the checked encoding rather than a hand-rolled format.
 ///
 /// ## Why two variants name their type and one does not
 ///
@@ -74,8 +73,10 @@ impl Write {
 ///
 /// `apply` commits all-or-nothing: a multi-record op (a record **and** the
 /// `BpTree` node it touches) is one batch, so a reader never sees a half-applied
-/// mutation and a crash either replays the whole batch or none of it. There is no
-/// separate transaction manager — the batch *is* the atomic unit.
+/// mutation and a crash keeps either the whole batch or none of it. There is no
+/// separate transaction manager — the batch *is* the atomic unit. When a crash
+/// may still take it is the store's: [`apply_durable`](Store::apply_durable)
+/// waits until none can.
 pub trait Store {
     /// Fetch a record's wire bytes, or `None` if absent.
     async fn get(&self, id: Id) -> Result<Option<Vec<u8>>>;
@@ -99,6 +100,21 @@ pub trait Store {
 
     /// Apply a batch of writes atomically (all-or-nothing).
     async fn apply(&self, batch: &[Write]) -> Result<()>;
+
+    /// [`apply`](Self::apply), resolving only once the batch is **durable**
+    /// — a crash after it resolves keeps it ([RFC 0072]). Everything this
+    /// store committed before it is durable with it.
+    ///
+    /// The default is `apply`: a store with no settle of its own — the
+    /// in-memory test stores, IndexedDB, whose transaction commit is its
+    /// durability point — is durable once `apply` resolves. A store that
+    /// forwards to another must forward this too, or it silently drops the
+    /// promise.
+    ///
+    /// [RFC 0072]: https://github.com/wavedb/wavedb/blob/main/rfcs/0072-the-settle-is-the-durability-point.md
+    async fn apply_durable(&self, batch: &[Write]) -> Result<()> {
+        self.apply(batch).await
+    }
 
     /// Observe one committed mutation — the write paths call this right
     /// after the op's `apply` resolves, carrying the op-level meaning a
@@ -138,6 +154,10 @@ impl<S: Store + ?Sized> Store for std::rc::Rc<S> {
         (**self).apply(batch).await
     }
 
+    async fn apply_durable(&self, batch: &[Write]) -> Result<()> {
+        (**self).apply_durable(batch).await
+    }
+
     fn note_mutation(
         &self,
         mutation: impl FnOnce() -> crate::notify::Mutation,
@@ -166,6 +186,10 @@ impl<S: Store + ?Sized> Store for &S {
 
     async fn apply(&self, batch: &[Write]) -> Result<()> {
         (**self).apply(batch).await
+    }
+
+    async fn apply_durable(&self, batch: &[Write]) -> Result<()> {
+        (**self).apply_durable(batch).await
     }
 
     fn note_mutation(
