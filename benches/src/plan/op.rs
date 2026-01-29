@@ -119,12 +119,6 @@ impl MicroOp {
 }
 
 impl ShopOp {
-    /// Whether the op writes — a durable row waits for it to be durable.
-    #[must_use]
-    pub const fn writes(&self) -> bool {
-        matches!(self, Self::Signup { .. } | Self::Checkout { .. })
-    }
-
     /// The user this op belongs to — its partition key, and its tenant.
     #[must_use]
     pub const fn partition_key(&self) -> u64 {
