@@ -158,17 +158,6 @@ where
 }
 
 impl<E: Engineish> WavedbDriver<E> {
-    /// A durable row's write returns once it is durable: settled and synced
-    /// on the spot — what `apply_durable` does on a store nobody ticks — and
-    /// inside the timed window.
-    fn after_write(&mut self) -> Result<(), String> {
-        if self.durable {
-            self.engine.drain()?;
-            self.settled = Instant::now();
-        }
-        Ok(())
-    }
-
     /// The anchor for dataset row `n`.
     fn id_of(&self, n: u64) -> Result<Id, String> {
         self.ids
@@ -185,11 +174,17 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
         let db = LocalHandle::new(self.engine.store(), U48::from(TENANT));
         let col = Thing::collection(self.pivot);
         match op {
+            // A durable row writes through the `_durable` twin (RFC 0072
+            // §12): it returns once its batch is durable — on a store nobody
+            // ticks, settled and synced on the spot, inside the timed window.
             MicroOp::Insert { n, row } => {
-                let id = block_on(col.insert(&db, &row))
-                    .map_err(|e| format!("insert {n}: {e}"))?;
+                let id = if self.durable {
+                    block_on(col.insert_durable(&db, &row))
+                } else {
+                    block_on(col.insert(&db, &row))
+                }
+                .map_err(|e| format!("insert {n}: {e}"))?;
                 self.ids.push(id);
-                self.after_write()?;
             }
             MicroOp::Read { n } => {
                 let id = self.id_of(n)?;
@@ -203,9 +198,12 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
             }
             MicroOp::Update { n, row } => {
                 let id = self.id_of(n)?;
-                block_on(col.save(&db, id, &row))
-                    .map_err(|e| format!("save {n}: {e}"))?;
-                self.after_write()?;
+                if self.durable {
+                    block_on(col.save_durable(&db, id, &row))
+                } else {
+                    block_on(col.save(&db, id, &row))
+                }
+                .map_err(|e| format!("save {n}: {e}"))?;
             }
         }
         Ok(())
