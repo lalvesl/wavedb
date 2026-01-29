@@ -131,10 +131,14 @@ names — `.import`, `\copy`, `LOAD DATA` and `mongoimport` are not the
 per-statement commit path either.
 
 The fill's settles are **not** the row's: durability is the driver's choice
-in the measured phases. WaveDB reports **two rows** like everyone else —
-`durable` (every write settled and synced before it returns, inside the timed
-window — what `apply_durable` does on a store nobody ticks) and `relaxed`
-(a settle per elapsed `RELAXED_WINDOW`, one second). One second lands mid-pack
+in the measured phases. WaveDB reports **two rows** like everyone else, and
+they call the two kinds of write the API has (RFC 0072 §12): `durable` writes
+through the `_durable` twins (`insert_durable`, `save_durable`, …; a shop
+checkout ends with one, which makes the writes before it durable too) — each
+returns once its batch is settled and synced, inside the timed window, since
+a store nobody ticks settles a durable write itself — and `relaxed` writes
+through the standard ones, settled per elapsed `RELAXED_WINDOW` (one second)
+outside the timed window, a node's tick in the embedded bracket. One second lands mid-pack
 rather than flattering: PostgreSQL's `synchronous_commit = off` risks ~600 ms,
 MySQL's `innodb_flush_log_at_trx_commit = 2` flushes once a second, and
 SQLite's `synchronous = NORMAL` holds until a checkpoint. None of those are
