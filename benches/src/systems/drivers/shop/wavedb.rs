@@ -26,7 +26,7 @@
 
 use futures::TryStreamExt as _;
 use futures::executor::block_on;
-use wavedb_core::{LocalHandle, Store, U48};
+use wavedb_core::{CollectionHandle, LocalHandle, NonUniqueStruct, Store, U48};
 use wavedb_storage::PageStore;
 
 use crate::harness::{Driver, DriverFactory};
@@ -140,16 +140,11 @@ impl<E: ShopEngine> Driver for ShopWavedb<E> {
         );
         let store = self.engine.store();
         let db = tenant(store, u);
-        let writes = op.writes();
-        block_on(run(&db, op))?;
-        // A durable row's write returns once it is durable: settled and
-        // synced on the spot — what `apply_durable` does on a store nobody
-        // ticks — inside the timed window.
-        if self.durable && writes {
-            self.engine.drain()?;
-            self.settled = std::time::Instant::now();
-        }
-        Ok(())
+        // A durable row ends each writing op with a `_durable` write (RFC
+        // 0072 §12): it returns once its batch is durable, and so is every
+        // write before it on this consumer's store — on a store nobody
+        // ticks, settled and synced on the spot, inside the timed window.
+        block_on(run(&db, op, self.durable))
     }
 
     /// A relaxed row settles once per elapsed window — a node's tick, as the
@@ -192,22 +187,25 @@ impl<E: ShopEngine> Driver for ShopWavedb<E> {
 async fn run<S: Store>(
     db: &LocalHandle<'_, S>,
     op: ShopOp,
+    durable: bool,
 ) -> Result<(), String> {
     match op {
         ShopOp::Signup { row, .. } => {
             let shoppings = Shopping::create_pivot(db)
                 .await
                 .map_err(|e| format!("create shopping pivot: {e}"))?;
-            User {
+            let user = User {
                 name: row.name,
                 address: row.address,
                 city: row.city,
                 email: row.email,
                 shoppings,
+            };
+            if durable {
+                user.save_durable(db).await
+            } else {
+                user.save(db).await
             }
-            .save(db)
-            .await
-            .map(|_| ())
             .map_err(|e| format!("save user: {e}"))
         }
         ShopOp::Checkout { row, items, .. } => {
@@ -218,29 +216,26 @@ async fn run<S: Store>(
             let pivot = Product::create_pivot(db)
                 .await
                 .map_err(|e| format!("create product pivot: {e}"))?;
-            Shopping::collection(user.shoppings)
-                .insert(
-                    db,
-                    &Shopping {
-                        bought_at: row.bought_at,
-                        discount_cents: row.discount_cents,
-                        transport_cents: row.transport_cents,
-                        items: pivot,
-                    },
-                )
+            // The op's last write is the durable one.
+            let last = items.len();
+            let shopping = Shopping {
+                bought_at: row.bought_at,
+                discount_cents: row.discount_cents,
+                transport_cents: row.transport_cents,
+                items: pivot,
+            };
+            let shoppings = Shopping::collection(user.shoppings);
+            insert(db, shoppings, &shopping, durable && last == 0)
                 .await
                 .map_err(|e| format!("insert shopping: {e}"))?;
             let products = Product::collection(pivot);
-            for item in items {
-                products
-                    .insert(
-                        db,
-                        &Product {
-                            name: item.name,
-                            quantity: item.quantity,
-                            unit_cents: item.unit_cents,
-                        },
-                    )
+            for (i, item) in items.into_iter().enumerate() {
+                let product = Product {
+                    name: item.name,
+                    quantity: item.quantity,
+                    unit_cents: item.unit_cents,
+                };
+                insert(db, products, &product, durable && i + 1 == last)
                     .await
                     .map_err(|e| format!("insert product: {e}"))?;
             }
@@ -285,6 +280,20 @@ async fn run<S: Store>(
             }
             Ok(())
         }
+    }
+}
+
+/// Insert `value` into `col`, through the `_durable` twin when `durable`.
+async fn insert<S: Store, T: NonUniqueStruct>(
+    db: &LocalHandle<'_, S>,
+    col: CollectionHandle<T>,
+    value: &T,
+    durable: bool,
+) -> wavedb_core::Result<()> {
+    if durable {
+        col.insert_durable(db, value).await.map(|_| ())
+    } else {
+        col.insert(db, value).await.map(|_| ())
     }
 }
 
