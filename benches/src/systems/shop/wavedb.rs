@@ -131,8 +131,9 @@ async fn create_order(
 }
 
 /// The **measured** store, reopened after the preload. Its durability is
-/// not an option of it any more (RFC 0072): the row's driver makes every write
-/// durable, or settles on a window (`drivers::shop::wavedb`).
+/// not an option of it any more (RFC 0072): the row's driver writes through
+/// the `_durable` operations, or the standard ones settled on a window
+/// (`drivers::shop::wavedb`).
 ///
 /// Each type contributes a different number of `StructStorage` slots — a
 /// Unique one, a NonUnique with a declared list six — so they are collected
