@@ -23,9 +23,10 @@ use crate::schema::Thing;
 
 pub fn notes(seeded: bool) -> Vec<String> {
     let mut notes = vec![
-        "Every collection op is one apply batch. The durable row takes one \
-         fsync per batch; the relaxed row takes one per elapsed window \
-         (RFC 0061), the counterpart of the others' relaxed knobs."
+        "Every collection op is one apply batch. The durable row writes \
+         through the `_durable` operations, one fsync per batch; the relaxed \
+         row through the standard ones, one fsync per elapsed window \
+         (RFC 0072), the counterpart of the others' relaxed knobs."
             .into(),
         "Retains every superseded version; the other systems retain none. Read \
          the update row beside the footprint, never alone."
