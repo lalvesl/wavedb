@@ -224,11 +224,11 @@ where
                     "barrier".into(),
                     match d {
                         Durability::Durable => {
-                            "a settle and its fsync per write (RFC 0072)"
+                            "`_durable` writes: a settle and its fsync each (RFC 0072)"
                                 .to_string()
                         }
                         Durability::Relaxed => format!(
-                            "a settle per elapsed {:?}",
+                            "standard writes: a settle per elapsed {:?}",
                             crate::RELAXED_WINDOW
                         ),
                     },
