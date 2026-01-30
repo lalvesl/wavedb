@@ -30,6 +30,30 @@ from here. One that is done is removed too; the commit says so.
 - **Decided** 2026-10-08, in RFC 0066 step 4 (client half): refuse now,
   keep it simple.
 
+### At most 32 native caches open in one process
+
+- **Now.** Each `Db::open` puts its cache's `PageStore` on a carrier of
+  its own, served by one Embassy task from a static pool of 32
+  (`cache::native::MAX_CACHES`). A 33rd open cache refuses with
+  `Error::Backend` until one is dropped.
+- **Instead.** One cache carrier per process with a task per cache, or a
+  pool sized at build time like `WAVEDB_CLIENT_MAX_POSTS` — whichever an
+  application that holds many app caches open at once actually needs.
+- **Decided** 2026-10-16, in RFC 0072 phase 4: a client opens one cache,
+  tests a handful; a fixed pool is the Embassy way.
+
+### The cache's tick settles everything at once
+
+- **Now.** Every 200 ms the cache's carrier runs a whole `drain` — every
+  round of the batch and its `fsync` — before serving the next request; a
+  durable write settles inline the same way. A large batch holds the
+  application's cache reads for as long as it takes.
+- **Instead.** Step the cycle in bounded rounds (`cycle_step`) between
+  requests, as a node's BG task does, with a barrier helper so the
+  `fsync` leaves the carrier too.
+- **Decided** 2026-10-16, in RFC 0072 phase 4: a client's batches are
+  small, and the node's valve would be machinery with nothing to weigh.
+
 ## Node
 
 ### Pool sizes are plain constants
