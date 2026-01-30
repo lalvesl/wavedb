@@ -55,7 +55,9 @@ NonUnique through `Pivot`/`BpTree`; kill-during-write test recovers cleanly.
 ## M3 — Registry-aware node
 
 A node that links the schema enforces shapes and serves records. A request is a
-**command frame** `{ struct_hash, command, payload }`; the node gates it
+**command frame** `{ struct_hash, command, payload, durable }` (the last bit
+asks for the write's `_durable` twin — answered once durable, RFC 0072
+§12); the node gates it
 (identity from the access token → header → decode → **permission** → `validate` →
 `preprocess`) then dispatches **`match struct_hash → match command`** (`Get`/`Save`
 for Unique, `Insert`/`Update`/`Remove` for NonUnique) to the type's compile-time
