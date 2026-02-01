@@ -15,6 +15,11 @@
 //!   back to a type the newer headers do not name, and the check that a
 //!   batch spread over several headers is whole — every header back to the
 //!   previous `end_of_batch` present.
+//! - **`horizon` bounds the way back**: every type that existed when the
+//!   header was written is named at or above it (the spare room's
+//!   rotations, `crate::restate::horizon`), so a walk rooted here never
+//!   reads below it, and a registered type still unnamed there is new — and
+//!   empty.
 //!
 //! No hash links the headers: nothing is written twice — a file number is
 //! never reused, every PUT is create-only — so a header's crc and its own
@@ -42,6 +47,9 @@ pub struct Header {
     pub at: u64,
     /// The header before this one ([`NO_FILE`] for the first).
     pub prev: u64,
+    /// The lowest header a walk rooted here reads: every type that existed
+    /// when this one was written is named at or above it.
+    pub horizon: u64,
     /// Whether this header ends a batch: with the headers before it, it
     /// holds every write up to a point and none in part. A reconstruction
     /// roots only in one.
@@ -160,6 +168,9 @@ pub struct Chain {
     pub start: u64,
     /// The newest file, once anything was uploaded.
     pub tail: Option<u64>,
+    /// The newest file's horizon ([`Header::horizon`]): where the next
+    /// file's stays until the rotations pass it.
+    pub floor: u64,
     /// Per type: where it stands in the chain.
     pub types: BTreeMap<u64, Rotation>,
 }
@@ -170,6 +181,7 @@ pub struct ChainRecord {
     pub end: u64,
     pub start: u64,
     pub tail: u64,
+    pub floor: u64,
     pub last: Vec<(u64, u64)>,
 }
 
@@ -184,6 +196,7 @@ impl Chain {
             end: self.end,
             start: self.start,
             tail: self.tail.unwrap_or(NO_FILE),
+            floor: self.floor,
             last: self.types.iter().map(|(&h, r)| (h, r.last)).collect(),
         }
     }
@@ -193,6 +206,7 @@ impl Chain {
             end: record.end,
             start: record.start,
             tail: (record.tail != NO_FILE).then_some(record.tail),
+            floor: record.floor,
             types: record
                 .last
                 .iter()
@@ -218,6 +232,7 @@ mod tests {
         Header {
             at: 7,
             prev: 6,
+            horizon: 0,
             end_of_batch: true,
             start: 0,
             end: 7 * 2048 + 20,
