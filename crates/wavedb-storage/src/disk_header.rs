@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use crate::block::{BlockDescriptor, Run};
 use crate::directory::Directory;
-use crate::disk_chain::Touched;
+use crate::disk_chain::{DiskChain, Touched};
 use crate::error::{StorageError, StorageResult};
 use crate::header::{
     ENTRY_BYTES, Header, ITEM_BYTES, NO_FILE, Rotation, TypeEntry,
@@ -109,6 +109,7 @@ impl PageStore {
         let mut header = Header {
             at,
             prev: chain.tail.unwrap_or(NO_FILE),
+            horizon: 0,
             end_of_batch: false,
             start: 0,
             end: 0,
@@ -161,6 +162,8 @@ impl PageStore {
         for e in &header.remote {
             chain.remote.entry(e.struct_hash).or_default().last = at;
         }
+        header.horizon =
+            coverage(&views, &remote_views, &chain, self.object.is_some());
         chain.tail = Some(at);
         chain.live.insert(at);
         let mut bytes = header.encode();
@@ -185,11 +188,8 @@ impl PageStore {
         let views = self.views_of(&disk, &[], &BTreeMap::new());
         let remote_views = self.remote_views_of(&remote);
         let mut chain = self.chain.borrow_mut();
-        let mut line = horizon(&views, &chain.types, chain.floor);
-        if self.object.is_some() {
-            line = line.min(horizon(&remote_views, &chain.remote, chain.floor));
-        }
-        line = line.max(chain.restated.unwrap_or(0));
+        let mut line =
+            coverage(&views, &remote_views, &chain, self.object.is_some());
         // A reconstruction checks the batch it roots in back to the header
         // ending the batch before.
         if let Some(before) = chain.last_end {
@@ -255,6 +255,23 @@ impl PageStore {
             })
             .collect()
     }
+}
+
+/// The lowest header a reconstruction from the newest one reads
+/// ([`Header::horizon`]): where the rotations of the disk's directories —
+/// and in disk + object mode the object store's — last came round, or the
+/// last full restatement, whichever is higher.
+fn coverage(
+    views: &[TypeView<'_>],
+    remote_views: &[TypeView<'_>],
+    chain: &DiskChain,
+    object_backed: bool,
+) -> u64 {
+    let mut line = horizon(views, &chain.types, chain.floor);
+    if object_backed {
+        line = line.min(horizon(remote_views, &chain.remote, chain.floor));
+    }
+    line.max(chain.restated.unwrap_or(0))
 }
 
 /// Name as much of `touched`'s `side` as `room` holds in an entry of
