@@ -116,6 +116,10 @@ struct Header {
     /// Where the previous header's 32 KiB start — the reconstruction's way
     /// back when a type is still missing.
     prev: u64,
+    /// The lowest header a reconstruction rooted here reads (§8's line):
+    /// every type that existed when this header was written is named at or
+    /// above it.
+    horizon: u64,
     /// The last header of a batch (§2).
     end_of_batch: bool,
     /// The object store's files: the oldest file not deleted, and the
@@ -203,6 +207,12 @@ chain for one.
    first address seen for a bucket being its newest. While a registered type
    is missing, read the header before (`prev`), and follow the missing type
    from where it appears. A type is closed once every bucket is known.
+   The way down stops at the root's `horizon`: every type that existed when
+   the root was written is named at or above it, so a registered type still
+   missing there was added to the code since — it is new, and empty. Without
+   the bound, the first open after a type is added would read down through
+   every surviving header, the dead ones below the horizon included, and
+   hold them live.
 4. The allocator is the files' layout plus every page run, dictionary run and
    header run the walk named; the rest is holes. Past the root's window is
    what a crash left: cut.
@@ -377,6 +387,16 @@ protected sets; `StoreOptions::relax_window`. `drain()` becomes whole cycles,
     on drop (`wavedb/tests/local_cache_settle.rs`); the contact-book
     end-to-end tests kill the node right after durable writes, with no
     wait, and fail when the node ignores the flag.
+
+- **The horizon in the header — landed 2026-10-17** (`header`,
+  `disk_header`, `upload_file`, `recover`, `walk`): `Header::horizon`, the
+  line §8 frees below, now written into every header — the disk's from its
+  own rotations and the object store's lanes, an uploaded file's from the
+  remote rotations (`Chain::floor`, recorded in `ChainRecord` and set by a
+  recovery from the root's horizon) — and the way down by `prev` stops
+  there; it only ever goes down, so a block a dead header was freed from and
+  that holds a newer one since cannot lead it back up. Covered by the
+  existing reopen and recovery tests.
 
 ## Testing
 
