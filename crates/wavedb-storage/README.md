@@ -29,7 +29,7 @@ pipeline whose settle is the durability point. This is where most of WaveDB's en
 | `disk_chain`      | What the disk's headers keep between windows: the unrecorded changes, the chain's tail, rotations, live headers, full restatements.                |
 | `cycle`           | The settle cycle: a batch opened by a mark, settled in bounded rounds, ended by a header, made durable by one barrier; `drain`.                    |
 | `barrier`         | The `fsync` helper thread, the batches asked of it, and a durable write's wait (`Durable`).                                                       |
-| `walk`            | The walk that rebuilds directories from headers, newest first, down by `prev` while a registered type is unnamed — disk and object store.          |
+| `walk`            | The walk that rebuilds directories from headers, newest first, down by `prev` while a registered type is unnamed, to the root's horizon.           |
 | `reopen`          | Reconstruction on open: the newest whole batch's header, its pages checked, the walk, the allocator; nothing replayed.                             |
 | `settle`          | The record cache's side of a settle: what is unsettled, and the cache-eviction budget.                                                             |
 | `compact`         | Compaction's phases and surface (`compact_step`, `compact`, `reclaim`, `space`): move, drop the old addressing, seal, cut and delete.              |
@@ -446,7 +446,9 @@ mutation → the type's record log (RAM) → (client confirmed)
 On startup the directories and the block allocator are **reconstructed from the
 headers**: the newest whole batch's — the last 8 blocks of the newest data
 file — roots a walk back along each type's `last`, and down by `prev` while a
-registered type is still unnamed. Only the newest batch can be cut by a crash
+registered type is still unnamed — never below the root's `horizon`, where
+every type that existed is named, so one unnamed there is new and empty.
+Only the newest batch can be cut by a crash
 (a cycle opens once the previous batch is durable): its pages are checked by
 their crc, and a batch not whole gives way to the one before. Nothing is
 replayed; the caches start empty.
