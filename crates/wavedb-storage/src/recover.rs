@@ -106,6 +106,7 @@ pub async fn recover(
         end: top.end.max(past),
         start: top.start,
         tail: Some(top.at),
+        floor: top.horizon,
         ..Chain::default()
     };
     let walked = walk(&mut headers, &top, registered, Lane::Types).await?;
@@ -268,6 +269,7 @@ mod tests {
         Header {
             at: file,
             prev,
+            horizon: 0,
             end_of_batch,
             start: 0,
             end: file * FILE_BLOCKS + HEADER_BLOCKS + 1,
