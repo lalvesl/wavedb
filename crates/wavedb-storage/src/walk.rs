@@ -2,6 +2,14 @@
 //! [RFC 0070] §6) — split from [`crate::recover`], which finds where it
 //! starts.
 //!
+//! Each type is followed along its `last` until every bucket is known; the
+//! way down by `prev`, for a registered type no header met yet names, stops
+//! at the root's [`Header::horizon`]: every type that existed when the root
+//! was written is named at or above it, so one still unnamed there was
+//! added since — it is new, and empty. Without the bound, every open after
+//! a type is added would read down through every surviving header, the dead
+//! ones included.
+//!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
@@ -75,7 +83,8 @@ pub struct Walked {
 
 /// Every type's directory and dictionary descriptor, gathered from `top`
 /// back along the types' chains, and down by `prev` while a `registered`
-/// type is still unnamed (see the module docs).
+/// type is still unnamed — never below `top`'s horizon, where a type still
+/// unnamed is new and empty (see the module docs).
 ///
 /// # Errors
 /// Object-store faults; [`StorageError::Corrupt`] when a header a type's
@@ -99,7 +108,9 @@ pub async fn walk<S: HeaderSource>(
             .filter(|t| t.missing > 0 && t.next != NO_FILE)
             .map(|t| t.next)
             .max();
-        let down = (!unnamed.is_empty() && below != NO_FILE).then_some(below);
+        let down =
+            (!unnamed.is_empty() && below != NO_FILE && below >= top.horizon)
+                .then_some(below);
         let Some(file) = chained.max(down) else { break };
         let Some(header) = headers.get(file).await? else {
             if chained == Some(file) {
@@ -109,7 +120,13 @@ pub async fn walk<S: HeaderSource>(
             continue;
         };
         if file == below {
-            below = header.prev;
+            // Only ever down: a block a dead header was freed from may hold
+            // a newer one since, whose `prev` leads back up.
+            below = if header.prev < file {
+                header.prev
+            } else {
+                NO_FILE
+            };
         }
         gather(&mut types, &mut unnamed, &header, lane);
         if types.values().any(|t| t.missing > 0 && t.next == file) {
