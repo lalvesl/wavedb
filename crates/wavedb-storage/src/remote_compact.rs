@@ -354,6 +354,7 @@ mod tests {
         let header = Header {
             at: file,
             prev: file.checked_sub(1).unwrap_or(NO_FILE),
+            horizon: 0,
             end_of_batch: true,
             start: 0,
             end: file * FILE_BLOCKS + HEADER_BLOCKS + 1,
