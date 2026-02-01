@@ -26,7 +26,7 @@ use crate::header::{
 use crate::plan::blocks_of;
 use crate::remote::{FILE_BLOCKS, HEADER_BLOCKS, HEADER_BYTES};
 pub use crate::restate::TypeView;
-use crate::restate::restate;
+use crate::restate::{horizon, restate};
 
 /// One type's images for an upload.
 pub struct SlotImages {
@@ -146,9 +146,10 @@ fn open_room(packed: &mut Packed, hash: u64, item: usize) {
 }
 
 /// Write every file's header, in order, advancing `chain` as it goes: each
-/// header links to the one before, names the types it holds pages of, and
-/// spends its spare room restating old addresses; the last ends the batch
-/// if the upload is a cut. `chain` ends at the last file.
+/// header links to the one before, names the types it holds pages of,
+/// spends its spare room restating old addresses, and records the horizon
+/// those restatements leave; the last ends the batch if the upload is a
+/// cut. `chain` ends at the last file.
 ///
 /// # Errors
 /// [`StorageError::Corrupt`] when a header outgrew [`HEADER_BYTES`]
@@ -163,6 +164,7 @@ pub fn finish(
         let mut header = Header {
             at: file.number,
             prev: chain.tail.unwrap_or(NO_FILE),
+            horizon: 0,
             end_of_batch: packed.cut && i + 1 == files,
             start: chain.start,
             end: packed.end,
@@ -187,6 +189,8 @@ pub fn finish(
             chain.types.entry(entry.struct_hash).or_default().last =
                 file.number;
         }
+        header.horizon = horizon(views, &chain.types, chain.floor);
+        chain.floor = header.horizon;
         let encoded = header.encode();
         if encoded.len() > HEADER_BYTES {
             return Err(StorageError::Corrupt("a header outgrew its room"));
