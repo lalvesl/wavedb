@@ -13,30 +13,30 @@ proof: every type that existed when a header was written is named at or
 above that header's horizon. Recorded in the header, it bounds the
 descent; a registered type still unnamed there is new, and empty.
 
-- [ ] 1.1 `Header` gains `horizon: u64` (`header.rs`), documented;
+- [x] 1.1 `Header` gains `horizon: u64` (`header.rs`), documented;
       `BARE_BYTES` follows by itself. Literals: `disk_header.rs`,
       `upload_file.rs`, and the tests in `header.rs`, `recover.rs`,
       `remote_compact.rs`.
-- [ ] 1.2 One function for the coverage line, shared by `header_at` and
+- [x] 1.2 One function for the coverage line, shared by `header_at` and
       `drop_dead_headers`: the min of `horizon(...)` over the disk and the
       remote lane, with `floor`, `.max(restated)`. The `last_end` clamp
       stays in `drop_dead_headers` only (it is the batch-wholeness check).
-- [ ] 1.3 `header_at` fills `horizon` after the `restate(...)` calls,
+- [x] 1.3 `header_at` fills `horizon` after the `restate(...)` calls,
       before `encode`.
-- [ ] 1.4 The object store's file headers (`upload_file.rs` `finish()`)
+- [x] 1.4 The object store's file headers (`upload_file.rs` `finish()`)
       fill it from the remote rotations; `Chain` gains a `floor`, set by
       the recovery (`recover.rs`).
-- [ ] 1.5 `walk.rs`: the descent by `prev` stops at `below < top.horizon`;
+- [x] 1.5 `walk.rs`: the descent by `prev` stops at `below < top.horizon`;
       the `last` chains stay free. Module and `walk()` docs: an unnamed type
       below the horizon is new, and empty.
-- [ ] 1.6 `reopen.rs`: with the bounded descent, `DiskHeaders.lowest` /
+- [x] 1.6 `reopen.rs`: with the bounded descent, `DiskHeaders.lowest` /
       `floor` and `seen` no longer hold dead headers live — check nothing
       else relies on it.
-- [ ] 1.7 Docs: RFC 0072 §6 (the stop at the horizon) + a Progress entry;
+- [x] 1.7 Docs: RFC 0072 §6 (the stop at the horizon) + a Progress entry;
       the `header.rs` module doc on `prev`; `CLAUDE.md`'s storage paragraph
       ("down by `prev` while a registered type is unnamed, never below the
       root's horizon").
-- [ ] 1.8 The pre-commit bar: fmt, clippy, test, `check_file_length`, doc,
+- [x] 1.8 The pre-commit bar: fmt, clippy, test, `check_file_length`, doc,
       nextest, deny, bench clippy. No new tests (existing reopen/recover
       tests cover the regression).
 
