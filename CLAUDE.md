@@ -182,8 +182,9 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   durable with it — on a node, the same shard.
   On open, nothing is replayed: the newest whole batch's header — the last
   8 blocks of the newest data file — roots a walk back along each type's
-  `last` and down by `prev` while a registered type is unnamed; only the
-  newest batch can be cut by a crash, its pages checked by crc. A store
+  `last` and down by `prev` while a registered type is unnamed, never
+  below the root's `horizon` (a type unnamed there is new, and empty); only
+  the newest batch can be cut by a crash, its pages checked by crc. A store
   dropped settles what it holds. The same header and walk serve the object
   store. Per-type routing is compile-time (`StructStorage` statics are
   declarations: hash + compression policy); the per-type state (directory,
