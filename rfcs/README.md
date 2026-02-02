@@ -240,7 +240,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   budget (navigational vs streaming, per-tenant accounting, no pinning ever). Held
   at *Planned* until a measured workload justifies it — the baseline of read,
   deposit, flush, and accept the miss is already correct;
-  [0044](0044-page-cache-PLANNED-LOW.md) — a page-granular cache so the read
+  [0044](0044-page-cache.md) — a page-granular cache so the read
   that precedes a write also serves the settle's read-modify-write (the weaker
   answer to 0050's problem: it pays to tolerate a random access pattern rather
   than removing it — still worth having), **superseded 2026-08-01** by
@@ -358,7 +358,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   serial), so distributed sharding later is a *coarsening* rather than a second
   design. A journal actor owns the journal (group commit) and a page actor owns
   `data.bin` — single ownership being what makes block de-duplication possible,
-  and the natural home for the [0044](0044-page-cache-PLANNED-LOW.md) page cache
+  and the natural home for the [0044](0044-page-cache.md) page cache
   and for zstd, following the actual Redis lesson (*one thread owns the data
   structure; everything that is not data-structure mutation leaves it* — Redis 6
   moved I/O off the core, it was never one thread doing everything). Routing is
@@ -610,7 +610,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0039](0039-developer-experience-PLANNED-LOW.md) | Developer experience (M9) | Planned (low) |
 | [0041](0041-single-barrier-checkpoint.md) | Single-barrier checkpoint (its one-window settle round kept; the checkpoint superseded by [0072](0072-the-settle-is-the-durability-point.md)) | Implemented |
 | [0043](0043-descriptors-in-the-commit-frame.md) | Descriptors in the `Commit` frame (superseded by 0046, then [0072](0072-the-settle-is-the-durability-point.md)) | Implemented |
-| [0044](0044-page-cache-PLANNED-LOW.md) | The page cache | Planned (low) |
+| [0044](0044-page-cache.md) | The page cache (decoded pages by run, disk and object store) | Implemented |
 | [0045](0045-vector-search-PLANNED.md) | Vector search | Planned |
 | [0046](0046-directory-deltas-in-the-window.md) | Directory deltas in the settle window (the delta kept, as [0072](0072-the-settle-is-the-durability-point.md)'s header) | Implemented |
 | [0049](0049-elastic-pages-and-load-driven-splits.md) | Elastic pages and load-driven splits | Implemented |
