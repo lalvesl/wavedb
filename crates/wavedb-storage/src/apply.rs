@@ -11,7 +11,6 @@ use wavedb_core::{Id, Result as CoreResult, Store, Write};
 use crate::barrier::{Barrier, Durable};
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::PageStore;
-use crate::record_cache::Lookup;
 use crate::record_log::MAX_RECORD;
 use crate::struct_storage::TypeSlot;
 
@@ -118,52 +117,6 @@ impl PageStore {
         Ok(wait)
     }
 
-    /// Read `id`'s current bytes from `struct_hash`'s slot: the record
-    /// cache, then its settled page. The sync body [`Store::get_of`] wraps, reused by the
-    /// `Expect` guard — one binary search on the route table and at most one
-    /// page read, whatever the schema's width.
-    ///
-    /// An unregistered `struct_hash` reads as absent rather than faulting:
-    /// [`route_batch`](Self::route_batch) has already refused any batch that
-    /// would reach here with one.
-    pub(crate) fn read_of(
-        &self,
-        struct_hash: u64,
-        id: Id,
-    ) -> StorageResult<Option<Vec<u8>>> {
-        let Some(idx) = self.slot_index(struct_hash) else {
-            return Ok(None);
-        };
-        let cached = self.cache.borrow().get(idx, id);
-        match cached {
-            Lookup::Hit(bytes) => Ok(Some(bytes)),
-            Lookup::Removed => Ok(None),
-            Lookup::Miss => self.read_from_pages(&self.types[idx], id),
-        }
-    }
-
-    /// Read `id`'s current bytes without knowing its type: the record cache,
-    /// then every settled page — the sync body [`Store::get`] wraps.
-    ///
-    /// The cost is a page read per registered type, so nothing on a write
-    /// path may call this (RFC 0063). `Store::get` keeps it because an
-    /// untyped read is what that method *means*; typed callers spell
-    /// [`read_of`](Self::read_of).
-    fn read_any(&self, id: Id) -> StorageResult<Option<Vec<u8>>> {
-        let cached = self.cache.borrow().get_any(id);
-        match cached {
-            Lookup::Hit(bytes) => return Ok(Some(bytes)),
-            Lookup::Removed => return Ok(None),
-            Lookup::Miss => {}
-        }
-        for slot in &self.types {
-            if let Some(bytes) = self.read_from_pages(slot, id)? {
-                return Ok(Some(bytes));
-            }
-        }
-        Ok(None)
-    }
-
     /// Verify every write in `batch` routes to a registered slot — `Put` by
     /// the STRUCT_HASH at its bytes' head, `Remove` and `Expect` by the one
     /// they carry.
@@ -222,24 +175,28 @@ impl PageStore {
     }
 
     /// The slot index for a registered hash.
-    fn slot_index(&self, struct_hash: u64) -> Option<usize> {
+    pub(crate) fn slot_index(&self, struct_hash: u64) -> Option<usize> {
         self.types
             .binary_search_by_key(&struct_hash, TypeSlot::struct_hash)
             .ok()
     }
 }
 
-// Every read is synchronous and its future is `Ready`, and so is `apply`
-// unless the store hands its barriers to a helper (`use_barrier`): an engine
-// that never suspends is what lets a collection op run read-to-apply without
-// interleaving on a current-thread executor (`concurrent_node_clobber.rs`).
-// A store that does suspend is used under the owner lock, as on the node.
+// A read does its synchronous half — record cache, page on disk — when it is
+// called, and so does `apply`: a disk-only store's futures are then ready at
+// once, and an engine that never suspends is what lets a collection op run
+// read-to-apply without interleaving on a current-thread executor
+// (`concurrent_node_clobber.rs`). An object-backed store suspends on the
+// object store, for a read of an evicted bucket or a write that restores one
+// (RFC 0070 §14), and a barrier helper makes `apply` wait (`use_barrier`): a
+// store that suspends is used under the owner lock, as on the node.
 impl Store for PageStore {
     fn get(&self, id: Id) -> impl Future<Output = CoreResult<Option<Vec<u8>>>> {
         // Untyped fallback: the id alone names no type, so probe every slot —
         // caches first (cheap), then settled pages. Typed callers use
         // `get_of` and skip this scan entirely.
-        std::future::ready(self.read_any(id).map_err(Into::into))
+        let now = self.read_any_now(id);
+        async move { self.read_any_rest(now, id).await.map_err(Into::into) }
     }
 
     fn get_of(
@@ -247,17 +204,27 @@ impl Store for PageStore {
         struct_hash: u64,
         id: Id,
     ) -> impl Future<Output = CoreResult<Option<Vec<u8>>>> {
-        // One binary search on the route table, then this type's own cache
-        // read lock — a cached read of one type never contends with another
-        // type's. A miss reads through to the settled page.
-        std::future::ready(self.read_of(struct_hash, id).map_err(Into::into))
+        // One binary search on the route table, then this type's own log in
+        // the record cache. A miss reads through to the settled page, and an
+        // evicted page to the object store.
+        let now = self.read_now(struct_hash, id);
+        async move { self.read_rest(now, id).await.map_err(Into::into) }
     }
 
     fn apply(&self, batch: &[Write]) -> impl Future<Output = CoreResult<()>> {
-        // The batch is written and committed now, on this call; only its
-        // barrier, when a helper takes it, is left to wait for.
-        let staged = self.apply_inner(batch);
+        // The batch is written and committed now, on this call — unless it
+        // writes to an evicted bucket, which comes back to disk first, so
+        // that no settle round ever meets one. Then only the barrier, when a
+        // helper takes it, is left to wait for.
+        let staged = self
+            .evicted_in(batch)
+            .is_empty()
+            .then(|| self.apply_inner(batch));
         async move {
+            let staged = match staged {
+                Some(staged) => staged,
+                None => self.apply_restoring(batch).await,
+            };
             // StorageError → core::Error (typed seam)
             match staged {
                 Ok(Some(durable)) => durable.await.map_err(Into::into),
@@ -268,12 +235,35 @@ impl Store for PageStore {
     }
 }
 
+impl PageStore {
+    /// Restore every evicted bucket `batch` writes to, then commit it —
+    /// checking again after the awaits, since an eviction may have run
+    /// meanwhile; the commit itself is synchronous, so nothing can evict
+    /// between that check and it.
+    async fn apply_restoring(
+        &self,
+        batch: &[Write],
+    ) -> StorageResult<Option<Durable>> {
+        loop {
+            let evicted = self.evicted_in(batch);
+            if evicted.is_empty() {
+                return self.apply_inner(batch);
+            }
+            for (idx, bucket) in evicted {
+                self.restore(idx, bucket).await?;
+            }
+        }
+    }
+}
+
+/// The `STRUCT_HASH` at the head of a wire-encoded record, if it has one.
+pub fn head_of(bytes: &[u8]) -> Option<u64> {
+    let head: [u8; 8] = bytes.get(..8)?.try_into().ok()?;
+    Some(u64::from_le_bytes(head))
+}
+
 /// The `STRUCT_HASH` at the head of a wire-encoded record (`[STRUCT_HASH][…]`).
 fn struct_hash_of(bytes: &[u8]) -> StorageResult<u64> {
-    if bytes.len() < 8 {
-        return Err(StorageError::Corrupt("record shorter than STRUCT_HASH"));
-    }
-    let mut head = [0u8; 8];
-    head.copy_from_slice(&bytes[..8]);
-    Ok(u64::from_le_bytes(head))
+    head_of(bytes)
+        .ok_or(StorageError::Corrupt("record shorter than STRUCT_HASH"))
 }
