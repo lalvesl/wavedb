@@ -7,7 +7,7 @@
   its settle), [0063](0063-engine-yield-map-and-interruptible-engine-PLANNED.md)
   part 3 (the settle in bounded rounds), [0067](0067-thread-per-core-shards-WIP.md)
   (one store per shard, owned by one worker)
-- **Related:** [0044](0044-page-cache-PLANNED-LOW.md) (the page cache, a
+- **Related:** [0044](0044-page-cache.md) (the page cache, a
   separate layer), [0053](0053-tenant-fair-cache-retention-PLANNED.md) (which
   entries deserve to stay hot — the policy this mechanism leaves open)
 
