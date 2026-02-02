@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 
 use crate::block::{BlockAllocator, BlockDescriptor, Run};
 use crate::error::{StorageError, StorageResult};
+use crate::page_cache::Lane;
 use crate::page_store::PageStore;
 use crate::plan::SlotPlan;
 use crate::record_cache::Records;
@@ -174,6 +175,16 @@ impl PageStore {
             if let Err(e) = written {
                 self.fail();
                 return Err(e); // the round's one write
+            }
+        }
+        // The pages just written are the ones read next: held decoded under
+        // their new runs (RFC 0044) — after the write, which forgot the
+        // window.
+        for (target, run) in targets.iter().zip(&runs) {
+            if let (Target::Page { plan, bucket }, Some(run)) = (target, run)
+                && let Some(page) = plans[*plan].decoded.remove(bucket)
+            {
+                self.file.page_cache().insert(Lane::Disk, *run, page);
             }
         }
         for run in superseded(&changed, self.object.as_ref()) {
