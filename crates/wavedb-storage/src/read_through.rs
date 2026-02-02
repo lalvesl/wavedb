@@ -16,6 +16,8 @@ use wavedb_core::Id;
 
 use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
+use crate::page::SlotPage;
+use crate::page_cache::Lane;
 use crate::page_store::PageStore;
 use crate::record_cache::Lookup;
 
@@ -207,11 +209,9 @@ impl PageStore {
             if !desc.is_allocated() {
                 return Ok(None);
             }
-            match self.fetch_image(desc).await {
-                Ok(image) => {
-                    let page = self.decode_remote(idx, &image)?;
-                    return Ok(page.get(id).map(<[u8]>::to_vec));
-                }
+            let read = |page: &SlotPage| page.get(id).map(<[u8]>::to_vec);
+            match self.with_remote_page(idx, desc, read).await {
+                Ok(bytes) => return Ok(bytes),
                 Err(e) => {
                     let now = self.remote_descriptor(idx, id);
                     if now == desc {
@@ -221,6 +221,31 @@ impl PageStore {
                 }
             }
         }
+    }
+
+    /// Lend the uploaded page of slot `idx` that `desc` names to `read` —
+    /// held by the page cache in the object store's lane, or fetched,
+    /// decoded and then held, decoded (RFC 0044). Nothing is borrowed across
+    /// the request.
+    ///
+    /// # Errors
+    /// The fetch's faults, and a page that fails to decode.
+    pub(crate) async fn with_remote_page<R>(
+        &self,
+        idx: usize,
+        desc: BlockDescriptor,
+        read: impl FnOnce(&SlotPage) -> R,
+    ) -> StorageResult<R> {
+        let cache = self.file.page_cache();
+        let read = match cache.with(Lane::Remote, desc.run(), read) {
+            Ok(done) => return Ok(done),
+            Err(read) => read,
+        };
+        let image = self.fetch_image(desc).await?;
+        let page = self.decode_remote(idx, &image)?;
+        let done = read(&page);
+        cache.insert(Lane::Remote, desc.run(), page);
+        Ok(done)
     }
 
     /// The remote descriptor of the page of slot `idx` covering `id`.
