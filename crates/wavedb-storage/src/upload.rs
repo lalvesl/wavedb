@@ -278,22 +278,22 @@ impl PageStore {
             for bucket in slot.affected() {
                 let desc = slot.remote.descriptor(bucket);
                 if desc.is_allocated() {
-                    wanted.push((w, bucket, desc));
+                    wanted.push((w, slot.idx, bucket, desc));
                 } else {
                     slot.staged.insert(bucket, SlotPage::new(hash));
                 }
             }
         }
-        let fetched: Vec<(usize, usize, Vec<u8>)> = stream::iter(wanted)
-            .map(|(w, bucket, desc)| async move {
-                let image = self.fetch_image(desc).await?;
-                StorageResult::Ok((w, bucket, image))
+        let fetched: Vec<(usize, usize, SlotPage)> = stream::iter(wanted)
+            .map(|(w, idx, bucket, desc)| async move {
+                let page =
+                    self.with_remote_page(idx, desc, SlotPage::clone).await?;
+                StorageResult::Ok((w, bucket, page))
             })
             .buffer_unordered(IN_FLIGHT)
             .try_collect()
             .await?;
-        for (w, bucket, image) in fetched {
-            let page = self.decode_remote(work[w].idx, &image)?;
+        for (w, bucket, page) in fetched {
             work[w].staged.insert(bucket, page);
         }
         Ok(())
