@@ -10,7 +10,7 @@
   `benches/src/systems/`, `benches/results/rows/`
 - **Related:** [RFC 0064](0064-pivot-owned-concurrency-PLANNED.md) (the sharded
   shape the multi-consumer row finally exercises),
-  [RFC 0044](0044-page-cache-PLANNED-LOW.md) and
+  [RFC 0044](0044-page-cache.md) and
   [RFC 0061](0061-relaxed-durability-window-DEPRECATED.md) (the two knobs the fill turns up),
   [RFC 0041](0041-single-barrier-checkpoint.md) /
   [RFC 0047](0047-generational-journal-retirement-DEPRECATED.md) (the barrier accounting
