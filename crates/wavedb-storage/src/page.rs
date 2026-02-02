@@ -120,6 +120,21 @@ impl SlotPage {
         self.records.is_empty()
     }
 
+    /// What the page takes in RAM, decoded — what the page cache charges
+    /// it: the record bytes, and per record its id, its `Vec` and its share
+    /// of the map's nodes.
+    #[must_use]
+    pub fn footprint(&self) -> usize {
+        /// The id, the `Vec` and a share of a B-tree node, about.
+        const PER_RECORD: usize = 64;
+        size_of::<Self>()
+            + self
+                .records
+                .values()
+                .map(|bytes| bytes.capacity() + PER_RECORD)
+                .sum::<usize>()
+    }
+
     /// Insert or overwrite the record stored at `id`.
     pub fn upsert(&mut self, id: Id, bytes: Vec<u8>) {
         self.records.insert(id.raw(), bytes);
