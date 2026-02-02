@@ -31,6 +31,7 @@ pub mod directory;
 mod directory_pages;
 mod edit;
 pub mod error;
+mod evict;
 pub mod journal;
 mod journal_frame;
 mod meta_log;
