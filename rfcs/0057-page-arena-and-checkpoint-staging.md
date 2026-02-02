@@ -3,7 +3,7 @@
 - **Status:** Planned — opened 2026-08-01
 - **Crates:** `wavedb-storage`
 - **Code:** `crates/wavedb-storage/src/{plan,checkpoint,read_through,commit}.rs`
-- **Supersedes:** [RFC 0044](0044-page-cache-PLANNED-LOW.md) — same cache, given
+- **Supersedes:** [RFC 0044](0044-page-cache.md) — same cache, given
   a concrete allocation shape and a decision about the write path
 - **Builds on:** [RFC 0041](0041-single-barrier-checkpoint.md) (the settle's one
   read per touched page is what this removes), [RFC 0047](0047-generational-journal-retirement-DEPRECATED.md)
