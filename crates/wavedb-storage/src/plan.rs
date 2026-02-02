@@ -48,6 +48,9 @@ pub struct SlotPlan {
     pub(crate) pages: BTreeMap<usize, Vec<u8>>,
     /// The grown dictionary buffer, when sampling extended it this round.
     pub(crate) dict: Option<Vec<u8>>,
+    /// Bucket → the page its image encodes, where the plan has it decoded:
+    /// held in the page cache under its new run once the window is written.
+    pub(crate) decoded: BTreeMap<usize, SlotPage>,
 }
 
 impl SlotPlan {
@@ -59,6 +62,7 @@ impl SlotPlan {
             dir,
             pages: BTreeMap::new(),
             dict: None,
+            decoded: BTreeMap::new(),
         }
     }
 }
@@ -141,6 +145,7 @@ impl PageStore {
             dir,
             pages,
             dict: dict_grew.then(|| dict.image()),
+            decoded: staged,
         })
     }
 
@@ -235,8 +240,10 @@ fn staged_page<'a>(
                     "a settle reached an evicted bucket",
                 ));
             }
+            // Out of the page cache: this round places the page in a new
+            // run, and holds it there once written (`crate::checkpoint`).
             let page =
-                dir.read_page(slot.struct_hash(), &store.file, bucket, dict)?;
+                dir.take_page(slot.struct_hash(), &store.file, bucket, dict)?;
             Ok(v.insert(page))
         }
     }
