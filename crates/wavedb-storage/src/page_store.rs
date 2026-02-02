@@ -686,6 +686,38 @@ mod tests {
         });
     }
 
+    /// A round holds the pages it writes, decoded, and the next round takes
+    /// them out instead of reading them back (RFC 0044): settling twice and
+    /// reading every record once the record cache let it go costs no disk
+    /// read at all.
+    #[test]
+    fn a_settled_page_is_read_from_ram() {
+        let d = tempfile::tempdir().unwrap();
+        let s = open(d.path());
+        block_on(async {
+            let before = s.file.io().snapshot().0;
+            for round in 0..2u8 {
+                for k in 0..64u64 {
+                    let bytes = rec(SH, &[round; 8]);
+                    s.apply(&[Write::Put(nonunique(k), bytes)]).await.unwrap();
+                }
+                s.drain().unwrap();
+            }
+            s.evict_settled(0);
+            for k in 0..64u64 {
+                assert_eq!(
+                    s.get_of(SH, nonunique(k)).await.unwrap(),
+                    Some(rec(SH, &[1; 8]))
+                );
+            }
+            assert_eq!(
+                s.file.io().snapshot().0,
+                before,
+                "the settles and the reads must find their pages in RAM"
+            );
+        });
+    }
+
     #[test]
     fn unregistered_struct_hash_is_refused_before_committing() {
         let d = tempfile::tempdir().unwrap();
