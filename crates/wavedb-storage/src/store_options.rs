@@ -15,8 +15,8 @@
 /// `STRUCT_HASH`: they change what is held in RAM, never what is written.
 #[derive(Debug, Clone)]
 pub struct StoreOptions {
-    /// Bytes of **page images** the block file may hold (RFC 0044) — whole
-    /// runs, still compressed, exactly as they sit on disk.
+    /// Bytes of **decoded pages** the block file may hold (RFC 0044) — by
+    /// run, on disk and in the object store, decompressed once when read.
     ///
     /// Zero disables the cache. Read once at open: a budget that changed
     /// under a running store would make "how much RAM does this hold" a
