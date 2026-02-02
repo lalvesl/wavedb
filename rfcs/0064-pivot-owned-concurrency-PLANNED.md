@@ -188,7 +188,7 @@ Splitting the disk owner in two is a physical distinction, not an arbitrary one
 stay coherent without either side telling the other to invalidate.
 
 **Scope:** the page cache in that box is
-[0044](0044-page-cache-PLANNED-LOW.md), which is *Planned (low)* and **not part
+[0044](0044-page-cache.md), which is *Planned (low)* and **not part
 of this work**. It appears here only because this RFC decides *where it would
 belong* if it is ever built — the claim is placement, not delivery. The same
 goes for the zstd move: today decompression happens on whatever thread reads,
@@ -477,7 +477,7 @@ happening in the most expensive place available.
 The two named above — the journal actor and the page actor. Single ownership of
 the page actor is what makes de-duplication possible: two shards wanting the
 same block produce one read, not two. It is also the natural home for
-[0044](0044-page-cache-PLANNED-LOW.md)'s page cache, which needs exactly one
+[0044](0044-page-cache.md)'s page cache, which needs exactly one
 owner to stay coherent.
 
 Redis is the instructive precedent and it is usually mis-cited. Its model was
