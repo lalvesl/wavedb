@@ -60,7 +60,7 @@ pub struct BlockFile {
     /// unit, so every event that can falsify an entry — a write over blocks,
     /// a file cut or deleted — already passes through this type.
     ///
-    /// [RFC 0044]: ../../../rfcs/0044-page-cache-PLANNED-LOW.md
+    /// [RFC 0044]: ../../../rfcs/0044-page-cache.md
     pub(crate) cache: PageCache,
 }
 
@@ -249,37 +249,6 @@ impl BlockFile {
         Ok(())
     }
 
-    /// [`read_run`](Self::read_run) through the page cache: `read` decodes
-    /// the image where it lies — lent by the cache on a hit (so it must not
-    /// reach the cache itself), or the buffer just read on a miss, which the
-    /// cache then keeps. Pages only: the dictionary image, the addressing
-    /// log's chunks and compaction's buffers are read once and want owned
-    /// bytes ([`read_run`](Self::read_run)).
-    ///
-    /// # Errors
-    /// The same faults as [`read_run`](Self::read_run). A cache hit cannot
-    /// fault at all, which is the point.
-    pub fn read_run_with<R>(
-        &self,
-        run: Run,
-        read: impl FnOnce(&[u8]) -> R,
-    ) -> StorageResult<R> {
-        let read = match self.cache.with(run, read) {
-            Ok(done) => return Ok(done),
-            Err(read) => read,
-        };
-        let bytes = self.read_run(run)?;
-        let done = read(&bytes);
-        self.cache.insert(run, bytes.into_boxed_slice());
-        Ok(done)
-    }
-
-    /// The page cache backing [`read_run_with`](Self::read_run_with).
-    #[must_use]
-    pub const fn page_cache(&self) -> &PageCache {
-        &self.cache
-    }
-
     /// Flush every file written since the last sync to stable storage
     /// (`fsync`) — the active file, or two across a rollover.
     ///
@@ -349,13 +318,30 @@ pub(crate) fn random_seed() -> [u64; 4] {
 
 #[cfg(test)]
 mod tests {
+    use wavedb_core::{Id, U48};
+
     use super::BlockFile;
     use crate::block::{BLOCK_SIZE, Run};
     use crate::data_file::{name_of, start_of};
     use crate::error::StorageError;
+    use crate::page::SlotPage;
+    use crate::page_cache::Lane;
 
     fn open(dir: &std::path::Path, cache: usize) -> BlockFile {
         BlockFile::open(dir, [1, 2, 3, 4], false, cache).unwrap()
+    }
+
+    fn id() -> Id {
+        Id::new(1, U48::from(1u32), false, 1)
+    }
+
+    /// A "page" of the stored bytes as one record — a decode the test can
+    /// check without a dictionary, in the shape a page read takes.
+    #[allow(clippy::unnecessary_wraps)]
+    fn as_page(bytes: &[u8]) -> crate::error::StorageResult<SlotPage> {
+        let mut page = SlotPage::new(1);
+        page.upsert(id(), bytes.to_vec());
+        Ok(page)
     }
 
     /// A run written then read through the cached path, so the entry exists.
@@ -364,7 +350,7 @@ mod tests {
         let byte = u8::try_from(start % 251).unwrap();
         bf.write_run(0, run, &vec![byte; run.byte_len() as usize])
             .unwrap();
-        bf.read_run_with(run, |_| ()).unwrap();
+        bf.with_page(run, as_page, |_| ()).unwrap();
     }
 
     /// The caller's budget is kept by **evicting**, not by refusing to cache:
@@ -373,7 +359,7 @@ mod tests {
     #[test]
     fn the_page_cache_holds_only_what_the_caller_budgeted() {
         let d = tempfile::tempdir().unwrap();
-        let budget = 2 * BLOCK_SIZE;
+        let budget = 2 * as_page(&[0; BLOCK_SIZE]).unwrap().footprint();
         let bf = open(d.path(), budget);
         for start in 1..=8u64 {
             cache_one(&bf, start);
@@ -381,17 +367,21 @@ mod tests {
         assert_eq!(bf.page_cache().budget(), budget);
         assert!(bf.page_cache().bytes() <= budget);
         assert!(
-            bf.page_cache().with(Run::new(8, 1), |_| ()).is_ok(),
+            bf.page_cache()
+                .with(Lane::Disk, Run::new(8, 1), |_| ())
+                .is_ok(),
             "the newest read must be the one kept"
         );
         assert!(
-            bf.page_cache().with(Run::new(1, 1), |_| ()).is_err(),
+            bf.page_cache()
+                .with(Lane::Disk, Run::new(1, 1), |_| ())
+                .is_err(),
             "the oldest must have been evicted"
         );
     }
 
     /// Zero disables it, and a disabled cache must still serve correct bytes
-    /// — `read_run_with` is the read path, not an optimisation beside it.
+    /// — `with_page` is the read path, not an optimisation beside it.
     #[test]
     fn a_zero_budget_disables_the_cache_without_changing_reads() {
         let d = tempfile::tempdir().unwrap();
@@ -399,7 +389,9 @@ mod tests {
         let run = Run::new(1, 2);
         let payload = vec![0xA5; run.byte_len() as usize];
         bf.write_run(0, run, &payload).unwrap();
-        assert_eq!(bf.read_run_with(run, <[u8]>::to_vec).unwrap(), payload);
+        let read =
+            bf.with_page(run, as_page, |p| p.get(id()).map(<[u8]>::to_vec));
+        assert_eq!(read.unwrap(), Some(payload));
         assert!(bf.page_cache().is_empty(), "zero must hold nothing");
     }
 
