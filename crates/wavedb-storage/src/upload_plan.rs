@@ -176,8 +176,8 @@ impl PageStore {
                 page
             } else {
                 let desc = work.remote.descriptor(source);
-                let image = self.fetch_image(desc).await?;
-                self.decode_remote(work.idx, &image)?
+                self.with_remote_page(work.idx, desc, SlotPage::clone)
+                    .await?
             };
             let (mut keep, mut moved) =
                 (SlotPage::new(hash), SlotPage::new(hash));
