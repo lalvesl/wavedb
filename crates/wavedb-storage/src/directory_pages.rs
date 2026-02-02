@@ -1,5 +1,5 @@
 //! [`Directory`] page **reads** — resolving a bucket to its [`SlotPage`] over
-//! a [`BlockFile`].
+//! a [`BlockFile`], through the page cache, which holds pages decoded.
 //!
 //! The addressing math and the container live in [`crate::directory`]. The
 //! write half is not here: pages are rewritten by the settle
@@ -15,14 +15,61 @@ use crate::error::StorageResult;
 use crate::page::SlotPage;
 
 impl Directory {
-    /// Read the [`SlotPage`] backing `bucket`, or a fresh empty page if the slot
-    /// is unallocated.
+    /// Lend the [`SlotPage`] backing `bucket` to `read` — an empty one if
+    /// the slot is unallocated.
+    ///
+    /// Through the page cache (RFC 0044): a bucket's run is immutable for as
+    /// long as it stays allocated — page writes are copy-on-write and land
+    /// in a *new* run — so a hit needs no validation, and the page is held
+    /// decoded: no read, no decompression.
     ///
     /// # Errors
     /// [`StorageError::Io`](crate::StorageError::Io) on a read fault or
     /// [`StorageError::Corrupt`](crate::StorageError::Corrupt) if the page fails
     /// its crc / bounds checks.
+    pub fn with_page<R>(
+        &self,
+        struct_hash: u64,
+        file: &BlockFile,
+        bucket: usize,
+        dict: &DictState,
+        read: impl FnOnce(&SlotPage) -> R,
+    ) -> StorageResult<R> {
+        let desc = self.slots[bucket];
+        if !desc.is_allocated() {
+            return Ok(read(&SlotPage::new(struct_hash)));
+        }
+        file.with_page(
+            desc.run(),
+            |image| SlotPage::from_bytes(image, dict.dictionary()),
+            |page| {
+                debug_assert_eq!(page.struct_hash(), struct_hash);
+                read(page)
+            },
+        )
+    }
+
+    /// The [`SlotPage`] backing `bucket`, owned — a copy of the held one.
+    ///
+    /// # Errors
+    /// As [`with_page`](Self::with_page).
     pub fn read_page(
+        &self,
+        struct_hash: u64,
+        file: &BlockFile,
+        bucket: usize,
+        dict: &DictState,
+    ) -> StorageResult<SlotPage> {
+        self.with_page(struct_hash, file, bucket, dict, SlotPage::clone)
+    }
+
+    /// The [`SlotPage`] backing `bucket`, taken out of the page cache — for
+    /// a settle about to rewrite it into a new run (`crate::plan`), which
+    /// leaves its run dead anyway.
+    ///
+    /// # Errors
+    /// As [`with_page`](Self::with_page).
+    pub fn take_page(
         &self,
         struct_hash: u64,
         file: &BlockFile,
@@ -33,15 +80,9 @@ impl Directory {
         if !desc.is_allocated() {
             return Ok(SlotPage::new(struct_hash));
         }
-        // Through the page cache (RFC 0044): a bucket's image is immutable for
-        // as long as its run stays allocated — page writes are copy-on-write
-        // and land in a *new* run — so a hit needs no validation, only the
-        // decompression below.
-        let page = file.read_run_with(desc.run(), |image| {
+        file.take_page(desc.run(), |image| {
             SlotPage::from_bytes(image, dict.dictionary())
-        })??;
-        debug_assert_eq!(page.struct_hash(), struct_hash);
-        Ok(page)
+        })
     }
 
     /// The record bytes stored at `id`, if present.
@@ -56,10 +97,9 @@ impl Directory {
         dict: &DictState,
     ) -> StorageResult<Option<Vec<u8>>> {
         let bucket = self.bucket_of(id.raw());
-        Ok(self
-            .read_page(struct_hash, file, bucket, dict)?
-            .get(id)
-            .map(<[u8]>::to_vec))
+        self.with_page(struct_hash, file, bucket, dict, |page| {
+            page.get(id).map(<[u8]>::to_vec)
+        })
     }
 }
 
