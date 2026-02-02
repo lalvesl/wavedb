@@ -48,30 +48,30 @@ a `SlotPage` again (`Directory::read_page` → `read_run_with`). A page that
 came from disk or the object store should be decompressed once, and stay
 so in RAM.
 
-- [ ] 2.1 `PageCache` holds a decoded `SlotPage` per entry instead of
+- [x] 2.1 `PageCache` holds a decoded `SlotPage` per entry instead of
       `Box<[u8]>`; the budget counts its decoded size (record bytes plus a
       per-record overhead), so the 64 MiB default holds fewer pages than
       before — the trade made on purpose: CPU per hit over RAM per page.
-- [ ] 2.2 `Directory::read_page` decodes on a miss and holds the result;
+- [x] 2.2 `Directory::read_page` decodes on a miss and holds the result;
       a hit lends `&SlotPage`. `get_record` takes the one record from the
       lent page — no clone of the page.
-- [ ] 2.3 The settle's read-modify-write (`plan.rs`) takes the page **out**
+- [x] 2.3 The settle's read-modify-write (`plan.rs`) takes the page **out**
       of the cache instead of cloning it: the round places it in a new run,
       superseding the old one anyway.
-- [ ] 2.4 A round holds the pages it writes, decoded, under their new runs
+- [x] 2.4 A round holds the pages it writes, decoded, under their new runs
       — the page just settled is the one read next.
-- [ ] 2.5 Pages from the object store (`read_remote`, an evicted bucket;
+- [x] 2.5 Pages from the object store (`read_remote`, an evicted bucket;
       `upload.rs`) go through the same cache, decoded. Today they are not
       held at all. The key tells the lanes apart: a disk run and a remote
       descriptor are different address spaces.
-- [ ] 2.6 Object mode: the RAM backing keeps the stored (compressed) images
+- [x] 2.6 Object mode: the RAM backing keeps the stored (compressed) images
       — it is the store's "disk"; the page cache over it holds them decoded,
       as on disk.
-- [ ] 2.7 Docs: `page_cache.rs` module doc (the "still compressed"
+- [x] 2.7 Docs: `page_cache.rs` module doc (the "still compressed"
       rationale reversed), `block_file.rs` `read_run_with`,
       `directory_pages.rs`, RFC 0044 (design + status), `CLAUDE.md`'s
       storage paragraph if it names the cache's form.
-- [ ] 2.8 The pre-commit bar.
+- [x] 2.8 The pre-commit bar.
 
 ## 3. Data shards and storage shards (RFC 0073)
 
