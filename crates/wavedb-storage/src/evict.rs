@@ -212,9 +212,12 @@ impl PageStore {
                 .filter(|d| d.is_allocated())
                 .collect()
         };
-        let images =
-            try_join_all(shared.into_iter().map(|d| self.fetch_image(d)))
-                .await?;
+        let images = try_join_all(
+            shared
+                .into_iter()
+                .map(|d| self.with_remote_page(idx, d, SlotPage::clone)),
+        )
+        .await?;
         let Some(disk) = slot.directory().borrow().clone() else {
             return Ok(());
         };
@@ -223,7 +226,7 @@ impl PageStore {
         }
         let mut page = SlotPage::new(slot.struct_hash());
         for image in images {
-            for (id, bytes) in self.decode_remote(idx, &image)?.into_entries() {
+            for (id, bytes) in image.into_entries() {
                 if disk.bucket_of(id.raw()) == bucket {
                     page.upsert(id, bytes);
                 }
@@ -235,6 +238,7 @@ impl PageStore {
         };
         let mut plan = SlotPlan::verbatim(idx, disk);
         plan.pages.insert(bucket, image);
+        plan.decoded.insert(bucket, page);
         self.place_restored(plan)?;
         self.touch(idx, bucket);
         if let Some(object) = &self.object {
