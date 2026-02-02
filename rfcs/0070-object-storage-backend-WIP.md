@@ -1,6 +1,6 @@
 # RFC 0070 — Object storage as a page backend
 
-- **Status:** In progress — opened 2026-10-10. Phases 1–3 done (descriptor, test store, S3 client; disk + object: the flag, the remote directories, the upload, reopen from disk); phase 4 next.
+- **Status:** In progress — opened 2026-10-10. Phases 1–4 done (descriptor, test store, S3 client; disk + object: the flag, the remote directories, the upload, reopen from disk; eviction from disk and the read that falls back to the object store); phase 5 next.
 - **Supersedes:** [RFC 0059](0059-object-storage-capacity-tier-PLANNED.md) §2–§5
   (the remote descriptor bit and the object per bucket). 0059 §1, the archive
   lane, stays and is independent of this.
@@ -216,12 +216,41 @@ starts on the worker and moves to the helper when measurement says so.
 
 In disk + object mode the disk is a cache. A bucket whose flag is clear may
 have its disk page freed when the disk passes its budget; a read then goes to
-the remote page covering the id. A settle round on an evicted bucket first
-rebuilds it — the remote pages that share records with it (§2), filtered to
-its own — and writes the merged page to disk with the flag set. Settle runs
-in the background, so those GETs are off every request path. A page on disk
-is therefore always complete, removals included, and no tombstone has to
-outlive anything.
+the remote page covering the id. A page on disk is always complete,
+removals included, and no tombstone has to outlive anything.
+
+Decided 2026-10-10, built in phase 4:
+
+- **The budget is the compaction ceiling** (RFC 0069 `above_bytes`, per
+  shard). Past it, the coldest uploaded pages leave the disk down to nine
+  tenths of the share, and the ceiling trigger then compacts the room they
+  left out of the file. Eviction frees runs; compaction is what shrinks
+  `data.bin`.
+- **Cold is least recently used**: a `u32` stamp per disk bucket, in RAM
+  (`evict::Heat`), moved by every page read and every page a settle round
+  writes or a restore brings back. Its clock halves every stamp when it
+  runs out. A reopen starts everything equally cold.
+- **Evicted is its own descriptor**, `start 1 · count 0 · flag 0`
+  (`BlockDescriptor::EVICTED`): no run, like `EMPTY`, but distinct from
+  it, so a bucket that is merely empty still answers "absent" without a
+  request.
+- **A write brings its bucket back before it commits** (`Store::apply`
+  restores, re-checks after its awaits, then commits synchronously), and so
+  does a replayed one at open. A settle round therefore never meets an
+  evicted bucket — it refuses one as corruption — and the settle stays
+  synchronous. A restored page is the object store's copy filtered to the
+  bucket, which is exactly what the object store holds, so its flag is clear.
+- **A read of an evicted bucket** fetches the page covering the id and marks
+  the bucket *wanted*; the node's upkeep brings wanted buckets back, 16 per
+  tick. A split whose turn's bucket is evicted waits for it the same way.
+- **The guard of a first save** (`Expect(id, None)`) on an evicted bucket
+  costs a GET — accepted: the answer is a disk cache kept as large as it can
+  be and a hot/cold tracker that works, not a structure to prove absence.
+- **Recording**: an eviction frees a run, so unlike an upload's results it
+  must never be missing from the addressing a `Commit` frame names. Every
+  checkpoint writes what is unrecorded before its frame
+  (`record_unrecorded`); between two checkpoints a crash reopens from a root
+  whose runs were held back, so it simply undoes the eviction.
 
 ### 8. Compaction deletes files
 
@@ -298,8 +327,15 @@ noted, not built.
 `BlockFile::read_run` and `Directory::read_page` are synchronous `pread`s. A
 GET must be awaited, so that the worker serves other owners meanwhile (one
 executor per thread, [RFC 0067](0067-thread-per-core-shards-WIP.md)). Where
-pages are read sits behind a plain `enum` of backends, matched at the read
-and write points — not a registry and not `dyn`.
+a page is read is the bucket's own descriptor: `EVICTED` sends the read to
+the object store — a plain `match` (`read_through::Settled`), not a
+registry and not `dyn`.
+
+As built in phase 4: a read does its synchronous half — record cache, page
+on disk — when it is *called*, as before, and its future awaits only for an
+evicted bucket; `apply` commits on the call unless the batch writes to an
+evicted bucket. A disk-only store's futures are therefore still ready at
+once and never suspend.
 
 - **It lands with the remote read, not before.** `Store::get_of` already
   returns a future; what is synchronous is the chain beneath it. Made `async`
@@ -384,7 +420,7 @@ and write points — not a registry and not `dyn`.
 | 1 | The descriptor repacked; the test object store (versitygw) in the dev shell, its behaviour verified — done |
 | 2 | The S3 client half (range GET, PUT, DELETE, LIST, conditional PUT, SigV4): `wavedb-platform::s3` — done |
 | 3 | disk + object: the remote directory, the flag, the upload that reassembles flagged pages into files with the header, reopen from disk — done |
-| 4 | Eviction from disk; the read path's backend `enum` and asynchronous chain, falling back to the object store; the settle that fetches an evicted page |
+| 4 | Eviction from disk (LRU, past the compaction ceiling); the read path falling back to the object store; writes, replays and wanted reads bringing a bucket back — done |
 | 5 | Recovery from the object store alone; snapshots in `2snap/` |
 | 6 | Object mode: rounds in RAM, the journal in the object store, the lease |
 | 7 | Compaction by file, on the 0069 triggers |
@@ -395,5 +431,5 @@ and write points — not a registry and not `dyn`.
    server; a public endpoint is HTTPS. This is the node's outbound
    connection, a separate question from TLS between WaveDB and its clients
    (future work).
-2. **The disk cache's budget and eviction order** (least recently read, or
-   oldest written).
+2. ~~The disk cache's budget and eviction order~~ — decided 2026-10-10: the
+   compaction ceiling, least recently used (§7).
