@@ -57,6 +57,12 @@ pub struct StoreOptions {
     /// a recovery root — before compaction empties it (RFC 0071 §7), 50 by
     /// default. A file mostly alive is not rewritten for little.
     pub victim_free_percent: u8,
+    /// Storage shards a **new** database is created with (RFC 0073 §1),
+    /// dividing its data shards: data shard `p` writes through storage shard
+    /// `p / (P / S)`. `0`, the default, is one per data shard. Fixed at
+    /// creation — the `MANIFEST` records it, and a later open's answer is
+    /// ignored, as its data shard count is.
+    pub storage_shards: usize,
 }
 
 /// Bytes of decoded records [`StoreOptions::record_cache_bytes`] defaults to.
@@ -76,6 +82,7 @@ impl Default for StoreOptions {
             remote: None,
             file_bytes: crate::alloc::DEFAULT_FILE_BYTES,
             victim_free_percent: 50,
+            storage_shards: 0,
         }
     }
 }
