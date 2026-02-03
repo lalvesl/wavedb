@@ -165,6 +165,8 @@ pub fn finish(
             at: file.number,
             prev: chain.tail.unwrap_or(NO_FILE),
             horizon: 0,
+            shard: 0,
+            roots: NO_FILE,
             end_of_batch: packed.cut && i + 1 == files,
             start: chain.start,
             end: packed.end,
