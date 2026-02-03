@@ -1,9 +1,10 @@
 //! The database's `MANIFEST` ([RFC 0071] §2) — its fixed facts, in one
 //! record at its root.
 //!
-//! The magic, the format version, the shard count, the hash seed and the
-//! mode: written once, when the database is created, and read on every open;
-//! nothing about it ever changes.
+//! The magic, the format version, the two shard counts — data shards `P`
+//! and storage shards `S`, `S` dividing `P` ([RFC 0073] §1) — the hash
+//! seed and the mode: written once, when the database is created, and read
+//! on every open; nothing about it ever changes.
 //!
 //! An object-backed database keeps a copy in its object store, at
 //! `<prefix>MANIFEST`, so a database whose disk is gone — or one opened in
@@ -16,6 +17,7 @@
 //! are only what a **new** database is created with.
 //!
 //! [RFC 0071]: ../../../rfcs/0071-data-files-by-address.md
+//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
 
 use std::fs;
 use std::io::Write as _;
@@ -51,30 +53,74 @@ pub const MAX_SHARDS: usize = 256;
 pub struct Manifest {
     version: u32,
     shards: u32,
+    /// Storage shards: data shard `p` writes through storage shard
+    /// `p / (P / S)`.
+    storage: u32,
     seed: [u64; 4],
     object_backed: bool,
 }
 
 impl Manifest {
-    /// The facts of a new database: `shards` shards, a fresh random seed.
+    /// The facts of a new database: `shards` data shards writing through
+    /// `storage` storage shards, a fresh random seed.
     ///
     /// # Errors
-    /// [`StorageError::Corrupt`] for a shard count out of `1..=256`.
-    pub fn new(shards: usize, object_backed: bool) -> StorageResult<Self> {
-        let shards = u32::try_from(checked(shards)?)
-            .map_err(|_| StorageError::Corrupt("MANIFEST shard count"))?;
-        Ok(Self {
+    /// [`StorageError::Corrupt`] for a shard count out of `1..=256`, or a
+    /// storage shard count that does not divide it.
+    pub fn new(
+        shards: usize,
+        storage: usize,
+        object_backed: bool,
+    ) -> StorageResult<Self> {
+        let manifest = Self {
             version: FORMAT_VERSION,
-            shards,
+            shards: u32::try_from(checked(shards)?)
+                .map_err(|_| StorageError::Corrupt("MANIFEST shard count"))?,
+            storage: u32::try_from(storage)
+                .map_err(|_| StorageError::Corrupt("MANIFEST storage count"))?,
             seed: random_seed(),
             object_backed,
-        })
+        };
+        manifest.check_storage()?;
+        Ok(manifest)
     }
 
-    /// The shard count.
+    /// The data shard count, `P`.
     #[must_use]
     pub const fn shards(&self) -> usize {
         self.shards as usize
+    }
+
+    /// The storage shard count, `S`.
+    #[must_use]
+    pub const fn storage_shards(&self) -> usize {
+        self.storage as usize
+    }
+
+    /// Data shards per storage shard, `P / S`.
+    #[must_use]
+    pub const fn per_storage(&self) -> usize {
+        self.shards() / self.storage_shards()
+    }
+
+    /// The storage shard data shard `p` writes through, and its position
+    /// there.
+    #[must_use]
+    pub const fn storage_of(&self, p: usize) -> (usize, usize) {
+        (p / self.per_storage(), p % self.per_storage())
+    }
+
+    /// `S` must divide `P`.
+    const fn check_storage(&self) -> StorageResult<()> {
+        if self.storage == 0
+            || self.storage > self.shards
+            || !self.shards.is_multiple_of(self.storage)
+        {
+            return Err(StorageError::Corrupt(
+                "storage shards must divide the data shards",
+            ));
+        }
+        Ok(())
     }
 
     /// The hash seed every record is routed with.
@@ -121,13 +167,15 @@ impl Manifest {
             return Err(StorageError::BadVersion(manifest.version));
         }
         checked(manifest.shards())?;
+        manifest.check_storage()?;
         Ok(manifest)
     }
 }
 
 /// The database's facts: the ones its `MANIFEST`s record, or a new one.
 ///
-/// A new database has `shards` shards and the mode the caller opens it with;
+/// A new database has `shards` data shards, `storage` storage shards (`0`:
+/// one per data shard) and the mode the caller opens it with;
 /// its `MANIFEST`s are written here, the object store's first, so a racing
 /// creator's wins and becomes ours.
 ///
@@ -142,7 +190,7 @@ impl Manifest {
 pub fn resolve(
     dir: Option<&Path>,
     remote: Option<&Remote>,
-    shards: usize,
+    (shards, storage): (usize, usize),
 ) -> StorageResult<Manifest> {
     let object_backed = remote.is_some();
     let on_disk = dir.map(read_local).transpose()?.flatten();
@@ -161,7 +209,11 @@ pub fn resolve(
     }
     let manifest = match on_disk.or(in_store) {
         Some(found) => found,
-        None => Manifest::new(shards, object_backed)?,
+        None => Manifest::new(
+            shards,
+            if storage == 0 { shards } else { storage },
+            object_backed,
+        )?,
     };
     let manifest = match (remote, in_store) {
         (Some(remote), None) => write_remote(remote, manifest)?,
@@ -239,14 +291,14 @@ mod tests {
 
     #[test]
     fn a_manifest_roundtrips() {
-        let m = Manifest::new(64, true).unwrap();
+        let m = Manifest::new(64, 4, true).unwrap();
         assert_eq!(Manifest::decode(&m.encode()).unwrap(), m);
         assert_ne!(m.seed(), [0; 4], "a new database draws a seed");
     }
 
     #[test]
     fn a_wrong_magic_is_bad_magic() {
-        let mut bytes = Manifest::new(1, false).unwrap().encode();
+        let mut bytes = Manifest::new(1, 1, false).unwrap().encode();
         bytes[0] ^= 0xFF;
         let err = Manifest::decode(&bytes).unwrap_err();
         assert!(matches!(err, StorageError::BadMagic), "{err:?}");
@@ -254,7 +306,7 @@ mod tests {
 
     #[test]
     fn a_torn_body_is_corrupt() {
-        let mut bytes = Manifest::new(1, false).unwrap().encode();
+        let mut bytes = Manifest::new(1, 1, false).unwrap().encode();
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF;
         let err = Manifest::decode(&bytes).unwrap_err();
@@ -263,7 +315,7 @@ mod tests {
 
     #[test]
     fn another_version_is_bad_version() {
-        let mut m = Manifest::new(1, false).unwrap();
+        let mut m = Manifest::new(1, 1, false).unwrap();
         m.version = 2;
         let mut bytes = MAGIC.to_vec();
         bytes.extend_from_slice(&wavedb_wire::to_wire_checked(&m));
@@ -276,9 +328,25 @@ mod tests {
     #[test]
     fn a_reopen_keeps_the_created_facts() {
         let dir = tempfile::tempdir().unwrap();
-        let created = resolve(Some(dir.path()), None, 4).unwrap();
-        let reopened = resolve(Some(dir.path()), None, 64).unwrap();
+        let created = resolve(Some(dir.path()), None, (4, 2)).unwrap();
+        let reopened = resolve(Some(dir.path()), None, (64, 0)).unwrap();
         assert_eq!(reopened, created);
+        assert_eq!((created.shards(), created.storage_shards()), (4, 2));
         assert!(dir.path().join(MANIFEST).exists());
+    }
+
+    /// A storage shard serves a contiguous range of data shards, and the
+    /// count must divide them evenly.
+    #[test]
+    fn storage_shards_divide_the_data_shards() {
+        let m = Manifest::new(64, 4, false).unwrap();
+        assert_eq!(m.per_storage(), 16);
+        assert_eq!(m.storage_of(0), (0, 0));
+        assert_eq!(m.storage_of(17), (1, 1));
+        assert_eq!(m.storage_of(63), (3, 15));
+        for bad in [0, 3, 128] {
+            let err = Manifest::new(64, bad, false).unwrap_err();
+            assert!(matches!(err, StorageError::Corrupt(_)), "{bad}: {err:?}");
+        }
     }
 }
