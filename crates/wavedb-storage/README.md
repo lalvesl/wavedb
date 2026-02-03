@@ -68,7 +68,7 @@ web ([`wavedb-wasm`](../wavedb-wasm/README.md)) — no pages, no headers. See
 
 A shard's blocks are **one address space of 4 KiB blocks, cut into data files**
 ([RFC 0071](../../rfcs/0071-data-files-by-address.md)). Each file is named
-by the block it starts at — 16 hex digits, `shards/00/0000000000280000` holds
+by the block it starts at — 16 hex digits, `storage/00/0000000000280000` holds
 the blocks from `0x280000` on — and the store finds them by **listing** the
 shard's directory into a `BTreeMap<start, file>`: a run at block `s` lives in
 the file with the greatest start `≤ s`. Descriptors never name a file, only a
@@ -99,15 +99,16 @@ hole only once the batch that stopped naming it is durable
 ### The `MANIFEST`
 
 A database's fixed facts live in **one** record at its root, `MANIFEST`
-(`crate::manifest`, RFC 0071 §2) — beside `shards/00` … `shards/xx`, each
-shard a whole `PageStore`. A single `PageStore::open(dir)` is a database of
-one shard, the same shape. Written once, atomically, when the database is
-created, and read on every open:
+(`crate::manifest`, RFC 0071 §2) — beside `storage/00` … `storage/xx`, one
+directory of data files per storage shard (RFC 0073), each data shard a
+`PageStore`. A single `PageStore::open(dir)` is a database of one shard, the
+same shape. Written once, atomically, when the database is created, and read
+on every open:
 
 | Field                       | Meaning                                                                             |
 | --------------------------- | ----------------------------------------------------------------------------------- |
 | magic                       | `WAVEDBMF`, a raw 8-byte prefix. Mismatch ⇒ `StorageError::BadMagic`.               |
-| `to_wire_checked(Manifest)` | `[crc32][wire]` of `{ version, shards, seed: [u64; 4], object_backed }`.            |
+| `to_wire_checked(Manifest)` | `[crc32][wire]` of `{ version, shards, storage, seed, object_backed }`.             |
 
 The format version is pinned at 1 pre-release (`BadVersion` otherwise; see
 the [root README](../../readme.md)); the shard count and the seed are part of
