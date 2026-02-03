@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use crate::block::{BLOCK_SIZE, BlockDescriptor, Run};
 use crate::plan::{SlotPlan, blocks_of};
 use crate::remote::{HEADER_BLOCKS, ObjectState};
+use crate::roots::ROOTS_BLOCKS;
 
 /// Where a placed image's descriptor is installed once the window is written.
 pub enum Target {
@@ -19,8 +20,11 @@ pub enum Target {
     Dict {
         plan: usize,
     },
-    /// The window's header — always last, always exactly one on disk.
+    /// The window's header — last on disk but for the roots.
     Header,
+    /// The roots block (RFC 0073 §5), after the header of a window that
+    /// asks to end its batch.
+    Roots,
 }
 
 /// Everything this round places, in window order (the header is appended by
@@ -52,6 +56,7 @@ pub fn size_of(plans: &[SlotPlan], target: &Target) -> u64 {
             plans[*plan].dict.as_deref().map_or(0, blocks_of)
         }
         Target::Header => HEADER_BLOCKS,
+        Target::Roots => ROOTS_BLOCKS,
     }
 }
 
@@ -134,13 +139,32 @@ pub fn dict_descriptors(
     out
 }
 
+/// The run a window's header or roots block was carved, if it has one.
+pub fn mark_run(
+    targets: &[Target],
+    runs: &[Option<Run>],
+    roots: bool,
+) -> Option<Run> {
+    targets
+        .iter()
+        .zip(runs)
+        .find(|(t, _)| {
+            if roots {
+                matches!(t, Target::Roots)
+            } else {
+                matches!(t, Target::Header)
+            }
+        })
+        .and_then(|(_, run)| *run)
+}
+
 /// Fill the window: every image at its carved offset, zero-padded between.
 pub fn assemble(
     window: Run,
     plans: &[SlotPlan],
     targets: &[Target],
     runs: &[Option<Run>],
-    header: &[u8],
+    (header, roots): (&[u8], &[u8]),
 ) -> Vec<u8> {
     let mut buf = vec![0u8; window.byte_len() as usize];
     for (target, run) in targets.iter().zip(runs) {
@@ -153,6 +177,7 @@ pub fn assemble(
                 plans[*plan].dict.as_deref().unwrap_or(&[])
             }
             Target::Header => header,
+            Target::Roots => roots,
         };
         let at = ((run.start - window.start) * BLOCK_SIZE as u64) as usize;
         buf[at..at + bytes.len()].copy_from_slice(bytes);
