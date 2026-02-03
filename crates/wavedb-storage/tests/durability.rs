@@ -69,7 +69,7 @@ fn crash(dir: &Path) -> PathBuf {
 
 /// The one data file of the one-shard database at `dir`.
 fn data_file(dir: &Path) -> PathBuf {
-    wavedb_storage::shard_set::shard_dir(dir, 0).join("0000000000000000")
+    wavedb_storage::shard_set::storage_dir(dir, 0).join("0000000000000000")
 }
 
 fn len(path: &Path) -> u64 {
@@ -205,6 +205,24 @@ fn a_torn_header_is_read_past() {
     let crashed = crash(&db);
     let file = data_file(&crashed);
     zero(&file, len(&file) - 8 * 4096, 8);
+    assert_eq!(read(&open(&crashed), SH, 1), Some(record(SH, 1, 1)));
+}
+
+/// A batch whose roots block the crash tore was never durable — its
+/// `fsync` comes after that block — so it gives way to the one before, its
+/// pages and header whole or not.
+#[test]
+fn a_torn_roots_block_gives_way_to_the_batch_before() {
+    let d = tempfile::tempdir().unwrap();
+    let db = d.path().join("db");
+    let s = open(&db);
+    block_on(s.apply(&[put(1, 1)])).unwrap();
+    s.drain().unwrap();
+    block_on(s.apply(&[put(1, 2)])).unwrap();
+    s.drain().unwrap();
+    let crashed = crash(&db);
+    let file = data_file(&crashed);
+    zero(&file, len(&file) - 4096, 1);
     assert_eq!(read(&open(&crashed), SH, 1), Some(record(SH, 1, 1)));
 }
 
