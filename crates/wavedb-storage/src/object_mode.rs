@@ -51,7 +51,7 @@ impl PageStore {
             .remote
             .as_ref()
             .ok_or(StorageError::NotObjectBacked)?;
-        let facts = crate::manifest::resolve(None, Some(remote), 1)?;
+        let facts = crate::manifest::resolve(None, Some(remote), (1, 1))?;
         let options = crate::shard_set::only_shard(&facts, options)?;
         Self::open_object_shard(types, options, &facts)
     }
