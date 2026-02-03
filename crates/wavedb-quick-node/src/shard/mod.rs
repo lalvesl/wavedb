@@ -16,7 +16,7 @@
 //! ```
 //!
 //! A database is `P` data shards, each a whole `PageStore` (`MANIFEST` +
-//! `shards/xx`); an owner — a collection's Pivot, or a Unique type under a
+//! `storage/xx`); an owner — a collection's Pivot, or a Unique type under a
 //! tenant — lives in shard `seahash(owner) % P`. `T` workers each own a
 //! contiguous range of the shards, **stores included**: an operation reaches
 //! its engine as a function call on the thread that owns it, and nothing but
