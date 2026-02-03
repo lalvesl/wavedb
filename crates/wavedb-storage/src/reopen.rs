@@ -3,18 +3,19 @@
 //! directory, dictionary and the allocator come out of it. Nothing is
 //! replayed; the caches start empty.
 //!
-//! 1. **The newest header** is the last 8 blocks of the newest data file —
-//!    a header whose crc holds and whose `at` is where it was read. After a
-//!    crash the end may be torn: the blocks before it are read back, a
-//!    chunk at a time, until one is.
-//! 2. **The batch it belongs to** ends at the first header down its `prev`
-//!    links that says `end_of_batch`. That batch is the root if it is whole —
-//!    every header back to the one ending the batch before present — and
-//!    every page and dictionary it placed is intact: one write reaches the
-//!    disk in any order, so a crash before its barrier can keep a header and
-//!    lose a page. Only the newest batch can be in that state (a batch opens
-//!    only once the one before is durable); a batch that is not whole is
-//!    passed over for the one before it, which is.
+//! 1. **The newest roots block** ([RFC 0073] §5): the newest data file ends
+//!    with one, or with a header naming the newest one written before it —
+//!    each only where it says it is, its crc holding. After a crash the end
+//!    may be torn: the blocks before it are read back, a chunk at a time,
+//!    until one is.
+//! 2. **The root it names** is this data shard's newest header ending a
+//!    batch. That batch is the root if it is whole — every header back to
+//!    the one ending the batch before present — and every page and
+//!    dictionary it placed is intact: one write reaches the disk in any
+//!    order, so a crash before its barrier can keep a header and lose a
+//!    page. Only the newest storage write can be in that state (the next one
+//!    is written once it is durable); a batch that is not whole is passed
+//!    over for the roots block before, whose root is.
 //! 3. **The walk** (`crate::walk`) rebuilds the directories — and in
 //!    disk + object mode the object store's, from the same headers.
 //! 4. **The allocator** is the files' layout, every run the directories and
@@ -22,8 +23,9 @@
 //!    and the tail past the root — what a crash left — is cut.
 //!
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
+//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use futures::FutureExt;
 
@@ -36,6 +38,7 @@ use crate::error::{StorageError, StorageResult};
 use crate::header::{ChainRecord, Header, NO_FILE, Rotation};
 use crate::page::SlotPage;
 use crate::remote::HEADER_BLOCKS;
+use crate::roots::{Mark, ROOTS_BLOCKS, Roots};
 use crate::struct_storage::TypeSlot;
 use crate::walk::{HeaderSource, Lane, walk};
 
@@ -101,7 +104,7 @@ pub fn reopen(
         seen: BTreeMap::new(),
         lowest: u64::MAX,
     };
-    let Some(root) = root(&mut headers)? else {
+    let Some((roots, root)) = root(&mut headers, 0)? else {
         // Nothing durable: every block is free, and cut.
         return Ok(Reopened {
             alloc: cut_tails(file, &[], file_bytes)?,
@@ -126,7 +129,9 @@ pub fn reopen(
         floor: headers.lowest,
         ..DiskChain::default()
     };
-    let mut used = Vec::new();
+    chain.roots.newest = Some(roots.at);
+    chain.roots.live = BTreeSet::from([roots.at]);
+    let mut used = vec![Run::new(roots.at, ROOTS_BLOCKS)];
     for w in disk {
         let slot = slot_of(types, w.struct_hash)?;
         chain.types.insert(w.struct_hash, rotation(w.newest));
@@ -174,31 +179,53 @@ fn rotation(newest: u64) -> Rotation {
     }
 }
 
-/// The header ending the newest whole batch, if any.
-fn root(headers: &mut DiskHeaders<'_>) -> StorageResult<Option<Header>> {
+/// The roots block a reconstruction roots in, and the header ending the
+/// newest whole batch of the data shard at `position` it names — `None`
+/// when nothing of it is durable.
+fn root(
+    headers: &mut DiskHeaders<'_>,
+    position: u32,
+) -> StorageResult<Option<(Roots, Header)>> {
     let mut limit = u64::MAX;
     loop {
-        let Some(top) = newest_below(headers.file, limit)? else {
+        let Some(mark) = newest_below(headers.file, limit)? else {
             return Ok(None);
         };
-        let mut end = top;
-        while !end.end_of_batch && end.prev != NO_FILE {
-            match headers.read(end.prev) {
-                Some(before) => end = before,
-                None => break,
+        limit = match &mark {
+            Mark::Header(h) => h.at,
+            Mark::Roots(r) => r.at,
+        };
+        let mut at = mark.roots_at();
+        loop {
+            if at == NO_FILE {
+                return Ok(None); // nothing ended before it
             }
-        }
-        if !end.end_of_batch {
-            // Down to a header that is not there, or to the first one with
-            // no batch ended: look below it.
-            limit = end.at;
-            continue;
-        }
-        match whole(headers, &end)? {
-            Ok(()) => return Ok(Some(end)),
-            Err(below) => limit = below,
+            let Some(roots) = read_roots(headers.file, at) else {
+                break; // unreadable: look below it
+            };
+            limit = at;
+            let Some(end) = roots.root(position as usize) else {
+                return Ok(None); // this data shard never ended a batch
+            };
+            let header = headers
+                .read(end)
+                .filter(|h| h.end_of_batch && h.shard == position)
+                .ok_or(StorageError::Corrupt("a root is not a batch's end"));
+            if let Ok(header) = header
+                && whole(headers, &header)?.is_ok()
+            {
+                return Ok(Some((roots, header)));
+            }
+            // The write this block ends was cut: the one before is durable.
+            at = roots.prev;
         }
     }
+}
+
+/// The roots block at `at`, if one is there.
+fn read_roots(file: &BlockFile, at: u64) -> Option<Roots> {
+    let bytes = file.read_run(Run::new(at, ROOTS_BLOCKS)).ok()?;
+    Roots::decode(&bytes).filter(|r| r.at == at)
 }
 
 /// Whether the batch `end` ends is whole and every page and dictionary it
@@ -248,20 +275,18 @@ fn whole(
     Ok(Ok(()))
 }
 
-/// The newest header whose 8 blocks end at or before block `limit`,
-/// newest file first, read back a chunk at a time.
-fn newest_below(file: &BlockFile, limit: u64) -> StorageResult<Option<Header>> {
+/// The newest header or roots block wholly below block `limit`, newest file
+/// first, read back a chunk at a time.
+fn newest_below(file: &BlockFile, limit: u64) -> StorageResult<Option<Mark>> {
     for (start, end) in file.layout().into_iter().rev() {
         let mut hi = end.min(limit);
-        while hi >= start + HEADER_BLOCKS {
+        while hi > start {
             let lo = hi.saturating_sub(SCAN_BLOCKS).max(start);
             let bytes = file.read_run(Run::new(lo, hi - lo))?;
-            for at in (lo..=hi - HEADER_BLOCKS).rev() {
+            for at in (lo..hi).rev() {
                 let offset = ((at - lo) as usize) * BLOCK_SIZE;
-                if let Ok(header) = Header::decode(&bytes[offset..])
-                    && header.at == at
-                {
-                    return Ok(Some(header));
+                if let Some(mark) = Mark::at(&bytes[offset..], at) {
+                    return Ok(Some(mark));
                 }
             }
             if lo == start {
