@@ -1,17 +1,17 @@
-//! A sharded database ([RFC 0067] §2): a `MANIFEST` and `shards/00` …
-//! `shards/xx`, each shard a whole [`PageStore`] — its own data files,
-//! headers, allocator, directories and dictionaries.
+//! A sharded database ([RFC 0067] §2, [RFC 0073] §1).
 //!
-//! The shard count is fixed when the database is created and read back from
-//! the `MANIFEST` on every open ([`crate::manifest`]), because it is part of
-//! every record's address. A caller's count is only the count a **new**
-//! database is created with. A database of one shard has the same shape —
-//! it is what [`PageStore::open`] opens.
+//! A `MANIFEST` and `storage/00` … `storage/xx`, one directory of data
+//! files per storage shard, which its data shards write through; each data
+//! shard a [`PageStore`] — its headers, directories and dictionaries.
 //!
-//! The shards share nothing, so each one is reconstructed from its own
-//! headers and nothing about it ever spans two of them.
+//! The shard counts are fixed when the database is created and read back
+//! from the `MANIFEST` on every open ([`crate::manifest`]), because they are
+//! part of every record's address. A caller's counts are only those a
+//! **new** database is created with. A database of one shard has the same
+//! shape — it is what [`PageStore::open`] opens.
 //!
 //! [RFC 0067]: ../../../../rfcs/0067-thread-per-core-shards-WIP.md
+//! [RFC 0073]: ../../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
 
 use std::path::{Path, PathBuf};
 
@@ -20,8 +20,8 @@ use crate::manifest::{self, Manifest};
 use crate::page_store::{PageStore, StoreOptions};
 use crate::struct_storage::StructStorage;
 
-/// Where the shards live, under the database's root.
-pub const SHARDS_DIR: &str = "shards";
+/// Where the storage shards' data files live, under the database's root.
+pub const STORAGE_DIR: &str = "storage";
 
 /// Open the sharded database at `dir`, creating it with `shards` shards if
 /// it does not exist yet. Returns one store per shard, in shard order.
@@ -71,9 +71,10 @@ pub fn open_shards_with(
     threads: usize,
 ) -> StorageResult<Vec<PageStore>> {
     let dir = dir.as_ref();
-    let facts = manifest::resolve(Some(dir), options.remote.as_ref(), shards)?;
+    let counts = (shards, options.storage_shards);
+    let facts = manifest::resolve(Some(dir), options.remote.as_ref(), counts)?;
     open_each(&facts, options, threads, |i, options| {
-        PageStore::open_shard(&shard_dir(dir, i), types, options, &facts)
+        PageStore::open_shard(&storage_dir(dir, i), types, options, &facts)
     })
 }
 
@@ -93,7 +94,7 @@ pub fn open_object_shards(
         .remote
         .as_ref()
         .ok_or(StorageError::NotObjectBacked)?;
-    let facts = manifest::resolve(None, Some(remote), shards)?;
+    let facts = manifest::resolve(None, Some(remote), (shards, 0))?;
     open_each(&facts, options, threads, |_, options| {
         PageStore::open_object_shard(types, options, &facts)
     })
@@ -124,6 +125,13 @@ fn open_each(
     open: impl Fn(usize, StoreOptions) -> StorageResult<PageStore> + Sync,
 ) -> StorageResult<Vec<PageStore>> {
     let count = facts.shards();
+    if facts.storage_shards() != count {
+        // Data shards sharing a storage shard write through its thread
+        // (RFC 0073 §4), which a later phase brings.
+        return Err(StorageError::Corrupt(
+            "a storage shard per data shard is all this build opens",
+        ));
+    }
     let share = |bytes: usize| bytes / count;
     let options = StoreOptions {
         page_cache_bytes: share(options.page_cache_bytes),
@@ -169,10 +177,11 @@ fn open_each(
     opened.into_iter().collect()
 }
 
-/// The directory of shard `i` under the database root `dir`.
+/// The data files' directory of storage shard `n` under the database root
+/// `dir`.
 #[must_use]
-pub fn shard_dir(dir: &Path, i: usize) -> PathBuf {
-    dir.join(SHARDS_DIR).join(format!("{i:02x}"))
+pub fn storage_dir(dir: &Path, n: usize) -> PathBuf {
+    dir.join(STORAGE_DIR).join(format!("{n:02x}"))
 }
 
 #[cfg(test)]
@@ -180,7 +189,7 @@ mod tests {
     use futures::executor::block_on;
     use wavedb_core::{Id, Store, U48, Write};
 
-    use super::{open_shards, open_shards_with, shard_dir};
+    use super::{open_shards, open_shards_with, storage_dir};
     use crate::error::StorageError;
     use crate::manifest::MANIFEST;
     use crate::{PageStore, StoreOptions, StructStorage};
@@ -216,7 +225,7 @@ mod tests {
         for (i, store) in stores.iter().enumerate() {
             assert_eq!(
                 store.file.dir.as_deref(),
-                Some(shard_dir(dir.path(), i).as_path())
+                Some(storage_dir(dir.path(), i).as_path())
             );
             for k in 0..8u64 {
                 let found = block_on(store.get_of(SH, id(k))).unwrap();
@@ -236,7 +245,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         drop(open_on(dir.path(), 4));
         // Another process holding shard 5: its data file locked.
-        let file = std::fs::read_dir(shard_dir(dir.path(), 5))
+        let file = std::fs::read_dir(storage_dir(dir.path(), 5))
             .unwrap()
             .next()
             .unwrap()
@@ -265,7 +274,7 @@ mod tests {
         assert_eq!(stores.len(), 4);
         assert!(dir.path().join(MANIFEST).exists());
         for i in 0..4 {
-            assert!(shard_dir(dir.path(), i).is_dir());
+            assert!(storage_dir(dir.path(), i).is_dir());
         }
     }
 
@@ -297,7 +306,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         drop(PageStore::open(dir.path(), &[]).unwrap());
         assert!(dir.path().join(MANIFEST).exists());
-        assert!(shard_dir(dir.path(), 0).is_dir());
+        assert!(storage_dir(dir.path(), 0).is_dir());
         assert_eq!(
             open_shards(dir.path(), &[], StoreOptions::default(), 8)
                 .unwrap()
