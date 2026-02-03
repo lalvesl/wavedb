@@ -50,6 +50,14 @@ pub struct Header {
     /// The lowest header a walk rooted here reads: every type that existed
     /// when this one was written is named at or above it.
     pub horizon: u64,
+    /// The data shard it belongs to, by its position in its storage shard
+    /// (RFC 0073 §5): a `prev` or a `last` landing on another's header is
+    /// corrupt.
+    pub shard: u32,
+    /// On disk: the newest roots block written before this header
+    /// ([`NO_FILE`] before any; `crate::roots`) — where a reconstruction
+    /// that found this header goes for every data shard's root.
+    pub roots: u64,
     /// Whether this header ends a batch: with the headers before it, it
     /// holds every write up to a point and none in part. A reconstruction
     /// roots only in one.
@@ -233,6 +241,8 @@ mod tests {
             at: 7,
             prev: 6,
             horizon: 0,
+            shard: 0,
+            roots: NO_FILE,
             end_of_batch: true,
             start: 0,
             end: 7 * 2048 + 20,
