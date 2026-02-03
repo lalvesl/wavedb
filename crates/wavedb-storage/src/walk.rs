@@ -119,6 +119,13 @@ pub async fn walk<S: HeaderSource>(
             below = NO_FILE;
             continue;
         };
+        if header.shard != top.shard {
+            // Data shards share their storage shard's files, never a
+            // chain (RFC 0073 §5).
+            return Err(StorageError::Corrupt(
+                "a link lands on another data shard's header",
+            ));
+        }
         if file == below {
             // Only ever down: a block a dead header was freed from may hold
             // a newer one since, whose `prev` leads back up.
