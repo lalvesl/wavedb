@@ -5,7 +5,7 @@
 //! it needs: the dispatch surface ([`Exposure`]) and the storage surface
 //! ([`StorageRegistry`], the [`StructStorage`] slots to open the engine with)
 //! — binds an HTTP POST socket, and serves records out of its sharded
-//! database (`MANIFEST` + `shards/xx`, one `PageStore` each — RFC 0067).
+//! database (`MANIFEST` + `storage/xx`, one `PageStore` per data shard — RFCs 0067, 0073).
 //!
 //! ```no_run
 //! # async fn run<E>(registry: E) -> wavedb_quick_node::Result<()>
