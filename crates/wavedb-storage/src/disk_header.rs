@@ -24,6 +24,7 @@ use crate::page_store::PageStore;
 use crate::plan::SlotPlan;
 use crate::remote::{HEADER_BLOCKS, HEADER_BYTES};
 use crate::restate::{TypeView, horizon, restate};
+use crate::roots::{ROOTS_BLOCKS, Roots};
 
 /// Which directories a view is of.
 #[derive(Clone, Copy)]
@@ -110,6 +111,8 @@ impl PageStore {
             at,
             prev: chain.tail.unwrap_or(NO_FILE),
             horizon: 0,
+            shard: self.position,
+            roots: chain.roots.newest.unwrap_or(NO_FILE),
             end_of_batch: false,
             start: 0,
             end: 0,
@@ -174,6 +177,28 @@ impl PageStore {
         Ok((bytes, header.end_of_batch))
     }
 
+    /// The roots block at `at`, ending a window whose header at `header`
+    /// ended its batch or not: this store's root — that header, or the one
+    /// ending the batch before — by its position (RFC 0073 §5).
+    ///
+    /// # Errors
+    /// [`StorageError::Corrupt`] when the roots outgrow their block.
+    pub(crate) fn roots_at(
+        &self,
+        at: u64,
+        header: u64,
+        ended: bool,
+    ) -> StorageResult<Vec<u8>> {
+        let mut chain = self.chain.borrow_mut();
+        let root = if ended { Some(header) } else { chain.last_end };
+        let mut roots = vec![NO_FILE; self.position as usize + 1];
+        roots[self.position as usize] = root.unwrap_or(NO_FILE);
+        let prev = chain.roots.newest.unwrap_or(NO_FILE);
+        chain.roots.newest = Some(at);
+        chain.roots.live.insert(at);
+        Roots::new(at, prev, roots).encode()
+    }
+
     /// The batch just ended at header `at`: every header below the horizon
     /// — what a reconstruction from it still reads — is dead, and its run
     /// freed once this batch is durable.
@@ -201,6 +226,16 @@ impl PageStore {
         for header in dead {
             chain.live.remove(&header);
             alloc.defer(Run::new(header, HEADER_BLOCKS));
+        }
+        // Every roots block but the newest is dead once this batch is
+        // durable: the newest names every root.
+        if let Some(newest) = chain.roots.newest {
+            let dead: Vec<u64> =
+                chain.roots.live.range(..newest).copied().collect();
+            for block in dead {
+                chain.roots.live.remove(&block);
+                alloc.defer(Run::new(block, ROOTS_BLOCKS));
+            }
         }
     }
 
