@@ -59,6 +59,19 @@ pub struct DiskChain {
     /// The header the last full restatement began in: every bucket is named
     /// at or after it.
     pub(crate) restated: Option<u64>,
+    /// The roots blocks this store wrote (RFC 0073 §5).
+    pub(crate) roots: RootsChain,
+}
+
+/// Where the roots blocks stand: the newest, and those a reconstruction
+/// may still read.
+#[derive(Debug, Default)]
+pub struct RootsChain {
+    /// The newest roots block written.
+    pub(crate) newest: Option<u64>,
+    /// The roots blocks not freed yet: the newest durable one and any
+    /// written since.
+    pub(crate) live: BTreeSet<u64>,
 }
 
 impl DiskChain {
