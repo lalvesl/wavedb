@@ -80,9 +80,9 @@ storage shards (S ≤ P, dividing it, fixed at creation: 64 → 4). Each storage
 shard has its own OS thread, outside Embassy, owning the allocator and the
 files; workers send their rounds by channel, and one `pwritev` + one roots
 block + one `fsync` (one PUT on S3) per tick makes every data shard in it
-durable. Design: `rfcs/0073-data-shards-and-storage-shards-PLANNED.md`.
+durable. Design: `rfcs/0073-data-shards-and-storage-shards-WIP.md`.
 
-- [ ] 3.1 Format: the `MANIFEST`'s S, the `storage/<n>/` layout, the
+- [x] 3.1 Format: the `MANIFEST`'s S, the `storage/<n>/` layout, the
       header's data shard, the `Roots { at, prev, roots: Vec<u64> }` block
       (positional, `NO_FILE` for a shard never written). P = S = 1
       everywhere; nothing else moves.
