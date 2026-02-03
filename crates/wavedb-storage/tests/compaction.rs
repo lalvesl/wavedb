@@ -39,7 +39,7 @@ fn open(dir: &Path) -> PageStore {
 
 /// The data files of the one-shard store at `dir`: `(first block, bytes)`.
 fn data_files(dir: &Path) -> Vec<(u64, u64)> {
-    let shard: PathBuf = wavedb_storage::shard_set::shard_dir(dir, 0);
+    let shard: PathBuf = wavedb_storage::shard_set::storage_dir(dir, 0);
     let mut out: Vec<(u64, u64)> = std::fs::read_dir(shard)
         .unwrap()
         .filter_map(|e| {
@@ -252,7 +252,7 @@ fn a_crash_s_leftovers_are_cut_on_reopen() {
         let s = open(d.path());
         pock(&s);
     }
-    let shard = wavedb_storage::shard_set::shard_dir(d.path(), 0);
+    let shard = wavedb_storage::shard_set::storage_dir(d.path(), 0);
     let files = data_files(d.path());
     let (last, len) = *files.last().unwrap();
     let path = shard.join(format!("{last:016x}"));
