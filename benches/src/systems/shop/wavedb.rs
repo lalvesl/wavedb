@@ -163,7 +163,7 @@ const FILL_CACHE_BYTES: usize = 192 << 20;
 /// because the preload shares a 500 MB cage with the row that follows it.
 const SETTLE_AFTER_BYTES: u64 = 64 << 20;
 
-/// The shop database: `shards` data shards (`MANIFEST` + `shards/xx`, RFC
+/// The shop database: `shards` data shards (`MANIFEST` + `storage/xx`, RFC
 /// 0067).
 fn open_db(dir: &Path, shards: usize) -> Result<Vec<PageStore>, String> {
     let mut entries = Vec::new();
