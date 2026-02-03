@@ -270,6 +270,8 @@ mod tests {
             at: file,
             prev,
             horizon: 0,
+            shard: 0,
+            roots: NO_FILE,
             end_of_batch,
             start: 0,
             end: file * FILE_BLOCKS + HEADER_BLOCKS + 1,
