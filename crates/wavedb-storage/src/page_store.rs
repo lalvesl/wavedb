@@ -80,6 +80,9 @@ pub struct PageStore {
     pub(crate) alloc: RefCell<BlockAllocator>,
     /// Where the disk's chain of headers stands (RFC 0072 §4).
     pub(crate) chain: RefCell<crate::disk_chain::DiskChain>,
+    /// This data shard's position in its storage shard — its place in the
+    /// roots block and in its headers (RFC 0073 §5).
+    pub(crate) position: u32,
     /// What no header names yet (RFC 0072 §3).
     pub(crate) unrecorded: RefCell<crate::disk_chain::Unrecorded>,
     /// Where the batches stand (RFC 0072 §2).
@@ -110,7 +113,7 @@ pub struct PageStore {
 
 impl PageStore {
     /// Open (or create) a node store rooted at directory `dir`, holding
-    /// its `MANIFEST` and `shards/00`, serving exactly the listed `types` (each
+    /// its `MANIFEST` and `storage/00`, serving exactly the listed `types` (each
     /// a `#[wavedb]`-generated declaration — `T::storage_entries()`). The
     /// reserved `BpTree`-node slot is always included.
     ///
@@ -132,7 +135,7 @@ impl PageStore {
     /// `StoreOptions::default()` is exactly [`open`](Self::open).
     ///
     /// `dir` is a database of **one** shard: its `MANIFEST` and
-    /// `shards/00` ([`crate::shard_set`]), created when missing.
+    /// `storage/00` ([`crate::shard_set`]), created when missing.
     ///
     /// # Errors
     /// The same faults as [`open`](Self::open);
@@ -144,11 +147,14 @@ impl PageStore {
         options: StoreOptions,
     ) -> StorageResult<Self> {
         let dir = dir.as_ref();
-        let facts =
-            crate::manifest::resolve(Some(dir), options.remote.as_ref(), 1)?;
+        let facts = crate::manifest::resolve(
+            Some(dir),
+            options.remote.as_ref(),
+            (1, 1),
+        )?;
         let options = crate::shard_set::only_shard(&facts, options)?;
         Self::open_shard(
-            &crate::shard_set::shard_dir(dir, 0),
+            &crate::shard_set::storage_dir(dir, 0),
             types,
             options,
             &facts,
@@ -228,6 +234,7 @@ impl PageStore {
             file,
             alloc: RefCell::new(alloc),
             chain: RefCell::default(),
+            position: 0,
             unrecorded: RefCell::default(),
             cycle: RefCell::default(),
             types,
