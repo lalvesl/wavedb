@@ -14,7 +14,7 @@ where
     E: NodeTasks + StorageRegistry,
 {
     /// Set the directory holding the database: its `MANIFEST` and one
-    /// directory per shard under `shards/`, each with its data files.
+    /// directory per storage shard under `storage/`, each with its data files.
     #[must_use]
     pub fn data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.data_dir = dir.into();
