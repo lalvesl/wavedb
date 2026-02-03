@@ -51,6 +51,7 @@ pub mod remote;
 mod remote_compact;
 mod reopen;
 mod restate;
+mod roots;
 mod settle;
 pub mod shard_set;
 mod store_options;
