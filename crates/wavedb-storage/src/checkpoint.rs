@@ -27,8 +27,8 @@ use crate::page_store::PageStore;
 use crate::plan::SlotPlan;
 use crate::record_cache::Records;
 use crate::window::{
-    Target, assemble, carve, dict_descriptors, install, size_of, superseded,
-    targets_of,
+    Target, assemble, carve, dict_descriptors, install, mark_run, size_of,
+    superseded, targets_of,
 };
 
 /// What a window writes — which decides the "not uploaded yet" flag of the
@@ -133,6 +133,9 @@ impl PageStore {
         }
         if logged {
             targets.push(Target::Header);
+            if end {
+                targets.push(Target::Roots);
+            }
         }
         let mut alloc = self.alloc.borrow_mut();
         let sizes: Vec<u64> =
@@ -151,7 +154,7 @@ impl PageStore {
         let changed = install(&mut plans, &targets, &runs, pending);
         let dicts = dict_descriptors(&plans, &targets, &runs);
         let mut ended = false;
-        let mut header = Vec::new();
+        let (mut header, mut roots) = (Vec::new(), Vec::new());
         if logged {
             let pages = targets.iter().filter_map(|t| match t {
                 Target::Page { plan, bucket } => {
@@ -161,13 +164,17 @@ impl PageStore {
             });
             let grown = dicts.keys().map(|&p| plans[p].idx);
             self.note_placed(pages, grown);
-            if let Some(at) = runs.last().copied().flatten() {
+            if let Some(at) = mark_run(&targets, &runs, false) {
                 (header, ended) =
                     self.header_at(at.start, &plans, &dicts, end)?;
+                if let Some(block) = mark_run(&targets, &runs, true) {
+                    roots = self.roots_at(block.start, at.start, ended)?;
+                }
             }
         }
         if let Some(window) = window {
-            let buf = assemble(window, &plans, &targets, &runs, &header);
+            let marks = (header.as_slice(), roots.as_slice());
+            let buf = assemble(window, &plans, &targets, &runs, marks);
             let written = alloc
                 .file_of(window.start)
                 .ok_or(StorageError::Corrupt("a window outside every file"))
