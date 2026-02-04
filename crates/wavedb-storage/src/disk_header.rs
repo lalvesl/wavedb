@@ -222,10 +222,9 @@ impl PageStore {
         }
         chain.last_end = Some(at);
         let dead: Vec<u64> = chain.live.range(..line).copied().collect();
-        let mut alloc = self.alloc.borrow_mut();
         for header in dead {
             chain.live.remove(&header);
-            alloc.defer(Run::new(header, HEADER_BLOCKS));
+            self.retire_run(Run::new(header, HEADER_BLOCKS));
         }
         // Every roots block but the newest is dead once this batch is
         // durable: the newest names every root.
@@ -234,7 +233,7 @@ impl PageStore {
                 chain.roots.live.range(..newest).copied().collect();
             for block in dead {
                 chain.roots.live.remove(&block);
-                alloc.defer(Run::new(block, ROOTS_BLOCKS));
+                self.retire_run(Run::new(block, ROOTS_BLOCKS));
             }
         }
     }
