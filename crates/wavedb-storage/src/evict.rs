@@ -126,7 +126,6 @@ impl PageStore {
         cold.sort_unstable();
         let mut evicted = 0;
         let mut unrecorded = self.unrecorded.borrow_mut();
-        let mut alloc = self.alloc.borrow_mut();
         for (_, idx, bucket) in cold {
             if live <= target_blocks {
                 break;
@@ -136,7 +135,7 @@ impl PageStore {
             let run = dir.descriptor(bucket).run();
             dir.set_descriptor(bucket, BlockDescriptor::EVICTED);
             self.file.page_cache().invalidate(run);
-            self.retire_run(&mut alloc, run);
+            self.retire_run(run);
             unrecorded.slots.entry(idx).or_default().disk.insert(bucket);
             live = live.saturating_sub(run.count);
             evicted += run.count;
@@ -218,6 +217,9 @@ impl PageStore {
                 .map(|d| self.with_remote_page(idx, d, SlotPage::clone)),
         )
         .await?;
+        // Through the gate from the copy of the directory to its publishing:
+        // a settle round waiting for its window would overwrite it.
+        let _through = self.gate.enter().await;
         let Some(disk) = slot.directory().borrow().clone() else {
             return Ok(());
         };
@@ -239,7 +241,7 @@ impl PageStore {
         let mut plan = SlotPlan::verbatim(idx, disk);
         plan.pages.insert(bucket, image);
         plan.decoded.insert(bucket, page);
-        self.place_restored(plan)?;
+        self.place_restored(plan).await?;
         self.touch(idx, bucket);
         if let Some(object) = &self.object {
             object.wanted.borrow_mut().remove(&(idx, bucket));
