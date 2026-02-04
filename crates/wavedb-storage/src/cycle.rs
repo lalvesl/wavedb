@@ -26,6 +26,7 @@ use crate::barrier::{Durable, Syncs, Waiter};
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::PageStore;
 use crate::settle::Progress;
+use crate::wait::park_on;
 
 /// Where a store's batches stand.
 #[derive(Debug, Default)]
@@ -95,27 +96,42 @@ impl PageStore {
     /// a header naming what is left unrecorded. [`Progress::Done`] once the
     /// batch is ended — or when none was open.
     ///
+    /// The round waits for its window from the storage shard (RFC 0073 §3)
+    /// — at once from a store's own files — and a node's task is parked
+    /// meanwhile; [`cycle_step`](Self::cycle_step) is the same step for a
+    /// caller with nothing else to run.
+    ///
     /// # Errors
     /// A page write fault — the store is then failed (`place_in`).
-    pub fn cycle_step(&self, budget: usize) -> StorageResult<Progress> {
+    pub async fn settle_step(&self, budget: usize) -> StorageResult<Progress> {
         if !self.is_cycling() {
             return Ok(Progress::Done);
         }
+        let through = self.gate.enter().await;
         let owes = self.cache.borrow().owes();
         let ended = if owes {
             let mut round = self.cache.borrow().round(budget);
             let work = std::mem::take(&mut round.work);
-            let ended = self.settle(work, round.complete)?;
+            let ended = self.settle(work, round.complete).await?;
             self.cache.borrow_mut().advance(&round);
             ended
         } else {
-            self.record_unrecorded(true)?
+            self.record_unrecorded(true).await?
         };
+        drop(through);
         if !ended {
             return Ok(Progress::Settled);
         }
         self.end_batch()?;
         Ok(Progress::Done)
+    }
+
+    /// [`settle_step`](Self::settle_step) to its end on the calling thread.
+    ///
+    /// # Errors
+    /// As [`settle_step`](Self::settle_step).
+    pub fn cycle_step(&self, budget: usize) -> StorageResult<Progress> {
+        park_on(self.settle_step(budget))
     }
 
     /// The batch's last header is written: drop the headers it leaves out of
@@ -221,7 +237,11 @@ impl PageStore {
                 if round.is_empty() {
                     return Ok(());
                 }
-                self.settle(std::mem::take(&mut round.work), false)?;
+                let work = std::mem::take(&mut round.work);
+                park_on(async {
+                    let _through = self.gate.enter().await;
+                    self.settle(work, false).await
+                })?;
                 self.cache.borrow_mut().advance(&round);
             }
         }
