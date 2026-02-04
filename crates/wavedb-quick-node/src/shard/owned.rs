@@ -123,7 +123,7 @@ impl Owned {
     /// One bounded step on the next store from `cursor` with a settle cycle
     /// open: a round of it, or its end. Faults are reported, not propagated:
     /// a durable write waiting on the batch hears of it from the store.
-    pub fn step(&self, cursor: &mut usize) {
+    pub async fn step(&self, cursor: &mut usize) {
         let n = self.stores.len();
         let next = (0..n)
             .map(|k| (*cursor + k) % n)
@@ -134,7 +134,7 @@ impl Owned {
             return;
         };
         *cursor = (i + 1) % n;
-        if let Err(e) = store.cycle_step(SETTLE_BUDGET_IDS) {
+        if let Err(e) = store.settle_step(SETTLE_BUDGET_IDS).await {
             eprintln!("worker: maintenance step failed: {e}");
         }
     }
@@ -145,7 +145,12 @@ impl Owned {
     /// (RFC 0069) — one pass per tick until it ends. The steps a cycle then
     /// owes, a compaction's sealing ones included, are
     /// [`step`](Self::step)'s.
-    pub fn upkeep(&self, i: usize, policy: &Maintenance, partitions: usize) {
+    pub async fn upkeep(
+        &self,
+        i: usize,
+        policy: &Maintenance,
+        partitions: usize,
+    ) {
         let Some(store) = self.stores.get(i) else {
             return;
         };
@@ -155,11 +160,11 @@ impl Owned {
         }
         let share = policy.cache_budget_bytes / partitions;
         store.evict_settled(share);
-        self.compact(i, store, policy, partitions);
+        self.compact(i, store, policy, partitions).await;
     }
 
     /// Start or continue store `i`'s compaction, if its triggers say so.
-    fn compact(
+    async fn compact(
         &self,
         i: usize,
         store: &PageStore,
@@ -178,7 +183,7 @@ impl Owned {
         if store.is_compacting()
             || policy.due(&mut armed, store.space(), partitions, now)
         {
-            match store.compact_step(policy.budget_blocks) {
+            match store.compact_pass(policy.budget_blocks).await {
                 Ok(Compacting::Done { .. }) => {
                     Compaction::finished(&mut armed, store.space());
                 }
@@ -339,13 +344,13 @@ mod tests {
         let owned = Owned::new(0, open(d.path(), 3));
         for i in 0..3 {
             put(owned.store(i).unwrap(), 0..10);
-            owned.upkeep(i, &Maintenance::default(), 3); // the tick
+            block_on(owned.upkeep(i, &Maintenance::default(), 3)); // the tick
         }
         assert!(owned.owes());
         let mut cursor = 0;
         let mut steps = 0;
         while owned.owes() {
-            owned.step(&mut cursor);
+            block_on(owned.step(&mut cursor));
             steps += 1;
             assert!(steps <= 3, "one bounded round each was enough");
         }
@@ -359,14 +364,14 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let owned = Owned::new(0, open(d.path(), 1));
         let policy = Maintenance::default();
-        owned.upkeep(0, &policy, 1);
+        block_on(owned.upkeep(0, &policy, 1));
         assert!(!owned.owes(), "nothing written, nothing opened");
         put(owned.store(0).unwrap(), 0..50);
-        owned.upkeep(0, &policy, 1);
+        block_on(owned.upkeep(0, &policy, 1));
         assert!(owned.store(0).unwrap().is_cycling());
         let mut cursor = 0;
         while owned.owes() {
-            owned.step(&mut cursor);
+            block_on(owned.step(&mut cursor));
         }
         assert!(!owned.store(0).unwrap().has_pending());
     }
@@ -385,7 +390,7 @@ mod tests {
         let batch = [Write::Put(id(1), SH.to_le_bytes().to_vec())];
         let mut durable = Box::pin(store.apply_durable(&batch));
         let _ = futures::FutureExt::now_or_never(&mut durable);
-        owned.upkeep(0, &Maintenance::default(), 1);
+        block_on(owned.upkeep(0, &Maintenance::default(), 1));
         assert!(owned.urgent(), "the open batch carries a waiter");
     }
 
@@ -425,12 +430,12 @@ mod tests {
             ..Maintenance::default()
         };
         let mut cursor = 0;
-        owned.upkeep(0, &policy, 1);
+        block_on(owned.upkeep(0, &policy, 1));
         assert!(store.is_compacting(), "the free share is past 20%");
         for _ in 0..1_000 {
-            owned.upkeep(0, &policy, 1);
+            block_on(owned.upkeep(0, &policy, 1));
             while owned.owes() {
-                owned.step(&mut cursor);
+                block_on(owned.step(&mut cursor));
             }
             if !store.is_compacting() {
                 break;
@@ -438,7 +443,7 @@ mod tests {
         }
         assert!(!store.is_compacting(), "it ended");
         assert!(store.space().file_blocks < before, "and the file shrank");
-        owned.upkeep(0, &policy, 1);
+        block_on(owned.upkeep(0, &policy, 1));
         assert!(!store.is_compacting(), "nothing new to give back");
     }
 
@@ -534,7 +539,7 @@ mod tests {
             },
             ..Maintenance::default()
         };
-        owned.upkeep(0, &policy, 1);
+        block_on(owned.upkeep(0, &policy, 1));
         assert!(
             !store.is_resident(SH, id(7)),
             "the uploaded pages left the disk"
