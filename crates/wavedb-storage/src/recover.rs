@@ -199,7 +199,7 @@ impl PageStore {
             }
         }
         *object.chain.borrow_mut() = found.chain;
-        self.place_plans(plans)?;
+        crate::wait::park_on(self.place_plans(plans))?;
         self.record_all();
         self.drain()
     }
