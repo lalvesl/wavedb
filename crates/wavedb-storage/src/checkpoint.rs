@@ -20,7 +20,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::block::{BlockAllocator, BlockDescriptor, Run};
+use crate::block::{BlockDescriptor, Run};
 use crate::error::{StorageError, StorageResult};
 use crate::page_cache::Lane;
 use crate::page_store::PageStore;
@@ -45,6 +45,15 @@ pub enum Placement {
     Restore,
 }
 
+/// A round's plans and what its window holds, between its reservation and
+/// its build.
+struct Round {
+    plans: Vec<SlotPlan>,
+    targets: Vec<Target>,
+    placement: Placement,
+    end: bool,
+}
+
 impl PageStore {
     /// Settle a round's records into pages: plan every slot, then write the
     /// whole round as one window and publish it. Whether its header ended
@@ -54,7 +63,10 @@ impl PageStore {
     /// Propagates page read/write, corruption, or compression faults. The
     /// caller leaves the settle cursors where they were; re-settling is
     /// idempotent because a round copies each record's newest entry.
-    pub(crate) fn settle(
+    ///
+    /// The caller holds the store's [`Gate`](crate::wait::Gate): the plans
+    /// are made from the directories the round then publishes into.
+    pub(crate) async fn settle(
         &self,
         work: Vec<(usize, Records)>,
         end: bool,
@@ -63,7 +75,7 @@ impl PageStore {
         for (idx, records) in work {
             plans.push(self.plan_slot(idx, records)?);
         }
-        self.place_in(plans, Placement::Settle, end)
+        self.place_in(plans, Placement::Settle, end).await
     }
 
     /// Write already-serialised images at the end of the active file, and
@@ -71,8 +83,13 @@ impl PageStore {
     ///
     /// # Errors
     /// Propagates the window write fault; nothing is repointed if it fails.
-    pub(crate) fn relocate(&self, plans: Vec<SlotPlan>) -> StorageResult<()> {
-        self.place_in(plans, Placement::Move, false).map(|_| ())
+    pub(crate) async fn relocate(
+        &self,
+        plans: Vec<SlotPlan>,
+    ) -> StorageResult<()> {
+        self.place_in(plans, Placement::Move, false)
+            .await
+            .map(|_| ())
     }
 
     /// Write already-planned images (a recovery's dictionaries) as one
@@ -80,19 +97,25 @@ impl PageStore {
     ///
     /// # Errors
     /// Propagates the window write fault.
-    pub(crate) fn place_plans(
+    pub(crate) async fn place_plans(
         &self,
         plans: Vec<SlotPlan>,
     ) -> StorageResult<()> {
-        self.place_in(plans, Placement::Settle, false).map(|_| ())
+        self.place_in(plans, Placement::Settle, false)
+            .await
+            .map(|_| ())
     }
 
     /// Write a page restored from the object store.
     ///
     /// # Errors
     /// Propagates the window write fault.
-    pub(crate) fn place_restored(&self, plan: SlotPlan) -> StorageResult<()> {
+    pub(crate) async fn place_restored(
+        &self,
+        plan: SlotPlan,
+    ) -> StorageResult<()> {
         self.place_in(vec![plan], Placement::Restore, false)
+            .await
             .map(|_| ())
     }
 
@@ -101,26 +124,31 @@ impl PageStore {
     ///
     /// # Errors
     /// Propagates the window write fault.
-    pub(crate) fn record_unrecorded(&self, end: bool) -> StorageResult<bool> {
-        self.place_in(Vec::new(), Placement::Settle, end)
+    pub(crate) async fn record_unrecorded(
+        &self,
+        end: bool,
+    ) -> StorageResult<bool> {
+        self.place_in(Vec::new(), Placement::Settle, end).await
     }
 
-    /// Carve one window for every planned image and, on disk, the header;
-    /// write it, swap the descriptors in, and release the superseded runs.
-    /// Whether the header ended the batch.
+    /// One round through the storage shard ([RFC 0073] §3): size the window
+    /// — every planned image and, on disk, the header — **reserve** it, then
+    /// build it at its real addresses, write it, swap the descriptors in and
+    /// release the superseded runs. Whether the header ended the batch.
+    ///
+    /// The reservation is the one wait; the caller holds the store's
+    /// [`Gate`](crate::wait::Gate) across it.
     ///
     /// # Errors
     /// The window write's fault. Nothing is published then — but the
     /// header's bookkeeping has moved on and the file's state is unknown, so
     /// the store is failed: every later write is refused until a reopen
     /// reconstructs it from what is on disk.
-    // The allocator guard deliberately spans carve → write → free: the window
-    // must not be handed out twice, and a superseded run must not return to
-    // the pool before the page replacing it is on disk.
-    #[allow(clippy::significant_drop_tightening)]
-    fn place_in(
+    ///
+    /// [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
+    async fn place_in(
         &self,
-        mut plans: Vec<SlotPlan>,
+        plans: Vec<SlotPlan>,
         placement: Placement,
         end: bool,
     ) -> StorageResult<bool> {
@@ -137,13 +165,50 @@ impl PageStore {
                 targets.push(Target::Roots);
             }
         }
-        let mut alloc = self.alloc.borrow_mut();
         let sizes: Vec<u64> =
             targets.iter().map(|t| size_of(&plans, t)).collect();
         let total: u64 = sizes.iter().sum();
-        let window = (total > 0).then(|| alloc.alloc(total));
+        let window = match total {
+            0 => None,
+            blocks => Some(self.reserve(blocks).await?),
+        };
+        let round = Round {
+            plans,
+            targets,
+            placement,
+            end,
+        };
+        self.build(round, &sizes, window)
+    }
+
+    /// The window `blocks` long a round writes, reserved where its storage
+    /// shard writes next.
+    ///
+    /// # Errors
+    /// None from a store's own files.
+    // A storage shard shared with other data shards answers later.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+    async fn reserve(&self, blocks: u64) -> StorageResult<Run> {
+        Ok(self.alloc.borrow_mut().alloc(blocks))
+    }
+
+    /// Build the round at its reserved `window`, write it and publish it
+    /// (see [`place_in`](Self::place_in)).
+    fn build(
+        &self,
+        round: Round,
+        sizes: &[u64],
+        window: Option<Run>,
+    ) -> StorageResult<bool> {
+        let Round {
+            mut plans,
+            targets,
+            placement,
+            end,
+        } = round;
+        let logged = self.has_disk();
         let runs = window
-            .map_or_else(|| vec![None; targets.len()], |w| carve(w, &sizes));
+            .map_or_else(|| vec![None; targets.len()], |w| carve(w, sizes));
         // A settle writes what the object store has not seen; a move does
         // not change what it moves.
         let pending = match placement {
@@ -175,10 +240,7 @@ impl PageStore {
         if let Some(window) = window {
             let marks = (header.as_slice(), roots.as_slice());
             let buf = assemble(window, &plans, &targets, &runs, marks);
-            let written = alloc
-                .file_of(window.start)
-                .ok_or(StorageError::Corrupt("a window outside every file"))
-                .and_then(|file| self.file.write_run(file, window, &buf));
+            let written = self.write_window(window, &buf);
             if let Err(e) = written {
                 self.fail();
                 return Err(e); // the round's one write
@@ -198,7 +260,7 @@ impl PageStore {
             // No directory names it any more, so no read will ask for it:
             // its image goes now rather than when the budget pushes it out.
             self.file.page_cache().invalidate(run);
-            self.retire_run(&mut alloc, run);
+            self.retire_run(run);
         }
         if pending.is_some() {
             // A page written for use — settled or brought back — is hot.
@@ -208,13 +270,27 @@ impl PageStore {
                 }
             }
         }
-        self.publish(plans, &dicts, &mut alloc);
+        self.publish(plans, &dicts);
         Ok(ended)
+    }
+
+    /// Write a round's built window where it was reserved.
+    ///
+    /// # Errors
+    /// The write's fault.
+    fn write_window(&self, window: Run, buf: &[u8]) -> StorageResult<()> {
+        let file = self
+            .alloc
+            .borrow()
+            .file_of(window.start)
+            .ok_or(StorageError::Corrupt("a window outside every file"))?;
+        self.file.write_run(file, window, buf)
     }
 
     /// A run no directory names any more: on disk, freed once the batch
     /// that stopped naming it is durable (`crate::alloc`); in RAM, at once.
-    pub(crate) fn retire_run(&self, alloc: &mut BlockAllocator, run: Run) {
+    pub(crate) fn retire_run(&self, run: Run) {
+        let mut alloc = self.alloc.borrow_mut();
         if self.has_disk() {
             alloc.defer(run);
         } else {
@@ -227,7 +303,6 @@ impl PageStore {
         &self,
         plans: Vec<SlotPlan>,
         dicts: &BTreeMap<usize, BlockDescriptor>,
-        alloc: &mut BlockAllocator,
     ) {
         for (plan, work) in plans.iter().enumerate() {
             let Some(&desc) = dicts.get(&plan) else {
@@ -236,7 +311,7 @@ impl PageStore {
             let old =
                 self.types[work.idx].dictionary().borrow_mut().repoint(desc);
             if old.is_allocated() {
-                self.retire_run(alloc, old.run());
+                self.retire_run(old.run());
             }
         }
         for work in plans {
