@@ -60,6 +60,7 @@ mod upload;
 mod upload_file;
 mod upload_plan;
 mod upload_publish;
+mod wait;
 mod walk;
 mod window;
 
