@@ -89,7 +89,7 @@ durable. Design: `rfcs/0073-data-shards-and-storage-shards-WIP.md`.
 - [ ] 3.2 The split in one thread: the storage side (allocator, writer,
       barrier, roots, file locks) out of `PageStore`, driven inline when
       nobody runs a thread; the seam an enum (inline | channel), no `dyn`.
-- [ ] 3.3 The round in three steps — `Reserve` → build with real addresses
+- [x] 3.3 The round in three steps — `Reserve` → build with real addresses
       → `Write { bytes, frees }` → `Done` — and the settle reshaped around
       the await (no `RefCell` borrow across it; `checkpoint.rs`).
 - [ ] 3.4 The storage thread: `recv_timeout` loop on an `async-channel`
