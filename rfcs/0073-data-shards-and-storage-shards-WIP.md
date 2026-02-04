@@ -1,6 +1,6 @@
 # RFC 0073 — Data shards and storage shards
 
-- **Status:** WIP — opened 2026-10-17; phase 1 landed 2026-10-17 (see
+- **Status:** WIP — opened 2026-10-17; phases 1–2 landed 2026-10-17 (see
   Progress)
 - **Crates:** `wavedb-storage` (the split of the store, the roots block, the
   reconstruction), `wavedb-quick-node` (the storage threads, the routing
@@ -304,6 +304,18 @@ data shard in it. Nothing is atomic across owners, which is not new (0067
   still one storage shard per data shard: a count below it is refused at
   open until the storage thread (phase 3). Tested: a torn roots block gives
   way to the batch before (`tests/durability.rs`).
+- **Phase 2, the round in three steps — landed 2026-10-17** (`checkpoint`,
+  `wait`, `cycle`, `compact`, `defrag`, `evict`, `recover`;
+  `wavedb-quick-node`'s `shard::{owned,background}`): a round sizes its
+  window, **reserves** it — an `await`, at once from a store's own files —
+  then builds it at its real addresses and writes it. Everything that
+  publishes into the directories goes through the store's `Gate`, one
+  round at a time, from the copy it plans from to the swap: a settle round,
+  a compaction's move round from the reading of its runs, a restore from
+  its copy of the directory — so a job restoring a bucket while a round
+  waits for its window cannot be overwritten by it. The node awaits
+  `settle_step` and `compact_pass`; `cycle_step`, `compact_step` and `drain`
+  run the same steps parked on the calling thread (`wait::park_on`).
 
 ## Open questions
 
