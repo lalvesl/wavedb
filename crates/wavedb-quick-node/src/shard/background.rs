@@ -84,7 +84,7 @@ async fn run(bg: &Background) {
             || valve.next(avail, bg.owned.unsettled_bytes())
                 == Some(Class::Maintenance)
         {
-            bg.owned.step(&mut cursor);
+            bg.owned.step(&mut cursor).await;
             yield_now().await;
             continue;
         }
@@ -97,7 +97,7 @@ async fn run(bg: &Background) {
         // without bound under steady traffic.
         if last.elapsed() >= UPKEEP_PERIOD {
             for i in 0..bg.owned.len() {
-                bg.owned.upkeep(i, &bg.policy, bg.partitions);
+                bg.owned.upkeep(i, &bg.policy, bg.partitions).await;
                 bg.owned.object_upkeep(i, &bg.policy, bg.partitions).await;
                 yield_now().await;
             }
