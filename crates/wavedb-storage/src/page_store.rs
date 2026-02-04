@@ -83,6 +83,8 @@ pub struct PageStore {
     /// This data shard's position in its storage shard — its place in the
     /// roots block and in its headers (RFC 0073 §5).
     pub(crate) position: u32,
+    /// One round at a time through the directories (`crate::wait`).
+    pub(crate) gate: crate::wait::Gate,
     /// What no header names yet (RFC 0072 §3).
     pub(crate) unrecorded: RefCell<crate::disk_chain::Unrecorded>,
     /// Where the batches stand (RFC 0072 §2).
@@ -235,6 +237,7 @@ impl PageStore {
             alloc: RefCell::new(alloc),
             chain: RefCell::default(),
             position: 0,
+            gate: crate::wait::Gate::default(),
             unrecorded: RefCell::default(),
             cycle: RefCell::default(),
             types,
