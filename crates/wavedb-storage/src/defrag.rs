@@ -35,12 +35,16 @@ struct Victim {
 impl PageStore {
     /// One pass: rounds until about `budget` blocks moved. `finished` once no
     /// file is worth emptying any more.
-    pub(crate) fn shift(
+    pub(crate) async fn shift(
         &self,
         budget: u64,
     ) -> StorageResult<(usize, u64, bool)> {
         let (mut images, mut blocks) = (0, 0);
         loop {
+            // Through the gate from the reading of the runs to their
+            // publishing: a round settled meanwhile would be overwritten by
+            // the stale copy.
+            let _through = self.gate.enter().await;
             let Some(victim) = self.victim() else {
                 return Ok((images, blocks, true));
             };
@@ -68,7 +72,7 @@ impl PageStore {
                 return Ok((images, blocks, false)); // the next would not fit
             }
             images += loaded.len();
-            self.move_round(loaded)?;
+            self.move_round(loaded).await?;
             if blocks >= budget {
                 return Ok((images, blocks, false));
             }
@@ -76,7 +80,10 @@ impl PageStore {
     }
 
     /// Write `loaded` into the active file as one round, repointing each.
-    fn move_round(&self, loaded: Vec<(Movable, Vec<u8>)>) -> StorageResult<()> {
+    async fn move_round(
+        &self,
+        loaded: Vec<(Movable, Vec<u8>)>,
+    ) -> StorageResult<()> {
         let mut plans: BTreeMap<usize, SlotPlan> = BTreeMap::new();
         for (m, bytes) in loaded {
             let Some(dir) = self.types[m.slot].directory().borrow().clone()
@@ -93,7 +100,7 @@ impl PageStore {
                 None => plan.dict = Some(bytes),
             }
         }
-        self.relocate(plans.into_values().collect())
+        self.relocate(plans.into_values().collect()).await
     }
 
     /// The data file to empty next: of those at least
