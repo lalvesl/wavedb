@@ -116,59 +116,73 @@ impl PageStore {
     /// One step of a compaction, starting one if none is under way: a pass
     /// copying about `budget_blocks` (at least one image), or a look at
     /// whether the moves are sealed. While [`Compacting::Sealing`], the
-    /// caller steps the cycle.
+    /// caller steps the cycle. Its rounds wait for their windows as a
+    /// settle's do ([`settle_step`](Self::settle_step)).
     ///
     /// # Errors
     /// Read, write or sync faults. A move that faults has repointed nothing;
     /// the phase stays, and the next step retries.
+    pub async fn compact_pass(
+        &self,
+        budget_blocks: u64,
+    ) -> StorageResult<Compacting> {
+        loop {
+            match self.compaction.get() {
+                Phase::Idle => {
+                    let since = self.reclaimed();
+                    if self.has_disk() {
+                        self.roll_if_worth_emptying();
+                        self.record_all();
+                        self.compaction.set(Phase::Restating { since });
+                    } else {
+                        self.compaction.set(Phase::Moving { since });
+                    }
+                }
+                Phase::Restating { since } => {
+                    self.settle_durable();
+                    let restated = {
+                        let chain = self.chain.borrow();
+                        !chain.restating && !chain.outlived()
+                    };
+                    if !restated {
+                        return Ok(Compacting::Sealing);
+                    }
+                    self.compaction.set(Phase::Moving { since });
+                }
+                Phase::Moving { since } => {
+                    let (images, blocks, finished) =
+                        self.shift(budget_blocks).await?;
+                    if finished {
+                        let mark = self.alloc.borrow().mark();
+                        self.compaction.set(Phase::Sealing { since, mark });
+                    }
+                    return Ok(Compacting::Moved { images, blocks });
+                }
+                Phase::Sealing { since, mark } => {
+                    self.settle_durable();
+                    if !self.alloc.borrow().released(mark) {
+                        return Ok(Compacting::Sealing);
+                    }
+                    self.reclaim()?;
+                    self.compaction.set(Phase::Idle);
+                    return Ok(Compacting::Done {
+                        reclaimed_blocks: self.reclaimed() - since,
+                    });
+                }
+            }
+        }
+    }
+
+    /// [`compact_pass`](Self::compact_pass) to its end on the calling
+    /// thread.
+    ///
+    /// # Errors
+    /// As [`compact_pass`](Self::compact_pass).
     pub fn compact_step(
         &self,
         budget_blocks: u64,
     ) -> StorageResult<Compacting> {
-        match self.compaction.get() {
-            Phase::Idle => {
-                let since = self.reclaimed();
-                if self.has_disk() {
-                    self.roll_if_worth_emptying();
-                    self.record_all();
-                    self.compaction.set(Phase::Restating { since });
-                } else {
-                    self.compaction.set(Phase::Moving { since });
-                }
-                self.compact_step(budget_blocks)
-            }
-            Phase::Restating { since } => {
-                self.settle_durable();
-                let restated = {
-                    let chain = self.chain.borrow();
-                    !chain.restating && !chain.outlived()
-                };
-                if !restated {
-                    return Ok(Compacting::Sealing);
-                }
-                self.compaction.set(Phase::Moving { since });
-                self.compact_step(budget_blocks)
-            }
-            Phase::Moving { since } => {
-                let (images, blocks, finished) = self.shift(budget_blocks)?;
-                if finished {
-                    let mark = self.alloc.borrow().mark();
-                    self.compaction.set(Phase::Sealing { since, mark });
-                }
-                Ok(Compacting::Moved { images, blocks })
-            }
-            Phase::Sealing { since, mark } => {
-                self.settle_durable();
-                if !self.alloc.borrow().released(mark) {
-                    return Ok(Compacting::Sealing);
-                }
-                self.reclaim()?;
-                self.compaction.set(Phase::Idle);
-                Ok(Compacting::Done {
-                    reclaimed_blocks: self.reclaimed() - since,
-                })
-            }
-        }
+        crate::wait::park_on(self.compact_pass(budget_blocks))
     }
 
     /// Compact to the end, settling the batches itself — for a caller with
