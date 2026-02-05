@@ -6,6 +6,10 @@
   checkpoint; workers owning their shards, the disk actor gone; ingress
   per thread, the accept thread gone; leases; the fsync helper; parallel
   recovery; one executor per thread, decided); see "Progress".
+- **Amended by:** [RFC 0073](0073-data-shards-and-storage-shards-WIP.md)
+  (2026-10-17) — §2: a data shard no longer owns files, its storage shard
+  does; §7–§8: durability and I/O are per storage shard, one write and one
+  `fsync` per storage shard and tick.
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the owner
   as the unit of concurrency, and `shard_of`),
   [0066](0066-embassy-executor-and-async-io.md) (the executor, the reactor
