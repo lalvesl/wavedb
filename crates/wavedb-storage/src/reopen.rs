@@ -1,26 +1,18 @@
-//! Reconstruction from the data files ([RFC 0072] §6–§7): the newest whole
-//! batch's header roots a walk back through the headers, and every
-//! directory, dictionary and the allocator come out of it. Nothing is
+//! Reconstruction from the data files ([RFC 0072] §6–§7, [RFC 0073] §6):
+//! the newest whole storage write's roots block names each data shard's
+//! root, whose header roots a walk back through that data shard's headers;
+//! every directory, dictionary and the allocator come out of it. Nothing is
 //! replayed; the caches start empty.
 //!
-//! 1. **The newest roots block** ([RFC 0073] §5): the newest data file ends
-//!    with one, or with a header naming the newest one written before it —
-//!    each only where it says it is, its crc holding. After a crash the end
-//!    may be torn: the blocks before it are read back, a chunk at a time,
-//!    until one is.
-//! 2. **The root it names** is this data shard's newest header ending a
-//!    batch. That batch is the root if it is whole — every header back to
-//!    the one ending the batch before present — and every page and
-//!    dictionary it placed is intact: one write reaches the disk in any
-//!    order, so a crash before its barrier can keep a header and lose a
-//!    page. Only the newest storage write can be in that state (the next one
-//!    is written once it is durable); a batch that is not whole is passed
-//!    over for the roots block before, whose root is.
-//! 3. **The walk** (`crate::walk`) rebuilds the directories — and in
-//!    disk + object mode the object store's, from the same headers.
-//! 4. **The allocator** is the files' layout, every run the directories and
-//!    dictionaries name and every header the walk read; the rest is holes,
-//!    and the tail past the root — what a crash left — is cut.
+//! 1. **The roots block** a reconstruction roots in: the newest whose
+//!    storage write is whole (`crate::roots_find`).
+//! 2. **The walk** (`crate::walk`), per data shard ([`rebuild`]), rebuilds
+//!    its directories — and in disk + object mode the object store's, from
+//!    the same headers — reading through its own handles.
+//! 3. **The allocator** is the files' layout, every run the data shards'
+//!    directories and dictionaries name, every header their walks read and
+//!    the roots block; the rest is holes, and the tail past the root — what
+//!    a crash left — is cut.
 //!
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 //! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
@@ -29,21 +21,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use futures::FutureExt;
 
-use crate::block::{BLOCK_SIZE, BlockAllocator, BlockDescriptor, Run};
+use crate::block::{BlockAllocator, BlockDescriptor, Run};
 use crate::block_file::BlockFile;
 use crate::dictionary::Dictionary;
 use crate::directory::Directory;
 use crate::disk_chain::DiskChain;
 use crate::error::{StorageError, StorageResult};
-use crate::header::{ChainRecord, Header, NO_FILE, Rotation};
-use crate::page::SlotPage;
+use crate::header::{ChainRecord, Header, Rotation};
 use crate::remote::HEADER_BLOCKS;
-use crate::roots::{Mark, ROOTS_BLOCKS, Roots};
+use crate::roots::ROOTS_BLOCKS;
+use crate::roots_find::find_roots;
 use crate::struct_storage::TypeSlot;
 use crate::walk::{HeaderSource, Lane, walk};
-
-/// Blocks read at a time while looking for a header behind a torn end.
-const SCAN_BLOCKS: u64 = 256;
 
 /// What a reconstruction rebuilt besides the directories, which it loads
 /// into the slots.
@@ -54,17 +43,35 @@ pub struct Reopened {
     pub remote_chain: Option<ChainRecord>,
 }
 
+/// What one data shard's walk rebuilt besides its directories.
+#[derive(Default)]
+pub struct Rebuilt {
+    pub chain: DiskChain,
+    /// The runs it names: pages, dictionaries, headers.
+    pub used: Vec<Run>,
+    pub remote_chain: Option<ChainRecord>,
+}
+
 /// The headers read from the data files, by where they start.
-struct DiskHeaders<'a> {
-    file: &'a BlockFile,
+pub struct DiskHeaders<'a> {
+    pub file: &'a BlockFile,
     seen: BTreeMap<u64, Option<Header>>,
     lowest: u64,
 }
 
-impl DiskHeaders<'_> {
+impl<'a> DiskHeaders<'a> {
+    /// None read yet from `file`.
+    pub const fn new(file: &'a BlockFile) -> Self {
+        Self {
+            file,
+            seen: BTreeMap::new(),
+            lowest: u64::MAX,
+        }
+    }
+
     /// The header at block `at`, if the 8 blocks there hold one that says
     /// it is there.
-    fn read(&mut self, at: u64) -> Option<Header> {
+    pub fn read(&mut self, at: u64) -> Option<Header> {
         self.lowest = self.lowest.min(at);
         let file = self.file;
         self.seen
@@ -87,39 +94,61 @@ impl HeaderSource for DiskHeaders<'_> {
     }
 }
 
-/// Rebuild the store over `file` into `types` (see the module docs).
+/// Rebuild the store writing its own files in `file` into `types` (see the
+/// module docs): the one data shard of its storage shard.
 ///
 /// # Errors
-/// Read faults; [`StorageError::Corrupt`] when a header a type's chain
-/// names is missing; [`StorageError::UnregisteredStructHash`] when the
-/// headers name a type this open does not list.
+/// As [`rebuild`].
 pub fn reopen(
     file: &BlockFile,
     types: &[TypeSlot],
     file_bytes: u64,
     object_backed: bool,
 ) -> StorageResult<Reopened> {
-    let mut headers = DiskHeaders {
-        file,
-        seen: BTreeMap::new(),
-        lowest: u64::MAX,
+    let mut headers = DiskHeaders::new(file);
+    let found = find_roots(&mut headers, 1)?;
+    let root = found
+        .as_ref()
+        .and_then(|r| r.root(0))
+        .and_then(|at| headers.read(at));
+    let mut rebuilt = rebuild(&mut headers, types, object_backed, root)?;
+    if let Some(roots) = found {
+        rebuilt.used.push(Run::new(roots.at, ROOTS_BLOCKS));
+        rebuilt.chain.roots.newest = Some(roots.at);
+        rebuilt.chain.roots.live = BTreeSet::from([roots.at]);
+    }
+    Ok(Reopened {
+        alloc: cut_tails(file, &rebuilt.used, file_bytes)?,
+        chain: rebuilt.chain,
+        remote_chain: rebuilt.remote_chain,
+    })
+}
+
+/// Rebuild one data shard into `types` by the walk from its `root` — the
+/// header ending its newest whole batch, if it ever ended one.
+///
+/// # Errors
+/// Read faults; [`StorageError::Corrupt`] when a header a type's chain
+/// names is missing; [`StorageError::UnregisteredStructHash`] when the
+/// headers name a type this open does not list.
+pub fn rebuild(
+    headers: &mut DiskHeaders<'_>,
+    types: &[TypeSlot],
+    object_backed: bool,
+    root: Option<Header>,
+) -> StorageResult<Rebuilt> {
+    let Some(root) = root else {
+        return Ok(Rebuilt::default()); // nothing durable
     };
-    let Some((roots, root)) = root(&mut headers, 0)? else {
-        // Nothing durable: every block is free, and cut.
-        return Ok(Reopened {
-            alloc: cut_tails(file, &[], file_bytes)?,
-            chain: DiskChain::default(),
-            remote_chain: None,
-        });
-    };
+    let file = headers.file;
     // The root itself, read where it was found, is one of the headers kept.
     headers.seen.insert(root.at, Some(root.clone()));
     headers.lowest = headers.lowest.min(root.at);
     let registered: Vec<u64> =
         types.iter().map(TypeSlot::struct_hash).collect();
-    let disk = on_disk(walk(&mut headers, &root, &registered, Lane::Types))?;
+    let disk = on_disk(walk(headers, &root, &registered, Lane::Types))?;
     let remote = if object_backed {
-        on_disk(walk(&mut headers, &root, &registered, Lane::Remote))?
+        on_disk(walk(headers, &root, &registered, Lane::Remote))?
     } else {
         Vec::new()
     };
@@ -129,9 +158,7 @@ pub fn reopen(
         floor: headers.lowest,
         ..DiskChain::default()
     };
-    chain.roots.newest = Some(roots.at);
-    chain.roots.live = BTreeSet::from([roots.at]);
-    let mut used = vec![Run::new(roots.at, ROOTS_BLOCKS)];
+    let mut used = Vec::new();
     for w in disk {
         let slot = slot_of(types, w.struct_hash)?;
         chain.types.insert(w.struct_hash, rotation(w.newest));
@@ -164,9 +191,9 @@ pub fn reopen(
             chain.live.insert(at);
         }
     }
-    Ok(Reopened {
-        alloc: cut_tails(file, &used, file_bytes)?,
+    Ok(Rebuilt {
         chain,
+        used,
         remote_chain: root.chain,
     })
 }
@@ -179,130 +206,10 @@ fn rotation(newest: u64) -> Rotation {
     }
 }
 
-/// The roots block a reconstruction roots in, and the header ending the
-/// newest whole batch of the data shard at `position` it names — `None`
-/// when nothing of it is durable.
-fn root(
-    headers: &mut DiskHeaders<'_>,
-    position: u32,
-) -> StorageResult<Option<(Roots, Header)>> {
-    let mut limit = u64::MAX;
-    loop {
-        let Some(mark) = newest_below(headers.file, limit)? else {
-            return Ok(None);
-        };
-        limit = match &mark {
-            Mark::Header(h) => h.at,
-            Mark::Roots(r) => r.at,
-        };
-        let mut at = mark.roots_at();
-        loop {
-            if at == NO_FILE {
-                return Ok(None); // nothing ended before it
-            }
-            let Some(roots) = read_roots(headers.file, at) else {
-                break; // unreadable: look below it
-            };
-            limit = at;
-            let Some(end) = roots.root(position as usize) else {
-                return Ok(None); // this data shard never ended a batch
-            };
-            let header = headers
-                .read(end)
-                .filter(|h| h.end_of_batch && h.shard == position)
-                .ok_or(StorageError::Corrupt("a root is not a batch's end"));
-            if let Ok(header) = header
-                && whole(headers, &header)?.is_ok()
-            {
-                return Ok(Some((roots, header)));
-            }
-            // The write this block ends was cut: the one before is durable.
-            at = roots.prev;
-        }
-    }
-}
-
-/// The roots block at `at`, if one is there.
-fn read_roots(file: &BlockFile, at: u64) -> Option<Roots> {
-    let bytes = file.read_run(Run::new(at, ROOTS_BLOCKS)).ok()?;
-    Roots::decode(&bytes).filter(|r| r.at == at)
-}
-
-/// Whether the batch `end` ends is whole and every page and dictionary it
-/// placed intact — or where to look below for an older one.
-fn whole(
-    headers: &mut DiskHeaders<'_>,
-    end: &Header,
-) -> StorageResult<Result<(), u64>> {
-    let mut batch = vec![end.clone()];
-    let base = loop {
-        let Some(last) = batch.last() else {
-            return Ok(Err(end.at));
-        };
-        if last.prev == NO_FILE {
-            break 0;
-        }
-        match headers.read(last.prev) {
-            None => return Ok(Err(last.prev)),
-            Some(before) if before.end_of_batch => {
-                break before.at + HEADER_BLOCKS;
-            }
-            Some(before) => batch.push(before),
-        }
-    };
-    // What the batch wrote lies between the header before it and its end.
-    let placed = |raw: u64| {
-        let desc = BlockDescriptor::from_raw(raw);
-        (desc.is_allocated() && (base..end.at).contains(&desc.start()))
-            .then(|| desc.run())
-    };
-    for header in &batch {
-        for entry in &header.types {
-            for &(_, raw) in &entry.changed {
-                if let Some(run) = placed(raw)
-                    && !SlotPage::intact(&headers.file.read_run(run)?)
-                {
-                    return Ok(Err(base));
-                }
-            }
-            if let Some(run) = entry.dict.and_then(placed)
-                && Dictionary::from_bytes(&headers.file.read_run(run)?).is_err()
-            {
-                return Ok(Err(base));
-            }
-        }
-    }
-    Ok(Ok(()))
-}
-
-/// The newest header or roots block wholly below block `limit`, newest file
-/// first, read back a chunk at a time.
-fn newest_below(file: &BlockFile, limit: u64) -> StorageResult<Option<Mark>> {
-    for (start, end) in file.layout().into_iter().rev() {
-        let mut hi = end.min(limit);
-        while hi > start {
-            let lo = hi.saturating_sub(SCAN_BLOCKS).max(start);
-            let bytes = file.read_run(Run::new(lo, hi - lo))?;
-            for at in (lo..hi).rev() {
-                let offset = ((at - lo) as usize) * BLOCK_SIZE;
-                if let Some(mark) = Mark::at(&bytes[offset..], at) {
-                    return Ok(Some(mark));
-                }
-            }
-            if lo == start {
-                break;
-            }
-            // The next positions are below `lo`; their headers reach past it.
-            hi = lo + HEADER_BLOCKS - 1;
-        }
-    }
-    Ok(None)
-}
-
 /// The allocator over the files' layout and the `used` runs, every free tail
 /// cut off — the active file's too: past the root is what a crash left —
 /// and the files left empty deleted.
-fn cut_tails(
+pub fn cut_tails(
     file: &BlockFile,
     used: &[Run],
     file_bytes: u64,
