@@ -1,7 +1,7 @@
 # RFC 0073 — Data shards and storage shards
 
-- **Status:** WIP — opened 2026-10-17; phases 1–2 landed 2026-10-17 (see
-  Progress)
+- **Status:** WIP — opened 2026-10-17; phases 1–5 landed 2026-10-17 (see
+  Progress); phase 6, the object store, open
 - **Crates:** `wavedb-storage` (the split of the store, the roots block, the
   reconstruction), `wavedb-quick-node` (the storage threads, the routing
   of settle rounds), `wavedb-platform` (the thread, `pwritev`)
@@ -316,10 +316,49 @@ data shard in it. Nothing is atomic across owners, which is not new (0067
   waits for its window cannot be overwritten by it. The node awaits
   `settle_step` and `compact_pass`; `cycle_step`, `compact_step` and `drain`
   run the same steps parked on the calling thread (`wait::park_on`).
+- **Phases 3–5, the storage thread, reconstruction and evacuation —
+  landed 2026-10-17** (`link`, `reader`, `storage_shard`, `storage_open`,
+  `storage_compact`, `roots_find`, `reopen`, `cycle`, `compact`, `defrag`,
+  `shard_set`; `wavedb-quick-node`'s `Server::storage_shards`, 4 by
+  default). As designed, with these choices made on the way:
+  - **`std::sync::mpsc` for the inbox**, not `async-channel`: the storage
+    thread blocks in `recv_timeout`, the data shards only send (unbounded,
+    never waiting), and the answers come back on `futures` one-shots their
+    tasks await — no new dependency, the barrier helper's stance.
+  - **A round publishes when it hands its window over**, not at `Done`: a
+    data shard's next round plans from the directories this one publishes,
+    so waiting for the write — up to a tick — would serialise a batch's
+    rounds on the ticks. Its window's bytes are held readable instead
+    (`reader`), until the batch carrying them is durable; the frees still
+    wait for the seal, the durable writes for the `fsync`.
+  - **A seal** follows the window that ends a batch, carrying the batch's
+    frees and waiters; a seal someone waits on (a durable write, a `drain`)
+    makes the storage thread write at once, as do 8 MiB gathered.
+  - **One write per run of windows end to end** in a file, by address — a
+    window still being built leaves a gap — then the roots block.
+  - **Reclaim after every durable storage write**: free tails cut, files
+    left all holes deleted; the data shards hear of the deletions with
+    their next reservation and close their handles.
+  - **Evacuation by asking**: the first data shard to compact asks which
+    files to empty and opens the evacuation (the active file rolled first
+    if it is one); the others asking get the same files, and it ends when
+    every data shard said it was done. Each reports its share of the
+    storage shard's space, so the node's triggers keep their meaning.
+  - **The storage shards reconstruct in parallel**, each one's data shards
+    one after the other (their walks are bounded by the horizon).
+  - An object-backed database keeps one storage shard per data shard until
+    phase 6: `Server::object_store` and `object_mode` ask for that.
+  - Tested (`tests/storage_shards.rs`): four data shards through two
+    storage shards reopen; an idle data shard's root survives thirty
+    batches of its neighbour; a durable write survives a crash; a torn
+    newest storage write gives way to the roots block before for every data
+    shard; an evacuation shrinks the files and every record reads back,
+    then and after a reopen.
 
 ## Open questions
 
-- The default S of a node (the example throughout: P = 64, S = 4).
+- The default S of a node: 4 for now (P = 64), a measurement away from
+  settled.
 - `posix_fadvise(RANDOM)` on the data shards' read handles: reads are random
   by construction (copy-on-write placement, seahash buckets), so read-ahead
   only spends IOPS.
