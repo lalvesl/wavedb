@@ -48,9 +48,11 @@ impl PageStore {
             let Some(victim) = self.victim() else {
                 return Ok((images, blocks, true));
             };
-            if self.alloc.borrow().active() == Some(victim.start) {
+            if let Some(alloc) = self.own()
+                && alloc.borrow().active() == Some(victim.start)
+            {
                 // Emptying the file new runs go to: they go elsewhere first.
-                self.alloc.borrow_mut().roll();
+                alloc.borrow_mut().roll();
             }
             let movable = self.movable_in(&victim);
             if movable.is_empty() {
@@ -108,7 +110,26 @@ impl PageStore {
     /// back, still holding a page or a dictionary, and holding no header a
     /// reconstruction may read — a header cannot move — the one with the
     /// fewest live blocks, the oldest on a tie.
+    ///
+    /// Through a storage thread, the evacuation's files instead (RFC 0073
+    /// §7): the next one this data shard still holds a run in.
     fn victim(&self) -> Option<Victim> {
+        if self.own().is_none() {
+            let chain = self.chain.borrow();
+            return self
+                .victims
+                .borrow()
+                .iter()
+                .map(|&(start, end)| Victim {
+                    start,
+                    end,
+                    live: 0,
+                })
+                .find(|v| {
+                    chain.live.range(v.start..v.end).next().is_none()
+                        && !self.movable_in(v).is_empty()
+                });
+        }
         self.candidates(true)
             .into_iter()
             .min_by_key(|v| (v.live, v.start))
@@ -119,14 +140,17 @@ impl PageStore {
     /// file, and this one can be emptied too — or a store smaller than one
     /// file would never shrink.
     pub(crate) fn roll_if_worth_emptying(&self) {
-        let active = self.alloc.borrow().active();
+        let Some(alloc) = self.own() else {
+            return;
+        };
+        let active = alloc.borrow().active();
         if active.is_some()
             && self
                 .candidates(false)
                 .iter()
                 .any(|v| Some(v.start) == active)
         {
-            self.alloc.borrow_mut().roll();
+            alloc.borrow_mut().roll();
         }
     }
 
@@ -134,7 +158,10 @@ impl PageStore {
     /// `headers` says so.
     fn candidates(&self, headers: bool) -> Vec<Victim> {
         let percent = u64::from(self.victim_free_percent);
-        let alloc = self.alloc.borrow();
+        let Some(alloc) = self.own() else {
+            return Vec::new();
+        };
+        let alloc = alloc.borrow();
         let mut held: Vec<u64> =
             self.movable_runs().map(|m| m.run.start).collect();
         held.sort_unstable();
