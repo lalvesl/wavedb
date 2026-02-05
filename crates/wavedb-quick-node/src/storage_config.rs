@@ -31,6 +31,9 @@ where
     #[must_use]
     pub fn object_store(mut self, remote: wavedb_storage::Remote) -> Self {
         self.store.remote = Some(remote);
+        // One storage shard per data shard until the object store's
+        // sections (RFC 0073 §8).
+        self.store.storage_shards = 0;
         self.diskless = false;
         self
     }
@@ -53,6 +56,7 @@ where
     #[must_use]
     pub fn object_mode(mut self, remote: wavedb_storage::Remote) -> Self {
         self.store.remote = Some(remote);
+        self.store.storage_shards = 0;
         self.diskless = true;
         self
     }
@@ -74,6 +78,19 @@ where
     #[must_use]
     pub const fn data_file_bytes(mut self, bytes: u64) -> Self {
         self.store.file_bytes = bytes;
+        self
+    }
+
+    /// Storage shards a **new** database is created with (RFC 0073):
+    /// the data shards write through this many sets of data files, each
+    /// with a thread of its own — one write and one `fsync` per set and
+    /// tick. Must divide the data shard count (64);
+    /// [`DEFAULT_STORAGE_SHARDS`](crate::DEFAULT_STORAGE_SHARDS) by default,
+    /// `0` one per data shard. Fixed at creation: an existing database keeps
+    /// its own.
+    #[must_use]
+    pub const fn storage_shards(mut self, count: usize) -> Self {
+        self.store.storage_shards = count;
         self
     }
 
