@@ -30,7 +30,15 @@ pipeline whose settle is the durability point. This is where most of WaveDB's en
 | `cycle`           | The settle cycle: a batch opened by a mark, settled in bounded rounds, ended by a header, made durable by one barrier; `drain`.                    |
 | `barrier`         | The `fsync` helper thread, the batches asked of it, and a durable write's wait (`Durable`).                                                       |
 | `walk`            | The walk that rebuilds directories from headers, newest first, down by `prev` while a registered type is unnamed, to the root's horizon.           |
-| `reopen`          | Reconstruction on open: the newest whole batch's header, its pages checked, the walk, the allocator; nothing replayed.                             |
+| `reopen`          | Reconstruction on open: from a data shard's root, the walk, the allocator; nothing replayed.                                                       |
+| `roots`           | The roots block every storage write ends with: each data shard's root, by position (RFC 0073 §5).                                                 |
+| `roots_find`      | Where a reconstruction roots: the newest roots block whose storage write is whole, read back past a torn end.                                     |
+| `wait`            | A round's wait for its window: the store's `Gate` (one round through the directories at a time) and `park_on` for synchronous callers.          |
+| `link`            | A data shard's side of its storage shard: its own files, or a storage thread's — reserve, hand over, seal.                                         |
+| `reader`          | A data shard's read handles on a storage thread's files, and the windows held readable until they land.                                         |
+| `storage_shard`   | A storage shard's thread: reservations, the gathered write and its roots block, the `fsync` on its helper, the seals answered.                   |
+| `storage_compact` | A storage shard's compaction: the evacuation's files, the data shards done with them, the reclaim after every durable write.                     |
+| `storage_open`    | Opening a storage shard its data shards share: the roots, each data shard's walk, the allocator, the thread.                                     |
 | `settle`          | The record cache's side of a settle: what is unsettled, and the cache-eviction budget.                                                             |
 | `compact`         | Compaction's phases and surface (`compact_step`, `compact`, `reclaim`, `space`): move, drop the old addressing, seal, cut and delete.              |
 | `defrag`          | Compaction's moves: the emptiest data file's runs, highest first, verbatim, into the active file — one window write per round.                    |
@@ -91,6 +99,34 @@ what lies past a file's last used run — what a crash cut before its batch
 ended — is cut, and a file no run names is deleted. A freed run becomes a
 hole only once the batch that stopped naming it is durable
 ([RFC 0072](../../rfcs/0072-the-settle-is-the-durability-point.md) §8).
+
+### Storage shards
+
+A database's `P` data shards — placement, ownership, caches, directories —
+write through `S` **storage shards** (`S` dividing `P`, both in the
+`MANIFEST`; a node creates 64 through 4,
+[RFC 0073](../../rfcs/0073-data-shards-and-storage-shards-WIP.md)): data
+shard `p` writes through storage shard `p / (P / S)`, whose data files live
+in `storage/<n>/`.
+
+- **One data shard per storage shard** (`Storage::Own`) — the client cache,
+  `PageStore::open`: the store allocates, writes and takes its barriers
+  itself, and the window that ends a batch ends with a **roots block**.
+- **Several** (`Storage::Shared`): a thread per storage shard owns the
+  allocator and the files. A round reserves its window by message, awaits
+  the answer (`wait::Gate` keeps a round's directories its own meanwhile),
+  builds the window at its real addresses and hands it over; its pages are
+  read from the bytes held back until they land (`reader`). Every 200 ms
+  the thread writes what gathered — each run of windows lying end to end as
+  one write — and a roots block naming every data shard's root, then one
+  `fsync` on its helper makes every batch sealed in it durable. One storage
+  write is in flight at a time, so only the newest can be cut by a crash.
+- **Reopening** roots in the newest roots block whose storage write is
+  whole (`roots_find`), each data shard walking from its own root through
+  its own read handles; the allocator is the union of what they name.
+- **Compaction** is an evacuation: the storage shard says which files to
+  empty, every data shard carries its runs out, and the thread cuts and
+  deletes after every durable write whatever is left only holes.
 
 ---
 
