@@ -225,11 +225,26 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   per data directory** — every data file is locked while open, a
   second open is `EngineBusy` — and stores over different directories coexist
   in one process. A database is **sharded** (RFC 0067): `MANIFEST` (magic,
-  version, the shard count `P` — 64 on a node, fixed at creation — the seed and
-  the mode; RFC 0071 §2) + `shards/00..3f/`, each a whole `PageStore`; a single
-  `PageStore::open(dir)` is a database of one shard, the same shape
-  (`open_shards`; the shards reconstruct in parallel ranges, `open_shards_with`);
-  a record lives in shard `seahash(owner bytes) % P` (`core::placement`).
+  version, the data shard count `P` — 64 on a node — and the **storage
+  shard** count `S` dividing it — 4 on a node — both fixed at creation, the
+  seed and the mode; RFC 0071 §2, RFC 0073) + `storage/00../`, one directory
+  of data files per storage shard; each data shard a `PageStore` (its
+  directories, caches, headers), data shard `p` writing through storage
+  shard `p / (P / S)`. One data shard per storage shard writes its own files
+  inline (`Storage::Own`: the client cache, `PageStore::open(dir)` — a
+  database of one shard, the same shape); several share a **storage
+  thread** (`Storage::Shared`) that owns the allocator and the files: a
+  round **reserves** its window by message and awaits it (`wait::Gate`
+  keeps the round's directories its own), hands the built window over and
+  reads it from RAM until it lands; the thread writes what gathered every
+  200 ms — runs end to end as one write — plus a **roots block** naming
+  every data shard's root, and one `fsync` (on its helper) makes every
+  sealed batch in it durable. A reopen roots in the newest whole roots
+  block, each data shard walking from its root through its own read
+  handles (`open_shards`; storage shards reconstruct in parallel,
+  `open_shards_with`); compaction is an evacuation the storage shard
+  directs. An object store still takes one storage shard per data shard.
+  A record lives in shard `seahash(owner bytes) % P` (`core::placement`).
 - **wavedb-net** — hand-rolled minimal HTTP/1.1 POST as a **dumb tunnel**: no headers,
   cookies, or status semantics as API; the body is a self-contained
   `Request { tenant, CommandFrame { struct_hash, command, payload } }` and a WaveDB
@@ -248,7 +263,9 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   coalesce to the live state).
 - **wavedb-quick-node** — library (no bin): `Server::new(REGISTRY).data_dir(d).serve(addr)`;
   `.threads(n)` workers each **own** a contiguous range of the data shards — their
-  `PageStore`s move onto the worker's thread, operations are plain calls there,
+  `PageStore`s move onto the worker's thread, operations are plain calls there
+  (the storage shards' threads start with the database, `.storage_shards(n)`,
+  4 by default — RFC 0073),
   and a BG task beside the jobs opens a settle cycle per 200 ms tick and steps
   it when they leave room — first when a durable write waits on it
   (RFC 0067 step 4; one executor per thread, no `unsafe`). A frame with its
