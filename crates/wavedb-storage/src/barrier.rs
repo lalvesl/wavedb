@@ -46,8 +46,8 @@ use futures::channel::oneshot;
 
 use crate::error::{StorageError, StorageResult};
 
-/// How one barrier went, as the helper reports it.
-type Answer = Result<(), ErrorKind>;
+/// How one barrier went, as the helper — or a storage thread — reports it.
+pub type Answer = Result<(), ErrorKind>;
 
 /// A waiter for a batch to be durable — the sending half of a [`Durable`].
 pub type Waiter = oneshot::Sender<StorageResult<()>>;
@@ -139,6 +139,13 @@ impl Syncs {
         } else {
             self.failed = true;
         }
+    }
+
+    /// Batch `batch` is asked of a storage thread (RFC 0073 §4), which
+    /// reports on the returned channel once it is durable.
+    pub(crate) fn ask(&mut self, batch: u64) -> mpsc::Sender<(u64, Answer)> {
+        self.asked = self.asked.max(batch);
+        self.report_to.clone()
     }
 
     /// The request for batch `batch`'s barrier over `files`, answering
