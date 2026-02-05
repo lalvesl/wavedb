@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 
 use crate::block::{BlockDescriptor, Run};
-use crate::error::{StorageError, StorageResult};
+use crate::error::StorageResult;
 use crate::page_cache::Lane;
 use crate::page_store::PageStore;
 use crate::plan::SlotPlan;
@@ -161,7 +161,8 @@ impl PageStore {
         }
         if logged {
             targets.push(Target::Header);
-            if end {
+            // A storage thread ends its own writes with one (RFC 0073 §4).
+            if end && self.own().is_some() {
                 targets.push(Target::Roots);
             }
         }
@@ -178,18 +179,13 @@ impl PageStore {
             placement,
             end,
         };
-        self.build(round, &sizes, window)
-    }
-
-    /// The window `blocks` long a round writes, reserved where its storage
-    /// shard writes next.
-    ///
-    /// # Errors
-    /// None from a store's own files.
-    // A storage shard shared with other data shards answers later.
-    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
-    async fn reserve(&self, blocks: u64) -> StorageResult<Run> {
-        Ok(self.alloc.borrow_mut().alloc(blocks))
+        let built = self.build(round, &sizes, window);
+        if built.is_err()
+            && let Some(window) = window
+        {
+            self.abandon(window);
+        }
+        built
     }
 
     /// Build the round at its reserved `window`, write it and publish it
@@ -240,7 +236,7 @@ impl PageStore {
         if let Some(window) = window {
             let marks = (header.as_slice(), roots.as_slice());
             let buf = assemble(window, &plans, &targets, &runs, marks);
-            let written = self.write_window(window, &buf);
+            let written = self.write_window(window, buf);
             if let Err(e) = written {
                 self.fail();
                 return Err(e); // the round's one write
@@ -272,30 +268,6 @@ impl PageStore {
         }
         self.publish(plans, &dicts);
         Ok(ended)
-    }
-
-    /// Write a round's built window where it was reserved.
-    ///
-    /// # Errors
-    /// The write's fault.
-    fn write_window(&self, window: Run, buf: &[u8]) -> StorageResult<()> {
-        let file = self
-            .alloc
-            .borrow()
-            .file_of(window.start)
-            .ok_or(StorageError::Corrupt("a window outside every file"))?;
-        self.file.write_run(file, window, buf)
-    }
-
-    /// A run no directory names any more: on disk, freed once the batch
-    /// that stopped naming it is durable (`crate::alloc`); in RAM, at once.
-    pub(crate) fn retire_run(&self, run: Run) {
-        let mut alloc = self.alloc.borrow_mut();
-        if self.has_disk() {
-            alloc.defer(run);
-        } else {
-            alloc.free(run);
-        }
     }
 
     /// Adopt the working directories and the new dictionary runs.
