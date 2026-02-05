@@ -98,6 +98,11 @@ pub struct Bound<E> {
     secret: [u8; 32],
 }
 
+/// Storage shards a node's new database is created with (RFC 0073): its 64
+/// data shards write through four sets of data files, four `fsync`s per
+/// tick at most.
+pub const DEFAULT_STORAGE_SHARDS: usize = 4;
+
 impl<E> Server<E>
 where
     E: NodeTasks + StorageRegistry,
@@ -111,7 +116,10 @@ where
             data_dir: PathBuf::from("data"),
             maintenance: Maintenance::default(),
             secret: None,
-            store: StoreOptions::default(),
+            store: StoreOptions {
+                storage_shards: DEFAULT_STORAGE_SHARDS,
+                ..StoreOptions::default()
+            },
             diskless: false,
             threads: 1,
         }
