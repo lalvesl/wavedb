@@ -24,6 +24,7 @@
 
 use crate::barrier::{Durable, Syncs, Waiter};
 use crate::error::{StorageError, StorageResult};
+use crate::header::NO_FILE;
 use crate::page_store::PageStore;
 use crate::settle::Progress;
 use crate::wait::park_on;
@@ -142,7 +143,7 @@ impl PageStore {
             self.drop_dead_headers(at);
         }
         self.root_remote();
-        let mark = self.alloc.borrow().mark();
+        let mark = self.own().map_or(0, |alloc| alloc.borrow().mark());
         let (batch, waiters) = {
             let mut cycle = self.cycle.borrow_mut();
             cycle.open = false;
@@ -151,6 +152,14 @@ impl PageStore {
             cycle.covers.push((batch, mark));
             (batch, std::mem::take(&mut cycle.current))
         };
+        if self.own().is_none() {
+            // The storage thread takes the barrier (RFC 0073 §4).
+            let sealed = self.seal(batch, tail.unwrap_or(NO_FILE), waiters);
+            if sealed.is_err() {
+                self.fail();
+            }
+            return sealed;
+        }
         let Some(barrier) = &self.barrier else {
             let synced = self.file.sync();
             self.cycle
@@ -182,6 +191,7 @@ impl PageStore {
         let mark = {
             let mut cycle = self.cycle.borrow_mut();
             let answered = cycle.syncs.answered();
+            self.file.landed(answered);
             let mark = cycle
                 .covers
                 .iter()
@@ -192,9 +202,16 @@ impl PageStore {
             mark
         };
         if let Some(mark) = mark {
-            self.alloc.borrow_mut().release_to(mark);
+            if let Some(alloc) = self.own() {
+                alloc.borrow_mut().release_to(mark);
+            }
             self.release_remote_root();
         }
+    }
+
+    /// The batch a window written now belongs to: the next to end.
+    pub(crate) fn next_batch(&self) -> u64 {
+        self.cycle.borrow().ended + 1
     }
 
     /// A wait for the next batch to end and be durable — a durable write's,
@@ -246,6 +263,7 @@ impl PageStore {
             }
         }
         loop {
+            self.hurry();
             while self.cycle_step(usize::MAX)? == Progress::Settled {}
             self.cycle.borrow_mut().syncs.wait();
             self.settle_durable();
