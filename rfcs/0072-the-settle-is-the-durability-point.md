@@ -20,6 +20,10 @@
 - **Builds on:** [0067](0067-thread-per-core-shards-WIP.md) §4 (the barrier
   helper), [0068](0068-record-cache-as-a-log-WIP.md) (the logs and their
   settle cursors)
+- **Amended by:** [RFC 0073](0073-data-shards-and-storage-shards-WIP.md)
+  (2026-10-17) — a window goes through its storage shard, the header names
+  its data shard and the newest roots block, and a reopen roots in the
+  newest whole roots block (§2, §3, §6–§8).
 
 ## Summary
 
