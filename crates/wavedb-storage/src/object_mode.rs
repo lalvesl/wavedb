@@ -76,7 +76,8 @@ impl PageStore {
         ))?;
         let file = BlockFile::in_memory(facts.seed());
         let alloc = BlockAllocator::new(options.file_bytes);
-        let store = Self::assemble(file, types, alloc, options);
+        let own = crate::link::Storage::Own(std::cell::RefCell::new(alloc));
+        let store = Self::assemble(file, types, own, options);
         if let Some(found) = found {
             store.adopt(found)?;
         }
