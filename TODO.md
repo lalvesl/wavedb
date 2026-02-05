@@ -86,24 +86,24 @@ durable. Design: `rfcs/0073-data-shards-and-storage-shards-WIP.md`.
       header's data shard, the `Roots { at, prev, roots: Vec<u64> }` block
       (positional, `NO_FILE` for a shard never written). P = S = 1
       everywhere; nothing else moves.
-- [ ] 3.2 The split in one thread: the storage side (allocator, writer,
+- [x] 3.2 The split in one thread: the storage side (allocator, writer,
       barrier, roots, file locks) out of `PageStore`, driven inline when
       nobody runs a thread; the seam an enum (inline | channel), no `dyn`.
 - [x] 3.3 The round in three steps — `Reserve` → build with real addresses
       → `Write { bytes, frees }` → `Done` — and the settle reshaped around
       the await (no `RefCell` borrow across it; `checkpoint.rs`).
-- [ ] 3.4 The storage thread: `recv_timeout` loop on an `async-channel`
+- [x] 3.4 The storage thread: `recv_timeout` loop on an `async-channel`
       inbox, the gathered `pwritev` in reservation order, the roots block,
       the `fsync` on its barrier helper (`Synced` on the same inbox), one
       write in flight, a `_durable` write sends it at once; `Abandon`.
-- [ ] 3.5 The node with S < P: storage threads started beside the workers,
+- [x] 3.5 The node with S < P: storage threads started beside the workers,
       data shard `p` → storage shard `p / (P / S)`; read handles per data
       shard, opened/closed as `Done` reports files.
-- [ ] 3.6 Reconstruction: the newest valid roots block (scan back), the
+- [x] 3.6 Reconstruction: the newest valid roots block (scan back), the
       storage write's wholeness check, `prev` on a cut; each data shard
       walks from `roots[i]` in parallel; the allocator from the runs they
       report.
-- [ ] 3.7 Compaction by evacuation: `Evacuate { file }` to the data shards
+- [x] 3.7 Compaction by evacuation: `Evacuate { file }` to the data shards
       with runs in it, carried forward through their rounds, the file cut
       and deleted once a write over the moves is durable; dead roots blocks
       freed like dead headers.
