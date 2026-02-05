@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{StorageError, StorageResult};
 use crate::manifest::{self, Manifest};
 use crate::page_store::{PageStore, StoreOptions};
+use crate::storage_open::open_storage_shard;
 use crate::struct_storage::StructStorage;
 
 /// Where the storage shards' data files live, under the database's root.
@@ -73,6 +74,18 @@ pub fn open_shards_with(
     let dir = dir.as_ref();
     let counts = (shards, options.storage_shards);
     let facts = manifest::resolve(Some(dir), options.remote.as_ref(), counts)?;
+    if facts.per_storage() > 1 {
+        if options.remote.is_some() {
+            return Err(StorageError::Corrupt(
+                "an object store behind shared storage shards",
+            ));
+        }
+        let options = shares(&facts, options);
+        return open_parallel(facts.storage_shards(), threads, |n| {
+            let dir = storage_dir(dir, n);
+            open_storage_shard(&dir, n, types, &options, &facts)
+        });
+    }
     open_each(&facts, options, threads, |i, options| {
         PageStore::open_shard(&storage_dir(dir, i), types, options, &facts)
     })
@@ -124,36 +137,48 @@ fn open_each(
     threads: usize,
     open: impl Fn(usize, StoreOptions) -> StorageResult<PageStore> + Sync,
 ) -> StorageResult<Vec<PageStore>> {
-    let count = facts.shards();
-    if facts.storage_shards() != count {
-        // Data shards sharing a storage shard write through its thread
-        // (RFC 0073 §4), which a later phase brings.
+    if facts.per_storage() > 1 {
         return Err(StorageError::Corrupt(
-            "a storage shard per data shard is all this build opens",
+            "object mode behind shared storage shards",
         ));
     }
-    let share = |bytes: usize| bytes / count;
-    let options = StoreOptions {
+    let options = shares(facts, options);
+    let options = &options;
+    // Each shard keeps its objects under a prefix of its own, as it keeps
+    // its files in a directory of its own.
+    open_parallel(facts.shards(), threads, |i| {
+        let options = StoreOptions {
+            remote: options.remote.as_ref().map(|r| r.shard(i)),
+            ..options.clone()
+        };
+        open(i, options).map(|store| vec![store])
+    })
+}
+
+/// The database's budgets divided among its data shards: each gets an equal
+/// share of the page cache and of the record-cache budget.
+fn shares(facts: &Manifest, options: StoreOptions) -> StoreOptions {
+    let share = |bytes: usize| bytes / facts.shards();
+    StoreOptions {
         page_cache_bytes: share(options.page_cache_bytes),
         record_cache_bytes: share(options.record_cache_bytes),
         ..options
-    };
-    let (options, open) = (&options, &open);
+    }
+}
+
+/// `open(0..count)` on `threads` threads — thread `t` the contiguous range
+/// `i` with `i · threads / count = t` — each giving its stores in order,
+/// and all of them in order.
+fn open_parallel(
+    count: usize,
+    threads: usize,
+    open: impl Fn(usize) -> StorageResult<Vec<PageStore>> + Sync,
+) -> StorageResult<Vec<PageStore>> {
+    let open = &open;
     let threads = threads.clamp(1, count);
-    // Each shard keeps its objects under a prefix of its own, as it keeps
-    // its files in a directory of its own.
-    let open_range = |range: std::ops::Range<usize>| -> Vec<_> {
-        range
-            .map(|i| {
-                let options = StoreOptions {
-                    remote: options.remote.as_ref().map(|r| r.shard(i)),
-                    ..options.clone()
-                };
-                open(i, options)
-            })
-            .collect()
-    };
-    let opened: Vec<StorageResult<PageStore>> = std::thread::scope(|s| {
+    let open_range =
+        |range: std::ops::Range<usize>| -> Vec<_> { range.map(open).collect() };
+    let opened: Vec<StorageResult<Vec<PageStore>>> = std::thread::scope(|s| {
         let ranges = (0..threads).map(|t| {
             (t * count).div_ceil(threads)..((t + 1) * count).div_ceil(threads)
         });
@@ -174,7 +199,11 @@ fn open_each(
             })
             .collect()
     });
-    opened.into_iter().collect()
+    let mut stores = Vec::new();
+    for each in opened {
+        stores.extend(each?);
+    }
+    Ok(stores)
 }
 
 /// The data files' directory of storage shard `n` under the database root
