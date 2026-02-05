@@ -62,6 +62,8 @@ pub struct BlockFile {
     ///
     /// [RFC 0044]: ../../../rfcs/0044-page-cache.md
     pub(crate) cache: PageCache,
+    /// For read handles on a storage thread's files (`crate::reader`).
+    pub(crate) shared: Option<crate::reader::Shared>,
 }
 
 /// Disk operations issued on one [`BlockFile`] since it was opened.
@@ -108,26 +110,44 @@ impl BlockFile {
         page_cache_bytes: usize,
     ) -> StorageResult<Self> {
         std::fs::create_dir_all(dir)?;
-        let mut files = BTreeMap::new();
+        let file = Self::open_with(
+            dir,
+            seed,
+            object_backed,
+            PageCache::new(page_cache_bytes),
+        );
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let Some(start) = entry.file_name().to_str().and_then(start_of)
             else {
                 continue;
             };
-            let file = open_locked(&entry.path(), false)?;
-            let len = file.metadata()?.len();
-            files.insert(start, DataFile::new(Backing::File(file), len));
+            let handle = open_locked(&entry.path(), false)?;
+            let len = handle.metadata()?.len();
+            file.files
+                .borrow_mut()
+                .insert(start, DataFile::new(Backing::File(handle), len));
         }
-        Ok(Self {
+        Ok(file)
+    }
+
+    /// No file open yet in `dir`.
+    pub(crate) fn open_with(
+        dir: &Path,
+        seed: [u64; 4],
+        object_backed: bool,
+        cache: PageCache,
+    ) -> Self {
+        Self {
             dir: Some(dir.to_path_buf()),
-            files: RefCell::new(files),
+            files: RefCell::default(),
             dirty: RefCell::default(),
             seed,
             object_backed,
             io: IoCounts::default(),
-            cache: PageCache::new(page_cache_bytes),
-        })
+            cache,
+            shared: None,
+        }
     }
 
     /// Data files in RAM, for a store with no disk (RFC 0070 §9). No page
@@ -142,6 +162,7 @@ impl BlockFile {
             object_backed: true,
             io: IoCounts::default(),
             cache: PageCache::new(0),
+            shared: None,
         }
     }
 
@@ -186,6 +207,12 @@ impl BlockFile {
     /// [`StorageError::OutOfBounds`] if the run extends past its file, or no
     /// file holds it; [`StorageError::Io`] on a read fault.
     pub fn read_run(&self, run: Run) -> StorageResult<Vec<u8>> {
+        if self.shared.is_some() {
+            if let Some(bytes) = self.landing(run) {
+                return Ok(bytes);
+            }
+            self.open_noted(run.start)?;
+        }
         let files = self.files.borrow();
         let Some((&start, file)) = files.range(..=run.start).next_back() else {
             return Err(StorageError::OutOfBounds {
@@ -196,11 +223,14 @@ impl BlockFile {
         let offset = (run.start - start) * BLOCK_SIZE as u64;
         let need = offset + run.byte_len();
         let have = file.len.get();
-        if need > have {
+        // A reader's lengths are the storage thread's; the read says.
+        if need > have && self.shared.is_none() {
             return Err(StorageError::OutOfBounds { need, have });
         }
         let mut buf = vec![0u8; run.byte_len() as usize];
-        file.backing.read_exact_at(&mut buf, offset)?;
+        file.backing
+            .read_exact_at(&mut buf, offset)
+            .map_err(|e| crate::reader::short_read(e, need))?;
         IoCounts::bump(&self.io.reads);
         Ok(buf)
     }
