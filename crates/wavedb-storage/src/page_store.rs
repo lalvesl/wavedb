@@ -54,7 +54,6 @@ use std::path::Path;
 
 use std::cell::RefCell;
 
-use crate::block::BlockAllocator;
 use crate::block_file::BlockFile;
 use crate::directory::Directory;
 use crate::error::StorageResult;
@@ -77,7 +76,9 @@ pub struct PageStore {
     /// The data files — in RAM in object mode, which has no disk
     /// (RFC 0070 §9).
     pub(crate) file: BlockFile,
-    pub(crate) alloc: RefCell<BlockAllocator>,
+    /// Where its windows go: its own files, or a storage thread's
+    /// (RFC 0073 §2).
+    pub(crate) storage: crate::link::Storage,
     /// Where the disk's chain of headers stands (RFC 0072 §4).
     pub(crate) chain: RefCell<crate::disk_chain::DiskChain>,
     /// This data shard's position in its storage shard — its place in the
@@ -105,6 +106,9 @@ pub struct PageStore {
     pub(crate) barrier: Option<crate::barrier::Barrier>,
     /// Where a compaction is between its steps (RFC 0069).
     pub(crate) compaction: std::cell::Cell<crate::compact::Phase>,
+    /// Through a storage thread: the files the running compaction empties
+    /// (RFC 0073 §7).
+    pub(crate) victims: RefCell<Vec<(u64, u64)>>,
     /// Blocks cut off the data files since open ([`reclaim`](Self::reclaim)).
     pub(crate) reclaimed: std::cell::Cell<u64>,
     /// The free share that makes a data file worth emptying (RFC 0071 §7).
@@ -193,7 +197,8 @@ impl PageStore {
             options.file_bytes,
             facts.object_backed(),
         )?;
-        let store = Self::assemble(file, types, reopened.alloc, options);
+        let own = crate::link::Storage::Own(RefCell::new(reopened.alloc));
+        let store = Self::assemble(file, types, own, options);
         *store.chain.borrow_mut() = reopened.chain;
         if let Some(object) = &store.object
             && let Some(record) = &reopened.remote_chain
@@ -216,8 +221,10 @@ impl PageStore {
     /// the data files' locks are what make a second open of it
     /// [`EngineBusy`](crate::StorageError::EngineBusy).
     fn hold_directory(&self) -> StorageResult<()> {
-        if !self.file.has_files() {
-            self.file.create(self.alloc.borrow().next_start())?;
+        if let Some(alloc) = self.own()
+            && !self.file.has_files()
+        {
+            self.file.create(alloc.borrow().next_start())?;
         }
         Ok(())
     }
@@ -227,14 +234,14 @@ impl PageStore {
     pub(crate) fn assemble(
         file: BlockFile,
         types: Vec<TypeSlot>,
-        alloc: BlockAllocator,
+        storage: crate::link::Storage,
         options: StoreOptions,
     ) -> Self {
         let type_count = types.len();
         Self {
             seed: file.seed(),
             file,
-            alloc: RefCell::new(alloc),
+            storage,
             chain: RefCell::default(),
             position: 0,
             gate: crate::wait::Gate::default(),
@@ -249,6 +256,7 @@ impl PageStore {
             record_cache_bytes: options.record_cache_bytes,
             barrier: None,
             compaction: std::cell::Cell::default(),
+            victims: RefCell::default(),
             reclaimed: std::cell::Cell::default(),
             victim_free_percent: options.victim_free_percent,
             object: options.remote.map(crate::remote::ObjectState::new),
