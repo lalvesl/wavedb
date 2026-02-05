@@ -90,10 +90,17 @@ pub enum Phase {
 }
 
 impl PageStore {
-    /// How the data files' blocks are used.
+    /// How the data files' blocks are used — through a storage thread,
+    /// this data shard's share of its storage shard's (RFC 0073 §7).
     #[must_use]
     pub fn space(&self) -> Space {
-        let alloc = self.alloc.borrow();
+        if let Some(share) = self.share_of_space() {
+            return share;
+        }
+        let Some(alloc) = self.own() else {
+            return Space::default();
+        };
+        let alloc = alloc.borrow();
         Space {
             file_blocks: alloc.total_blocks(),
             free_blocks: alloc.free_blocks(),
@@ -130,13 +137,25 @@ impl PageStore {
             match self.compaction.get() {
                 Phase::Idle => {
                     let since = self.reclaimed();
-                    if self.has_disk() {
-                        self.roll_if_worth_emptying();
-                        self.record_all();
-                        self.compaction.set(Phase::Restating { since });
-                    } else {
+                    if !self.has_disk() {
                         self.compaction.set(Phase::Moving { since });
+                        continue;
                     }
+                    if self.own().is_some() {
+                        self.roll_if_worth_emptying();
+                    } else {
+                        // The storage shard says which files to empty.
+                        let percent = self.victim_free_percent;
+                        let victims = self.shared_victims(percent).await?;
+                        if victims.is_empty() {
+                            return Ok(Compacting::Done {
+                                reclaimed_blocks: 0,
+                            });
+                        }
+                        *self.victims.borrow_mut() = victims;
+                    }
+                    self.record_all();
+                    self.compaction.set(Phase::Restating { since });
                 }
                 Phase::Restating { since } => {
                     self.settle_durable();
@@ -153,17 +172,19 @@ impl PageStore {
                     let (images, blocks, finished) =
                         self.shift(budget_blocks).await?;
                     if finished {
-                        let mark = self.alloc.borrow().mark();
+                        let mark = self.seal_mark();
                         self.compaction.set(Phase::Sealing { since, mark });
                     }
                     return Ok(Compacting::Moved { images, blocks });
                 }
                 Phase::Sealing { since, mark } => {
                     self.settle_durable();
-                    if !self.alloc.borrow().released(mark) {
+                    if !self.sealed(mark) {
                         return Ok(Compacting::Sealing);
                     }
                     self.reclaim()?;
+                    self.evacuated()?;
+                    self.victims.borrow_mut().clear();
                     self.compaction.set(Phase::Idle);
                     return Ok(Compacting::Done {
                         reclaimed_blocks: self.reclaimed() - since,
@@ -171,6 +192,22 @@ impl PageStore {
                 }
             }
         }
+    }
+
+    /// Where the frees stand when the moves end: the deferred frees of a
+    /// store's own files, or the batch that will cover them.
+    fn seal_mark(&self) -> u64 {
+        self.own()
+            .map_or_else(|| self.next_batch(), |alloc| alloc.borrow().mark())
+    }
+
+    /// Whether the moves `mark` stands for are sealed: their frees holes,
+    /// or the batch covering them durable.
+    fn sealed(&self, mark: u64) -> bool {
+        self.own().map_or_else(
+            || self.cycle.borrow_mut().syncs.answered() >= mark,
+            |alloc| alloc.borrow().released(mark),
+        )
     }
 
     /// [`compact_pass`](Self::compact_pass) to its end on the calling
@@ -219,7 +256,11 @@ impl PageStore {
     /// fails; the file is then merely longer than the allocator says, which
     /// a reopen reads as free tail.
     pub fn reclaim(&self) -> StorageResult<u64> {
-        let cuts = self.alloc.borrow_mut().reclaim(false);
+        // A storage thread reclaims after every durable write.
+        let Some(alloc) = self.own() else {
+            return Ok(0);
+        };
+        let cuts = alloc.borrow_mut().reclaim(false);
         let mut blocks = 0;
         for cut in cuts {
             self.file.cut(cut.file, cut.end)?;
