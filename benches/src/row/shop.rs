@@ -221,6 +221,14 @@ where
                 ("consumers".into(), used.to_string()),
                 ("mode".into(), engine.mode().into()),
                 (
+                    "storage_shards".into(),
+                    format!(
+                        "{} — every data shard writes through it: one write \
+                         and one fsync per tick (RFC 0073)",
+                        crate::systems::shop::wavedb::STORAGE_SHARDS
+                    ),
+                ),
+                (
                     "barrier".into(),
                     match d {
                         Durability::Durable => {
