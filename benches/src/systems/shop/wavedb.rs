@@ -164,15 +164,24 @@ const FILL_CACHE_BYTES: usize = 192 << 20;
 const SETTLE_AFTER_BYTES: u64 = 64 << 20;
 
 /// The shop database: `shards` data shards (`MANIFEST` + `storage/xx`, RFC
-/// 0067).
+/// 0067), all of them writing through **one** storage shard (RFC 0073) — a
+/// node's 64 data shards write through four, sixteen to one, and the
+/// consumers here are a node's data shards in miniature.
 fn open_db(dir: &Path, shards: usize) -> Result<Vec<PageStore>, String> {
     let mut entries = Vec::new();
     entries.extend_from_slice(&User::storage_entries());
     entries.extend_from_slice(&Shopping::storage_entries());
     entries.extend_from_slice(&Product::storage_entries());
-    wavedb_storage::open_shards(dir, &entries, StoreOptions::default(), shards)
+    let options = StoreOptions {
+        storage_shards: STORAGE_SHARDS,
+        ..StoreOptions::default()
+    };
+    wavedb_storage::open_shards(dir, &entries, options, shards)
         .map_err(|e| format!("open: {e}"))
 }
+
+/// Storage shards the shop database is created with.
+pub const STORAGE_SHARDS: usize = 1;
 
 /// The tenant a user's records live under. `u + 1` because tenant 0 is not a
 /// tenant, and the row's user numbering starts at zero — the same mapping
