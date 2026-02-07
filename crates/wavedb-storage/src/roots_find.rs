@@ -17,7 +17,7 @@
 //!    the roots block before it, which is durable.
 //!
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
-//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
+//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
 
 use crate::block::{BLOCK_SIZE, BlockDescriptor, Run};
 use crate::block_file::BlockFile;
