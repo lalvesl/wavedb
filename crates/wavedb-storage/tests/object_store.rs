@@ -38,7 +38,7 @@ fn every_settled_record_reads_back_from_the_object_store() {
     assert_uploaded(&s, |k| Some(record(k, 0)));
     assert_eq!(
         fx.newest_file(),
-        Some(format!("db/shards/00/1seg/{:016x}", !0u64))
+        Some(format!("db/storage/00/1seg/{:016x}", !0u64))
     );
 }
 
