@@ -15,7 +15,7 @@
 //! Single-threaded like the store: a flag and the waiting wakers in cells,
 //! no lock, no atomic. The one `Arc` is the waker's, which every waker is.
 //!
-//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
+//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
