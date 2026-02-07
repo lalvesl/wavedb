@@ -4,7 +4,7 @@
 - **Amended by:** [RFC 0072](0072-the-settle-is-the-durability-point.md) (2026-10-16) — §5–§7's protected generations and
   two-checkpoint sealing give way to frees deferred to the batch's barrier, and
   a compaction restates every address before it moves anything.
-- **Amended by:** [RFC 0073](0073-data-shards-and-storage-shards-WIP.md) (2026-10-17) — the data files belong
+- **Amended by:** [RFC 0073](0073-data-shards-and-storage-shards.md) (2026-10-17) — the data files belong
   to a storage shard (`storage/<n>/`), which its data shards write through;
   compaction is an evacuation the storage shard directs.
 - **Supersedes:** [RFC 0069](0069-compaction-into-the-holes-DEPRECATED.md)'s placement
