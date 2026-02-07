@@ -17,7 +17,7 @@
 //! The data shards hear of the deletions with their next reservation and
 //! close their handles.
 //!
-//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
+//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
 
 use std::collections::BTreeSet;
 
