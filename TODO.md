@@ -80,7 +80,7 @@ storage shards (S ≤ P, dividing it, fixed at creation: 64 → 4). Each storage
 shard has its own OS thread, outside Embassy, owning the allocator and the
 files; workers send their rounds by channel, and one `pwritev` + one roots
 block + one `fsync` (one PUT on S3) per tick makes every data shard in it
-durable. Design: `rfcs/0073-data-shards-and-storage-shards-WIP.md`.
+durable. Design: `rfcs/0073-data-shards-and-storage-shards.md`.
 
 - [x] 3.1 Format: the `MANIFEST`'s S, the `storage/<n>/` layout, the
       header's data shard, the `Roots { at, prev, roots: Vec<u64> }` block
@@ -107,11 +107,11 @@ durable. Design: `rfcs/0073-data-shards-and-storage-shards-WIP.md`.
       with runs in it, carried forward through their rounds, the file cut
       and deleted once a write over the moves is durable; dead roots blocks
       freed like dead headers.
-- [ ] 3.8 The object store: sections built by the data shards, one file
+- [x] 3.8 The object store: sections built by the data shards, one file
       `[roots][header a][pages a][header b][pages b]…` and one PUT per
       storage shard; the chain fields in the roots block; recovery,
       `compact_remote`, `convert`, object mode.
-- [ ] 3.9 Docs: RFC 0073 Progress per phase; RFC 0067 §2/§7/§8, 0072,
+- [x] 3.9 Docs: RFC 0073 Progress per phase; RFC 0067 §2/§7/§8, 0072,
       0070, 0071 where they change; the storage and node READMEs;
       `CLAUDE.md`'s storage and node paragraphs.
-- [ ] 3.10 The pre-commit bar at every phase.
+- [x] 3.10 The pre-commit bar at every phase.
