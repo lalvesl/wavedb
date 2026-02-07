@@ -35,7 +35,7 @@ fn assert_reads(s: &PageStore, want: impl Fn(u64) -> Option<Vec<u8>>) {
 impl Fixture {
     /// The numbers of the files the object store holds, up to the newest.
     fn files(&self) -> Vec<u64> {
-        let remote = self.remote().shard(0);
+        let remote = self.remote().storage(0);
         let Some(key) = self.newest_file() else {
             return Vec::new();
         };
