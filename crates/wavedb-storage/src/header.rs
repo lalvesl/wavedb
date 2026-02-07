@@ -62,11 +62,6 @@ pub struct Header {
     /// holds every write up to a point and none in part. A reconstruction
     /// roots only in one.
     pub end_of_batch: bool,
-    /// The oldest file not deleted when this one was written. It may lag
-    /// behind the truth, never run ahead of it (RFC 0070 §4).
-    pub start: u64,
-    /// The remote end once this batch is in.
-    pub end: u64,
     /// The types this header names: changed, then restated.
     pub types: Vec<TypeEntry>,
     /// On disk, in disk + object mode: the object store's directories, the
@@ -174,10 +169,15 @@ pub struct Chain {
     pub end: u64,
     /// The oldest live file.
     pub start: u64,
-    /// The newest file, once anything was uploaded.
+    /// The newest section header uploaded, once anything was.
     pub tail: Option<u64>,
-    /// The newest file's horizon ([`Header::horizon`]): where the next
-    /// file's stays until the rotations pass it.
+    /// The newest one ending a batch — this data shard's root in the object
+    /// store's roots blocks (RFC 0073 §8).
+    pub cut: Option<u64>,
+    /// The newest roots block written at a file's head.
+    pub roots: Option<u64>,
+    /// The newest section's horizon ([`Header::horizon`]): where the next
+    /// one's stays until the rotations pass it.
     pub floor: u64,
     /// Per type: where it stands in the chain.
     pub types: BTreeMap<u64, Rotation>,
@@ -189,6 +189,8 @@ pub struct ChainRecord {
     pub end: u64,
     pub start: u64,
     pub tail: u64,
+    pub cut: u64,
+    pub roots: u64,
     pub floor: u64,
     pub last: Vec<(u64, u64)>,
 }
@@ -204,6 +206,8 @@ impl Chain {
             end: self.end,
             start: self.start,
             tail: self.tail.unwrap_or(NO_FILE),
+            cut: self.cut.unwrap_or(NO_FILE),
+            roots: self.roots.unwrap_or(NO_FILE),
             floor: self.floor,
             last: self.types.iter().map(|(&h, r)| (h, r.last)).collect(),
         }
@@ -214,6 +218,8 @@ impl Chain {
             end: record.end,
             start: record.start,
             tail: (record.tail != NO_FILE).then_some(record.tail),
+            cut: (record.cut != NO_FILE).then_some(record.cut),
+            roots: (record.roots != NO_FILE).then_some(record.roots),
             floor: record.floor,
             types: record
                 .last
@@ -244,8 +250,6 @@ mod tests {
             shard: 0,
             roots: NO_FILE,
             end_of_batch: true,
-            start: 0,
-            end: 7 * 2048 + 20,
             types: vec![TypeEntry {
                 struct_hash: 5,
                 buckets: 3,
