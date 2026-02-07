@@ -36,17 +36,17 @@
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use futures::stream::{self, StreamExt, TryStreamExt};
 
 use crate::block::BlockDescriptor;
-use crate::compact::Space;
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::PageStore;
 use crate::recover::{newest_cut, newest_file};
 use crate::recover_headers::Headers;
 use crate::remote::{FILE_BLOCKS, Remote, file_of};
+use crate::remote_shard_compact::Report;
 use crate::upload::{IN_FLIGHT, Release};
 use crate::walk::{Lane, walk};
 
@@ -127,29 +127,6 @@ impl PageStore {
         Ok(done)
     }
 
-    /// The object store's space as compaction weighs it: every file not
-    /// deleted counted at its nominal 8 MiB, and free whatever of that is
-    /// not a live page — so the small files an upload interval leaves read
-    /// as mostly free, which is what they cost in objects.
-    #[must_use]
-    pub fn remote_space(&self) -> Space {
-        let Some(object) = &self.object else {
-            return Space::default();
-        };
-        let chain = object.chain.borrow();
-        let files = (chain.start..chain.end.div_ceil(FILE_BLOCKS))
-            .filter(|f| !object.deleted.borrow().contains(f))
-            .count() as u64;
-        let file_blocks = files * FILE_BLOCKS;
-        let live: u64 = self.remote_live().values().sum();
-        Space {
-            file_blocks,
-            free_blocks: file_blocks.saturating_sub(live),
-            deferred_blocks: 0,
-        }
-    }
-
-    /// Survey the object store, DELETE every file below the horizon that
     /// nothing names, and advance the chain's oldest live file. The horizon,
     /// or `None` when the object store holds no cut to recover.
     async fn delete_unneeded(
@@ -163,9 +140,37 @@ impl PageStore {
             live.entry(*file).or_insert(0);
         }
         let registered = self.registered();
-        let Some(survey) = survey(&object.remote, &registered).await? else {
+        let position = self.position;
+        let Some(survey) =
+            survey(&object.remote, &registered, position).await?
+        else {
             return Ok(None);
         };
+        if let Some(link) = &object.link {
+            // The files are the storage shard's: it deletes what none of
+            // its data shards needs (RFC 0073 §8).
+            let needed = live
+                .keys()
+                .chain(&survey.named)
+                .copied()
+                .filter(|&f| f < survey.horizon)
+                .collect();
+            let report = Report {
+                horizon: survey.horizon,
+                needed,
+                live: self.remote_live(),
+                percent: self.victim_free_percent,
+            };
+            let answer = link.compact(position as usize, report).await?;
+            done.deleted_files += answer.deleted;
+            object.chain.borrow_mut().start = answer.start;
+            *object.victims.borrow_mut() = answer
+                .victims
+                .into_iter()
+                .filter(|f| live.contains_key(f))
+                .collect();
+            return Ok(Some(survey.horizon));
+        }
         let start = object.chain.borrow().start;
         let doomed: Vec<u64> = (start..survey.horizon)
             .filter(|f| !live.contains_key(f) && !survey.named.contains(f))
@@ -201,6 +206,12 @@ impl PageStore {
     /// [`StoreOptions::victim_free_percent`](crate::StoreOptions) leaves of
     /// a file's 8 MiB.
     fn victims_below(&self, horizon: u64) -> BTreeSet<u64> {
+        if let Some(object) = &self.object
+            && object.link.is_some()
+        {
+            // The storage shard weighed them across its data shards.
+            return std::mem::take(&mut *object.victims.borrow_mut());
+        }
         let free = u64::from(self.victim_free_percent.min(100));
         let most = FILE_BLOCKS * (100 - free) / 100;
         self.remote_live()
@@ -208,42 +219,6 @@ impl PageStore {
             .filter(|&(file, live)| file < horizon && live < most)
             .map(|(file, _)| file)
             .collect()
-    }
-
-    /// Live blocks per file: every remote page and dictionary named.
-    fn remote_live(&self) -> BTreeMap<u64, u64> {
-        let mut live = BTreeMap::new();
-        for slot in &self.types {
-            let remote = slot.remote_directory().borrow();
-            let pages = remote.iter().flat_map(|dir| dir.slots().iter());
-            let dict = slot.remote_dict().get();
-            for desc in pages.copied().chain(std::iter::once(dict)) {
-                if desc.is_allocated() {
-                    *live.entry(file_of(desc.start())).or_insert(0) +=
-                        desc.count();
-                }
-            }
-        }
-        live
-    }
-
-    /// A batch ended naming the store's addressing: the object store's files
-    /// it names become the newest root's, the newest's the previous one's.
-    pub(crate) fn root_remote(&self) {
-        let Some(object) = &self.object else { return };
-        if !self.has_disk() {
-            return; // nothing reopens from RAM
-        }
-        let named = self.remote_live().into_keys().collect();
-        let mut rooted = object.rooted.borrow_mut();
-        rooted[1] = std::mem::replace(&mut rooted[0], named);
-    }
-
-    /// The newest batch is durable: the root before it is not one any more.
-    pub(crate) fn release_remote_root(&self) {
-        if let Some(object) = &self.object {
-            object.rooted.borrow_mut()[1].clear();
-        }
     }
 
     /// Whether a page or a dictionary still lies in a file being emptied.
@@ -307,12 +282,14 @@ impl PageStore {
 async fn survey(
     remote: &Remote,
     registered: &[u64],
+    position: u32,
 ) -> StorageResult<Option<Survey>> {
     let Some(newest) = newest_file(remote).await? else {
         return Ok(None);
     };
     let mut headers = Headers::new(remote);
-    let Some(top) = newest_cut(&mut headers, newest).await? else {
+    let Some((_, top)) = newest_cut(&mut headers, newest, position).await?
+    else {
         return Ok(None);
     };
     let walked = walk(&mut headers, &top, registered, Lane::Types).await?;
@@ -325,7 +302,7 @@ async fn survey(
         }
     }
     Ok(Some(Survey {
-        horizon: headers.lowest_asked(),
+        horizon: headers.lowest_file(),
         named,
     }))
 }
@@ -339,42 +316,50 @@ mod tests {
     use super::survey;
     use crate::block::BlockDescriptor;
     use crate::header::{Header, NO_FILE, TypeEntry};
-    use crate::remote::{FILE_BLOCKS, HEADER_BLOCKS, HEADER_BYTES, Remote};
+    use crate::recover_headers::file_bytes;
+    use crate::remote::{FILE_BLOCKS, Remote};
+    use crate::upload_file::{FIRST_PAGE, SECTION};
 
     const SH: u64 = 7;
 
+    /// Where file `file`'s header starts.
+    const fn at(file: u64) -> u64 {
+        file * FILE_BLOCKS + SECTION
+    }
+
     /// A one-block page at the head of file `file`.
     fn page(file: u64) -> u64 {
-        BlockDescriptor::new(file * FILE_BLOCKS + HEADER_BLOCKS, 1).raw()
+        BlockDescriptor::new(file * FILE_BLOCKS + FIRST_PAGE, 1).raw()
     }
 
     /// PUT file `file`, a whole batch of its own, naming `changed` for a
-    /// two-bucket type whose previous entries are in `last`.
-    fn put(remote: &Remote, file: u64, last: u64, changed: Vec<(u32, u64)>) {
+    /// two-bucket type whose previous entries are in file `last`'s header.
+    fn put(
+        remote: &Remote,
+        file: u64,
+        last: Option<u64>,
+        changed: Vec<(u32, u64)>,
+    ) {
         let header = Header {
-            at: file,
-            prev: file.checked_sub(1).unwrap_or(NO_FILE),
+            at: at(file),
+            prev: file.checked_sub(1).map_or(NO_FILE, at),
             horizon: 0,
             shard: 0,
             roots: NO_FILE,
             end_of_batch: true,
-            start: 0,
-            end: file * FILE_BLOCKS + HEADER_BLOCKS + 1,
             types: vec![TypeEntry {
                 struct_hash: SH,
                 buckets: 2,
-                last,
+                last: last.map_or(NO_FILE, at),
                 dict: None,
                 changed,
             }],
             remote: Vec::new(),
             chain: None,
         };
-        let mut bytes = header.encode();
-        bytes.resize(HEADER_BYTES + 4096, 0);
         block_on(remote.bucket().put(
             &remote.file_key(file),
-            &bytes,
+            &file_bytes(&header, at(file)),
             When::Always,
         ))
         .unwrap();
@@ -389,15 +374,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let server = TestServer::start(dir.path());
         let remote = Remote::new(server.bucket(), "t/");
-        put(&remote, 0, NO_FILE, vec![(1, page(0))]);
-        put(&remote, 1, 0, vec![(0, page(1))]);
-        put(&remote, 2, 1, vec![(0, page(2))]);
-        let s = block_on(survey(&remote, &[SH])).unwrap().unwrap();
+        put(&remote, 0, None, vec![(1, page(0))]);
+        put(&remote, 1, Some(0), vec![(0, page(1))]);
+        put(&remote, 2, Some(1), vec![(0, page(2))]);
+        let s = block_on(survey(&remote, &[SH], 0)).unwrap().unwrap();
         assert_eq!(s.horizon, 0, "bucket 1 is only known from file 0");
         assert_eq!(s.named.iter().copied().collect::<Vec<_>>(), [0, 2]);
 
-        put(&remote, 3, 2, vec![(0, page(2)), (1, page(0))]);
-        let s = block_on(survey(&remote, &[SH])).unwrap().unwrap();
+        put(&remote, 3, Some(2), vec![(0, page(2)), (1, page(0))]);
+        let s = block_on(survey(&remote, &[SH], 0)).unwrap().unwrap();
         assert_eq!(
             s.horizon, 2,
             "the batch and the one ending the batch before"
