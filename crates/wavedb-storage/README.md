@@ -38,7 +38,13 @@ pipeline whose settle is the durability point. This is where most of WaveDB's en
 | `reader`          | A data shard's read handles on a storage thread's files, and the windows held readable until they land.                                         |
 | `storage_shard`   | A storage shard's thread: reservations, the gathered write and its roots block, the `fsync` on its helper, the seals answered.                   |
 | `storage_compact` | A storage shard's compaction: the evacuation's files, the data shards done with them, the reclaim after every durable write.                     |
-| `storage_open`    | Opening a storage shard its data shards share: the roots, each data shard's walk, the allocator, the thread.                                     |
+| `storage_open`    | Opening a storage shard its data shards share: the roots, each data shard's walk, the allocator, the threads.                                    |
+| `storage_write`   | A storage shard's write: the gathered windows by address, the roots block, the `fsync` on the helper, the seals answered.                       |
+| `remote_shard`    | A storage shard's chain of files in the object store: its data shards' sections placed in files, one PUT for all of them.                       |
+| `remote_put`      | The files going down, oldest first, each headed by a roots block naming every cut whose whole upload is in.                                      |
+| `remote_shard_compact` | The object store compacted across data shards: their reports, the files none needs deleted, the mostly free ones carried out.              |
+| `remote_link`     | A data shard's side of the remote thread: reserve, hand over, await the files.                                                                  |
+| `remote_live`     | What of the object store a store still names: live blocks per file, the space compaction weighs, the disk's rooted files.                      |
 | `settle`          | The record cache's side of a settle: what is unsettled, and the cache-eviction budget.                                                             |
 | `compact`         | Compaction's phases and surface (`compact_step`, `compact`, `reclaim`, `space`): move, drop the old addressing, seal, cut and delete.              |
 | `defrag`          | Compaction's moves: the emptiest data file's runs, highest first, verbatim, into the active file — one window write per round.                    |
@@ -105,7 +111,7 @@ hole only once the batch that stopped naming it is durable
 A database's `P` data shards — placement, ownership, caches, directories —
 write through `S` **storage shards** (`S` dividing `P`, both in the
 `MANIFEST`; a node creates 64 through 4,
-[RFC 0073](../../rfcs/0073-data-shards-and-storage-shards-WIP.md)): data
+[RFC 0073](../../rfcs/0073-data-shards-and-storage-shards.md)): data
 shard `p` writes through storage shard `p / (P / S)`, whose data files live
 in `storage/<n>/`.
 
@@ -127,6 +133,12 @@ in `storage/<n>/`.
 - **Compaction** is an evacuation: the storage shard says which files to
   empty, every data shard carries its runs out, and the thread cuts and
   deletes after every durable write whatever is left only holes.
+- **The object store** (`remote_shard`): the storage shard's chain of files
+  lives under `storage/<n>/`, each file headed by a roots block. A remote
+  thread per storage shard places every data shard's upload sections in
+  the open file, PUTs the files oldest first — at its tick, or at once when
+  someone waits — and deletes, once every data shard has reported what it
+  still needs, the files none of them does.
 
 ---
 
@@ -451,8 +463,10 @@ mutation → the type's record log (RAM) → (client confirmed)
    in an object store, the disk caching them. Settle rounds flag what they
    write; `upload` reassembles the flagged pages, record by record, into the
    object store's own linear hash of 128 KiB pages, packed into files of
-   `[32 KiB header][pages…]` (every page starts within the file's first
-   8 MiB), and clears the flags. The remote directories ride the disk's
+   `[roots block][32 KiB header][pages…]` (every page starts within the
+   file's first 8 MiB; the roots block names the newest header ending a
+   batch and where the chain of files stands, RFC 0073 §8), and clears the
+   flags. The remote directories ride the disk's
    headers (their own lane, and the object store's chain), so a reopen
    restores them from the disk alone. Past the
    compaction ceiling the least recently used uploaded pages leave the disk
