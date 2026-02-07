@@ -114,8 +114,6 @@ impl PageStore {
             shard: self.position,
             roots: chain.roots.newest.unwrap_or(NO_FILE),
             end_of_batch: false,
-            start: 0,
-            end: 0,
             types: Vec::new(),
             remote: Vec::new(),
             chain: self.object.as_ref().map(|o| o.chain.borrow().record()),
