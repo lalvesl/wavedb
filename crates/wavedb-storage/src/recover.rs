@@ -3,14 +3,14 @@
 //! walk every reconstruction makes ([RFC 0072] §6).
 //!
 //! 1. **The newest whole batch.** `LIST 1seg/ max-keys=1` names the highest
-//!    file. It is taken only if its header ends a batch
-//!    (`Header::end_of_batch`: every write up to a point, none in part) and
-//!    the batch is whole: every header back to the one ending the batch
-//!    before present. Otherwise the next number down is tried — so the files
-//!    a crashed upload left above the recorded end, a part of a backlog, or
-//!    a copy under another key, are never taken for the newest. Files with
-//!    no batch end among them are a database whose first upload never
-//!    finished: it opens empty, its numbers stepped over.
+//!    file, whose roots block ([RFC 0073] §8) names the newest header ending
+//!    a batch (`Header::end_of_batch`: every write up to a point, none in
+//!    part). It is taken only if the batch is whole: every header back to
+//!    the one ending the batch before present. Otherwise the next number
+//!    down is tried — so a file a crashed upload left, or a copy under
+//!    another key, is never taken for the newest. Files naming no batch end
+//!    are a database whose first upload never finished: it opens empty, its
+//!    numbers stepped over.
 //! 2. **The walk.** Every type that header names is started there, and
 //!    followed along its `last`, the first address seen for a bucket being
 //!    its newest. While a registered type is not found yet, the headers are
@@ -27,6 +27,7 @@
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
+//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
 
 use futures::future::try_join_all;
 
@@ -39,6 +40,7 @@ use crate::page_store::{PageStore, StoreOptions};
 use crate::plan::SlotPlan;
 use crate::recover_headers::Headers;
 use crate::remote::{FILE_BLOCKS, Remote};
+use crate::roots::Roots;
 use crate::walk::{Lane, walk};
 
 /// What a recovery found in the object store.
@@ -67,14 +69,15 @@ pub fn found_for(
 ) -> StorageResult<Option<Found>> {
     match &options.remote {
         Some(remote) if !had_files => {
-            futures::executor::block_on(recover(remote, registered))
+            futures::executor::block_on(recover(remote, registered, 0))
         }
         _ => Ok(None),
     }
 }
 
-/// What `remote` holds for the `registered` types (and any other its
-/// headers name), or `None` when it holds no file at all.
+/// What `remote` holds for the data shard at `position` — the
+/// `registered` types and any other its headers name — or `None` when it
+/// holds no file at all.
 ///
 /// # Errors
 /// Object-store faults; [`StorageError::Corrupt`] when a chained header is
@@ -82,6 +85,7 @@ pub fn found_for(
 pub async fn recover(
     remote: &Remote,
     registered: &[u64],
+    position: u32,
 ) -> StorageResult<Option<Found>> {
     let Some(newest) = newest_file(remote).await? else {
         return Ok(None);
@@ -90,7 +94,8 @@ pub async fn recover(
     // is never written again.
     let past = (newest + 1) * FILE_BLOCKS;
     let mut headers = Headers::new(remote);
-    let Some(top) = newest_cut(&mut headers, newest).await? else {
+    let Some((roots, top)) = newest_cut(&mut headers, newest, position).await?
+    else {
         // Files, but no batch end among them: the first uploads never
         // finished one, so nothing was ever recoverable.
         let chain = Chain {
@@ -103,9 +108,11 @@ pub async fn recover(
         }));
     };
     let mut chain = Chain {
-        end: top.end.max(past),
-        start: top.start,
+        end: roots.end.max(past),
+        start: roots.start,
         tail: Some(top.at),
+        cut: Some(top.at),
+        roots: Some(roots.at),
         floor: top.horizon,
         ..Chain::default()
     };
@@ -132,24 +139,34 @@ pub async fn recover(
     Ok(Some(Found { chain, types }))
 }
 
-/// The newest header at or below file `newest` that ends a whole batch,
-/// trying each number down — what a recovery roots in.
+/// The newest roots block at or below file `newest` whose root for the
+/// data shard at `position` ends a whole batch, and that header, trying
+/// each number down — what a recovery roots in. `None` once a roots block
+/// says the data shard never ended one.
 ///
 /// # Errors
 /// Object-store faults.
 pub async fn newest_cut(
     headers: &mut Headers<'_>,
     newest: u64,
-) -> StorageResult<Option<Header>> {
-    let mut top = Some(newest);
-    while let Some(n) = top {
-        if let Some(header) = headers.get(n).await?
+    position: u32,
+) -> StorageResult<Option<(Roots, Header)>> {
+    let mut file = Some(newest);
+    while let Some(n) = file {
+        file = n.checked_sub(1);
+        let Some(roots) = headers.roots(n).await? else {
+            continue;
+        };
+        let Some(at) = roots.root(position as usize) else {
+            return Ok(None);
+        };
+        if let Some(header) = headers.get(at).await?
             && header.end_of_batch
+            && header.shard == position
             && headers.whole(&header).await?
         {
-            return Ok(Some(header));
+            return Ok(Some((roots, header)));
         }
-        top = n.checked_sub(1);
     }
     Ok(None)
 }
@@ -252,29 +269,35 @@ mod tests {
     use super::recover;
     use crate::block::BlockDescriptor;
     use crate::header::{Header, NO_FILE, TypeEntry};
-    use crate::remote::{FILE_BLOCKS, HEADER_BLOCKS, HEADER_BYTES, Remote};
+    use crate::recover_headers::file_bytes;
+    use crate::remote::{FILE_BLOCKS, Remote, file_of};
+    use crate::upload_file::{FIRST_PAGE, SECTION};
 
     const SH: u64 = 7;
     /// A registered type no header names before file 3.
     const LATE: u64 = 8;
 
-    /// A descriptor of a one-block page at the head of file `file`.
-    fn page(file: u64) -> u64 {
-        BlockDescriptor::new(file * FILE_BLOCKS + HEADER_BLOCKS, 1).raw()
+    /// Where file `file`'s header starts.
+    const fn at(file: u64) -> u64 {
+        file * FILE_BLOCKS + SECTION
     }
 
-    /// A header for file `file`, following `prev`, naming bucket 0 of a
-    /// two-bucket type in itself — the type's previous entries in `prev`.
-    fn header(file: u64, prev: u64, end_of_batch: bool) -> Header {
+    /// A descriptor of a one-block page at the head of file `file`.
+    fn page(file: u64) -> u64 {
+        BlockDescriptor::new(file * FILE_BLOCKS + FIRST_PAGE, 1).raw()
+    }
+
+    /// A header for file `file`, following file `prev`'s, naming bucket 0 of
+    /// a two-bucket type in itself — the type's previous entries in `prev`.
+    fn header(file: u64, prev: Option<u64>, end_of_batch: bool) -> Header {
+        let prev = prev.map_or(NO_FILE, at);
         Header {
-            at: file,
+            at: at(file),
             prev,
             horizon: 0,
             shard: 0,
             roots: NO_FILE,
             end_of_batch,
-            start: 0,
-            end: file * FILE_BLOCKS + HEADER_BLOCKS + 1,
             types: vec![TypeEntry {
                 struct_hash: SH,
                 buckets: 2,
@@ -287,13 +310,11 @@ mod tests {
         }
     }
 
-    /// PUT `header` as its file.
-    fn put(remote: &Remote, header: &Header) {
-        let mut bytes = header.encode();
-        bytes.resize(HEADER_BYTES + 4096, 0);
+    /// PUT `header` as its file, its roots block naming file `root`'s.
+    fn put(remote: &Remote, header: &Header, root: u64) {
         block_on(remote.bucket().put(
-            &remote.file_key(header.at),
-            &bytes,
+            &remote.file_key(file_of(header.at)),
+            &file_bytes(header, at(root)),
             When::Always,
         ))
         .unwrap();
@@ -308,18 +329,18 @@ mod tests {
 
     /// File 0 is a whole batch; files 1–2 a second one.
     fn two_batches(remote: &Remote) {
-        put(remote, &header(0, NO_FILE, true));
-        put(remote, &header(1, 0, false));
-        put(remote, &header(2, 1, true));
+        put(remote, &header(0, None, true), 0);
+        put(remote, &header(1, Some(0), false), 0);
+        put(remote, &header(2, Some(1), true), 2);
     }
 
     #[test]
     fn the_newest_whole_batch_is_the_state() {
         let (_dir, _server, remote) = fixture();
         two_batches(&remote);
-        let found = block_on(recover(&remote, &[SH])).unwrap().unwrap();
-        assert_eq!(found.chain.tail, Some(2));
-        assert_eq!(found.chain.last(SH), 2);
+        let found = block_on(recover(&remote, &[SH], 0)).unwrap().unwrap();
+        assert_eq!(found.chain.tail, Some(at(2)));
+        assert_eq!(found.chain.last(SH), at(2));
         let t = &found.types[0];
         assert_eq!(t.remote[0].raw(), page(2), "the newest entry wins");
         assert_eq!(t.remote[1], BlockDescriptor::EMPTY, "never written");
@@ -331,28 +352,28 @@ mod tests {
         let (_dir, _server, remote) = fixture();
         two_batches(&remote);
         block_on(remote.bucket().delete(&remote.file_key(1))).unwrap();
-        let found = block_on(recover(&remote, &[SH])).unwrap().unwrap();
-        assert_eq!(found.chain.tail, Some(0));
+        let found = block_on(recover(&remote, &[SH], 0)).unwrap().unwrap();
+        assert_eq!(found.chain.tail, Some(at(0)));
         assert_eq!(found.types[0].remote[0].raw(), page(0));
         assert!(found.chain.end >= 3 * FILE_BLOCKS, "past the leftover too");
     }
 
-    /// A part of a backlog — the newest file, ending no batch — is stepped
-    /// over, and so is a header copied under another file's key.
+    /// A part of a backlog — the newest file, ending no batch — roots in
+    /// the batch its roots block names, and a file copied under another
+    /// file's key is stepped over.
     #[test]
-    fn a_header_ending_no_batch_or_not_its_file_is_not_the_state() {
+    fn a_file_ending_no_batch_or_not_its_own_is_not_the_state() {
         let (_dir, _server, remote) = fixture();
         two_batches(&remote);
-        put(&remote, &header(3, 2, false));
-        let found = block_on(recover(&remote, &[SH])).unwrap().unwrap();
-        assert_eq!(found.chain.tail, Some(2));
+        put(&remote, &header(3, Some(2), false), 2);
+        let found = block_on(recover(&remote, &[SH], 0)).unwrap().unwrap();
+        assert_eq!(found.chain.tail, Some(at(2)));
 
-        let mut copy = header(2, 1, true).encode();
-        copy.resize(HEADER_BYTES + 4096, 0);
+        let copy = file_bytes(&header(2, Some(1), true), at(2));
         let key = remote.file_key(4);
         block_on(remote.bucket().put(&key, &copy, When::Always)).unwrap();
-        let found = block_on(recover(&remote, &[SH])).unwrap().unwrap();
-        assert_eq!(found.chain.tail, Some(2), "file 4 holds file 2's header");
+        let found = block_on(recover(&remote, &[SH], 0)).unwrap().unwrap();
+        assert_eq!(found.chain.tail, Some(at(2)), "file 4 holds file 2");
     }
 
     /// A registered type the newest header does not name is found by going
@@ -362,7 +383,7 @@ mod tests {
     fn a_type_the_newest_header_does_not_name_is_found_further_down() {
         let (_dir, _server, remote) = fixture();
         two_batches(&remote);
-        let mut named = header(3, 2, true);
+        let mut named = header(3, Some(2), true);
         named.types.push(TypeEntry {
             struct_hash: LATE,
             buckets: 1,
@@ -370,20 +391,20 @@ mod tests {
             dict: None,
             changed: vec![(0, page(3))],
         });
-        put(&remote, &named);
-        put(&remote, &header(4, 3, true));
-        put(&remote, &header(5, 4, true));
-        let found = block_on(recover(&remote, &[SH, LATE, 9])).unwrap();
+        put(&remote, &named, 3);
+        put(&remote, &header(4, Some(3), true), 4);
+        put(&remote, &header(5, Some(4), true), 5);
+        let found = block_on(recover(&remote, &[SH, LATE, 9], 0)).unwrap();
         let found = found.unwrap();
         let late = found.types.iter().find(|t| t.struct_hash == LATE);
         assert_eq!(late.map(|t| t.remote[0].raw()), Some(page(3)));
-        assert_eq!(found.chain.last(LATE), 3, "its newest header");
+        assert_eq!(found.chain.last(LATE), at(3), "its newest header");
         assert!(found.types.iter().all(|t| t.struct_hash != 9), "unnamed");
     }
 
     #[test]
     fn an_empty_prefix_holds_no_database() {
         let (_dir, _server, remote) = fixture();
-        assert!(block_on(recover(&remote, &[SH])).unwrap().is_none());
+        assert!(block_on(recover(&remote, &[SH], 0)).unwrap().is_none());
     }
 }
