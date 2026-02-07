@@ -83,8 +83,8 @@ fn to_object_store(
         return Ok(());
     }
     let target = facts.with_object_backed(true);
-    for shard in 0..facts.shards() {
-        if block_on(newest_file(&remote.shard(shard)))?.is_some() {
+    for n in 0..facts.storage_shards() {
+        if block_on(newest_file(&remote.storage(n)))?.is_some() {
             return Err(StorageError::ObjectStoreInUse);
         }
     }
