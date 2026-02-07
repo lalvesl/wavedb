@@ -59,13 +59,13 @@ impl Remote {
         }
     }
 
-    /// The same bucket, under shard `shard`'s prefix (`…shards/<xx>/`) —
-    /// a shard is a database of its own here as on disk (RFC 0067).
+    /// The same bucket, under storage shard `n`'s prefix (`…storage/<nn>/`)
+    /// — its chain of files, as its data files are on disk (RFC 0073 §8).
     #[must_use]
-    pub fn shard(&self, shard: usize) -> Self {
+    pub fn storage(&self, n: usize) -> Self {
         Self::new(
             self.bucket.clone(),
-            format!("{}shards/{shard:02x}/", self.prefix),
+            format!("{}storage/{n:02x}/", self.prefix),
         )
     }
 
@@ -137,6 +137,14 @@ pub(crate) struct ObjectState {
     /// and the one before while the newest is not durable yet. Not
     /// deleted.
     pub(crate) rooted: RefCell<[BTreeSet<u64>; 2]>,
+    /// The storage shard's remote thread, when its data shards share its
+    /// chain of files (RFC 0073 §8); `None`: this store's own.
+    pub(crate) link: Option<crate::remote_link::RemoteLink>,
+    /// Somebody waits for the upload under way: its files go at once.
+    pub(crate) hurry: Cell<bool>,
+    /// Through a storage shard: the files its last compaction round said to
+    /// carry this store's pages out of.
+    pub(crate) victims: RefCell<BTreeSet<u64>>,
 }
 
 impl ObjectState {
@@ -153,6 +161,9 @@ impl ObjectState {
             moving: RefCell::default(),
             deleted: RefCell::default(),
             rooted: RefCell::default(),
+            link: None,
+            hurry: Cell::new(false),
+            victims: RefCell::default(),
         }
     }
 
@@ -203,7 +214,10 @@ impl PageStore {
     pub(crate) fn prepare_object(&self, reopened: bool) -> StorageResult<()> {
         self.tally_pending();
         self.root_remote();
-        if reopened {
+        // A storage shard's remote thread steps over them for its data
+        // shards (RFC 0073 §8).
+        let linked = self.object.as_ref().is_some_and(|o| o.link.is_some());
+        if reopened && !linked {
             self.step_over_leftovers()?;
         }
         Ok(())
