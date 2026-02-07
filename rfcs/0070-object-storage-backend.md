@@ -4,6 +4,11 @@
 - **Supersedes:** [RFC 0059](0059-object-storage-capacity-tier-PLANNED.md) §2–§5
   (the remote descriptor bit and the object per bucket). 0059 §1, the archive
   lane, stays and is independent of this.
+- **Amended by:** [RFC 0073](0073-data-shards-and-storage-shards.md)
+  (2026-10-17) — the chain of files is the storage shard's, under
+  `storage/<n>/`; every file opens with a roots block naming the newest
+  header ending a batch and where the chain stands (§4–§6), and a header is
+  named by the block it starts at.
 - **Crates:** `wavedb-storage` (the backend), `wavedb-platform` (the S3 client
   half), `wavedb-quick-node` (configuration)
 - **Builds on:** [RFC 0046](0046-directory-deltas-in-the-window.md) /
@@ -121,7 +126,7 @@ range  = bytes=offset-(offset + count · 4096 − 1)
 
 ### 4. Files, names and the order LIST gives
 
-Per shard, under `<prefix>/shards/<shard:02x>/`:
+Per storage shard, under `<prefix>/storage/<n:02x>/` (RFC 0073 §8):
 
 ```
 1seg/<!file:016x>        the files — named by the bitwise complement of the
@@ -135,8 +140,9 @@ The numeric prefixes fix the order LIST returns. `LIST prefix=1seg/
 max-keys=1` names the newest file in one request.
 
 **No `start` object** (decided 2026-10-10). The oldest live file
-(`first_file`) is a field of every file's header, and the newest file's
-header is the one recovery reads first anyway — so knowing it costs no
+(`first_file`) is a field of every file's header — since RFC 0073, of the
+roots block every file opens with — and the newest file's head is the
+one recovery reads first anyway — so knowing it costs no
 request, where a `start` object cost a PUT (a tier-1 request) each time it
 advanced and a GET on recovery. The field takes 8 bytes of a header that
 is fixed at 32 KiB, so it costs no space either.
