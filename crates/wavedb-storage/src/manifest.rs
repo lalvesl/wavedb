@@ -17,7 +17,7 @@
 //! are only what a **new** database is created with.
 //!
 //! [RFC 0071]: ../../../rfcs/0071-data-files-by-address.md
-//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
+//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
 
 use std::fs;
 use std::io::Write as _;
