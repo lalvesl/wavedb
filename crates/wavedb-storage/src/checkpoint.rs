@@ -145,7 +145,7 @@ impl PageStore {
     /// the store is failed: every later write is refused until a reopen
     /// reconstructs it from what is on disk.
     ///
-    /// [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
+    /// [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
     async fn place_in(
         &self,
         plans: Vec<SlotPlan>,
