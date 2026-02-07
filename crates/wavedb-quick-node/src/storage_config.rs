@@ -22,7 +22,7 @@ where
     }
 
     /// Keep the pages in an object store, the disk caching them (RFC 0070):
-    /// each shard keeps its objects under `shards/<xx>/` below `remote`'s
+    /// each storage shard keeps its objects under `storage/<xx>/` below `remote`'s
     /// prefix, and uploads what it settled once it holds back
     /// [`upload_after_bytes`](crate::Maintenance::upload_after_bytes) or
     /// after [`upload_interval`](Self::upload_interval). Disk-only or not is
@@ -31,9 +31,6 @@ where
     #[must_use]
     pub fn object_store(mut self, remote: wavedb_storage::Remote) -> Self {
         self.store.remote = Some(remote);
-        // One storage shard per data shard until the object store's
-        // sections (RFC 0073 §8).
-        self.store.storage_shards = 0;
         self.diskless = false;
         self
     }
@@ -56,7 +53,6 @@ where
     #[must_use]
     pub fn object_mode(mut self, remote: wavedb_storage::Remote) -> Self {
         self.store.remote = Some(remote);
-        self.store.storage_shards = 0;
         self.diskless = true;
         self
     }
