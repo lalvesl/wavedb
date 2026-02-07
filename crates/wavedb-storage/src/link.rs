@@ -13,7 +13,7 @@
 //!   storage thread answers once the storage write holding the batch's end
 //!   is durable (`crate::storage_shard`).
 //!
-//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
+//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
 
 use std::cell::{Cell, RefCell};
 use std::sync::mpsc;
