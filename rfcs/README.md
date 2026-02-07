@@ -44,6 +44,17 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   client cache runs on a carrier of its own with the same tick. It supersedes
   the journal-era designs below (0019, 0047, 0048, 0061, 0062; 0041/0043/0046
   in part).
+- **Data shards and storage shards (2026-10-17,
+  [0073](0073-data-shards-and-storage-shards.md), Implemented):** a node's
+  64 data shards write through 4 storage shards. A thread per storage shard
+  owns its data files: rounds reserve their windows by message, and every
+  tick goes down as one write per run of windows plus a roots block naming
+  every data shard's root, made durable by one `fsync`; a reopen roots in
+  the newest whole roots block. In the object store, a thread per storage
+  shard puts its data shards' uploads in one file — one PUT — and compacts
+  by their reports. The horizon in every header bounds a reconstruction's
+  walk (0072), and the page cache holds pages decoded
+  ([0044](0044-page-cache.md)).
 - **The storage write path (2026-07-28 → 07-29):**
   [0041](0041-single-barrier-checkpoint.md) *(Implemented)* replaced the per-id
   settle — which read-modify-wrote a bucket page once per record — with a
@@ -632,7 +643,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0070](0070-object-storage-backend.md) | Object storage as a page backend (three modes) | Implemented |
 | [0071](0071-data-files-by-address.md) | Data files named by address (append-only files, compaction forward; supersedes 0069's placement) | Implemented |
 | [0072](0072-the-settle-is-the-durability-point.md) | The settle is the durability point (no journal; `_durable` operations; one header for disk and object store) | Implemented |
-| [0073](0073-data-shards-and-storage-shards-WIP.md) | Data shards and storage shards (P data shards write through S storage shards: one write, one `fsync`, one PUT per storage shard) | WIP |
+| [0073](0073-data-shards-and-storage-shards.md) | Data shards and storage shards (P data shards write through S storage shards: one write, one `fsync`, one PUT per storage shard) | Implemented |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
