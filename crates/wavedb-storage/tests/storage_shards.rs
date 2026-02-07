@@ -3,7 +3,7 @@
 //! files through one thread, and a reopen — or a crash — finds every data
 //! shard's root in the newest roots block, an idle one's included.
 //!
-//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
+//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
 
 // The engine is used from one thread; its futures are not `Send` (lib.rs).
 #![allow(clippy::future_not_send)]
