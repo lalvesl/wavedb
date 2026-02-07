@@ -3,7 +3,7 @@
 //! by address with a roots block after it, the `fsync` goes to the helper,
 //! and its answer answers every seal the write held.
 //!
-//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
+//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
 
 use std::fs::File;
 use std::sync::mpsc;
