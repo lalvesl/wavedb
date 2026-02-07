@@ -11,14 +11,14 @@
 //! shape — it is what [`PageStore::open`] opens.
 //!
 //! [RFC 0067]: ../../../../rfcs/0067-thread-per-core-shards-WIP.md
-//! [RFC 0073]: ../../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
+//! [RFC 0073]: ../../../../rfcs/0073-data-shards-and-storage-shards.md
 
 use std::path::{Path, PathBuf};
 
 use crate::error::{StorageError, StorageResult};
 use crate::manifest::{self, Manifest};
 use crate::page_store::{PageStore, StoreOptions};
-use crate::storage_open::open_storage_shard;
+use crate::storage_open::{open_object_storage_shard, open_storage_shard};
 use crate::struct_storage::StructStorage;
 
 /// Where the storage shards' data files live, under the database's root.
@@ -75,11 +75,6 @@ pub fn open_shards_with(
     let counts = (shards, options.storage_shards);
     let facts = manifest::resolve(Some(dir), options.remote.as_ref(), counts)?;
     if facts.per_storage() > 1 {
-        if options.remote.is_some() {
-            return Err(StorageError::Corrupt(
-                "an object store behind shared storage shards",
-            ));
-        }
         let options = shares(&facts, options);
         return open_parallel(facts.storage_shards(), threads, |n| {
             let dir = storage_dir(dir, n);
@@ -107,7 +102,17 @@ pub fn open_object_shards(
         .remote
         .as_ref()
         .ok_or(StorageError::NotObjectBacked)?;
-    let facts = manifest::resolve(None, Some(remote), (shards, 0))?;
+    let facts = manifest::resolve(
+        None,
+        Some(remote),
+        (shards, options.storage_shards),
+    )?;
+    if facts.per_storage() > 1 {
+        let options = shares(&facts, options);
+        return open_parallel(facts.storage_shards(), threads, |n| {
+            open_object_storage_shard(n, types, &options, &facts)
+        });
+    }
     open_each(&facts, options, threads, |_, options| {
         PageStore::open_object_shard(types, options, &facts)
     })
@@ -125,7 +130,7 @@ pub(crate) fn only_shard(
     if facts.shards() != 1 {
         return Err(StorageError::Corrupt("a sharded database: open_shards"));
     }
-    options.remote = options.remote.map(|r| r.shard(0));
+    options.remote = options.remote.map(|r| r.storage(0));
     Ok(options)
 }
 
@@ -137,18 +142,13 @@ fn open_each(
     threads: usize,
     open: impl Fn(usize, StoreOptions) -> StorageResult<PageStore> + Sync,
 ) -> StorageResult<Vec<PageStore>> {
-    if facts.per_storage() > 1 {
-        return Err(StorageError::Corrupt(
-            "object mode behind shared storage shards",
-        ));
-    }
     let options = shares(facts, options);
     let options = &options;
     // Each shard keeps its objects under a prefix of its own, as it keeps
     // its files in a directory of its own.
     open_parallel(facts.shards(), threads, |i| {
         let options = StoreOptions {
-            remote: options.remote.as_ref().map(|r| r.shard(i)),
+            remote: options.remote.as_ref().map(|r| r.storage(i)),
             ..options.clone()
         };
         open(i, options).map(|store| vec![store])
