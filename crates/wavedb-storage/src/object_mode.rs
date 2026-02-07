@@ -73,6 +73,7 @@ impl PageStore {
         let found = futures::executor::block_on(crate::recover::recover(
             &remote,
             &registered,
+            0,
         ))?;
         let file = BlockFile::in_memory(facts.seed());
         let alloc = BlockAllocator::new(options.file_bytes);
@@ -125,7 +126,10 @@ impl PageStore {
     /// [`StorageError::NotObjectBacked`] for a disk-only store; the first
     /// upload's fault.
     pub async fn upload_all(&self) -> StorageResult<()> {
-        self.object()?;
+        let object = self.object()?;
+        // Somebody waits: a shared storage shard sends the files at once.
+        object.hurry.set(true);
+        let _calm = crate::upload::Release(&object.hurry);
         loop {
             self.upload().await?;
             if self.unuploaded_for().is_none() {
