@@ -200,7 +200,8 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   node) keeps its pages in an S3-compatible object store, the disk caching
   them (RFC 0070 phase 3): settle rounds flag the pages they write, `upload`
   reassembles the flagged ones into the object store's own linear hash
-  (128 KiB pages, files of `[32 KiB header][pages]`), and the remote
+  (128 KiB pages, files of `[roots block][32 KiB header][pages]` under
+  `storage/<n>/`), and the remote
   directories ride the disk's headers; the mode is fixed in the
   `MANIFEST`. Past the compaction ceiling the least recently used uploaded
   pages leave the disk (phase 4): a read of one goes to the object store, a
@@ -243,7 +244,10 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   block, each data shard walking from its root through its own read
   handles (`open_shards`; storage shards reconstruct in parallel,
   `open_shards_with`); compaction is an evacuation the storage shard
-  directs. An object store still takes one storage shard per data shard.
+  directs. With an object store, a **remote thread** per storage shard
+  assembles its data shards' uploads into one file — their sections
+  reserved, built at their bases, PUT together — headed by a roots block
+  of its own, and compacts by the data shards' reports.
   A record lives in shard `seahash(owner bytes) % P` (`core::placement`).
 - **wavedb-net** — hand-rolled minimal HTTP/1.1 POST as a **dumb tunnel**: no headers,
   cookies, or status semantics as API; the body is a self-contained
