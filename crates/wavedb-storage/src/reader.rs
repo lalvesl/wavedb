@@ -15,7 +15,7 @@
 //!   ([`hold`](BlockFile::hold)) until the batch carrying it is durable
 //!   ([`landed`](BlockFile::landed)) — by then they are in the file.
 //!
-//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
+//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
