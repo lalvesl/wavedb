@@ -27,7 +27,7 @@
 //! channels. The thread ends once every data shard closed its link and what
 //! they wrote is durable.
 //!
-//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
+//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
 
 use std::collections::BTreeSet;
 use std::fs::File;
