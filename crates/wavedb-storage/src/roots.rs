@@ -16,7 +16,11 @@
 //! its own first, so a block holding one is never taken for the other. 256
 //! data shards' roots are 2 KiB: a roots block always fits its one block.
 //!
-//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards-WIP.md
+//! The object store's files open with one too (§8): there it also says
+//! where the storage shard's chain of files stands — the oldest file not
+//! deleted, and the remote end once the file is in.
+//!
+//! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
 
 use wavedb_core::wire::{WaveWire, from_wire_checked, to_wire_checked};
 
@@ -42,6 +46,11 @@ pub struct Roots {
     /// Per data shard, by its position in the storage shard: the newest
     /// header ending one of its batches.
     pub by_shard: Vec<u64>,
+    /// In the object store: the oldest file not deleted when this one was
+    /// written — it may lag behind the truth, never run ahead of it — and
+    /// the remote end once this file is in. Zero on disk.
+    pub start: u64,
+    pub end: u64,
 }
 
 impl Roots {
@@ -53,7 +62,18 @@ impl Roots {
             at,
             prev,
             by_shard,
+            start: 0,
+            end: 0,
         }
+    }
+
+    /// The same, heading an object store's file: with where its chain of
+    /// files stands.
+    #[must_use]
+    pub const fn with_chain(mut self, start: u64, end: u64) -> Self {
+        self.start = start;
+        self.end = end;
+        self
     }
 
     /// The data shard at `position`'s root, if it ever ended a batch.
