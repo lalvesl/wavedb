@@ -1,0 +1,126 @@
+
+{
+  "schema": "wavedb-bench/2",
+  "digest": "5c0ceeb0e5609510",
+  "timestamp": "2026-10-17T09-26Z",
+  "key": {
+    "system": "wavedb",
+    "system_version": "0.1.0",
+    "variant": "single",
+    "durability": "relaxed",
+    "workload": "micro",
+    "tier": "small",
+    "dataset_revision": 1,
+    "generator_seed": 42,
+    "consumers": 1,
+    "host_key": "intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-btrfs-104a",
+    "cage_revision": 1,
+    "wavedb_git_sha": "4590276",
+    "seeded": false
+  },
+  "provenance": {
+    "dirty": false,
+    "caged": true,
+    "forced": false
+  },
+  "bracket": "embedded",
+  "compression": "zstd (per-type dictionaries)",
+  "retains_history": true,
+  "live_records": 200000,
+  "logical_bytes": 50800000,
+  "materialise_ms": 0,
+  "seed_path": "",
+  "settings": {
+    "mode": "PageStore (in-process, one thread)",
+    "threads": "1 consumer (everything there)",
+    "barrier": "standard writes: a settle per elapsed 1s",
+    "block_size": "4096"
+  },
+  "phases": [
+    {
+      "name": "insert",
+      "count": 200000,
+      "wall_ns": 216946591400,
+      "total_ns": 138605747410,
+      "p50_ns": 685486,
+      "p95_ns": 914983,
+      "p99_ns": 1255727,
+      "max_ns": 4295767,
+      "bytes_written": 1528274944,
+      "read_bytes": 634880,
+      "rchar": 108953705,
+      "ops_per_sec": 921.886
+    },
+    {
+      "name": "read_hot",
+      "count": 50000,
+      "wall_ns": 30359042438,
+      "total_ns": 30212829020,
+      "p50_ns": 2501,
+      "p95_ns": 1527099,
+      "p99_ns": 1603782,
+      "max_ns": 3448503,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 635793534,
+      "ops_per_sec": 1646.956
+    },
+    {
+      "name": "read_cold",
+      "count": 50000,
+      "wall_ns": 29587941042,
+      "total_ns": 29525348847,
+      "p50_ns": 2314,
+      "p95_ns": 1505459,
+      "p99_ns": 1589682,
+      "max_ns": 4044443,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 630042751,
+      "ops_per_sec": 1689.878
+    },
+    {
+      "name": "update",
+      "count": 50000,
+      "wall_ns": 189836062581,
+      "total_ns": 78924349778,
+      "p50_ns": 1814639,
+      "p95_ns": 2654332,
+      "p99_ns": 3605217,
+      "max_ns": 5764744,
+      "bytes_written": 1422258176,
+      "read_bytes": 98304,
+      "rchar": 1583259776,
+      "ops_per_sec": 263.385
+    }
+  ],
+  "footprints": [
+    {
+      "point": "hot",
+      "apparent_bytes": 2949312569,
+      "allocated_bytes": 2949316608,
+      "log_bytes": 0,
+      "files": 2
+    },
+    {
+      "point": "settled",
+      "apparent_bytes": 2956562489,
+      "allocated_bytes": 2956566528,
+      "log_bytes": 0,
+      "files": 2
+    },
+    {
+      "point": "compacted",
+      "apparent_bytes": 28143673,
+      "allocated_bytes": 28147712,
+      "log_bytes": 0,
+      "files": 2
+    }
+  ],
+  "notes": [
+    "Every collection op is one apply batch. The durable row writes through the `_durable` operations, one fsync per batch; the relaxed row through the standard ones, one fsync per elapsed window (RFC 0072), the counterpart of the others' relaxed knobs.",
+    "Retains every superseded version; the other systems retain none. Read the update row beside the footprint, never alone.",
+    "Barrier count is not recorded: PageStore exposes no public IoCounts accessor and RFC 0060 forbids changing a shipped crate.",
+    "Measured on the RFC 0065 producer/consumer harness: `wall_ns` is the phase's wall clock, `total_ns` is the sum of the timed windows, and the percentiles are pooled across every consumer. Read counters are absent (phase 4)."
+  ]
+}
