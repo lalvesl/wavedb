@@ -50,6 +50,12 @@ scripts/browser_demo.sh    # M5 exit: live node + browser demo (starts the
                            # contact-book example node, handles chromedriver)
 scripts/registry_size.sh   # per-struct wasm cost of the exposure match
                            # (examples/registry-size at widths 1/16/64)
+# settle-round probe: one line per round naming what its window holds
+# (wavedb-storage `probe` feature; a probe build records no bench rows)
+WAVEDB_PROBE=/tmp/probe.log cargo test -p wavedb-storage --features probe --test durability
+(cd benches && cargo build --release --features probe --bins && \
+  WAVEDB_PROBE=/tmp/probe.log target/release/bench --only wavedb --workload micro --tier smoke --force)
+scripts/probe_summary.sh /tmp/probe.log 1000 4250545245450001=bptree   # KiB per round by component
 ```
 
 Toolchain is pinned by `rust-toolchain.toml` (1.99.0, edition 2024, includes
