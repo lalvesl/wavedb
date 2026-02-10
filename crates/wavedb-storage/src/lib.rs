@@ -41,6 +41,8 @@ pub mod page;
 pub mod page_cache;
 pub mod page_store;
 mod plan;
+#[cfg(feature = "probe")]
+mod probe;
 mod read_through;
 mod reader;
 mod record_cache;
