@@ -28,6 +28,12 @@ futures.workspace = true
 # its pages through it.
 wavedb-platform.workspace = true
 
+[features]
+# The settle-round probe (`src/probe.rs`): one line per round naming what
+# its window holds, for chasing an issue in a test or a bench. Off by
+# default; a build without it compiles none of it.
+probe = []
+
 [dev-dependencies]
 # The object-store tests run against a local versitygw.
 wavedb-platform = { workspace = true, features = ["test-server"] }
