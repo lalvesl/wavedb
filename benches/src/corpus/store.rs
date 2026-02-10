@@ -87,9 +87,18 @@ impl Corpus {
     /// that is not refreshing never reaches here for a row it already has,
     /// because the planner filtered it out first.
     ///
+    /// A build with the `probe` feature records nothing: its rows wrote a
+    /// log line per settle round inside their timed windows, which makes
+    /// them a diagnosis, not a measurement.
+    ///
     /// # Errors
-    /// Any filesystem fault along the way.
+    /// Any filesystem fault along the way; a `probe` build.
     pub fn store(&self, record: &RowRecord) -> Result<PathBuf, String> {
+        if cfg!(feature = "probe") {
+            return Err("a `probe` build records no rows: its timings carry \
+                        the probe's own writes"
+                .into());
+        }
         let path = self.path_of(&record.key);
         let dir = path.parent().ok_or("row path has no directory")?;
         std::fs::create_dir_all(dir)
