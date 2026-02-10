@@ -168,6 +168,14 @@ impl PageStore {
         }
         let sizes: Vec<u64> =
             targets.iter().map(|t| size_of(&plans, t)).collect();
+        #[cfg(feature = "probe")]
+        crate::probe::round(
+            self.position,
+            &self.types,
+            &plans,
+            &targets,
+            &sizes,
+        );
         let total: u64 = sizes.iter().sum();
         let window = match total {
             0 => None,
