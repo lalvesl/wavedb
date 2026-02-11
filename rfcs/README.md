@@ -644,6 +644,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0071](0071-data-files-by-address.md) | Data files named by address (append-only files, compaction forward; supersedes 0069's placement) | Implemented |
 | [0072](0072-the-settle-is-the-durability-point.md) | The settle is the durability point (no journal; `_durable` operations; one header for disk and object store) | Implemented |
 | [0073](0073-data-shards-and-storage-shards.md) | Data shards and storage shards (P data shards write through S storage shards: one write, one `fsync`, one PUT per storage shard) | Implemented |
+| [0074](0074-extendible-hashing-PLANNED.md) | Extendible hashing for the page directories (a page over target splits at once; ℓ and a 10-bit size code in the descriptor) | Planned |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
