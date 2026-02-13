@@ -190,8 +190,13 @@ No format version is bumped and nothing is migrated, per policy.
 - **Smaller leaves.** Shrinking the leaf toward a segment's size and pinning
   the root's id would re-derive the chain and its sparse index, which already
   exist and are tested.
-- **Every index a list.** This answers `by_f` without per-anchor reads, but it
-  makes every declared index a full copy of the records, against RFC 0054's
-  default. Duplication stays opt-in, and `list` is how a type opts in.
+- **Every index a list, by the engine.** This answers `by_f` without
+  per-anchor reads, but as a default it would make every declared index a full
+  copy of the records, against RFC 0054. It is not lost, only left to the
+  developer: since both kinds are one chain, swapping `pivot(f)` for
+  `list(f)` on any ordering, or on all of them, is a one-word change with the
+  same `by_f` surface. It trades a copy of every record per declaration for
+  reads with no `get`, and because the declaration folds into the
+  `STRUCT_HASH`, the swap yields a new type.
 - **Pivot and list coexisting on one ordering (today).** The pivot then
   costs writes and answers nothing the list cannot answer faster.
