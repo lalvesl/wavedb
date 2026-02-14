@@ -64,6 +64,7 @@ mod roots;
 mod roots_find;
 mod settle;
 pub mod shard_set;
+pub mod size_code;
 mod storage_compact;
 mod storage_open;
 mod storage_shard;
