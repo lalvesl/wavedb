@@ -19,7 +19,9 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use crate::block::{BLOCK_SIZE, BlockDescriptor};
+use crate::block::{
+    BLOCK_SIZE, BlockDescriptor, MAX_COUNT, MAX_PAGE_BYTES, round_count,
+};
 use crate::dictionary::DictState;
 use crate::directory::Directory;
 use crate::error::{StorageError, StorageResult};
@@ -67,9 +69,15 @@ impl SlotPlan {
     }
 }
 
-/// Blocks a serialised image occupies (an empty image occupies none).
+/// Blocks a serialised image occupies (an empty image occupies none),
+/// rounded up to a count its descriptor can carry.
 pub const fn blocks_of(bytes: &[u8]) -> u64 {
-    bytes.len().div_ceil(BLOCK_SIZE) as u64
+    let blocks = bytes.len().div_ceil(BLOCK_SIZE) as u64;
+    match round_count(blocks) {
+        Some(rounded) => rounded,
+        // Past the largest page: refused by `image_of` before it is placed.
+        None => MAX_COUNT,
+    }
 }
 
 /// Blocks `bucket` will occupy once this round lands: its planned image when
@@ -133,10 +141,7 @@ impl PageStore {
 
         let mut pages = BTreeMap::new();
         for (bucket, page) in &staged {
-            pages.insert(
-                *bucket,
-                page.to_bytes(dict.dictionary(), dict.enabled())?,
-            );
+            pages.insert(*bucket, image_of(page, &dict)?);
         }
         self.plan_splits(slot, &mut dir, &dict, &mut staged, &mut pages)?;
 
@@ -206,19 +211,23 @@ impl PageStore {
                 }
             }
             let target = dir.push_bucket(BlockDescriptor::EMPTY);
-            pages.insert(
-                source,
-                keep.to_bytes(dict.dictionary(), dict.enabled())?,
-            );
-            pages.insert(
-                target,
-                moved.to_bytes(dict.dictionary(), dict.enabled())?,
-            );
+            pages.insert(source, image_of(&keep, dict)?);
+            pages.insert(target, image_of(&moved, dict)?);
             staged.insert(source, keep);
             staged.insert(target, moved);
         }
         Ok(())
     }
+}
+
+/// `page` serialised — refused, typed, past the largest page a descriptor
+/// can size ([`MAX_PAGE_BYTES`]), never truncated.
+fn image_of(page: &SlotPage, dict: &DictState) -> StorageResult<Vec<u8>> {
+    let bytes = page.to_bytes(dict.dictionary(), dict.enabled())?;
+    if bytes.len() as u64 > MAX_PAGE_BYTES {
+        return Err(StorageError::PageTooLarge(bytes.len() as u64));
+    }
+    Ok(bytes)
 }
 
 /// The staged page for `bucket`, read from its settled run on first touch.
