@@ -39,7 +39,8 @@ pub enum StorageError {
     #[error("corrupt {0}")]
     Corrupt(&'static str),
     /// A record larger than the record cache can hold
-    /// (`record_log::MAX_RECORD`), refused before anything is committed.
+    /// (`record_log::MAX_RECORD`) or than a page can carry (RFC 0074),
+    /// refused before anything is committed.
     #[error("a record of {0} bytes is too large to commit")]
     RecordTooLarge(usize),
     /// A write named a `STRUCT_HASH` with no registered [`StructStorage`] slot
@@ -89,6 +90,11 @@ pub enum StorageError {
     /// its prefix ([`convert`](crate::convert)): never written over.
     #[error("the object store prefix already holds a database")]
     ObjectStoreInUse,
+    /// A page grew past the largest a descriptor can size
+    /// ([`MAX_PAGE_BYTES`](crate::block::MAX_PAGE_BYTES)): refused before it
+    /// is placed, never truncated.
+    #[error("a page of {0} bytes is past the largest page")]
+    PageTooLarge(u64),
     /// A core/codec fault surfaced inside the engine.
     #[error(transparent)]
     Core(#[from] wavedb_core::Error),
