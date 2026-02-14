@@ -11,10 +11,20 @@
 use wavedb_core::{Id, Result as CoreResult, Store, Write};
 
 use crate::barrier::Barrier;
+use crate::block::{BLOCK_SIZE, MAX_PAGE_BYTES};
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::PageStore;
 use crate::record_log::MAX_RECORD;
 use crate::struct_storage::TypeSlot;
+
+/// The largest record a batch may commit: one the record cache can hold that
+/// still fits a page of its own, a block left for the page's envelope
+/// (RFC 0074). A page takes its bytes uncompressed when zstd would not
+/// shrink them, so the envelope is all a lone record adds.
+const MAX_COMMIT: usize = {
+    let page = (MAX_PAGE_BYTES - BLOCK_SIZE as u64) as usize;
+    if page < MAX_RECORD { page } else { MAX_RECORD }
+};
 
 impl PageStore {
     /// Take batch barriers on `barrier`'s helper thread from now on, instead
@@ -118,7 +128,7 @@ impl PageStore {
     pub(crate) fn route_batch(&self, batch: &[Write]) -> StorageResult<()> {
         for w in batch {
             let sh = match w {
-                Write::Put(_, bytes) if bytes.len() > MAX_RECORD => {
+                Write::Put(_, bytes) if bytes.len() > MAX_COMMIT => {
                     return Err(StorageError::RecordTooLarge(bytes.len()));
                 }
                 Write::Put(_, bytes) => struct_hash_of(bytes)?,
