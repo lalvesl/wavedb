@@ -6,7 +6,7 @@
     index; B+trees opt-in);
   - [RFC 0051](0051-ordered-record-lists.md) (declared lists);
   - [RFC 0054](0054-no-duplication-by-default.md) (pointer chains);
-  - [RFC 0074](0074-extendible-hashing-PLANNED.md) (a page per segment).
+  - [RFC 0074](0074-extendible-hashing-WIP.md) (a page per segment).
 - **Revises:**
   - [RFC 0011](0011-bptree-index-and-collections.md) (the B+tree's last users);
   - [RFC 0056](0056-fuzzy-string-search-WIP.md) (the posting structure).
