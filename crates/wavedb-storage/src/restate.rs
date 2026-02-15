@@ -7,9 +7,13 @@
 use std::collections::BTreeMap;
 
 use crate::block::BlockDescriptor;
-use crate::header::{ENTRY_BYTES, ITEM_BYTES, NO_FILE, Rotation, TypeEntry};
+use crate::directory::is_bucket;
+use crate::header::{
+    ENTRY_BYTES, ITEM_BYTES, NO_FILE, Rotation, TypeEntry, depth_of,
+};
 
-/// A type's directory as a header names it, and restates from. Every
+/// A type's directory as a header names it, and restates from — every
+/// entry, aliases included; a header names its buckets only. Every
 /// registered type has one, a type never written with no slots: it is
 /// named too, in its turn.
 pub struct TypeView<'a> {
@@ -23,8 +27,9 @@ pub struct TypeView<'a> {
 /// `entries`: the type restated longest ago first — one never restated
 /// before any, the smaller directory first on a tie, so the empty ones take
 /// an entry and no item and the first header names them all — from its
-/// rotating cursor, then the next, until the room runs out or every type had
-/// its turn. Returns the bytes left.
+/// rotating cursor over the entries, naming each page at its bucket, then
+/// the next, until the room runs out or every type had its turn. Returns
+/// the bytes left.
 ///
 /// By restatement, not by mention: a collection's `Pivot` and its B+tree
 /// nodes keep their ids, so the same few buckets of a type change in every
@@ -44,46 +49,52 @@ pub fn restate(
         (shifted.map_or(0, |at| at.saturating_add(1)), v.slots.len())
     });
     for view in order {
-        let buckets = view.slots.len();
+        let len = view.slots.len();
         let present = entries
             .iter()
             .position(|e| e.struct_hash == view.struct_hash);
         let entry = if present.is_some() { 0 } else { ENTRY_BYTES };
-        let least = entry + if buckets > 0 { ITEM_BYTES } else { 0 };
+        let least = entry + if len > 0 { ITEM_BYTES } else { 0 };
         if least == 0 || spare < least {
             continue;
         }
-        let n = ((spare - entry) / ITEM_BYTES).min(buckets);
+        let room = (spare - entry) / ITEM_BYTES;
         let rotation = rotations.entry(view.struct_hash).or_default();
         let idx = present.unwrap_or_else(|| {
             entries.push(TypeEntry {
                 struct_hash: view.struct_hash,
-                buckets: buckets as u32,
+                depth: depth_of(view.slots),
                 last: rotation.last,
                 dict: view.dict,
                 changed: Vec::new(),
             });
             entries.len() - 1
         });
-        if buckets > 0 {
+        let mut named = 0;
+        if len > 0 {
             if rotation.began.is_none() {
                 rotation.began = Some(at);
             }
-            for k in 0..n {
-                let bucket = (rotation.shift + k) % buckets;
-                entries[idx]
-                    .changed
-                    .push((bucket as u32, view.slots[bucket].raw()));
+            // A whole pass over the entries names every page once.
+            let mut steps = 0;
+            while named < room && steps < len {
+                let entry = (rotation.shift + steps) % len;
+                steps += 1;
+                let desc = view.slots[entry];
+                if is_bucket(entry, desc) {
+                    entries[idx].changed.push((entry as u32, desc.raw()));
+                    named += 1;
+                }
             }
-            if rotation.shift + n >= buckets {
+            if rotation.shift + steps >= len {
                 // A whole rotation: every bucket named since it began.
                 rotation.covered = rotation.began;
                 rotation.began = Some(at);
             }
-            rotation.shift = (rotation.shift + n) % buckets;
+            rotation.shift = (rotation.shift + steps) % len;
         }
         rotation.shifted = Some(at);
-        spare -= entry + n * ITEM_BYTES;
+        spare -= entry + named * ITEM_BYTES;
     }
     spare
 }
@@ -121,11 +132,14 @@ mod tests {
 
     use super::{TypeView, horizon, restate};
     use crate::block::BlockDescriptor;
+    use crate::directory::Directory;
     use crate::header::{Rotation, TypeEntry};
 
+    /// A directory of `n` pages (`n` a power of two), every one placed.
     fn dir(n: usize) -> Vec<BlockDescriptor> {
+        let depth = n.trailing_zeros() as u8;
         (0..n)
-            .map(|b| BlockDescriptor::new(b as u64 + 1, 1))
+            .map(|b| BlockDescriptor::new(b as u64 + 1, 1).with_depth(depth))
             .collect()
     }
 
@@ -141,7 +155,7 @@ mod tests {
     /// is then where that rotation began, and rises with the next one.
     #[test]
     fn the_horizon_rises_as_rotations_complete() {
-        let (a, b) = (dir(100), dir(10));
+        let (a, b) = (dir(128), dir(8));
         let views = [view(1, &a), view(2, &b)];
         let mut rotations: BTreeMap<u64, Rotation> = BTreeMap::new();
         let room = 12 * 40; // forty items a header, about
@@ -161,5 +175,23 @@ mod tests {
         let h = horizon(&views, &rotations, 0);
         assert!(h > 0, "both came round at least once: {h}");
         assert!(rotations[&2].covered.is_some());
+    }
+
+    /// A rotation names every page once, at its bucket, and no alias.
+    #[test]
+    fn a_rotation_names_buckets_not_aliases() {
+        let mut d = Directory::new([1, 2, 3, 4]);
+        for bucket in [0, 0, 0, 1] {
+            d.split(bucket);
+        }
+        let views = [view(1, d.slots())];
+        let mut rotations = BTreeMap::new();
+        let mut entries = Vec::new();
+        restate(&mut entries, 32 * 1024, &views, &mut rotations, 0);
+        let named: Vec<u32> = entries[0].changed.iter().map(|c| c.0).collect();
+        let buckets: Vec<u32> = d.buckets().map(|(c, _)| c as u32).collect();
+        assert_eq!(named, buckets);
+        assert_eq!(entries[0].depth, Some(d.depth()));
+        assert!(rotations[&1].covered.is_some(), "one header, whole round");
     }
 }
