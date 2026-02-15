@@ -18,7 +18,7 @@ use crate::directory::Directory;
 use crate::disk_chain::{DiskChain, Touched};
 use crate::error::{StorageError, StorageResult};
 use crate::header::{
-    ENTRY_BYTES, Header, ITEM_BYTES, NO_FILE, Rotation, TypeEntry,
+    ENTRY_BYTES, Header, ITEM_BYTES, NO_FILE, Rotation, TypeEntry, depth_of,
 };
 use crate::page_store::PageStore;
 use crate::plan::SlotPlan;
@@ -53,10 +53,10 @@ impl PageStore {
         for (idx, slot) in self.types.iter().enumerate() {
             let touched = unrecorded.slots.entry(idx).or_default();
             if let Some(dir) = slot.directory().borrow().as_ref() {
-                touched.disk.extend(0..dir.len());
+                touched.disk.extend(dir.buckets().map(|(c, _)| c));
             }
             if let Some(dir) = slot.remote_directory().borrow().as_ref() {
-                touched.remote.extend(0..dir.len());
+                touched.remote.extend(dir.buckets().map(|(c, _)| c));
             }
             touched.dict = true;
             touched.remote_dict = self.object.is_some();
@@ -337,7 +337,7 @@ fn record(
     *dict = false;
     entries.push(TypeEntry {
         struct_hash: view.struct_hash,
-        buckets: view.slots.len() as u32,
+        depth: depth_of(view.slots),
         last: rotations.get(&view.struct_hash).map_or(NO_FILE, |r| r.last),
         dict: view.dict,
         changed,
