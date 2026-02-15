@@ -1,5 +1,5 @@
 //! `wavedb-storage` — the per-node engine: block manager, per-`STRUCT_HASH`
-//! page directory (linear hashing), page format, dictionaries, and the settle
+//! page directory (extendible hashing), page format, dictionaries, and the settle
 //! pipeline whose batches are the durability point (RFC 0072). See
 //! `crates/wavedb-storage/README.md` for the design.
 
@@ -65,6 +65,7 @@ mod roots_find;
 mod settle;
 pub mod shard_set;
 pub mod size_code;
+mod split;
 mod storage_compact;
 mod storage_open;
 mod storage_shard;
@@ -86,7 +87,7 @@ pub use block_file::{BlockFile, IoCounts};
 pub use compact::{Compacted, Compacting, Space};
 pub use convert::{Backend, convert};
 pub use dictionary::{DictState, Dictionary};
-pub use directory::{Directory, bucket_index, hash_of};
+pub use directory::{Directory, hash_of};
 pub use error::{StorageError, StorageResult};
 pub use manifest::{MANIFEST, Manifest};
 pub use page::SlotPage;
