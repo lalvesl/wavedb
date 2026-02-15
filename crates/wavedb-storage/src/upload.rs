@@ -148,7 +148,7 @@ impl PageStore {
         let mut dicts = Vec::with_capacity(work.len());
         for w in &mut work {
             w.rebuild()?;
-            let pages = self.split_remote(w).await?;
+            let pages = self.split_remote(w)?;
             let slot = &self.types[w.idx];
             let dict = slot.dictionary().borrow();
             let len = dict.dictionary().len();
@@ -276,7 +276,7 @@ impl PageStore {
             };
             let (mut flagged, mut pages) = (Vec::new(), Vec::new());
             let dict = slot.dictionary().borrow();
-            for (bucket, &desc) in disk.slots().iter().enumerate() {
+            for (bucket, desc) in disk.buckets() {
                 if !desc.pending_upload() {
                     continue;
                 }
