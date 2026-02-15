@@ -198,7 +198,13 @@ impl PageStore {
             if t.remote.is_empty() {
                 continue;
             }
-            let evicted = vec![BlockDescriptor::EVICTED; t.remote.len()];
+            // The disk's directory takes the object store's shape: every
+            // page evicted, at the depth it has there.
+            let evicted = t
+                .remote
+                .iter()
+                .map(|d| BlockDescriptor::EVICTED.with_depth(d.depth()))
+                .collect();
             let disk = Directory::from_slots(evicted, self.seed);
             *slot.remote_directory().borrow_mut() =
                 Some(Directory::from_slots(t.remote, self.seed));
@@ -283,8 +289,12 @@ mod tests {
     }
 
     /// A descriptor of a one-block page at the head of file `file`.
+    /// A page of one block at the head of file `file`, one of the two
+    /// buckets of a depth-1 directory.
     fn page(file: u64) -> u64 {
-        BlockDescriptor::new(file * FILE_BLOCKS + FIRST_PAGE, 1).raw()
+        BlockDescriptor::new(file * FILE_BLOCKS + FIRST_PAGE, 1)
+            .with_depth(1)
+            .raw()
     }
 
     /// A header for file `file`, following file `prev`'s, naming bucket 0 of
@@ -300,7 +310,7 @@ mod tests {
             end_of_batch,
             types: vec![TypeEntry {
                 struct_hash: SH,
-                buckets: 2,
+                depth: Some(1),
                 last: prev,
                 dict: None,
                 changed: vec![(0, page(file))],
@@ -386,7 +396,7 @@ mod tests {
         let mut named = header(3, Some(2), true);
         named.types.push(TypeEntry {
             struct_hash: LATE,
-            buckets: 1,
+            depth: Some(1),
             last: NO_FILE,
             dict: None,
             changed: vec![(0, page(3))],
