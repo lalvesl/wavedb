@@ -27,6 +27,7 @@ use std::path::Path;
 use futures::executor::block_on;
 
 use crate::block::BlockDescriptor;
+use crate::directory::Directory;
 use crate::error::{StorageError, StorageResult};
 use crate::manifest;
 use crate::page_store::{PageStore, StoreOptions};
@@ -146,8 +147,8 @@ impl PageStore {
         for slot in &self.types {
             let mut dir = slot.directory().borrow_mut();
             let Some(dir) = dir.as_mut() else { continue };
-            for bucket in 0..dir.len() {
-                let desc = dir.descriptor(bucket);
+            let buckets: Vec<_> = dir.buckets().collect();
+            for (bucket, desc) in buckets {
                 if desc.is_allocated() {
                     dir.set_descriptor(
                         bucket,
@@ -165,7 +166,7 @@ impl PageStore {
                 .directory()
                 .borrow()
                 .iter()
-                .flat_map(|dir| dir.slots().iter().enumerate())
+                .flat_map(Directory::buckets)
                 .filter(|(_, desc)| desc.is_evicted())
                 .map(|(bucket, _)| bucket)
                 .collect();
