@@ -236,7 +236,7 @@ impl PageStore {
                     .remote_directory()
                     .borrow()
                     .iter()
-                    .any(|dir| dir.slots().iter().any(|&d| left(d)))
+                    .any(|dir| dir.buckets().any(|(_, d)| left(d)))
         })
     }
 
@@ -261,7 +261,7 @@ impl PageStore {
         let move_dict =
             dict.is_allocated() && moving.contains(&file_of(dict.start()));
         if let Some(dir) = slot.remote_directory().borrow().as_ref() {
-            for (bucket, desc) in dir.slots().iter().enumerate() {
+            for (bucket, desc) in dir.buckets() {
                 if *budget == 0 {
                     break;
                 }
@@ -328,8 +328,12 @@ mod tests {
     }
 
     /// A one-block page at the head of file `file`.
+    /// A page of one block at the head of file `file`, one of the two
+    /// buckets of a depth-1 directory.
     fn page(file: u64) -> u64 {
-        BlockDescriptor::new(file * FILE_BLOCKS + FIRST_PAGE, 1).raw()
+        BlockDescriptor::new(file * FILE_BLOCKS + FIRST_PAGE, 1)
+            .with_depth(1)
+            .raw()
     }
 
     /// PUT file `file`, a whole batch of its own, naming `changed` for a
@@ -349,7 +353,7 @@ mod tests {
             end_of_batch: true,
             types: vec![TypeEntry {
                 struct_hash: SH,
-                buckets: 2,
+                depth: Some(1),
                 last: last.map_or(NO_FILE, at),
                 dict: None,
                 changed,
