@@ -111,7 +111,7 @@ pub(crate) struct TypeSlot {
     resident: bool,
     dir: StructDirectory,
     /// The object store's directory for this type (RFC 0070 §2): 128 KiB
-    /// pages, a linear hash of its own. `None` until the first upload.
+    /// pages, an extendible hash of its own. `None` until the first upload.
     remote: StructDirectory,
     /// Where the object store's copy of the dictionary is — the remote
     /// descriptor a header names.
