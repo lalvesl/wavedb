@@ -173,7 +173,7 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
 - **wavedb-storage** — the node engine behind `Store`: per shard, **data files**
   of 4 KiB blocks named by the block each starts at (16 hex digits, found by
   listing the directory; writing only appends, a file closes at
-  `StoreOptions::file_bytes`, 10 GiB — RFC 0071), per-STRUCT_HASH linear-hashed page directories, `SlotPage`
+  `StoreOptions::file_bytes`, 10 GiB — RFC 0071), per-STRUCT_HASH extendible-hashed page directories (a page over target splits in the round that rewrites it; RFC 0074), `SlotPage`
   (checked-wire envelope, per-type zstd dictionaries with version = prefix length),
   **no journal** (RFC 0072): `apply` commits a batch to the record cache
   and returns; a **settle cycle** (every 200 ms on a node — a tick with
@@ -205,7 +205,7 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   A database created with `StoreOptions::remote` (`Server::object_store` on a
   node) keeps its pages in an S3-compatible object store, the disk caching
   them (RFC 0070 phase 3): settle rounds flag the pages they write, `upload`
-  reassembles the flagged ones into the object store's own linear hash
+  reassembles the flagged ones into the object store's own extendible hash
   (128 KiB pages, files of `[roots block][32 KiB header][pages]` under
   `storage/<n>/`), and the remote
   directories ride the disk's headers; the mode is fixed in the
