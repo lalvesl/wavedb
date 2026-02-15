@@ -116,7 +116,7 @@ impl PageStore {
             for (idx, slot) in evictable {
                 let dir = slot.directory().borrow();
                 let Some(dir) = dir.as_ref() else { continue };
-                for (bucket, desc) in dir.slots().iter().enumerate() {
+                for (bucket, desc) in dir.buckets() {
                     if desc.is_allocated() && !desc.pending_upload() {
                         cold.push((heat.stamp(idx, bucket), idx, bucket));
                     }
@@ -205,7 +205,7 @@ impl PageStore {
             let remote = remote.as_ref().ok_or(StorageError::Corrupt(
                 "an evicted bucket with no remote directory",
             ))?;
-            sharing(disk.len() as u64, bucket as u64, remote.len() as u64)
+            sharing(disk, bucket, remote)
                 .into_iter()
                 .map(|s| remote.descriptor(s))
                 .filter(|d| d.is_allocated())
