@@ -1,7 +1,7 @@
 # RFC 0074 — Extendible hashing for the page directories
 
-- **Status:** In progress (opened 2026-10-17; phase 1, the descriptor, landed
-  2026-10-18)
+- **Status:** In progress (opened 2026-10-17; phases 1–4 landed 2026-10-18;
+  the measure waits for RFC 0075, and both are measured together)
 - **Revises:** [RFC 0049](0049-elastic-pages-and-load-driven-splits.md) (the
   split's trigger and its pacing; elastic pages stay),
   [RFC 0018](0018-storage-engine.md) (the directory's addressing)
@@ -130,7 +130,9 @@ Some pages never split:
   attacker cannot aim at this.
 - A page whose split would double the directory waits while
   `dir.len() ≥ DIR_RATIO × pages`, with `DIR_RATIO = 16`. It stays over
-  target this round, as RFC 0049 already allowed.
+  target, as RFC 0049 already allowed — unless the round's other splits
+  raise the page count enough, in which case it is tried again before the
+  round ends.
 
 **Why the ratio.** A directory indexed by the low bits is as long as its
 deepest page needs, whatever the volume of data. With records near the target
@@ -197,7 +199,8 @@ A doubling would change 2^d entries at once, and naming them all would
 overflow the 32 KiB header. Nothing needs naming, though, because ℓ travels in
 the descriptor:
 
-- `TypeEntry.buckets: u32` becomes `depth: u8`, the type's d.
+- `TypeEntry.buckets: u32` becomes `depth: Option<u8>`, the type's d (`None`
+  for a type with no directory yet).
 - `changed` items stay `(u32, u64)`, but name **buckets** (canonical entries),
   never aliases.
   - A round names the buckets it rewrote, both halves of every split included.
