@@ -282,14 +282,15 @@ impl PageStore {
         self.cache.borrow().footprint()
     }
 
-    /// Bucket count of one type's directory (`0` while nothing settled).
+    /// Bucket (page) count of one type's directory (`0` while nothing
+    /// settled) — pages, not entries: aliases count once.
     #[must_use]
     pub fn bucket_count(&self, struct_hash: u64) -> usize {
         self.slot_of(struct_hash).map_or(0, |slot| {
             slot.directory()
                 .borrow_mut()
                 .as_ref()
-                .map_or(0, Directory::len)
+                .map_or(0, Directory::pages)
         })
     }
 
