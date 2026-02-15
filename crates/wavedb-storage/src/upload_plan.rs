@@ -1,14 +1,16 @@
 //! An upload's middle ([RFC 0070] §5): which remote pages share records with
 //! the flagged disk pages, and those pages rebuilt — the old one, minus every
 //! record of a flagged disk bucket, plus the flagged pages' records — then
-//! split while the bucket whose turn it is runs over target.
+//! split while over target ([RFC 0074]).
 //!
-//! The disk and the object store each have a linear hash of their own. A
-//! bucket's **level** is how many low hash bits route to it, so disk bucket
-//! `d` and remote bucket `s` can hold the same record exactly when
-//! `d ≡ s (mod 2^min(level(d), level(s)))` — arithmetic, no lookup.
+//! The disk and the object store each have an extendible hash of their
+//! own. A page's **depth** is how many low hash bits its records share, so
+//! disk bucket `d` and a remote page can hold the same record exactly when
+//! the remote page has an entry `j ≡ d (mod 2^min(depth(d), D))`, `D` the
+//! remote directory's depth — arithmetic, no lookup.
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
+//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing-WIP.md
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,40 +21,26 @@ use crate::directory::Directory;
 use crate::error::{StorageError, StorageResult};
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
-use crate::plan::blocks_of;
+use crate::plan::image_of;
+use crate::split::split_staged;
 
 /// Blocks a remote page should hold (128 KiB): a target, as on disk — a
-/// bucket over it is split when its turn comes round (RFC 0049).
+/// page over it splits in the upload that rewrites it.
 pub const REMOTE_TARGET_BLOCKS: u64 = 32;
 
-/// Splits one upload may perform per type.
-const MAX_REMOTE_SPLITS: usize = 64;
-
-/// The low hash bits bucket `bucket` of a `len`-bucket linear hash routes by.
-pub const fn level_of(len: u64, bucket: u64) -> u32 {
-    let level = len.ilog2();
-    let base = 1u64 << level;
-    if bucket < len - base || bucket >= base {
-        level + 1
-    } else {
-        level
-    }
-}
-
-/// The buckets of a `remote_len`-bucket directory that can share records
-/// with bucket `disk` of a `disk_len`-bucket one.
-pub fn sharing(disk_len: u64, disk: u64, remote_len: u64) -> Vec<usize> {
-    let disk_level = level_of(disk_len, disk);
-    // Every candidate agrees with `disk` on the bits both levels have at
-    // least; walk those, then keep the ones that agree on all they share.
-    let step = 1u64 << disk_level.min(remote_len.ilog2());
-    (disk % step..remote_len)
-        .step_by(step as usize)
-        .filter(|&s| {
-            let bits = disk_level.min(level_of(remote_len, s));
-            (s ^ disk) & ((1u64 << bits) - 1) == 0
-        })
-        .map(|s| s as usize)
+/// The buckets of `remote` that can share records with bucket `bucket` of
+/// `disk`: those with an entry agreeing with it on every bit both depths
+/// route by.
+pub fn sharing(
+    disk: &Directory,
+    bucket: usize,
+    remote: &Directory,
+) -> BTreeSet<usize> {
+    let bits = disk.descriptor(bucket).depth().min(remote.depth());
+    let step = 1usize << bits;
+    (bucket & (step - 1)..remote.len())
+        .step_by(step)
+        .map(|entry| remote.bucket_at(entry))
         .collect()
 }
 
@@ -81,11 +69,9 @@ impl SlotUpload {
     /// The remote buckets this upload rewrites: those sharing records with a
     /// flagged disk page, and those carried forward.
     pub(crate) fn affected(&self) -> BTreeSet<usize> {
-        let (disk_len, remote_len) =
-            (self.disk.len() as u64, self.remote.len() as u64);
         self.flagged
             .iter()
-            .flat_map(|&(d, _)| sharing(disk_len, d as u64, remote_len))
+            .flat_map(|&(d, _)| sharing(&self.disk, d, &self.remote))
             .chain(self.moved.iter().copied())
             .collect()
     }
@@ -135,8 +121,7 @@ impl PageStore {
         if page.is_empty() {
             return Ok(Vec::new());
         }
-        let dict = self.types[idx].dictionary().borrow();
-        page.to_bytes(dict.dictionary(), dict.enabled())
+        image_of(page, &self.types[idx].dictionary().borrow())
     }
 
     /// Decode an uploaded image of slot `idx`.
@@ -149,11 +134,10 @@ impl PageStore {
         SlotPage::from_bytes(image, dict.dictionary())
     }
 
-    /// Split the remote directory while the bucket whose turn it is runs
-    /// over [`REMOTE_TARGET_BLOCKS`], as the disk's `plan_splits` does,
-    /// fetching a source page this upload did not stage. Returns every
-    /// staged bucket's encoded image.
-    pub(crate) async fn split_remote(
+    /// Split every staged remote page over [`REMOTE_TARGET_BLOCKS`], as the
+    /// disk's settle does (`crate::split`). Returns every staged bucket's
+    /// encoded image.
+    pub(crate) fn split_remote(
         &self,
         work: &mut SlotUpload,
     ) -> StorageResult<BTreeMap<usize, Vec<u8>>> {
@@ -161,78 +145,62 @@ impl PageStore {
         for (&bucket, page) in &work.staged {
             images.insert(bucket, self.encode_remote(work.idx, page)?);
         }
-        let hash = self.types[work.idx].struct_hash();
-        for _ in 0..MAX_REMOTE_SPLITS {
-            let level = work.remote.split_bit();
-            let source = work.remote.next_split_bucket() as usize;
-            let blocks = images.get(&source).map_or_else(
-                || work.remote.descriptor(source).count(),
-                |image| blocks_of(image),
-            );
-            if blocks <= REMOTE_TARGET_BLOCKS {
-                break;
-            }
-            let page = if let Some(page) = work.staged.remove(&source) {
-                page
-            } else {
-                let desc = work.remote.descriptor(source);
-                self.with_remote_page(work.idx, desc, SlotPage::clone)
-                    .await?
-            };
-            let (mut keep, mut moved) =
-                (SlotPage::new(hash), SlotPage::new(hash));
-            for (id, bytes) in page.into_entries() {
-                if (work.remote.hash(id.raw()) >> level) & 1 == 0 {
-                    keep.upsert(id, bytes);
-                } else {
-                    moved.upsert(id, bytes);
-                }
-            }
-            let target = work.remote.push_bucket(BlockDescriptor::EMPTY);
-            images.insert(source, self.encode_remote(work.idx, &keep)?);
-            images.insert(target, self.encode_remote(work.idx, &moved)?);
-            work.staged.insert(source, keep);
-            work.staged.insert(target, moved);
-        }
+        let idx = work.idx;
+        split_staged(
+            &mut work.remote,
+            &mut work.staged,
+            &mut images,
+            REMOTE_TARGET_BLOCKS,
+            |page| self.encode_remote(idx, page),
+        )?;
         Ok(images)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{level_of, sharing};
-    use crate::directory::bucket_index;
+    use std::collections::{BTreeMap, BTreeSet};
 
-    #[test]
-    fn a_bucket_level_is_the_bits_that_route_to_it() {
-        assert_eq!(level_of(1, 0), 0);
-        // len 6: base 4, buckets 0 and 1 split (3 bits), 2 and 3 not yet
-        // (2 bits), 4 and 5 new (3 bits).
-        let levels: Vec<u32> = (0..6).map(|b| level_of(6, b)).collect();
-        assert_eq!(levels, [3, 3, 2, 2, 3, 3]);
-        assert_eq!(level_of(8, 5), 3, "a power of two is one level");
+    use super::sharing;
+    use crate::directory::Directory;
+
+    const SEED: [u64; 4] = [5, 6, 7, 8];
+
+    /// A directory grown by `splits` splits of pseudo-random buckets, so
+    /// its pages sit at uneven depths.
+    fn grown(splits: u64, salt: u64) -> Directory {
+        let mut dir = Directory::new(SEED);
+        let mut x = salt | 1;
+        for _ in 0..splits {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let bucket = dir.bucket_at((x as usize) % dir.len());
+            if dir.can_split(bucket) {
+                dir.split(bucket);
+            }
+        }
+        dir
     }
 
-    /// The congruence names exactly the remote buckets that hold some hash
-    /// of the disk bucket — checked against routing every hash for real.
+    /// The congruence names exactly the remote buckets that hold some id
+    /// of the disk bucket — checked against routing ids for real.
     #[test]
-    fn sharing_is_exactly_where_the_hashes_go() {
-        for disk_len in 1u64..40 {
-            for remote_len in 1u64..20 {
-                let mut truth =
-                    vec![std::collections::BTreeSet::new(); disk_len as usize];
-                for hash in 0u64..512 {
-                    let d = bucket_index(disk_len, hash);
-                    truth[d].insert(bucket_index(remote_len, hash));
-                }
-                for d in 0..disk_len {
-                    let got: std::collections::BTreeSet<usize> =
-                        sharing(disk_len, d, remote_len).into_iter().collect();
-                    assert_eq!(
-                        got, truth[d as usize],
-                        "disk {d}/{disk_len}, remote len {remote_len}"
-                    );
-                }
+    fn sharing_is_exactly_where_the_ids_go() {
+        for (disk_splits, remote_splits) in [(0, 0), (9, 2), (2, 9), (40, 13)] {
+            let disk = grown(disk_splits, 11 + disk_splits);
+            let remote = grown(remote_splits, 29 + remote_splits);
+            let mut truth: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+            for id in 0u128..20_000 {
+                truth
+                    .entry(disk.bucket_of(id))
+                    .or_default()
+                    .insert(remote.bucket_of(id));
+            }
+            for (bucket, _) in disk.buckets() {
+                let got = sharing(&disk, bucket, &remote);
+                let want = truth.remove(&bucket).unwrap_or_default();
+                assert_eq!(got, want, "disk bucket {bucket}");
             }
         }
     }
