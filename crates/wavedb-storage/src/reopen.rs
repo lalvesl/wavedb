@@ -24,7 +24,7 @@ use futures::FutureExt;
 use crate::block::{BlockAllocator, BlockDescriptor, Run};
 use crate::block_file::BlockFile;
 use crate::dictionary::Dictionary;
-use crate::directory::Directory;
+use crate::directory::{Directory, is_bucket};
 use crate::disk_chain::DiskChain;
 use crate::error::{StorageError, StorageResult};
 use crate::header::{ChainRecord, Header, Rotation};
@@ -162,8 +162,13 @@ pub fn rebuild(
     for w in disk {
         let slot = slot_of(types, w.struct_hash)?;
         chain.types.insert(w.struct_hash, rotation(w.newest));
+        // Once a page, not once an entry: aliases share its run.
         used.extend(
-            w.slots.iter().filter(|d| d.is_allocated()).map(|d| d.run()),
+            w.slots
+                .iter()
+                .enumerate()
+                .filter(|&(j, &d)| is_bucket(j, d) && d.is_allocated())
+                .map(|(_, d)| d.run()),
         );
         if !w.slots.is_empty() {
             *slot.directory().borrow_mut() =
