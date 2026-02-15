@@ -202,7 +202,7 @@ impl PageStore {
         self.types.iter().enumerate().flat_map(|(slot, ts)| {
             let mut out = Vec::new();
             if let Some(dir) = ts.directory().borrow().as_ref() {
-                for (bucket, desc) in dir.slots().iter().enumerate() {
+                for (bucket, desc) in dir.buckets() {
                     if desc.is_allocated() {
                         out.push(Movable {
                             slot,
