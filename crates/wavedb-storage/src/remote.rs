@@ -230,7 +230,7 @@ impl PageStore {
         let mut blocks = 0;
         for slot in &self.types {
             if let Some(dir) = slot.directory().borrow().as_ref() {
-                blocks += dir.slots().iter().map(|&d| weight(d)).sum::<u64>();
+                blocks += dir.buckets().map(|(_, d)| weight(d)).sum::<u64>();
             }
         }
         object.pending_blocks.set(blocks);
