@@ -165,6 +165,18 @@ impl BlockDescriptor {
         Self((self.0 & !(DEPTH_MASK << DEPTH_SHIFT)) | field)
     }
 
+    /// This descriptor with its run starting at `start` instead: the same
+    /// size, depth and flag.
+    ///
+    /// # Panics
+    /// Panics (in debug) if `start` exceeds its bit width.
+    #[must_use]
+    pub fn moved_to(self, start: u64) -> Self {
+        debug_assert!(start <= MAX_START, "start {start} exceeds u46");
+        let field = (start & START_MASK) << START_SHIFT;
+        Self((self.0 & !(START_MASK << START_SHIFT)) | field)
+    }
+
     /// Whether the object store has yet to receive this disk page (RFC 0070
     /// §1). Always `false` in a disk-only store and in a remote directory.
     #[must_use]
