@@ -44,7 +44,7 @@ refused as an unknown hash; `WaveWire` encode/decode is property-tested.
 
 ## M2 — Storage engine
 
-The block manager, per-`STRUCT_HASH` linear-hashed page directory, page format,
+The block manager, per-`STRUCT_HASH` extendible-hashed page directory, page format,
 dictionaries, and the record-cache / settle pipeline. Since RFC 0072 there is no
 journal: the settle is the durability point, and a reopen reconstructs from the
 headers each batch ends with.
