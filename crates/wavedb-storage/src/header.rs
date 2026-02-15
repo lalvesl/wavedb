@@ -34,6 +34,7 @@ use wavedb_core::wire::{
     CRC_PREFIX_LEN, WaveWire, from_wire_checked, to_wire_checked,
 };
 
+use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
 
 /// "No such header" in a link.
@@ -77,19 +78,31 @@ pub struct Header {
 #[derive(Debug, Clone, PartialEq, Eq, WaveWire)]
 pub struct TypeEntry {
     pub struct_hash: u64,
-    /// The directory's bucket count.
-    pub buckets: u32,
+    /// The directory's global depth: `2^depth` entries; `None` for a type
+    /// with no directory yet ([RFC 0074]).
+    ///
+    /// [RFC 0074]: ../../../rfcs/0074-extendible-hashing-WIP.md
+    pub depth: Option<u8>,
     /// The header before this one with entries for this type
     /// ([`NO_FILE`]).
     pub last: u64,
     /// The type's dictionary image, if any.
     pub dict: Option<u64>,
-    /// `(bucket, address)`: what the batch changed, and what is restated.
+    /// `(bucket, address)`: what the batch changed, and what is restated —
+    /// buckets only, never an alias: the address's depth says which entries
+    /// it fills.
     pub changed: Vec<(u32, u64)>,
 }
 
-/// Bytes a type's entry takes with no `changed` items.
-pub const ENTRY_BYTES: usize = TypeEntry::STACK_SIZE + 8;
+/// The depth a header records for a directory of `slots` entries.
+#[must_use]
+pub fn depth_of(slots: &[BlockDescriptor]) -> Option<u8> {
+    (!slots.is_empty()).then(|| slots.len().trailing_zeros() as u8)
+}
+
+/// Bytes a type's entry takes with no `changed` items, at most: its
+/// dictionary's address and its depth on the heap.
+pub const ENTRY_BYTES: usize = TypeEntry::STACK_SIZE + 8 + 1;
 
 /// Bytes one `changed` item takes.
 pub const ITEM_BYTES: usize = <(u32, u64)>::STACK_SIZE;
@@ -252,7 +265,7 @@ mod tests {
             end_of_batch: true,
             types: vec![TypeEntry {
                 struct_hash: 5,
-                buckets: 3,
+                depth: Some(2),
                 last: NO_FILE,
                 dict: Some(42),
                 changed: vec![(0, 1), (2, 3)],
@@ -281,7 +294,7 @@ mod tests {
         assert_eq!(h.encode().len(), BARE_BYTES);
         h.types.push(TypeEntry {
             struct_hash: 1,
-            buckets: 1,
+            depth: Some(0),
             last: NO_FILE,
             dict: Some(0),
             changed: Vec::new(),
