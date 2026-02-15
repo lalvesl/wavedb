@@ -8,35 +8,27 @@
 //! routes to it, and is serialised once. The images go to
 //! [`crate::checkpoint`], which places all of them in one contiguous window.
 //!
-//! Splits are planned here too, **after** the ids are applied: linear hashing
-//! only ever moves keys out of the bucket being split, so a record placed
-//! against the pre-split directory keeps its address (or is repartitioned by
-//! the split itself). Nothing is written until the whole shape is decided, so
+//! Splits are planned here too, **after** the ids are applied: a split only
+//! ever moves keys out of the page being split, so a record placed against
+//! the pre-split directory keeps its address (or is repartitioned by the
+//! split itself, [RFC 0074]). Nothing is written until the whole shape is decided, so
 //! no page is ever written twice in one round.
 //!
 //! [RFC 0041]: ../../../rfcs/0041-single-barrier-checkpoint.md
+//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing-WIP.md
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use crate::block::{
-    BLOCK_SIZE, BlockDescriptor, MAX_COUNT, MAX_PAGE_BYTES, round_count,
-};
+use crate::block::{BLOCK_SIZE, MAX_COUNT, MAX_PAGE_BYTES, round_count};
 use crate::dictionary::DictState;
 use crate::directory::Directory;
 use crate::error::{StorageError, StorageResult};
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
 use crate::record_cache::Records;
+use crate::split::split_staged;
 use crate::struct_storage::TypeSlot;
-
-/// Splits one round may perform — a pacing budget on how fast the directory
-/// grows in one round. Page size is a target, not an invariant: a bucket
-/// still over target is split when its turn next comes round, or never, if
-/// splitting cannot relieve it ([RFC 0049]).
-///
-/// [RFC 0049]: ../../../rfcs/0049-elastic-pages-and-load-driven-splits.md
-const MAX_SPLITS_PER_ROUND: usize = 64;
 
 /// One slot's planned contribution to a settle round.
 pub struct SlotPlan {
@@ -78,19 +70,6 @@ pub const fn blocks_of(bytes: &[u8]) -> u64 {
         // Past the largest page: refused by `image_of` before it is placed.
         None => MAX_COUNT,
     }
-}
-
-/// Blocks `bucket` will occupy once this round lands: its planned image when
-/// the round rewrites it, its settled span otherwise. The settled case reads
-/// the descriptor, so deciding against a split costs no IO.
-fn planned_blocks(
-    dir: &Directory,
-    pages: &BTreeMap<usize, Vec<u8>>,
-    bucket: usize,
-) -> u64 {
-    pages
-        .get(&bucket)
-        .map_or_else(|| dir.descriptor(bucket).count(), |b| blocks_of(b))
 }
 
 impl PageStore {
@@ -143,7 +122,13 @@ impl PageStore {
         for (bucket, page) in &staged {
             pages.insert(*bucket, image_of(page, &dict)?);
         }
-        self.plan_splits(slot, &mut dir, &dict, &mut staged, &mut pages)?;
+        split_staged(
+            &mut dir,
+            &mut staged,
+            &mut pages,
+            self.target_blocks_per_bucket,
+            |page| image_of(page, &dict),
+        )?;
 
         Ok(SlotPlan {
             idx,
@@ -153,76 +138,11 @@ impl PageStore {
             decoded: staged,
         })
     }
-
-    /// Split while the bucket **whose turn it is** is over target, growing the
-    /// working directory, up to the round's pacing budget ([RFC 0049]).
-    ///
-    /// Linear hashing's split order is derived from the directory's length
-    /// (`Directory::next_split_bucket`), because addressing depends on that
-    /// length and nothing else — so a split can never be aimed at whichever
-    /// bucket happens to have overflowed. The trigger therefore asks about the
-    /// bucket that is going to be split *anyway*: a split then never happens
-    /// except where it relieves something, and the loop terminates because
-    /// splitting the source is what makes it stop qualifying.
-    ///
-    /// A bucket over target whose turn has not come simply spans more blocks
-    /// until it does — including one holding a record larger than the target,
-    /// which splitting could never relieve at all, since splits distribute
-    /// whole records.
-    ///
-    /// [RFC 0049]: ../../../rfcs/0049-elastic-pages-and-load-driven-splits.md
-    fn plan_splits(
-        &self,
-        slot: &TypeSlot,
-        dir: &mut Directory,
-        dict: &DictState,
-        staged: &mut BTreeMap<usize, SlotPage>,
-        pages: &mut BTreeMap<usize, Vec<u8>>,
-    ) -> StorageResult<()> {
-        for _ in 0..MAX_SPLITS_PER_ROUND {
-            let level = dir.split_bit();
-            let source = dir.next_split_bucket() as usize;
-            if dir.descriptor(source).is_evicted() {
-                // The turn's bucket lives in the object store, its size
-                // unknown here: the split waits for it to come back to disk.
-                if let Some(idx) = self.slot_index(slot.struct_hash()) {
-                    self.want(idx, source);
-                }
-                return Ok(());
-            }
-            if planned_blocks(dir, pages, source)
-                <= self.target_blocks_per_bucket
-            {
-                return Ok(());
-            }
-            let page = std::mem::replace(
-                staged_page(self, slot, dir, dict, staged, source)?,
-                SlotPage::new(slot.struct_hash()),
-            );
-
-            let mut keep = SlotPage::new(slot.struct_hash());
-            let mut moved = SlotPage::new(slot.struct_hash());
-            for (id, bytes) in page.into_entries() {
-                // Bit `level` decides: 0 stays put, 1 moves to the new bucket.
-                if (dir.hash(id.raw()) >> level) & 1 == 0 {
-                    keep.upsert(id, bytes);
-                } else {
-                    moved.upsert(id, bytes);
-                }
-            }
-            let target = dir.push_bucket(BlockDescriptor::EMPTY);
-            pages.insert(source, image_of(&keep, dict)?);
-            pages.insert(target, image_of(&moved, dict)?);
-            staged.insert(source, keep);
-            staged.insert(target, moved);
-        }
-        Ok(())
-    }
 }
 
 /// `page` serialised — refused, typed, past the largest page a descriptor
 /// can size ([`MAX_PAGE_BYTES`]), never truncated.
-fn image_of(page: &SlotPage, dict: &DictState) -> StorageResult<Vec<u8>> {
+pub fn image_of(page: &SlotPage, dict: &DictState) -> StorageResult<Vec<u8>> {
     let bytes = page.to_bytes(dict.dictionary(), dict.enabled())?;
     if bytes.len() as u64 > MAX_PAGE_BYTES {
         return Err(StorageError::PageTooLarge(bytes.len() as u64));
