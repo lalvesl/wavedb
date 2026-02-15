@@ -1,13 +1,16 @@
-//! The per-`STRUCT_HASH` page directory and its **linear hashing** addressing.
+//! The per-`STRUCT_HASH` page directory and its **extendible hashing**
+//! addressing ([RFC 0074]).
 //!
-//! Each `STRUCT_HASH` owns a `Vec<BlockDescriptor>` — one slot ("bucket") per
-//! homogeneous page. Records are routed to a bucket by [`hash_of`] reduced through
-//! [`bucket_index`]. Linear hashing grows the directory **one bucket at a time**,
-//! so a grow rehashes only a single bucket, never the whole type.
+//! Each `STRUCT_HASH` owns a `Vec<BlockDescriptor>` of `2^d` **entries**,
+//! indexed by the low `d` bits of [`hash_of`] — `d`, the global depth, is
+//! never stored: it is the length's `trailing_zeros`. Several entries may
+//! point at one page: a page of **local depth** ℓ (in its descriptor) is
+//! named by the `2^(d−ℓ)` entries `j ≡ c (mod 2^ℓ)`, and its **bucket** —
+//! the key every per-page map uses — is the lowest of them, `c < 2^ℓ`.
 //!
-//! This module owns the **addressing math** and the directory container. The
-//! page-moving half of a split (`split_next`) needs the block I/O layer and lands
-//! with it; [`Directory::next_split_bucket`] exposes which bucket is next in line.
+//! A page over target splits by itself ([`Directory::split`]): its records
+//! partition by hash bit ℓ, and both halves take ℓ + 1. When ℓ = d the
+//! directory doubles first, by copying itself — no record moves.
 //!
 //! ## The id hash
 //!
@@ -17,8 +20,20 @@
 //! portable across architecture and endianness, so the directory — rebuilt from
 //! the headers on open — routes every record to the same bucket even if the data
 //! files are opened on a different machine.
+//!
+//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing-WIP.md
 use crate::block::BlockDescriptor;
 use seahash::hash_seeded;
+
+/// The deepest a page splits to: past it a page stays over target, which
+/// bounds the directory against records sharing their low hash bits.
+pub const D_MAX: u8 = 32;
+
+/// Entries a directory may hold per page before a split that would double
+/// it waits: 128 bytes of RAM a page at most ([RFC 0074]).
+///
+/// [RFC 0074]: ../../../rfcs/0074-extendible-hashing-WIP.md
+pub const DIR_RATIO: usize = 16;
 
 /// A SeaHash of a 128-bit `Id` under a per-database seed.
 ///
@@ -32,34 +47,19 @@ pub const fn hash_of(id: u128, seed: [u64; 4]) -> u64 {
     hash_seeded(&id.to_le_bytes(), seed[0], seed[1], seed[2], seed[3])
 }
 
-/// Reduce a hash to a bucket index over a directory of `dir_len` buckets, using
-/// **linear hashing** (not `hash % len`).
-///
-/// `dir_len` must be `>= 1`. The result is always `< dir_len`.
+/// The bucket entry `entry` names: the lowest entry of its page.
 #[must_use]
-pub fn bucket_index(dir_len: u64, hash: u64) -> usize {
-    debug_assert!(dir_len >= 1, "directory must have at least one bucket");
-    let level = dir_len.ilog2();
-    let base = 1u64 << level; // largest power of two <= dir_len
-    let split = dir_len - base; // buckets [0, split) have already been split this round
-    let mut b = hash & (base - 1);
-    if b < split {
-        // This bucket was split: use one more bit to choose the two halves.
-        b = hash & ((base << 1) - 1);
-    }
-    debug_assert!(b < dir_len);
-    b as usize
+pub const fn canonical(entry: usize, desc: BlockDescriptor) -> usize {
+    entry & ((1usize << desc.depth()) - 1)
 }
 
-/// The bucket that the next [`Directory`] grow will split (round-robin within the
-/// current level).
+/// Whether entry `entry` is its page's bucket rather than an alias.
 #[must_use]
-pub const fn next_split_bucket(dir_len: u64) -> u64 {
-    let level = dir_len.ilog2();
-    dir_len - (1u64 << level)
+pub const fn is_bucket(entry: usize, desc: BlockDescriptor) -> bool {
+    entry >> desc.depth() == 0
 }
 
-/// A per-`STRUCT_HASH` page directory: a vector of [`BlockDescriptor`] slots
+/// A per-`STRUCT_HASH` page directory: `2^d` [`BlockDescriptor`] entries
 /// plus the per-database hash seed.
 ///
 /// Pure addressing — the type's compression state
@@ -67,8 +67,10 @@ pub const fn next_split_bucket(dir_len: u64) -> u64 {
 /// `StructStorage` slot, not inside the directory.
 #[derive(Debug, Clone)]
 pub struct Directory {
-    /// One descriptor per bucket (page).
+    /// `2^d` entries; a page of depth ℓ fills `2^(d−ℓ)` of them.
     pub(crate) slots: Vec<BlockDescriptor>,
+    /// How many pages (buckets) the entries name.
+    pages: usize,
     /// Per-database hash seed (from the `MANIFEST`).
     seed: [u64; 4],
 }
@@ -79,21 +81,26 @@ impl Directory {
     pub fn new(seed: [u64; 4]) -> Self {
         Self {
             slots: vec![BlockDescriptor::EMPTY],
+            pages: 1,
             seed,
         }
     }
 
-    /// Rebuild a directory from already-known descriptors (a reconstruction).
-    ///
-    /// # Panics
-    /// Panics if `slots` is empty — a directory always has at least one bucket.
+    /// Rebuild a directory from already-known entries (a reconstruction,
+    /// which checked their shape: a power of two long, every page's depth
+    /// within it and its aliases alike).
     #[must_use]
     pub fn from_slots(slots: Vec<BlockDescriptor>, seed: [u64; 4]) -> Self {
-        assert!(!slots.is_empty(), "directory needs at least one bucket");
-        Self { slots, seed }
+        debug_assert!(slots.len().is_power_of_two(), "2^d entries");
+        let pages = slots
+            .iter()
+            .enumerate()
+            .filter(|&(j, &d)| is_bucket(j, d))
+            .count();
+        Self { slots, pages, seed }
     }
 
-    /// Number of buckets.
+    /// Number of entries (`2^d`).
     #[must_use]
     pub const fn len(&self) -> usize {
         self.slots.len()
@@ -103,6 +110,18 @@ impl Directory {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         false
+    }
+
+    /// The global depth `d`.
+    #[must_use]
+    pub const fn depth(&self) -> u8 {
+        self.slots.len().trailing_zeros() as u8
+    }
+
+    /// Number of pages (buckets).
+    #[must_use]
+    pub const fn pages(&self) -> usize {
+        self.pages
     }
 
     /// The per-database hash seed.
@@ -117,45 +136,82 @@ impl Directory {
         hash_of(id, self.seed)
     }
 
-    /// The bucket index an `Id` routes to.
+    /// The bucket whose entries contain `entry`.
     #[must_use]
-    pub fn bucket_of(&self, id: u128) -> usize {
-        bucket_index(self.slots.len() as u64, self.hash(id))
+    pub fn bucket_at(&self, entry: usize) -> usize {
+        canonical(entry, self.slots[entry])
     }
 
-    /// The descriptor at `bucket`.
+    /// The bucket an `Id` routes to.
+    #[must_use]
+    pub fn bucket_of(&self, id: u128) -> usize {
+        let entry = (self.hash(id) & (self.slots.len() as u64 - 1)) as usize;
+        self.bucket_at(entry)
+    }
+
+    /// The descriptor of `bucket` (or of any entry naming its page).
     #[must_use]
     pub fn descriptor(&self, bucket: usize) -> BlockDescriptor {
         self.slots[bucket]
     }
 
-    /// Replace the descriptor at `bucket`.
+    /// Point `bucket`'s page at `desc` — every entry naming it. The page
+    /// keeps its depth, whatever `desc` carries: depth is the directory's
+    /// to change, by [`split`](Self::split).
     pub fn set_descriptor(&mut self, bucket: usize, desc: BlockDescriptor) {
-        self.slots[bucket] = desc;
+        let bucket = self.bucket_at(bucket);
+        let depth = self.slots[bucket].depth();
+        let desc = desc.with_depth(depth);
+        for entry in (bucket..self.slots.len()).step_by(1 << depth) {
+            self.slots[entry] = desc;
+        }
     }
 
-    /// Append a new bucket (the directory-growth half of a split) and return its
-    /// index.
-    pub fn push_bucket(&mut self, desc: BlockDescriptor) -> usize {
-        self.slots.push(desc);
-        self.slots.len() - 1
-    }
-
-    /// Which bucket the next grow will split.
+    /// Whether `bucket` may split now: below [`D_MAX`], and — when the
+    /// split would double the directory — the directory under
+    /// [`DIR_RATIO`] entries a page.
     #[must_use]
-    pub const fn next_split_bucket(&self) -> u64 {
-        next_split_bucket(self.slots.len() as u64)
+    pub fn can_split(&self, bucket: usize) -> bool {
+        let depth = self.slots[bucket].depth();
+        depth < D_MAX
+            && (depth < self.depth()
+                || self.slots.len() < DIR_RATIO * self.pages)
     }
 
-    /// The bit position used to partition keys when splitting the current bucket
-    /// (`= level`). On a split, a key stays in the source bucket when this bit is
-    /// `0` and moves to the new bucket when it is `1`.
-    #[must_use]
-    pub const fn split_bit(&self) -> u32 {
-        (self.slots.len() as u64).ilog2()
+    /// Split `bucket` by hash bit ℓ (its depth), doubling the directory
+    /// first when ℓ = d, and return the new bucket `bucket + 2^ℓ`. The
+    /// source keeps its descriptor — its old run, freed when the round
+    /// installs the halves — and the new bucket starts empty; both take
+    /// depth ℓ + 1.
+    pub fn split(&mut self, bucket: usize) -> usize {
+        let depth = self.slots[bucket].depth();
+        if depth == self.depth() {
+            self.slots.extend_from_within(..);
+        }
+        let deeper = depth + 1;
+        let new = bucket + (1 << depth);
+        let source = self.slots[bucket].with_depth(deeper);
+        let target = BlockDescriptor::EMPTY.with_depth(deeper);
+        for entry in (bucket..self.slots.len()).step_by(1 << deeper) {
+            self.slots[entry] = source;
+            self.slots[entry + (1 << depth)] = target;
+        }
+        self.pages += 1;
+        new
     }
 
-    /// All descriptors, in bucket order.
+    /// Every bucket and its page's descriptor, once per page.
+    pub fn buckets(
+        &self,
+    ) -> impl Iterator<Item = (usize, BlockDescriptor)> + '_ {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(|&(j, &d)| is_bucket(j, d))
+            .map(|(j, &d)| (j, d))
+    }
+
+    /// Every entry, aliases included, in entry order.
     #[must_use]
     pub fn slots(&self) -> &[BlockDescriptor] {
         &self.slots
@@ -164,7 +220,9 @@ impl Directory {
 
 #[cfg(test)]
 mod tests {
-    use super::{Directory, bucket_index, hash_of, next_split_bucket};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::{D_MAX, DIR_RATIO, Directory, hash_of};
     use crate::block::BlockDescriptor;
 
     const SEED: [u64; 4] = [0x1234, 0x5678, 0x9abc, 0xdef0];
@@ -194,91 +252,92 @@ mod tests {
         );
     }
 
+    /// A split moves only the records of the page it splits, and those by
+    /// hash bit ℓ; every other id keeps its bucket.
     #[test]
-    fn bucket_index_in_range_for_all_sizes() {
-        for dir_len in 1u64..=64 {
-            for h in 0u64..1000 {
-                let b =
-                    bucket_index(dir_len, h.wrapping_mul(0x9E37_79B9)) as u64;
-                assert!(b < dir_len, "bucket {b} >= len {dir_len}");
-            }
-        }
-    }
-
-    #[test]
-    fn power_of_two_directory_is_plain_mask() {
-        // When dir_len is a power of two, split == 0 → just the low `level` bits.
-        for &len in &[1u64, 2, 4, 8, 16] {
-            for h in 0u64..500 {
-                assert_eq!(bucket_index(len, h) as u64, h & (len - 1));
-            }
-        }
-    }
-
-    #[test]
-    fn split_preserves_linear_hashing_invariant() {
-        // Growing from m to m+1 splits exactly bucket `s`: keys there move to `s`
-        // or the new bucket `m`; every other key keeps its bucket.
-        for m in 1u64..32 {
-            let s = next_split_bucket(m);
-            let new_bucket = m; // appended at index m
-            for h in 0u64..2000 {
-                let hash = h.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                let before = bucket_index(m, hash) as u64;
-                let after = bucket_index(m + 1, hash) as u64;
-                if before == s {
-                    assert!(
-                        after == s || after == new_bucket,
-                        "split bucket {s}: {before} -> {after} (m={m})"
-                    );
+    fn a_split_moves_only_its_own_records() {
+        let mut dir = Directory::new(SEED);
+        for round in 0..40u128 {
+            let before: BTreeMap<u128, usize> =
+                (0..2000).map(|id| (id, dir.bucket_of(id))).collect();
+            let source = dir.bucket_of(round * 7919);
+            let depth = dir.descriptor(source).depth();
+            let new = dir.split(source);
+            assert_eq!(new, source + (1 << depth));
+            for (id, was) in before {
+                let now = dir.bucket_of(id);
+                if was != source {
+                    assert_eq!(now, was, "an unrelated id moved");
+                } else if (dir.hash(id) >> depth) & 1 == 0 {
+                    assert_eq!(now, source);
                 } else {
-                    assert_eq!(
-                        after, before,
-                        "unaffected bucket changed (m={m})"
-                    );
+                    assert_eq!(now, new);
                 }
             }
         }
     }
 
+    /// A doubling copies the entries: every id keeps its bucket.
     #[test]
-    fn directory_routing_and_growth() {
+    fn a_doubling_moves_no_record() {
         let mut dir = Directory::new(SEED);
-        assert_eq!(dir.len(), 1);
-        assert!(!dir.is_empty());
-        // Single bucket: everything routes to 0.
-        assert_eq!(dir.bucket_of(123), 0);
-        assert_eq!(dir.bucket_of(999), 0);
-
         dir.set_descriptor(0, BlockDescriptor::new(10, 4));
-        assert_eq!(dir.descriptor(0).run().start, 10);
-
-        let idx = dir.push_bucket(BlockDescriptor::new(20, 4));
-        assert_eq!(idx, 1);
-        assert_eq!(dir.len(), 2);
-        // Now routing uses one bit → buckets 0 and 1 both reachable.
-        let buckets: std::collections::HashSet<usize> =
-            (0u128..100).map(|id| dir.bucket_of(id)).collect();
-        assert_eq!(buckets, [0, 1].into_iter().collect());
+        let new = dir.split(0);
+        assert_eq!((dir.len(), dir.depth(), new), (2, 1, 1));
+        dir.split(0);
+        assert_eq!((dir.len(), dir.pages()), (4, 3));
+        // Bucket 1 (depth 1) now has two entries, 1 and 3.
+        assert_eq!(dir.bucket_at(3), 1);
+        assert_eq!(dir.descriptor(0).run().start, 10, "the source's run");
+        assert!(!dir.descriptor(2).is_allocated(), "the new half is empty");
     }
 
+    /// Setting a descriptor writes every alias and keeps the page's depth.
     #[test]
-    fn next_split_bucket_round_robin() {
-        // Level 1 (len 2..3): splits bucket 0, then 1, then wraps to level 2.
-        assert_eq!(next_split_bucket(2), 0);
-        assert_eq!(next_split_bucket(3), 1);
-        assert_eq!(next_split_bucket(4), 0);
-        assert_eq!(next_split_bucket(5), 1);
-        assert_eq!(next_split_bucket(7), 3);
+    fn set_descriptor_writes_every_alias() {
+        let mut dir = Directory::new(SEED);
+        dir.split(0);
+        dir.split(0); // entries 0..4: 0 (ℓ2), 1 (ℓ1), 2 (ℓ2), 3 → 1
+        dir.set_descriptor(1, BlockDescriptor::new(77, 3));
+        assert_eq!(dir.slots()[1], dir.slots()[3]);
+        assert_eq!(dir.slots()[3].run().start, 77);
+        assert_eq!(dir.slots()[3].depth(), 1);
+        let buckets: Vec<usize> = dir.buckets().map(|(c, _)| c).collect();
+        assert_eq!(buckets, [0, 1, 2], "once per page");
     }
 
+    /// Nothing splits past `D_MAX`, and a doubling waits while the
+    /// directory holds `DIR_RATIO` entries a page.
     #[test]
-    fn from_slots_roundtrips() {
-        let slots =
-            vec![BlockDescriptor::new(0, 1), BlockDescriptor::new(8, 1)];
-        let dir = Directory::from_slots(slots.clone(), SEED);
-        assert_eq!(dir.slots(), slots.as_slice());
-        assert_eq!(dir.seed(), SEED);
-        assert_eq!(dir.split_bit(), 1);
+    fn splits_stop_at_the_caps() {
+        let mut dir = Directory::new(SEED);
+        // Split bucket 0 only: one deep page, the rest shallow.
+        while dir.can_split(0) {
+            dir.split(0);
+        }
+        let depth = dir.descriptor(0).depth();
+        assert!(dir.len() >= DIR_RATIO * dir.pages());
+        assert!(depth < D_MAX, "the ratio binds first: {depth}");
+        // A shallow page still splits without doubling.
+        assert!(dir.can_split(1));
+        let len = dir.len();
+        dir.split(1);
+        assert_eq!(dir.len(), len);
+    }
+
+    /// Rebuilt from its entries, a directory counts its pages again.
+    #[test]
+    fn from_slots_counts_pages() {
+        let mut dir = Directory::new(SEED);
+        for b in [0, 0, 1, 0] {
+            dir.split(b);
+        }
+        let again = Directory::from_slots(dir.slots().to_vec(), SEED);
+        assert_eq!(again.pages(), dir.pages());
+        assert_eq!(again.slots(), dir.slots());
+        let routed: BTreeSet<usize> =
+            (0u128..500).map(|id| again.bucket_of(id)).collect();
+        let named: BTreeSet<usize> = dir.buckets().map(|(c, _)| c).collect();
+        assert_eq!(routed, named, "every page reachable, no other");
     }
 }
