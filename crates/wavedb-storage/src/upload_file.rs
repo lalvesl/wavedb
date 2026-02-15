@@ -28,6 +28,7 @@ use crate::block::{BLOCK_SIZE, BlockDescriptor};
 use crate::error::{StorageError, StorageResult};
 use crate::header::{
     BARE_BYTES, Chain, ENTRY_BYTES, Header, ITEM_BYTES, NO_FILE, TypeEntry,
+    depth_of,
 };
 use crate::plan::blocks_of;
 use crate::remote::{FILE_BLOCKS, HEADER_BLOCKS, HEADER_BYTES};
@@ -197,9 +198,17 @@ pub fn finish(
                 .into_iter()
                 .map(|(hash, changed)| {
                     let view = views.iter().find(|v| v.struct_hash == hash);
+                    // The layout placed each page at depth 0: its bucket's
+                    // depth is the directory's to say.
+                    let changed = changed
+                        .into_iter()
+                        .map(|(bucket, raw)| {
+                            (bucket, deepened(view, bucket, raw))
+                        })
+                        .collect();
                     TypeEntry {
                         struct_hash: hash,
-                        buckets: view.map_or(0, |v| v.slots.len() as u32),
+                        depth: view.and_then(|v| depth_of(v.slots)),
                         last: chain.last(hash),
                         dict: view.and_then(|v| v.dict),
                         changed,
@@ -283,7 +292,15 @@ fn shift(raw: u64, from: u64, to: u64) -> u64 {
     if !desc.is_allocated() {
         return raw;
     }
-    BlockDescriptor::new(desc.start() - from + to, desc.count()).raw()
+    desc.moved_to(desc.start() - from + to).raw()
+}
+
+/// `raw` at the depth `view`'s directory gives `bucket`.
+fn deepened(view: Option<&TypeView<'_>>, bucket: u32, raw: u64) -> u64 {
+    let depth = view
+        .and_then(|v| v.slots.get(bucket as usize))
+        .map_or(0, |d| d.depth());
+    BlockDescriptor::from_raw(raw).with_depth(depth).raw()
 }
 
 /// Spend `header`'s spare room restating old addresses (`crate::restate`).
@@ -319,10 +336,12 @@ mod tests {
         }
     }
 
-    /// A remote directory of `n` buckets, every one placed somewhere.
+    /// A remote directory of `n` pages (`n` a power of two), every one
+    /// placed somewhere.
     fn dir(n: usize) -> Vec<BlockDescriptor> {
+        let depth = n.trailing_zeros() as u8;
         (0..n)
-            .map(|b| BlockDescriptor::new(b as u64 + 1, 1))
+            .map(|b| BlockDescriptor::new(b as u64 + 1, 1).with_depth(depth))
             .collect()
     }
 
@@ -375,11 +394,13 @@ mod tests {
         assert_eq!((roots.at, roots.end), (0, packed.end));
         assert_eq!(roots.root(0), Some(SECTION), "the batch it ends");
         assert_eq!(h.types[0].struct_hash, 9, "the changed type first");
-        assert_eq!(h.types[0].buckets, 4);
+        assert_eq!(h.types[0].depth, Some(2));
         assert!(
-            h.types[0]
-                .changed
-                .starts_with(&[(0, first.raw()), (3, second.raw())])
+            h.types[0].changed.starts_with(&[
+                (0, first.with_depth(2).raw()),
+                (3, second.with_depth(2).raw())
+            ]),
+            "named at the depth the directory gives them"
         );
         assert_eq!(h.types[1].struct_hash, 5, "then the restated one");
         assert_eq!(chain.tail, Some(SECTION));
@@ -461,7 +482,7 @@ mod tests {
     /// near the head of the chain.
     #[test]
     fn spare_room_restates_on_from_the_cursor() {
-        let (busy, idle) = (dir(4), dir(5_000));
+        let (busy, idle) = (dir(4), dir(4_096));
         let views = [view(1, &busy), view(2, &idle)];
         let mut chain = Chain::default();
         for (hash, shifted) in [(1, 50), (2, 10)] {
@@ -504,7 +525,7 @@ mod tests {
     /// and a type never written is named in the very first header.
     #[test]
     fn every_type_comes_round_a_busy_one_and_an_empty_one_too() {
-        let (a, b, busy) = (dir(3_000), dir(3_000), dir(3_000));
+        let (a, b, busy) = (dir(4_096), dir(4_096), dir(4_096));
         let empty: [BlockDescriptor; 0] = [];
         let views = [view(1, &a), view(2, &b), view(3, &busy), view(4, &empty)];
         let mut chain = Chain::default();
@@ -512,7 +533,7 @@ mod tests {
         finish(&mut packed, &views, &mut chain, 0).unwrap();
         let first = header(&packed, 0);
         let named = first.types.iter().find(|e| e.struct_hash == 4);
-        assert_eq!(named.map(|e| e.buckets), Some(0), "the empty type");
+        assert_eq!(named.map(|e| e.depth), Some(None), "the empty type");
         for _ in 0..12 {
             let mut packed = layout(chain.end, &[images(3, &[(0, 1)])]);
             finish(&mut packed, &views, &mut chain, 0).unwrap();
