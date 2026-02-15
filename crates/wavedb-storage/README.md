@@ -1,7 +1,7 @@
 # wavedb-storage
 
 The per-node **storage engine**: the block manager, the per-`STRUCT_HASH` page
-directory (linear-hashed), the page format, dictionaries, and the write
+directory (extendible-hashed), the page format, dictionaries, and the write
 pipeline whose settle is the durability point. This is where most of WaveDB's engineering energy lives.
 
 > For the project-wide idea and quickstart see the
@@ -19,7 +19,7 @@ pipeline whose settle is the durability point. This is where most of WaveDB's en
 | `block_file`      | A shard's data files, named by the block each starts at and found by listing: positioned run I/O, create/cut/delete, the lock, fsync.              |
 | `data_file`       | One data file: its handle and name (16 hex digits), the per-file lock, create/cut/delete.                                                              |
 | `dictionary`      | Per-`STRUCT_HASH` raw-content zstd dictionary (`Dictionary` + `DictState`): capped append-only buffer, version = prefix length, own run persistence. |
-| `directory`       | The per-`STRUCT_HASH` page directory container + the linear-hashing addressing math (pure addressing).                                               |
+| `directory`       | The per-`STRUCT_HASH` page directory container + the extendible-hashing addressing math (pure addressing).                                           |
 | `directory_pages` | The directory's page **reads**: resolving a bucket to its `SlotPage`, decompressing against the passed-in `DictState`.                               |
 | `plan`            | A settle round's phase 1: touched ids → page images grouped per bucket, splits decided, nothing written.                                             |
 | `checkpoint`      | One window for every image at the end of the active file, ending with its header; one positioned write, then the descriptor swap.                  |
@@ -202,25 +202,28 @@ descriptor** pointing at one homogeneous page (a run of blocks holding records o
 exactly that `STRUCT_HASH`). One `Vec<u64>` per type, so unrelated types never
 share a page and each page compresses against one tight dictionary.
 
-> **"bucket" = "page", 1:1.** A _bucket_ is one directory slot — the logical
-> hash-table slot records hash into (the linear-hashing term). A _page_ is the
-> physical run of blocks that slot points to. Each directory entry is exactly one
-> page, so the two words name the same thing: "bucket" stresses its role in the
-> hash table, "page" its on-disk form.
+> **"bucket" and "page".** A _page_ is the physical run of blocks holding
+> records of one type; its _bucket_ is the directory entry that identifies it.
+> Under extendible hashing several entries may point at one page — its
+> aliases — and the bucket is the lowest of them, the key every per-page map
+> uses.
 
 ### Block descriptor (`u64`) — one format everywhere
 
 Pages (for every `STRUCT_HASH`) **and** dictionary runs share a single 64-bit
-descriptor — there is no second format:
+descriptor — there is no second format ([RFC 0074](../../rfcs/0074-extendible-hashing-WIP.md)):
 
 | Bits   | Field         | Width | Meaning                                                         |
 | ------ | ------------- | ----- | --------------------------------------------------------------- |
-| 63..21 | `start_block` | `u43` | First 4 KiB block (2⁴³ × 4 KiB ≈ **32 PiB** of address).        |
-| 20..1  | `block_count` | `u20` | Contiguous blocks (1 ≤ n ≤ 2²⁰ ⇒ ≤ **~4 GiB** per page/run).    |
-| 0      | `flag`        | `u1`  | Not uploaded yet (RFC 0070): set on a disk page the object store has not received. |
+| 63..18 | `start_block` | `u46` | First 4 KiB block (2⁴⁶ × 4 KiB ≈ **256 PiB** of address).       |
+| 17     | `flag`        | `u1`  | Not uploaded yet (RFC 0070): set on a disk page the object store has not received. |
+| 16..10 | `depth`       | `u7`  | The page's local depth ℓ: the low hash bits its records share (0 for a dictionary). |
+| 9..0   | `size`        | `u10` | A size code: `max(N, round(2^(N/64)))` blocks, exact below 589, ≤ **~253 MiB**. |
 
-`43 + 20 + 1 = 64` — exact fit. (A 4-bit fill gauge used to sit in the low bits;
-nothing ever read it, so its bits went to the address and the flag.)
+`46 + 1 + 7 + 10 = 64` — exact fit. The size code is decoded through a table
+built at compile time from integers alone (`size_code`), so every target reads
+a stored size the same way; a run is always allocated at a size a code stands
+for, and the page's envelope carries its own length.
 
 ### The `Id` hash
 
@@ -231,73 +234,43 @@ per-database (not the fixed `STRUCT_HASH` seed): each node rebuilds its own
 directory consistently, and an attacker can't precompute bucket collisions. SeaHash
 is portable across architectures and endianness, so data files reopened on
 another machine route every record to the same bucket. The resulting
-`u64` feeds the linear-hashing reduction below.
+`u64` feeds the extendible-hashing addressing below.
 
-### Linear hashing (not `%`)
+### Extendible hashing
 
-Addressing uses **linear hashing**, not `hash % len`. The directory starts as one
-page (~16 KiB) and grows **one bucket at a time** when a fill warning trips, so a
-grow rehashes only a single bucket — never the whole type.
+The directory is `2^d` entries, indexed by the hash's low `d` bits; `d` is the
+length's `trailing_zeros`, never stored. A page of local depth ℓ is named by
+the `2^(d−ℓ)` entries `j ≡ c (mod 2^ℓ)`, its bucket `c < 2^ℓ`.
 
 ```rust
-// Which bucket does this id land in?
-pub fn index(&self, id: u128) -> usize {
-    let m = self.dir.len() as u64;
-    let level = m.ilog2();
-    let base = 1u64 << level;
-    let s = m - base;
-    let h = hash_of(id);
-    let mut b = h & (base - 1);
-    if b < s {
-        b = h & ((base << 1) - 1);
-    }
-    b as usize
-}
-
-// Split the next bucket in round-robin order; append one new bucket.
-pub fn split_next(&mut self, file: &BlockFile) -> StorageResult<()> {
-    let m = self.dir.len() as u64;
-    let level = m.ilog2();
-    let s = (m - (1u64 << level)) as usize; // bucket to split
-
-    let desc = self.dir[s];
-    let bucket = self.read_bucket(file, desc)?;
-    // Partition by bit `level`: 0 stays in s, 1 moves to the new bucket.
-    let mut keep = SlotPage::new(self.struct_hash);
-    let mut moved = SlotPage::new(self.struct_hash);
-    for (id, entry) in bucket.entries {
-        if (hash_of(id) >> level) & 1 == 0 {
-            keep.upsert_entry(id, entry);
-        } else {
-            moved.upsert_entry(id, entry);
-        }
-    }
-    let keep_desc = self.place_if_nonempty(file, &keep)?;
-    let moved_desc = self.place_if_nonempty(file, &moved)?;
-    if desc.is_allocated() {
-        file.free(desc.run());
-    }
-    self.dir[s] = keep_desc;
-    self.dir.push(moved_desc); // new bucket at index M (= s + base)
-    Ok(())
-}
+let entry = (hash & (dir.len() as u64 - 1)) as usize;
+let bucket = entry & ((1 << dir[entry].depth()) - 1);
 ```
+
+A page a settle round rewrites over `target_blocks_per_bucket` splits **in that
+round, by itself**: its records partition by hash bit ℓ — clear stays at `c`,
+set goes to `c + 2^ℓ` — and both halves take ℓ + 1; when ℓ = d the directory
+doubles first by copying itself, so no other record moves. A half still over
+target splits again in the same round. The split costs no extra IO: the page
+was being rewritten anyway, and its halves are the same bytes. A page of one
+record never splits (a large record is a large page, RFC 0049), and none
+splits past depth 32, nor doubles a directory already holding 16 entries a
+page — which keeps the directory at most 128 bytes of RAM a page however the
+records' hashes fall.
+
+The headers name buckets, never aliases, and carry each type's depth; the
+walk that rebuilds a directory fills every alias of a named bucket from the
+ℓ in its descriptor.
 
 ### Two kinds of growth
 
-| Growth           | Trigger                                   | Cost                                                                                                                |
-| ---------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| **Page grow**    | a bucket's page outgrows its run          | allocate a larger run, copy the page, free the old run, rewrite **one** descriptor. No keys move.                   |
-| **Bucket split** | the warning limit trips                   | `split_next` splits one bucket by the next hash bit and appends one directory slot. Scoped to one type, one bucket. |
+| Growth           | Trigger                                        | Cost                                                                                          |
+| ---------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| **Page grow**    | a round's image of a page outgrows its run     | the page lands in a new run of the round's window, its descriptor rewritten. No keys move.     |
+| **Bucket split** | a page the round rewrites is over target       | the page splits by its next hash bit in the same round, the directory doubling first if needed. No extra IO. |
 
-**Page grow is the cheap, common case** — relocate one contiguous run to a bigger
-hole, patch one pointer. Growing the page in place lets writes proceed **without
-rebalancing on the hot path**; a background task runs `split_next` to keep pages
-from getting too large (see _Write pipeline_).
-
-For safety, the order is: allocate the larger run → write the updated page →
-**then** rewrite the directory entry. The directory only ever points at a fully
-written page.
+Every page is rewritten copy-on-write into the round's window, so the
+directory only ever points at a fully written page.
 
 ---
 
@@ -356,7 +329,7 @@ changing the framing):
 > A `BpTree` exists per tenant, so a B2C node hosts millions of _small_ trees and
 > a page per node wastes exactly the dominant case.
 
-Nodes ride the shared linear-hash `SlotPage` directory instead: a node is an
+Nodes ride the shared `SlotPage` directory instead: a node is an
 ordinary `STRUCT_HASH`-headed value (`[hash][kind u8][WaveWire]`), packed with
 everything else of its type so many tenants' small nodes share common buckets.
 Entry format, split/rebalance, and merge policy live in
@@ -462,7 +435,7 @@ mutation → the type's record log (RAM) → (client confirmed)
    phases 3–6). A database created with `StoreOptions::remote` keeps its pages
    in an object store, the disk caching them. Settle rounds flag what they
    write; `upload` reassembles the flagged pages, record by record, into the
-   object store's own linear hash of 128 KiB pages, packed into files of
+   object store's own extendible hash of 128 KiB pages, packed into files of
    `[roots block][32 KiB header][pages…]` (every page starts within the
    file's first 8 MiB; the roots block names the newest header ending a
    batch and where the chain of files stands, RFC 0073 §8), and clears the
