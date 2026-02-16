@@ -13,6 +13,7 @@ mod chain;
 mod chain_insert;
 mod chain_io;
 mod chain_remove;
+mod chain_scan;
 mod key;
 #[cfg(test)]
 pub(crate) mod mem_store;
