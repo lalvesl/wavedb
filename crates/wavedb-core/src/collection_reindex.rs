@@ -40,8 +40,8 @@ pub struct Reindex<'a> {
     pub records: &'a mut Chain<()>,
     /// The declared lists (RFC 0051).
     pub lists: &'a mut [Chain<Vec<u8>>],
-    /// The `#[wavedb::pivot(...)]` secondary trees.
-    pub secs: &'a mut [BpTree<SecKey>],
+    /// The `#[wavedb::pivot(...)]` secondary chains (RFC 0075).
+    pub secs: &'a mut [Chain<()>],
     /// The `#[wavedb::fuzzy]` posting trees (RFC 0056).
     pub fuzzy: &'a mut [BpTree<SecKey>],
 }
@@ -114,22 +114,22 @@ impl<T: NonUniqueStruct> Collection<T> {
         &self,
         view: &mut Overlay<'_, S>,
         batch: &mut Vec<Write>,
-        secs: &mut [BpTree<SecKey>],
+        secs: &mut [Chain<()>],
         id: Id,
         values: (&T, &T),
     ) -> Result<()> {
         let (old_value, value) = values;
-        for (i, tree) in secs.iter_mut().enumerate() {
+        for (i, chain) in secs.iter_mut().enumerate() {
             let old_key = Self::sec_key(old_value, i, id);
             let new_key = Self::sec_key(value, i, id);
             if old_key == new_key {
                 continue;
             }
-            if let Some(writes) = tree.plan_remove(&*view, old_key).await? {
+            if let Some(writes) = chain.plan_remove(&*view, &old_key).await? {
                 view.stage(&writes);
                 batch.extend(writes);
             }
-            let writes = tree.plan_insert(&*view, new_key).await?;
+            let writes = chain.plan_insert(&*view, new_key, ()).await?;
             view.stage(&writes);
             batch.extend(writes);
         }
