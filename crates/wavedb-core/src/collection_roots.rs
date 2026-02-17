@@ -27,18 +27,44 @@ use crate::traits::NonUniqueStruct;
 use crate::u48::U48;
 
 impl<T: NonUniqueStruct> Collection<T> {
-    /// A secondary-index tree handle at `root` with the same capacities.
+    /// A posting-tree handle at `root` with the same capacities.
     pub(crate) fn sec_tree(&self, root: LocalId) -> BpTree<SecKey> {
         BpTree::at(root, self.tenant)
             .with_caps(self.leaf_cap, self.internal_cap)
     }
 
-    /// The secondary-index trees this pivot declares, in declaration order.
-    pub(crate) fn sec_trees(&self, pivot: &T::Pivot) -> Vec<BpTree<SecKey>> {
+    /// A **secondary chain** at `roots` ([RFC 0075]): the recency chain's
+    /// shape — `[field][anchor]` keys, no payload ([RFC 0054]), a sparse
+    /// index above — keyed by a declared field instead of an instant.
+    ///
+    /// Pointer entries, so the removal log's kind of capacity: there are no
+    /// records in here to paginate.
+    ///
+    /// [RFC 0054]: https://github.com/wavedb/wavedb/blob/main/rfcs/0054-no-duplication-by-default.md
+    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
+    pub(crate) fn sec_chain(&self, roots: ChainRoots) -> Chain<()> {
+        self.pointer_chain(roots, Lane::Secondary)
+    }
+
+    /// A payload-free chain at `roots` in `lane`, at the index capacity.
+    fn pointer_chain(&self, roots: ChainRoots, lane: Lane) -> Chain<()> {
+        Chain::at(
+            roots.head,
+            roots.tail,
+            roots.index,
+            self.tenant,
+            T::STRUCT_HASH,
+            lane,
+        )
+        .with_min(self.index_min)
+    }
+
+    /// The secondary chains this pivot declares, in declaration order.
+    pub(crate) fn sec_chains(&self, pivot: &T::Pivot) -> Vec<Chain<()>> {
         pivot
             .secondaries()
             .iter()
-            .map(|root| self.sec_tree(*root))
+            .map(|roots| self.sec_chain(*roots))
             .collect()
     }
 
@@ -171,7 +197,7 @@ impl<T: NonUniqueStruct> Collection<T> {
     }
 
     /// Create a new, empty collection under `tenant`: the recency chain and
-    /// its sparse index, the removal log, one B+tree per
+    /// its sparse index, the removal log, one chain per
     /// `#[wavedb::pivot(...)]`, and the `Pivot` record pointing at them all,
     /// committed in one atomic batch. Returns the pivot's `LocalId` — the caller stores it (via the
     /// generated `{Name}PivotId`) in an owning record.
@@ -216,15 +242,19 @@ impl<T: NonUniqueStruct> Collection<T> {
         tenant: U48,
         pivot_id: Id,
     ) -> Result<()> {
-        // One B+tree per declared `#[wavedb::pivot(...)]` index; the rest are
-        // chains. The recency chain IS the membership set and the modification
-        // order at once (RFC 0050 phase 5c folded them together).
+        // One chain per declared `#[wavedb::pivot(...)]` index (RFC 0075),
+        // in its own lane. The recency chain IS the membership set and the
+        // modification order at once (RFC 0050 phase 5c folded them together).
         let mut batch = Vec::new();
         let mut sec_roots = Vec::with_capacity(T::NUM_SECONDARIES);
         for _ in 0..T::NUM_SECONDARIES {
-            let (tree, write) = BpTree::<SecKey>::plan_create(tenant);
-            sec_roots.push(tree.root());
-            batch.push(write);
+            let (chain, writes) = Chain::<()>::plan_create(
+                tenant,
+                T::STRUCT_HASH,
+                Lane::Secondary,
+            );
+            sec_roots.push(chain.roots());
+            batch.extend(writes);
         }
         // The **recency chain**: one pointer per living record, keyed by the
         // instant its live version was authored (RFC 0054). It is the same
