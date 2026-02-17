@@ -93,7 +93,10 @@ fn pivot_identity(
     let mut shape = vec![
         ("records".into(), "ChainRoots".into()),
         ("removals".into(), "LogRoots".into()),
-        ("secondaries".into(), format!("[LocalId;{num_secondaries}]")),
+        (
+            "secondaries".into(),
+            format!("[ChainRoots;{num_secondaries}]"),
+        ),
         ("lists".into(), format!("[ChainRoots;{num_lists}]")),
     ];
     if num_fuzzy > 0 {
@@ -111,7 +114,7 @@ fn pivot_impl(pivot: &Ident, pivot_hash: u64) -> TokenStream {
         impl ::wavedb_core::index::Pivot for #pivot {
             const STRUCT_HASH: u64 = #pivot_hash;
 
-            fn secondaries(&self) -> &[::wavedb_core::LocalId] { &self.secondaries }
+            fn secondaries(&self) -> &[::wavedb_core::ChainRoots] { &self.secondaries }
             fn recency(&self) -> ::wavedb_core::ChainRoots { self.recency }
             fn removals(&self) -> ::wavedb_core::LogRoots { self.removals }
             fn lists(&self) -> &[::wavedb_core::ChainRoots] { &self.lists }
@@ -166,7 +169,7 @@ pub fn nonunique_types(
         pivot_identity(&pivot, num_secondaries, num_lists, num_fuzzy);
     let pivot_id_tokens = pivot_id_tokens(&pivot_id)?;
 
-    // `struct {Name}Pivot { current, dead, secondaries: [LocalId; N], permission }`.
+    // `struct {Name}Pivot { recency, removals, secondaries: [ChainRoots; N], … }`.
     // `#[repr(C)]` keeps a clean layout when `N == 0` (a trailing zero-sized array
     // is otherwise a lint footgun); WaveWire never depends on the repr.
     // The pivot record is stored like any value, so it gets its own native
@@ -201,7 +204,7 @@ pub fn nonunique_types(
         pub struct #pivot {
             pub recency: ::wavedb_core::ChainRoots,
             pub removals: ::wavedb_core::LogRoots,
-            pub secondaries: [::wavedb_core::LocalId; #num_secondaries],
+            pub secondaries: [::wavedb_core::ChainRoots; #num_secondaries],
             pub lists: [::wavedb_core::ChainRoots; #num_lists],
             pub fuzzy: [::wavedb_core::LocalId; #num_fuzzy],
             pub permission: ::core::option::Option<::wavedb_core::PermissionRef>,
