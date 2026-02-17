@@ -280,7 +280,6 @@ mod tests {
     use crate::collection::Collection;
     use crate::index::mem_store::MemStore;
     use crate::index::{Chain, ChainRoots, IndexKey, LogRoots, Pivot, Roots};
-    use crate::local_id::LocalId;
     use crate::permission::PermissionRef;
     use crate::store::Store;
     use crate::traits::{NonUniqueStruct, Shape, WaveDbStruct};
@@ -313,7 +312,7 @@ mod tests {
 
     impl Pivot for RowPivot {
         const STRUCT_HASH: u64 = 0x115_0002;
-        fn secondaries(&self) -> &[LocalId] {
+        fn secondaries(&self) -> &[ChainRoots] {
             &[]
         }
         fn recency(&self) -> ChainRoots {
