@@ -250,7 +250,6 @@ mod tests {
     use crate::id::Id;
     use crate::index::mem_store::MemStore;
     use crate::index::{ChainRoots, LogRoots, Pivot, Roots};
-    use crate::local_id::LocalId;
     use crate::metadata::Succession;
     use crate::permission::PermissionRef;
     use crate::record::{adopt_unique, get_unique, save_unique};
@@ -282,7 +281,7 @@ mod tests {
     }
     impl Pivot for DocPivot {
         const STRUCT_HASH: u64 = 0xC4A6_0002;
-        fn secondaries(&self) -> &[LocalId] {
+        fn secondaries(&self) -> &[ChainRoots] {
             &[]
         }
         fn recency(&self) -> ChainRoots {
