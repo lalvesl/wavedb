@@ -174,12 +174,12 @@ mod tests {
     struct ItemPivot {
         recency: ChainRoots,
         removals: LogRoots,
-        secondaries: [LocalId; 1],
+        secondaries: [ChainRoots; 1],
         permission: Option<PermissionRef>,
     }
     impl Pivot for ItemPivot {
         const STRUCT_HASH: u64 = 0xADD_0002;
-        fn secondaries(&self) -> &[LocalId] {
+        fn secondaries(&self) -> &[ChainRoots] {
             &self.secondaries
         }
         fn recency(&self) -> ChainRoots {
