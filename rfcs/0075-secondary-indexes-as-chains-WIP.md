@@ -1,7 +1,7 @@
 # RFC 0075 — Secondary indexes as chains
 
-- **Status:** In progress (opened 2026-10-17; phase 1, the seek, landed
-  2026-10-18)
+- **Status:** In progress (opened 2026-10-17; phases 1, the seek, and 2,
+  secondaries on chains, landed 2026-10-18)
 - **Builds on:**
   - [RFC 0050](0050-clustered-record-chains.md) (the chain and its sparse
     index; B+trees opt-in);
