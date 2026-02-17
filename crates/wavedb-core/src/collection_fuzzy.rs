@@ -177,7 +177,7 @@ mod tests {
 
     impl Pivot for MemberPivot {
         const STRUCT_HASH: u64 = 0x0F0_0002;
-        fn secondaries(&self) -> &[LocalId] {
+        fn secondaries(&self) -> &[ChainRoots] {
             &[]
         }
         fn recency(&self) -> ChainRoots {
