@@ -255,7 +255,6 @@ mod tests {
     use super::{DbHandle, LocalHandle};
     use crate::index::mem_store::MemStore;
     use crate::index::{ChainRoots, IndexKey, LogRoots, Pivot, Roots};
-    use crate::local_id::LocalId;
     use crate::permission::PermissionRef;
     use crate::traits::{NonUniqueStruct, Shape, UniqueStruct, WaveDbStruct};
     use crate::u48::U48;
@@ -299,12 +298,12 @@ mod tests {
     struct NotePivot {
         recency: ChainRoots,
         removals: LogRoots,
-        secondaries: [LocalId; 1],
+        secondaries: [ChainRoots; 1],
         permission: Option<PermissionRef>,
     }
     impl Pivot for NotePivot {
         const STRUCT_HASH: u64 = 0x2077_1002;
-        fn secondaries(&self) -> &[LocalId] {
+        fn secondaries(&self) -> &[ChainRoots] {
             &self.secondaries
         }
         fn recency(&self) -> ChainRoots {
