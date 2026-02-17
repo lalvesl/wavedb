@@ -73,7 +73,6 @@ mod tests {
     use crate::id::Id;
     use crate::index::mem_store::MemStore;
     use crate::index::{ChainRoots, LogRoots, Pivot, Roots};
-    use crate::local_id::LocalId;
     use crate::permission::PermissionRef;
     use crate::record::save_unique;
     use crate::store::{Store, Write};
@@ -127,7 +126,7 @@ mod tests {
     }
     impl Pivot for NotePivot {
         const STRUCT_HASH: u64 = 0x1107_0002;
-        fn secondaries(&self) -> &[LocalId] {
+        fn secondaries(&self) -> &[ChainRoots] {
             &[]
         }
         fn recency(&self) -> ChainRoots {
