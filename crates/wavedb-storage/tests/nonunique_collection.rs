@@ -23,7 +23,7 @@ pub struct Todo {
     pub completed: bool,
 }
 
-/// A secondary-indexed type: `by_tag` rides an extra durable B+tree.
+/// A secondary-indexed type: `by_tag` rides a secondary chain (RFC 0075).
 #[wavedb(NonUnique)]
 #[wavedb::pivot(tag)]
 #[derive(Debug, PartialEq, Eq, Clone, Default)]
@@ -220,7 +220,7 @@ fn secondary_index_survives_reopen() {
         pivot
     });
 
-    // Reopen: the secondary tree is rebuilt from the headers like everything
+    // Reopen: the secondary chain is rebuilt from the headers like everything
     // else; the same PivotId reaches it through the recovered Pivot record.
     block_on(async {
         let store =
@@ -235,5 +235,48 @@ fn secondary_index_survives_reopen() {
         // Equal field values order by the records' CREATED_AT (`a` was
         // minted before `b`; its re-key kept its identity).
         assert_eq!(tagged(&db, col, "db").await, vec!["a", "b"]);
+    });
+}
+
+/// A secondary chain long enough to span many segments — and a sparse index
+/// above them — answers every value after a reopen, the removed records
+/// gone from it and the re-keyed ones at their new value only.
+#[test]
+fn a_secondary_chain_of_many_segments_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = U48::from(TENANT);
+    let tag = |k: usize| format!("t{:02}", k % 20);
+
+    let pivot = block_on(async {
+        let store =
+            PageStore::open(dir.path(), &Bookmark::storage_entries()).unwrap();
+        let db = LocalHandle::new(&store, tenant);
+        let pivot = Bookmark::create_pivot(&db).await.unwrap();
+        let col = Bookmark::collection(pivot);
+        let mut ids = Vec::new();
+        for k in 0..2_000 {
+            let mark = mark(&tag(k), &format!("u{k}"));
+            ids.push(col.insert(&db, &mark).await.unwrap());
+        }
+        // Every tenth of `t00` moves to `t99`; every tenth of `t01` goes.
+        for k in (0..2_000).step_by(200) {
+            col.save(&db, ids[k], &mark("t99", &format!("u{k}")))
+                .await
+                .unwrap();
+            assert!(col.remove(&db, ids[k + 1]).await.unwrap());
+        }
+        pivot
+    });
+
+    block_on(async {
+        let store =
+            PageStore::open(dir.path(), &Bookmark::storage_entries()).unwrap();
+        let db = LocalHandle::new(&store, tenant);
+        let col = Bookmark::collection(pivot);
+        assert_eq!(tagged(&db, col, "t00").await.len(), 90);
+        assert_eq!(tagged(&db, col, "t01").await.len(), 90);
+        assert_eq!(tagged(&db, col, "t02").await.len(), 100);
+        assert_eq!(tagged(&db, col, "t99").await.len(), 10);
+        assert_eq!(tagged(&db, col, "t50").await, Vec::<String>::new());
     });
 }
