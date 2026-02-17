@@ -71,6 +71,19 @@ impl Bound {
         }
     }
 
+    /// The least encoded key this bound can match — where an ordered scan
+    /// of it starts (RFC 0075). Every key it matches is `≥` this, so a scan
+    /// from here taking while [`contains`](Self::contains) holds is exactly
+    /// the bound.
+    #[must_use]
+    pub fn least(&self) -> &[u8] {
+        match self {
+            Self::All => &[],
+            Self::Exact(k) | Self::Prefix(k) => k,
+            Self::Range { lo, .. } => lo,
+        }
+    }
+
     /// The inclusive `CREATED_AT` (`u64`) range this bound can match, when it is
     /// expressible — the tree's descent pruning. `None` = no pruning possible
     /// ([`Bound::All`], or a key that isn't an 8-byte big-endian `CREATED_AT`).
@@ -151,8 +164,11 @@ pub struct LogRoots {
 /// generated or hand-written to mirror the macro, so a field added here is a
 /// compile error everywhere it matters and nowhere it doesn't.
 pub struct Roots<'a> {
-    /// One root per `#[wavedb::pivot(...)]` secondary index.
-    pub secondaries: &'a [LocalId],
+    /// One chain per `#[wavedb::pivot(...)]` secondary index, declaration
+    /// order ([RFC 0075]).
+    ///
+    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
+    pub secondaries: &'a [ChainRoots],
     /// The built-in modification-ordered record chain.
     pub recency: ChainRoots,
     /// The removal log.
@@ -183,9 +199,13 @@ pub trait Pivot: WaveWire + Sized {
     /// directory. The macro derives it from the generated pivot's own shape.
     const STRUCT_HASH: u64;
 
-    /// One root per `#[wavedb::pivot(...)]` secondary index — the only
-    /// B+trees a collection still holds (RFC 0050 phase 5c retired the rest).
-    fn secondaries(&self) -> &[LocalId];
+    /// One chain per `#[wavedb::pivot(...)]` secondary index, in declaration
+    /// order ([RFC 0075]) — `[field][anchor]` keys and no payload, the
+    /// recency chain's shape keyed by a field instead of an instant. Its
+    /// roots are permanent, so a secondary write never rewrites the `Pivot`.
+    ///
+    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
+    fn secondaries(&self) -> &[ChainRoots];
     /// The **record chain**'s roots: the collection's living records stored
     /// inline in modification order, with a sparse index above them (RFC 0050).
     ///
