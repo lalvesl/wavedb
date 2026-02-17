@@ -53,8 +53,9 @@ pub fn statics_for(
 /// Emit `storage_entries()` on the record type: every slot the type needs
 /// registered at `PageStore::open` — its own, plus its Pivot's for NonUnique.
 pub fn entries_for(name: &Ident, pivot: Option<&Ident>) -> TokenStream {
-    // A NonUnique type owns four reserved lanes — declared-list segments, the
-    // recency chain, the removal log and the sparse index — each a directory of
+    // A NonUnique type owns five reserved lanes — declared-list segments, the
+    // recency chain, the removal log, the sparse index and the secondary
+    // chains (RFC 0075) — each a directory of
     // its own, so each needs its own registered slot. Recency and `dead` are
     // separated from the record lane because they hold ids, not records
     // (RFC 0054), and a lane exists so one dictionary models one kind of thing.
@@ -62,7 +63,7 @@ pub fn entries_for(name: &Ident, pivot: Option<&Ident>) -> TokenStream {
         || (quote!(1usize), quote!([Self::struct_storage()])),
         |pivot| {
             (
-                quote!(6usize),
+                quote!(7usize),
                 quote!([
                     Self::struct_storage(),
                     #pivot::struct_storage(),
@@ -70,6 +71,7 @@ pub fn entries_for(name: &Ident, pivot: Option<&Ident>) -> TokenStream {
                     Self::recency_lane_storage(),
                     Self::dead_lane_storage(),
                     Self::index_lane_storage(),
+                    Self::secondary_lane_storage(),
                 ]),
             )
         },
@@ -88,8 +90,9 @@ pub fn entries_for(name: &Ident, pivot: Option<&Ident>) -> TokenStream {
     }
 }
 
-/// The three reserved-lane slots a NonUnique type needs registered: its record
-/// chain's segments, its removal log's, and its sparse index's (RFC 0050).
+/// The reserved-lane slots a NonUnique type needs registered: its lists'
+/// segments, its recency chain's, its removal log's, its sparse index's
+/// (RFC 0050) and its secondary chains' (RFC 0075).
 ///
 /// Each lane is its own storage directory, which is what keeps a page
 /// homogeneous — fat inline records, skinny `[instant][anchor]` pairs and
@@ -101,6 +104,7 @@ pub fn lane_statics(name: &Ident, hash: u64) -> TokenStream {
     let recency = crate::struct_hash::lane_hash(b"WDB.REC", hash);
     let dead = crate::struct_hash::lane_hash(b"WDB.DEAD", hash);
     let index = crate::struct_hash::lane_hash(b"WDB.IDX", hash);
+    let secondary = crate::struct_hash::lane_hash(b"WDB.SEC", hash);
     quote! {
         #[cfg(not(target_arch = "wasm32"))]
         impl #name {
@@ -139,6 +143,17 @@ pub fn lane_statics(name: &Ident, hash: u64) -> TokenStream {
             -> &'static ::wavedb_storage::StructStorage {
                 static SLOT: ::wavedb_storage::StructStorage =
                     ::wavedb_storage::StructStorage::new(#index).resident();
+                &SLOT
+            }
+
+            /// Storage slot for this type's **secondary chains** — the
+            /// `#[wavedb::pivot(...)]` indexes, `[field][anchor]` pointers
+            /// (RFC 0075).
+            #[must_use]
+            pub fn secondary_lane_storage()
+            -> &'static ::wavedb_storage::StructStorage {
+                static SLOT: ::wavedb_storage::StructStorage =
+                    ::wavedb_storage::StructStorage::new(#secondary).resident();
                 &SLOT
             }
         }
