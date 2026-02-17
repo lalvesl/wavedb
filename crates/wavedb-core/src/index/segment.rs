@@ -73,6 +73,15 @@ pub enum Lane {
     /// distinction RFC 0053 draws, which only separate lanes let the cache and
     /// the bucket target act on.
     Index,
+    /// `#[wavedb::pivot(...)]` secondary chains ([RFC 0075]): one
+    /// `[field][anchor]` key per record and no payload.
+    ///
+    /// Its own lane rather than the recency chain's: a field-keyed pointer
+    /// is different content from an instant-keyed one, and a lane is what
+    /// lets one dictionary model one kind of thing.
+    ///
+    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
+    Secondary,
 }
 
 impl Lane {
@@ -89,6 +98,7 @@ impl Lane {
             Self::Recency => b"WDB.REC",
             Self::Dead => b"WDB.DEAD",
             Self::Index => b"WDB.IDX",
+            Self::Secondary => b"WDB.SEC",
         };
         let mut bytes = tag.to_vec();
         bytes.extend_from_slice(&struct_hash.to_le_bytes());
