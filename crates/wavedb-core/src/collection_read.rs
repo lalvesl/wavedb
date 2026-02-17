@@ -20,7 +20,8 @@ use futures::{Stream, TryStreamExt};
 use crate::collection::Collection;
 use crate::error::{Error, Result};
 use crate::id::Id;
-use crate::index::{Bound, Pivot};
+use crate::index::{Bound, Pivot, SecKey};
+use crate::local_id::LocalId;
 use crate::metadata::Metadata;
 use crate::record::{decode_record, history_stream};
 use crate::store::Store;
@@ -111,13 +112,15 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// Stream the living records secondary index `index` selects under
     /// `bound` (a bound over the index's [`IndexKey`](crate::index::IndexKey)
     /// encoding — `Exact` for one value, `Prefix`/`Range` for scans),
-    /// resolved two-phase: the tree yields anchors, each one is fetched.
+    /// resolved two-phase: the chain yields anchors, each one is fetched.
     /// Ordered by the indexed field. The generated `by_<field>` wrappers call
     /// this with the field's exact encoding.
     ///
-    /// This is the last B+tree read a collection makes, and it stays one: a
-    /// secondary index is *declared*, so RFC 0051's lists are what will
-    /// eventually replace it — not the built-in chain.
+    /// One sparse-index descent to the bound's least key, then the chain in
+    /// order while the bound holds ([RFC 0075]): a range read touches the
+    /// segments it returns from, and one more at most.
+    ///
+    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
     pub fn search_by<'a, S: Store>(
         self,
         store: &'a S,
@@ -128,15 +131,24 @@ impl<T: NonUniqueStruct> Collection<T> {
         T: 'a,
     {
         let handle = self;
+        let tenant = self.tenant();
         futures::stream::once(async move {
             let pivot = handle.load_pivot(store).await?;
-            let root = *pivot
+            let roots = *pivot
                 .secondaries()
                 .get(index)
                 .ok_or(Error::SecondaryIndexOutOfRange(index))?;
-            Ok::<_, Error>(handle.sec_tree(root).search(store, bound))
+            let from = SecKey {
+                field: bound.least().to_vec(),
+                rec: LocalId::default(),
+            };
+            let keys = handle.sec_chain(roots).scan_from(store, from);
+            Ok::<_, Error>(keys.try_take_while(move |(key, ())| {
+                futures::future::ready(Ok(bound.contains(&key.field)))
+            }))
         })
         .try_flatten()
+        .map_ok(move |(key, ())| key.rec.to_id(tenant))
         .and_then(move |id| async move {
             let bytes = store
                 .get_of(T::STRUCT_HASH, id)
