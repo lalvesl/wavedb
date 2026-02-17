@@ -65,6 +65,8 @@ pub struct Collection<T: NonUniqueStruct> {
     user: U48,
     pub(crate) leaf_cap: usize,
     pub(crate) internal_cap: usize,
+    /// The secondary chains' segment minimum (RFC 0075).
+    pub(crate) index_min: usize,
     _record: PhantomData<fn() -> T>,
 }
 
@@ -89,6 +91,7 @@ impl<T: NonUniqueStruct> Collection<T> {
             user: tenant,
             leaf_cap: crate::index::DEFAULT_LEAF_CAP,
             internal_cap: crate::index::DEFAULT_INTERNAL_CAP,
+            index_min: crate::index::DEFAULT_DEAD_MIN,
             _record: PhantomData,
         }
     }
@@ -108,6 +111,15 @@ impl<T: NonUniqueStruct> Collection<T> {
     pub const fn with_caps(mut self, leaf: usize, internal: usize) -> Self {
         self.leaf_cap = leaf;
         self.internal_cap = internal;
+        self
+    }
+
+    /// Override the secondary chains' segment minimum (small segments make
+    /// long chains cheap to build in tests; production uses the default).
+    /// Use one for a collection's whole lifetime.
+    #[must_use]
+    pub const fn with_index_min(mut self, min: usize) -> Self {
+        self.index_min = min;
         self
     }
 
@@ -203,7 +215,7 @@ mod tests {
 
     impl Pivot for DocPivot {
         const STRUCT_HASH: u64 = 0xD0C_0002;
-        fn secondaries(&self) -> &[LocalId] {
+        fn secondaries(&self) -> &[ChainRoots] {
             &[]
         }
         fn recency(&self) -> ChainRoots {
@@ -246,13 +258,13 @@ mod tests {
     struct TaggedPivot {
         recency: ChainRoots,
         removals: LogRoots,
-        secondaries: [LocalId; 1],
+        secondaries: [ChainRoots; 1],
         permission: Option<PermissionRef>,
     }
 
     impl Pivot for TaggedPivot {
         const STRUCT_HASH: u64 = 0x7A6_0002;
-        fn secondaries(&self) -> &[LocalId] {
+        fn secondaries(&self) -> &[ChainRoots] {
             &self.secondaries
         }
         fn recency(&self) -> ChainRoots {
@@ -543,7 +555,8 @@ mod tests {
             let pivot = Collection::<Tagged>::create(&store, tenant())
                 .await
                 .unwrap();
-            let col = Collection::<Tagged>::at(pivot, tenant()).with_caps(4, 4);
+            let col =
+                Collection::<Tagged>::at(pivot, tenant()).with_index_min(4);
 
             let mut ids = Vec::new();
             for (label, n) in
@@ -611,7 +624,7 @@ mod tests {
                 .unwrap();
             }
             let fresh =
-                Collection::<Tagged>::at(pivot, tenant()).with_caps(4, 4);
+                Collection::<Tagged>::at(pivot, tenant()).with_index_min(4);
             assert_eq!(
                 by_label(fresh, &store, "bulk").await,
                 (0..40).collect::<Vec<u64>>()
