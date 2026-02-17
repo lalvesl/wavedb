@@ -241,7 +241,8 @@ fn lane_hashes_const(shape: Shape, hash: u64) -> TokenStream {
     let recency = crate::struct_hash::lane_hash(b"WDB.REC", hash);
     let dead = crate::struct_hash::lane_hash(b"WDB.DEAD", hash);
     let index = crate::struct_hash::lane_hash(b"WDB.IDX", hash);
-    quote!(&[#records, #recency, #dead, #index])
+    let secondary = crate::struct_hash::lane_hash(b"WDB.SEC", hash);
+    quote!(&[#records, #recency, #dead, #index, #secondary])
 }
 
 /// A whitespace-free rendering of a field type, so the same declared type always
