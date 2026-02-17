@@ -98,7 +98,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         // Distinct structures, so their plans don't overlap (the writes
         // already in `batch` are record slots, never nodes) — no overlay.
         let mut records = self.recency_chain(pivot);
-        let mut secs = self.sec_trees(pivot);
+        let mut secs = self.sec_chains(pivot);
         let mut lists = self.list_chains(pivot);
         let key = Self::instant_key(instant, LocalId::from_id(id));
         let envelope =
@@ -112,9 +112,9 @@ impl<T: NonUniqueStruct> Collection<T> {
             store, &mut batch, &mut lists, id, &envelope, value,
         )
         .await?;
-        for (i, tree) in secs.iter_mut().enumerate() {
+        for (i, chain) in secs.iter_mut().enumerate() {
             let key = Self::sec_key(value, i, id);
-            batch.extend(tree.plan_insert(store, key).await?);
+            batch.extend(chain.plan_insert(store, key, ()).await?);
         }
         let mut fuzzy = self.fuzzy_trees(pivot);
         let mut view = crate::overlay::Overlay::new(store);
@@ -157,7 +157,6 @@ mod tests {
     use crate::id::Id;
     use crate::index::mem_store::MemStore;
     use crate::index::{Bound, ChainRoots, IndexKey, LogRoots, Pivot, Roots};
-    use crate::local_id::LocalId;
     use crate::metadata::Metadata;
     use crate::permission::PermissionRef;
     use crate::traits::{NonUniqueStruct, Shape, WaveDbStruct};
@@ -198,12 +197,12 @@ mod tests {
     struct CredPivot {
         recency: ChainRoots,
         removals: LogRoots,
-        secondaries: [LocalId; 1],
+        secondaries: [ChainRoots; 1],
         permission: Option<PermissionRef>,
     }
     impl Pivot for CredPivot {
         const STRUCT_HASH: u64 = 0x5EA_0002;
-        fn secondaries(&self) -> &[LocalId] {
+        fn secondaries(&self) -> &[ChainRoots] {
             &self.secondaries
         }
         fn recency(&self) -> ChainRoots {
