@@ -27,8 +27,8 @@ use crate::wire::to_wire;
 /// and rewritten **exactly once** — a second write built from the pre-batch
 /// pivot would drop whatever the first one carried.
 pub struct MovedRoots<'a> {
-    /// The secondary trees, in declaration order.
-    pub secondaries: &'a [BpTree<SecKey>],
+    /// The secondary chains, in declaration order (RFC 0075).
+    pub secondaries: &'a [Chain<()>],
     /// The record chain's endpoints and index root (RFC 0050).
     pub recency: ChainRoots,
     /// The removal log's endpoints.
@@ -54,8 +54,8 @@ impl<T: NonUniqueStruct> Collection<T> {
         pivot: &T::Pivot,
         moved: &MovedRoots<'_>,
     ) {
-        let sec_roots: Vec<LocalId> =
-            moved.secondaries.iter().map(BpTree::root).collect();
+        let sec_roots: Vec<ChainRoots> =
+            moved.secondaries.iter().map(Chain::roots).collect();
         let list_roots: Vec<ChainRoots> =
             moved.lists.iter().map(Chain::roots).collect();
         let fuzzy_roots: Vec<LocalId> =
@@ -142,7 +142,7 @@ impl<T: NonUniqueStruct> Collection<T> {
             return Err(crate::Error::ChainCorrupt(id));
         };
         let mut records = self.recency_chain(pivot);
-        let mut secs = self.sec_trees(pivot);
+        let mut secs = self.sec_chains(pivot);
         let mut lists = self.list_chains(pivot);
         let mut fuzzy = self.fuzzy_trees(pivot);
         let envelope = encode_record(T::STRUCT_HASH, &meta, value);
@@ -158,9 +158,9 @@ impl<T: NonUniqueStruct> Collection<T> {
             store, &mut batch, &mut lists, id, &envelope, value,
         )
         .await?;
-        for (i, tree) in secs.iter_mut().enumerate() {
+        for (i, chain) in secs.iter_mut().enumerate() {
             let key = Self::sec_key(value, i, id);
-            batch.extend(tree.plan_insert(store, key).await?);
+            batch.extend(chain.plan_insert(store, key, ()).await?);
         }
         // …and `L + n - 1` postings per fuzzy declaration (RFC 0056).
         let mut view = Overlay::new(store);
@@ -263,7 +263,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         let (mut batch, old, live_meta) =
             plan_chained_save::<T, S>(store, &plan, value).await?;
         let mut records = self.recency_chain(&pivot);
-        let mut secs = self.sec_trees(&pivot);
+        let mut secs = self.sec_chains(&pivot);
         let mut lists = self.list_chains(&pivot);
         let mut fuzzy = self.fuzzy_trees(&pivot);
         // Removals and inserts mutate the same structures in one batch: each
