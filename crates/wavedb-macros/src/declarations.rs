@@ -33,13 +33,11 @@ pub struct Declared {
 /// into `hash_fields`.
 ///
 /// Order is fixed and load-bearing: the fold order **is** part of the identity,
-/// so the sequence here (key, layout knobs, lists, fuzzy) must not be shuffled
-/// for tidiness — and a new kind is **appended**, never inserted, so adding one
-/// leaves every existing type's hash alone. Secondary indexes are last and fold
-/// nothing: a secondary is a derived lookup structure over the record's own
-/// values, not a fact about the bytes stored for it. A fuzzy index is not in
-/// that company — its postings are a normalization and a gram width away from
-/// the field, and both choices are stored.
+/// so the sequence here (key, layout knobs, lists, fuzzy, secondaries) must not
+/// be shuffled for tidiness — and a new kind is **appended**, never inserted, so
+/// adding one leaves every existing type's hash alone. A fuzzy index folds its
+/// normalization and gram width, both stored choices; a secondary folds its
+/// fields, since its chain stores their encoding (RFC 0075).
 pub fn take_declarations(
     input: &mut DeriveInput,
     named: &syn::FieldsNamed,
@@ -59,12 +57,35 @@ pub fn take_declarations(
             "#[wavedb::pivot(...)] is only valid on a #[wavedb(NonUnique)] struct",
         ));
     }
+    fold_secondaries(&secondaries, hash_fields);
     Ok(Declared {
         key_fields,
         secondaries,
         lists,
         fuzzy,
     })
+}
+
+/// Fold each secondary index, in declaration order, as a synthetic
+/// `#pivot{i}` entry naming its fields ([RFC 0075]): index `i` of the
+/// `Pivot` names a chain whose stored keys are those fields' encoding, so
+/// reordering or retyping the declarations would point `by_` at another
+/// field's chain — a fact about stored bytes, so it is a new type.
+///
+/// [RFC 0075]: ../../../rfcs/0075-secondary-indexes-as-chains-WIP.md
+fn fold_secondaries(
+    secondaries: &[ResolvedPivot],
+    hash_fields: &mut Vec<(String, String)>,
+) {
+    for (i, pivot) in secondaries.iter().enumerate() {
+        let joined = pivot
+            .fields
+            .iter()
+            .map(|(f, _)| f.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        hash_fields.push((format!("#pivot{i}"), joined));
+    }
 }
 
 /// Remove every `#[wavedb::pivot(...)]` attribute from `attrs`, parsing each
