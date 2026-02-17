@@ -41,7 +41,7 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// a corrupt pivot.
     pub async fn remove<S: Store>(&self, store: &S, id: Id) -> Result<bool> {
         let pivot = self.load_pivot(store).await?;
-        let mut secs = self.sec_trees(&pivot);
+        let mut secs = self.sec_chains(&pivot);
 
         // Liveness reads off the anchor (RFC 0050), and the same read hands
         // back what the removal needs: the live instant keying the record's
@@ -91,9 +91,9 @@ impl<T: NonUniqueStruct> Collection<T> {
                 .plan_insert(store, Self::instant_key(removed_at, anchor), ())
                 .await?,
         );
-        for (i, tree) in secs.iter_mut().enumerate() {
+        for (i, chain) in secs.iter_mut().enumerate() {
             let key = Self::sec_key(&value, i, id);
-            if let Some(writes) = tree.plan_remove(store, key).await? {
+            if let Some(writes) = chain.plan_remove(store, &key).await? {
                 batch.extend(writes);
             }
         }
