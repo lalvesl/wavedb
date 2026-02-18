@@ -1,7 +1,7 @@
 //! [`Collection`]'s mutating half — `insert` / `save` / `remove` — each one
-//! atomic [`Store::apply`] batch: the record write, every touched B+tree node
-//! (primary, secondary, and the recency/dead logs, via the trees' `plan_*`
-//! planners), and the rewritten `Pivot` when any root moved.
+//! atomic [`Store::apply`] batch: the record write, every touched chain
+//! segment and index node (recency, removals, lists, secondaries, fuzzy, via
+//! the chains' `plan_*` planners), and the rewritten `Pivot` when a root moved.
 //!
 //! Every instant minted here (an insert's id, a save's version instant, a
 //! removal's log key) lands strictly above the collection's **instant
@@ -12,7 +12,7 @@ use crate::collection::Collection;
 use crate::collection_reindex::Reindex;
 use crate::error::Result;
 use crate::id::Id;
-use crate::index::{BpTree, Chain, ChainRoots, LogRoots, Pivot, Roots, SecKey};
+use crate::index::{Chain, ChainRoots, LogRoots, Pivot, Roots};
 use crate::local_id::LocalId;
 use crate::metadata::{Metadata, Succession};
 use crate::notify::{Mutation, MutationKind};
@@ -35,12 +35,12 @@ pub struct MovedRoots<'a> {
     pub removals: LogRoots,
     /// The declared lists' chains, in declaration order (RFC 0051).
     pub lists: &'a [Chain<Vec<u8>>],
-    /// The fuzzy posting trees, in declaration order (RFC 0056).
-    pub fuzzy: &'a [BpTree<SecKey>],
+    /// The fuzzy posting chains, in declaration order (RFC 0056).
+    pub fuzzy: &'a [Chain<()>],
 }
 
 impl<T: NonUniqueStruct> Collection<T> {
-    /// When any root moved — a secondary B+tree's, or a chain's endpoint —
+    /// When any root moved — a chain's endpoint, at its first split —
     /// append the `Pivot` rewrite carrying them all.
     ///
     /// A chain moves an endpoint at most once in its life (its first split) and
@@ -58,8 +58,8 @@ impl<T: NonUniqueStruct> Collection<T> {
             moved.secondaries.iter().map(Chain::roots).collect();
         let list_roots: Vec<ChainRoots> =
             moved.lists.iter().map(Chain::roots).collect();
-        let fuzzy_roots: Vec<LocalId> =
-            moved.fuzzy.iter().map(BpTree::root).collect();
+        let fuzzy_roots: Vec<ChainRoots> =
+            moved.fuzzy.iter().map(Chain::roots).collect();
         if sec_roots.as_slice() != pivot.secondaries()
             || moved.recency != pivot.recency()
             || moved.removals != pivot.removals()
@@ -144,7 +144,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         let mut records = self.recency_chain(pivot);
         let mut secs = self.sec_chains(pivot);
         let mut lists = self.list_chains(pivot);
-        let mut fuzzy = self.fuzzy_trees(pivot);
+        let mut fuzzy = self.fuzzy_chains(pivot);
         let envelope = encode_record(T::STRUCT_HASH, &meta, value);
         let key = Self::instant_key(instant, LocalId::from_id(id));
         // The chain carries the record **inline**, keyed by the instant its
@@ -265,7 +265,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         let mut records = self.recency_chain(&pivot);
         let mut secs = self.sec_chains(&pivot);
         let mut lists = self.list_chains(&pivot);
-        let mut fuzzy = self.fuzzy_trees(&pivot);
+        let mut fuzzy = self.fuzzy_chains(&pivot);
         // Removals and inserts mutate the same structures in one batch: each
         // plan reads through the overlay of the pending node writes.
         let mut view = Overlay::new(store);
