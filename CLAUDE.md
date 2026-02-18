@@ -76,7 +76,8 @@ Full rationale in `docs/development_standards.md`. The load-bearing ones:
   change to the algorithm is a change to every stored identity.
 - **Everything that reaches stored bytes folds into `STRUCT_HASH`.** Fields, shape,
   `#[wavedb::key]`, `compress`, `page = N`, and every `#[wavedb::list]`
-  declaration **including their order** (RFCs 0051/0052) — as a synthetic `#name`
+  declaration **including their order** (RFCs 0051/0052), and every
+  `#[wavedb::pivot]` declaration in order (RFC 0075) — as a synthetic `#name`
   hash entry when it isn't a real field. The engine does **no** migration (RFC 0040), so the only
   coherent answer to "can I change this on live data?" is that changing it yields a
   **new type** and moving the data across is application code. Never add a knob that
@@ -136,15 +137,18 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   and every forwarding store must forward it), `Durability<S>` (a store
   whose `apply` goes durable on a flag — every `_durable` operation is its
   plain twin over it, RFC 0072 §12), the `Store`-generic
-  `BpTree<K: NodeKey>` index, `Collection<T>` (the developer surface over the tree),
+  `Chain<P>` every index is (sorted segments keyed by `SecKey`, a sparse index
+  above, permanent roots, `scan_from` for ordered reads — RFC 0050, RFC 0075),
+  `Collection<T>` (the developer surface over the chains),
   `record.rs` (envelopes, id minting, `plan_chained_save`), `Overlay` (batch-pending
-  read view so multiple plans on one tree compose into one atomic batch), and the
+  read view so multiple plans on one chain compose into one atomic batch), and the
   `expose` module (`Command`/`Reply`/`Exposure` — the registry contract).
 - **wavedb-macros** — `#[wavedb]` computes `STRUCT_HASH` (SeaHash over
   name+shape+fields — any schema change = new type), emits `WaveWire`, generated
   `{Name}Pivot`/`{Name}PivotId`, per-command exec steps `__wavedb_{get,save,insert,update,remove,all}`,
   per-type `static StructStorage` slots (native only; wasm expansion omits them), and
-  secondary-index hooks from `#[wavedb::pivot(field)]`, and natural-key anchors
+  secondary-index hooks from `#[wavedb::pivot(field)]` (a pointer chain each, its
+  declaration folded into the STRUCT_HASH as `#pivot{i}`), and natural-key anchors
   from `#[wavedb::key(f1, …)]` (NonUnique only; emits `natural_key()` — seahash
   of the fields' wire bytes — and folds the declaration into the STRUCT_HASH,
   so changing the key is a schema change), and **declared lists** from
@@ -389,11 +393,12 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   the generated `listed_by_*` / `_at_page` / `_len`. It costs a full copy of
   every record per declaration — that duplication *is* the design.
 - Every mutating collection op is exactly **one atomic `Store::apply` batch**
-  (record + touched chain segments and sparse-index nodes + touched B+tree nodes
-  + Pivot rewrite when a root moves).
+  (record + touched chain segments and sparse-index nodes — recency, removals,
+  lists, secondaries, fuzzy — + Pivot rewrite when a root moves).
 - Stored values are STRUCT_HASH-headed: user records
-  `[STRUCT_HASH][meta_len][Metadata][body]`; Pivots `[STRUCT_HASH][wire]`; BpTree
-  nodes `[BPTREE_NODE_HASH][kind u8][wire]`. Decode verifies the head.
+  `[STRUCT_HASH][meta_len][Metadata][body]`; Pivots `[STRUCT_HASH][wire]`; chain
+  segments `[lane hash][wire]` and sparse-index nodes `[lane hash][kind u8][wire]`.
+  Decode verifies the head.
 - Pivot instances are created explicitly (`create_pivot`), **one per holder** —
   *not* one per tenant per type: the API imposes no such limit, so a nesting
   NonUnique mints one per record and a type has as many collections as there
