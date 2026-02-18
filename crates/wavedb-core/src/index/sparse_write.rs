@@ -11,7 +11,7 @@
 //!
 //! ## The root id never changes
 //!
-//! A `BpTree` root moves whenever the root splits, and the `Pivot` holding it must
+//! A B+tree root moves whenever the root splits, and the `Pivot` holding it must
 //! be rewritten. Here a root that overflows keeps its own id: its contents move
 //! into a **freshly minted child** and the root becomes the internal node above the
 //! two halves. One extra node write on a level growth — a rare event — in exchange
@@ -24,8 +24,8 @@
 //! An emptied node is dropped from its parent and removed from the store, so
 //! removals leak nothing. But this tree **never merges underfull nodes**, and a
 //! root left with a single child is not collapsed: nodes drain and stay drained,
-//! and a tree that grew a level never gives it back. The dense `BpTree` has the
-//! full cycle (`tree_delete`); this half of RFC 0050 phase 3a was not written.
+//! and a tree that grew a level never gives it back; this half of RFC 0050
+//! phase 3a was not written.
 //!
 //! It is **accepted debt**, not a design position (RFC 0050 phase 8a, written up as
 //! RFC 0055): this index holds one entry per *segment*, so a million records at
@@ -41,7 +41,7 @@ use crate::error::{Error, Result};
 use crate::local_id::LocalId;
 use crate::store::{Store, Write};
 
-use super::node_key::SecKey;
+use super::sec_key::SecKey;
 use super::segment::mint_lane_id;
 use super::sparse::{Branch, Slot, SparseNode};
 use super::sparse_tree::SparseTree;
@@ -59,9 +59,8 @@ impl SparseTree {
     ///
     /// Replacement is the common case, not the exception: a segment that gained
     /// or lost one record keeps its separator and revises its count. This is the
-    /// operation `BpTree` cannot express — its `plan_insert` returns an empty
-    /// batch for a key already present, so a count revision through it would be a
-    /// silent no-op.
+    /// operation a key-only tree cannot express: a count revision needs a
+    /// payload to revise.
     ///
     /// # Errors
     /// As [`find`](Self::find).
@@ -229,7 +228,7 @@ mod tests {
 
     use super::{Slot, SparseTree};
     use crate::index::mem_store::MemStore;
-    use crate::index::node_key::SecKey;
+    use crate::index::sec_key::SecKey;
     use crate::local_id::LocalId;
     use crate::store::Store;
     use crate::u48::U48;
@@ -323,9 +322,8 @@ mod tests {
     #[test]
     fn upserting_a_separator_revises_its_count_instead_of_duplicating_it() {
         block_on(async {
-            // The operation `BpTree` cannot express: its `plan_insert` returns an
-            // empty batch for a key already present, so this revision would be a
-            // silent no-op there.
+            // A key-only tree has no payload to revise: this would be a silent
+            // no-op there.
             let store = MemStore::default();
             let tree = fresh(&store, 4).await;
             upsert(&store, &tree, slot(10, 100, 3)).await;
