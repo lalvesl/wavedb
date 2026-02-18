@@ -20,7 +20,7 @@ because both compile this crate.
 | `args`              | Parse `#[wavedb(...)]` attribute arguments.                     |
 | `struct_hash`       | Compute the `STRUCT_HASH: u64` const from name/shape/fields.    |
 | `wire_derive`       | `WaveWire` — the no-serde, no-`repr(C)` `WaveWire` impl.            |
-| `generated`         | Auto-emit the per-NonUnique `Pivot` + `BpTree` types.           |
+| `generated`         | Auto-emit the per-NonUnique `Pivot` + `PivotId` types.          |
 | `crud`              | Generated accessors / CRUD glue (the per-item execution steps). |
 | `expose`            | `expose_server!` / `expose_client!` — the declared registry.    |
 | `codegen` / `utils` | Shared emit helpers.                                            |
@@ -48,9 +48,9 @@ because both compile this crate.
    (see `docs/wire_format.md`) — no `serde`, no `repr(C)`. The macro decides
    every field's stack/heap placement, so layout never depends on the Rust
    compiler's struct representation.
-4. **Generates the collection machinery for `NonUnique`** — a `Pivot` type and a
-   `BpTree` type, plus one extra `BpTree` (secondary index) per
-   `#[wavedb::pivot(...)]` attribute (below).
+4. **Generates the collection machinery for `NonUnique`** — a `Pivot` type
+   naming every chain the collection holds, one secondary chain per
+   `#[wavedb::pivot(...)]` attribute among them (below).
 5. **Implements the typed object trait by shape** — `UniqueObject` (`get` /
    `save`) for Unique, `NonUniqueObject` (`collection` → `insert`/`get`/`all`/
    `remove`, plus record `save`) for NonUnique. On the **client** each method
@@ -59,7 +59,7 @@ because both compile this crate.
    the matching compile-time **engine fns** (`get`/`save` for Unique;
    `insert`/`update`/`remove` for NonUnique) that the registry's `match command`
    calls — these drive the storage internals (block allocator, record cache, the
-   object's page directory, `Pivot`/`BpTree`) directly, monomorphized, no `dyn`.
+   object's page directory, `Pivot`/`Chain`) directly, monomorphized, no `dyn`.
    So the write half of the wire command set is `Get`/`Save` (Unique) and
    `Insert`/`Update`/`Remove` (NonUnique); the client-side `save()` method emits
    the `Update` command for NonUnique. The read half adds `All`, `History`,
@@ -124,31 +124,30 @@ of another NonUnique collection in a field. The collection is reached by
 
 ---
 
-## Generated collection types (`Pivot` + `BpTree`)
+## Generated collection types (`Pivot` + `PivotId`)
 
 `#[wavedb(NonUnique)]` auto-generates the two helper **types** per family. They
 carry no business data — pure addressing — so applications rarely name them
 directly; they reference a collection through its `PivotId`.
 
 ```rust
-// Generated type. The handle for one NonUnique collection.
-// No counter — a size field would force a Pivot write on every insert/remove;
-// the Pivot stays effectively immutable (written only if a BpTree root moves).
-pub struct Pivot {
-    pub current:    BpTreeId,              // u128 → B+tree of living records (keyed by CREATED_AT)
-    pub dead:       BpTreeId,              // u128 → B+tree of deleted records
-    pub permission: Option<PermissionRef>, // collection-default access; per-record Metadata overrides
-    // + one BpTreeId root per `#[wavedb::pivot(...)]` secondary index (below)
+// Generated type. The handle for one NonUnique collection: the roots of every
+// chain it holds (RFC 0050, RFC 0075). No counter — a size field would force a
+// Pivot write on every insert/remove — and a chain's roots are permanent, so
+// the Pivot is written at creation and then essentially never.
+pub struct NotePivot {
+    pub recency:     ChainRoots,            // living records, by live instant
+    pub removals:    LogRoots,              // the removal log
+    pub secondaries: [ChainRoots; S],       // one per `#[wavedb::pivot(...)]`
+    pub lists:       [ChainRoots; L],       // one per `#[wavedb::list]`
+    pub fuzzy:       [ChainRoots; F],       // one per `#[wavedb::fuzzy]`
+    pub permission:  Option<PermissionRef>, // collection default; record Metadata overrides
 }
-
-// Generated type. A B+tree keyed by CREATED_AT, holding NonUnique record
-// IDs (not their bytes). One instance indexes living data, one deleted.
-pub struct BpTree { /* node entries → Id */ }
 ```
 
 ### The type is generated; the **instance is created explicitly**
 
-The macro emits the `Pivot`/`BpTree` _types_, but a `Pivot` _instance_ is **not
+The macro emits the `Pivot` _type_, but a `Pivot` _instance_ is **not
 created automatically**. A collection comes into being when you **call create on
 its `Pivot`** — there is **one `Pivot` per tenant per definition** (per NonUnique
 struct type) — and then **store the returned `PivotId`** in a field of a `Unique`
@@ -165,7 +164,7 @@ pub struct UserInterestedFruits {
 }
 ```
 
-> The generated `Pivot`/`BpTree` types share a name and field shape across
+> The generated `Pivot` types share a field shape across
 > families, so their `STRUCT_HASH` may collide. That is harmless — each is
 > addressed only within its own per-`STRUCT_HASH` directory and tenant/collection
 > context, and the type is never inferred from the `Id` (the 15-bit `SALT` is pure
@@ -174,14 +173,15 @@ pub struct UserInterestedFruits {
 
 ### Secondary indexes — `#[wavedb::pivot(...)]`
 
-By default a NonUnique collection has one index: the `current` `BpTree` keyed by
-`CREATED_AT` (time order). Declare **extra `BpTree`s on properties** with the
-repeatable `#[wavedb::pivot(...)]` attribute — single field or a composite tuple:
+By default a NonUnique collection orders by recency only (its recency chain).
+Declare **secondary indexes on properties** with the repeatable
+`#[wavedb::pivot(...)]` attribute — single field or a composite tuple — each a
+pointer chain of `[field][anchor]` keys in a lane of its own (RFC 0075):
 
 ```rust
 #[wavedb(NonUnique)]
-#[wavedb::pivot(amount)]              // a BpTree keyed by `amount`
-#[wavedb::pivot((customer, date))]   // a composite BpTree keyed by (customer, date)
+#[wavedb::pivot(amount)]              // a chain keyed by `amount`
+#[wavedb::pivot((customer, date))]   // a composite chain keyed by (customer, date)
 pub struct Order {
     pub amount: u64,
     pub customer: u64,
@@ -191,20 +191,20 @@ pub struct Order {
 
 Per declared pivot the macro:
 
-- adds a **`BpTreeId` root to the `Pivot`** (one per index);
+- adds a **`ChainRoots` to the `Pivot`** (one per index), and folds the
+  declaration into the `STRUCT_HASH` as `#pivot{i}` — reordering or retyping
+  them is a new type;
 - generates a **typed lookup** on the collection handle — e.g. `by_amount(&db, v)`
   / a range query, and `by_customer_date(&db, (c, d))` — returning a record async
   iterator (`impl Stream<Item = Result<T>>`), resolved two-phase (index → `Id`s →
-  fetch), exactly like the primary tree.
+  fetch): one descent to the bound's least key, then the chain in order.
 
 **Maintenance cost.** `insert` and `remove` index / de-index the record in
-`current` **and every secondary**; a `save` (update) **re-keys each secondary
-whose field values changed** — the old key comes out, the new key goes in, all
-inside the op's one atomic batch (the old record's bytes supply the stale
-keys). The primary `current` tree never re-keys: its key is the record's
-immutable `CREATED_AT` identity. The **`dead`** tree is **not** touched on
-update — history is the `Metadata` modification chain — so only `remove`
-writes `dead`. Cost scales with the secondary-index count (see
+every secondary; a `save` (update) **re-keys each secondary whose field values
+changed** — the old key comes out, the new key goes in, all inside the op's one
+atomic batch (the old record's bytes supply the stale keys). A secondary write
+rewrites one segment of pointers and never the `Pivot`. Cost scales with the
+secondary-index count (see
 [`wavedb-storage`](../wavedb-storage/README.md#io-cost-per-operation)):
 secondary indexes are a write-amplification trade — faster lookups, costlier
 updates.
@@ -358,7 +358,7 @@ effect of merely existing.
 **Division of labor (the two halves).**
 
 - **`#[wavedb]` / `#[server]` (proc-macros)** do all the _per-item_ work, in
-  place: `STRUCT_HASH` const, `WaveWire` impl, `PivotId`/`Pivot`/`BpTree` types,
+  place: `STRUCT_HASH` const, `WaveWire` impl, `PivotId`/`Pivot` types,
   hook wiring — **and the item's execution steps**: the shape's engine ops
   (`get`/`save` for Unique; `insert`/`update`/`remove`/`get`/`search` for
   NonUnique) and a function's call arm. Each item is fully self-contained
@@ -455,7 +455,7 @@ matches give the engine, each as its own `match` over the **listed** items:
 - the right **wire parser** — decode `bytes` into the concrete `T`;
 - the server-side **hooks** — `first_try(struct_hash, db, …)` /
   `fallback_not_found(struct_hash, db, …)` route to the declared struct's fns;
-- the matching generated **`Pivot` / `BpTree`** types for a collection;
+- the matching generated **`Pivot` / `PivotId`** types for a collection;
 - the **execution steps** — the listed (or overridden) engine op per command;
 - the **server-function call** — the *same hash space*: a `STRUCT_HASH` arm decodes
   the `WaveWire` args and invokes the node-side body.
