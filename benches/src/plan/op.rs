@@ -102,8 +102,8 @@ impl MicroOp {
     ///
     /// **Always zero, and that is a finding rather than a stub.** The micro
     /// workload lives in exactly one collection (`systems/wavedb.rs` mints one
-    /// `Thing::create_pivot`), and a collection is indivisible: its B+tree
-    /// nodes and chain segments carry ids of their own and belong to the
+    /// `Thing::create_pivot`), and a collection is indivisible: its chain
+    /// segments and index nodes carry ids of their own and belong to the
     /// Pivot's owner, so two consumers writing disjoint *records* would still
     /// contend on shared *structure* — silent index loss, not a cache miss
     /// (`wavedb-quick-node/src/shard/route.rs` states the rule).
