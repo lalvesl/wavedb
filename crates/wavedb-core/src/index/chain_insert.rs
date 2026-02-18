@@ -4,8 +4,7 @@
 //! so each step reads what the earlier ones wrote.
 //!
 //! [`chain`](super::chain) is the handle; removal and merging live in
-//! [`chain_remove`](super::chain_remove), the way `BpTree` splits insert and
-//! delete.
+//! [`chain_remove`](super::chain_remove).
 //!
 //! [RFC 0050]: https://github.com/wavedb/wavedb/blob/main/rfcs/0050-clustered-record-chains.md
 
@@ -16,7 +15,7 @@ use crate::store::{Store, Write};
 use crate::wire::WaveWire;
 
 use super::chain::Chain;
-use super::node_key::SecKey;
+use super::sec_key::SecKey;
 use super::segment::{Segment, mint_lane_id};
 use super::sparse::Slot;
 
