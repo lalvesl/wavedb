@@ -1,7 +1,7 @@
 //! [`PageStore`] — the node's authoritative [`Store`](wavedb_core::Store) backend.
 //!
 //! This is the disk-optimised key→value store the `Store`-generic
-//! `Pivot`/`BpTree` layer in [`wavedb_core`] runs over. It ties together the
+//! `Pivot`/`Chain` layer in [`wavedb_core`] runs over. It ties together the
 //! pieces built below it:
 //!
 //! - one slot **per registered type** — that type's own [`Directory`] over
@@ -120,8 +120,7 @@ pub struct PageStore {
 impl PageStore {
     /// Open (or create) a node store rooted at directory `dir`, holding
     /// its `MANIFEST` and `storage/00`, serving exactly the listed `types` (each
-    /// a `#[wavedb]`-generated declaration — `T::storage_entries()`). The
-    /// reserved `BpTree`-node slot is always included.
+    /// a `#[wavedb]`-generated declaration — `T::storage_entries()`).
     ///
     /// The registry is an allowlist: a write whose `STRUCT_HASH` has no listed
     /// slot fails with [`StorageError::UnregisteredStructHash`](crate::StorageError::UnregisteredStructHash).
