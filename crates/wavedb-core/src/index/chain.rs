@@ -9,13 +9,14 @@
 //!
 //! This file is the handle. Inserting and splitting live in
 //! [`chain_insert`](super::chain_insert), removal and merging in
-//! [`chain_remove`](super::chain_remove) — the way `BpTree` splits insert and
-//! delete — and reaching a segment in [`chain_io`](super::chain_io).
+//! [`chain_remove`](super::chain_remove), reading in order from a seek in
+//! [`chain_scan`](super::chain_scan), and reaching a segment in
+//! [`chain_io`](super::chain_io).
 //!
 //! ## Endpoints are permanent, and that is the point
 //!
-//! A `BpTree` moves its root as it grows, and every move rewrites the `Pivot`. A
-//! chain does not: a split always hands the **new** id to the interior side and
+//! A B+tree moves its root as it grows, and every move rewrites the `Pivot` —
+//! the reason none is left (RFC 0075). A chain does not: a split always hands the **new** id to the interior side and
 //! lets the endpoint keep its own — the growth end keeps the newer half, any other
 //! segment keeps the lower half. So after a chain's first split its `head` and
 //! `tail` never change again, the index root never moves either
@@ -24,7 +25,7 @@
 //!
 //! The one exception is that first split, when `head == tail` and one of them must
 //! become the fresh id. `plan_insert` takes `&mut self` for exactly that, and the
-//! caller compares the endpoints afterwards — the same shape as `BpTree::root`.
+//! caller compares the endpoints afterwards.
 //!
 //! ## The size band
 //!
@@ -45,7 +46,7 @@ use crate::store::{Store, Write};
 use crate::u48::U48;
 use crate::wire::WaveWire;
 
-use super::node_key::SecKey;
+use super::sec_key::SecKey;
 use super::segment::{Lane, Segment, mint_lane_id};
 use super::sparse_tree::SparseTree;
 use super::{ChainRoots, LogRoots};
@@ -83,7 +84,7 @@ pub struct Chain<P> {
     _payload: PhantomData<fn() -> P>,
 }
 
-// Manual, exactly as `BpTree` does it: a derive would demand `P: Copy`, but the
+// Manual: a derive would demand `P: Copy`, but the
 // handle holds only ids and caps — the `PhantomData` is `fn() -> P`, which is
 // unconditionally `Copy`. A scan captures the handle in a long-lived closure,
 // so this is load-bearing, not cosmetic.
@@ -311,7 +312,7 @@ mod tests {
 
     use super::Chain;
     use crate::index::mem_store::MemStore;
-    use crate::index::node_key::SecKey;
+    use crate::index::sec_key::SecKey;
     use crate::index::segment::Lane;
     use crate::local_id::LocalId;
     use crate::store::Store;
