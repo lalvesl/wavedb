@@ -1,22 +1,10 @@
 //! The sparse index node ([RFC 0052]) — one entry per **chain segment**, not per
 //! record, carrying that segment's element count.
 //!
-//! A separate structure from [`BpTree`](super::BpTree) rather than a count bolted
-//! onto it, for three reasons:
-//!
-//! 1. **A dense tree would pay for it.** Eight bytes per entry costs a dense
-//!    secondary nothing it can use, and shrinks its leaf capacity — an IOp
-//!    regression for a feature only a sparse index reads.
-//! 2. **A count is mutable payload, and `BpTree` has no update path.**
-//!    `plan_insert` returns an empty batch for a key already present, so a count
-//!    revision through it would be a silent no-op.
-//! 3. **`NodeBody::Internal` has nowhere to put the leftmost child's count.** It
-//!    stores `leftmost` plus separators *between* children, so the first subtree
-//!    has no entry of its own. Here every child carries its own least key, which
-//!    is what lets every child carry a count too.
-//!
-//! The dense `BpTree` keeps its place for cold or small data, where one entry per
-//! record costs little and the machinery is already proven.
+//! It was built beside the dense B+tree rather than as a count bolted onto
+//! it — a count is mutable payload, and every child here carries its own least
+//! key, which is what lets every child carry a count too — and outlived it:
+//! since RFC 0075 every index is a chain, and this is the only tree left.
 //!
 //! ## Value format
 //!
@@ -24,7 +12,7 @@
 //! [ Lane::Index hash (8 B LE) ][ kind (u8) ][ WaveWire payload ]
 //! ```
 //!
-//! Same discipline as a `BpTree` node: the leading 8 bytes route the value in the
+//! Same discipline as a chain segment: the leading 8 bytes route the value in the
 //! storage backend, the kind byte picks the variant, the payload is plain
 //! `WaveWire`. Index nodes take their own lane because they are *navigational*
 //! while segments are *streaming* ([RFC 0053]).
@@ -36,7 +24,7 @@ use crate::error::{Error, Result};
 use crate::local_id::LocalId;
 use crate::wire::{WaveWire, from_wire, to_wire};
 
-use super::node_key::SecKey;
+use super::sec_key::SecKey;
 
 /// Bytes before the kind byte: the lane's `STRUCT_HASH` tag.
 const LANE_PREFIX: usize = 8;
