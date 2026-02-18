@@ -19,7 +19,7 @@ use crate::store::Store;
 use crate::wire::WaveWire;
 
 use super::chain::Chain;
-use super::node_key::SecKey;
+use super::sec_key::SecKey;
 use super::segment::Segment;
 
 /// Where a scan stands: the seek still to make, the next segment to read,
@@ -97,7 +97,7 @@ mod tests {
 
     use crate::index::Chain;
     use crate::index::mem_store::MemStore;
-    use crate::index::node_key::SecKey;
+    use crate::index::sec_key::SecKey;
     use crate::index::segment::Lane;
     use crate::local_id::LocalId;
     use crate::store::Store;
