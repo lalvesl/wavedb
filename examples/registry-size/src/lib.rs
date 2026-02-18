@@ -12,7 +12,7 @@
 //! The structs cycle four field shapes so structurally identical decode fns
 //! don't collapse into one by LLVM function merging (real schemas are
 //! heterogeneous). All are Unique — a NonUnique adds its generated
-//! Pivot/BpTree machinery on top, which is schema code, not registry cost.
+//! Pivot/Chain machinery on top, which is schema code, not registry cost.
 
 use wavedb::prelude::*;
 
