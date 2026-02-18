@@ -13,13 +13,13 @@ permission refs, and the `WaveWire` serialization trait.
 | Module       | Responsibility                                                                |
 | ------------ | ----------------------------------------------------------------------------- |
 | `id`         | The 128-bit composite `Id`, the `U48` newtype, and field accessors.           |
-| `local_id`   | `LocalId` — compact 80-bit ID (no `TENANT`) for BpTree-internal use.          |
+| `local_id`   | `LocalId` — compact 80-bit ID (no `TENANT`) for chain-internal use.           |
 | `metadata`   | `Metadata` — modification chain, pivot back-link, authorship, permission ref. |
 | `hooks`      | `first_try` (pre-search) and `fallback_not_found` (post-miss) hooks.          |
 | `permission` | `PermissionRef` shapes.                                                       |
 | `wire`       | Re-export of the standalone [`wavedb-wire`](../wavedb-wire/README.md) codec.  |
 | `store`      | The `Store` backend trait (key→value over `Id` + atomic batch).               |
-| `index`      | `Pivot`, `BpTree`, `IndexKey`, `Bound` — the `Store`-generic index contracts. |
+| `index`      | `Pivot`, `Chain`, `IndexKey`, `Bound` — the `Store`-generic index contracts.  |
 | `traits`     | `WaveDbStruct`, shape markers.                                                |
 | `error`      | Workspace error type.                                                         |
 
@@ -30,7 +30,7 @@ permission refs, and the `WaveWire` serialization trait.
 Every record has a composite ID of exactly **128 bits**. The **key is the most
 significant field**, so a numeric ordering of the `u128` _is_ an ordering by key
 — for the timestamp-keyed shapes that means chronological order, which is what
-the `BpTree` indexes on.
+the recency chain is keyed by.
 
 ```
 [ KEY (u64) | TENANT (u48) | FLAG (1) | SALT (15) ]
@@ -51,7 +51,7 @@ The trailing 15 bits **only break collisions** within a single `(KEY, TENANT)`:
 | Shape                          | `SALT[14..0]`                                 |
 | ------------------------------ | --------------------------------------------- |
 | **Unique**                     | `0` (the fixed anchor needs no salt)          |
-| **NonUnique / BpTree / Pivot** | 15 bits of writer-supplied random/fixed value |
+| **NonUnique / Chain / Pivot**   | 15 bits of writer-supplied random/fixed value |
 
 There is **no struct-hash truncation in the `Id`**. The type is always known
 without it — every lookup is scoped to one `STRUCT_HASH` directory (storage) or
@@ -88,7 +88,7 @@ reference instant). What is and isn't guaranteed:
   get distinct `Id`s from the salt. At low scale 15 random bits are ample; a
   64-write burst in one ns has a sub-1e-15 collision chance.
 - **Ordering (best-effort):** sorting by `CREATED_AT` is approximately
-  chronological — good enough for the `BpTree`'s time index — but it is **not a
+  chronological — good enough for the recency chain — but it is **not a
   strict total order** under clock skew/adjustment. WaveDB does not promise that
   `Id` order equals real-time order across NTP corrections.
 
@@ -102,8 +102,8 @@ It lets one `Id` type encode two addressing schemes in the same `KEY` slot:
 
 - **Unique anchor** — `FLAG = 1`, `KEY = STRUCT_HASH`, `SALT = 0`: a directly
   computable, single-record address. One lookup, no index.
-- **Everything timestamped** (NonUnique records, Pivots, BpTree nodes) —
-  `FLAG = 0`, `KEY = CREATED_AT`: chronologically ordered, indexable by `BpTree`.
+- **Everything timestamped** (NonUnique records, Pivots, chain segments) —
+  `FLAG = 0`, `KEY = CREATED_AT`: chronologically ordered, indexable by a chain.
 
 There is **no `STRUCT_ID`** and **no schema-version field** in the ID. Type
 identity and schema generation are both folded into `STRUCT_HASH`.
@@ -168,17 +168,17 @@ version (every `Option` `None`) adds zero heap. Full model:
    MSB ─────────────────────────── LSB
 ```
 
-`LocalId` is `Id` with `TENANT (u48)` stripped — 10 bytes on the wire. The BpTree
+`LocalId` is `Id` with `TENANT (u48)` stripped — 10 bytes on the wire. A chain
 is already scoped to a tenant, so `TENANT` is derivable from context. Reconstruct
 a full `Id` with `local_id.to_id(tenant)` — two or three CPU cycles, in memory,
 never disk.
 
 ### `pivot_id` — the NonUnique reindex back-link
 
-A NonUnique `save` (update) re-keys the collection trees whose field changed — the
-`current` `BpTree` is keyed by the immutable `CREATED_AT` (never re-keyed), each
+A NonUnique `save` (update) re-keys the collection chains whose key changed — the
+recency chain at the new live instant, each
 `#[wavedb::pivot(...)]` secondary only when its field changed — so it must reach the
-tree roots, which live in the collection's **`Pivot`**. The record carries its
+chain roots, which live in the collection's **`Pivot`**. The record carries its
 owning `PivotId` here as a `LocalId` (the typed `<T>::PivotId` is the compile-time
 view only — core never names macro types).
 
@@ -255,7 +255,7 @@ inserts, not a broadcast. Enforcement runs node-side — see
 > the model above is the contract; the multi-node routing is not built yet.
 
 There is **no query expression tree**. Reads are: a Unique `get`, a NonUnique
-collection walk through its `Pivot` → `BpTree` (ordered by `CREATED_AT`), or a
+collection walk through its `Pivot` → recency chain (ordered by live instant), or a
 **server function** for anything filtered or derived — an `async fn` that runs on
 the node with DB access and is called by a typed client binding (see
 [`wavedb-macros`](../wavedb-macros/README.md#server-functions--server)).
@@ -272,7 +272,7 @@ node's code, `expose_client!` in the client's) lists what is actually
 reachable, and expands to **one `match` on the 64-bit `STRUCT_HASH` per
 operation**, *not* an `Object` enum. **The matches *are* the registry**:
 `from_wire` / `to_wire`, the `first_try` / `fallback_not_found` hooks, the
-generated `Pivot`/`BpTree` accessors, the engine ops, and the server-function
+generated `Pivot`/`Chain` accessors, the engine ops, and the server-function
 call all dispatch by `match struct_hash { … }` to a **concrete, monomorphized**
 arm — **no sum type, no `dyn`, no runtime registration, no descriptor table,
 no build-time scanner**. An unlisted item is an unknown hash at that boundary:
@@ -300,7 +300,7 @@ and nothing else leaks:
 1. **write-through to the local store** — a key→value map of `Id → wire bytes`
    kept on the client. Gives warm reads and survives reconnects.
 2. **send to the owner node** over `wavedb-net` — the node is the **authoritative
-   writer**: it runs the real engine (confirm `Id`, pages, `Pivot`/`BpTree`,
+   writer**: it runs the real engine (confirm `Id`, pages, `Pivot`/`Chain`,
    history, replication) and acks.
 
 ```rust
@@ -321,13 +321,13 @@ write-through happens immediately; the node confirms.
 
 `Store` is the **backend seam** — the only thing that differs native vs web. Core
 declares the contract (async, no I/O — WASM/macro-safe). It is key→value over `Id`
-plus an **atomic batch** (`apply`) so a multi-record op (record + `BpTree` node)
+plus an **atomic batch** (`apply`) so a multi-record op (record + chain segments)
 commits all-or-nothing:
 
 ```rust
 pub trait Store {                  // key→value over Id + wire bytes
     async fn get(&self, id: Id) -> Result<Option<Vec<u8>>>;
-    // Type-directed fetch: the typed layers (Collection, BpTree) always know
+    // Type-directed fetch: the typed layers (Collection, Chain) always know
     // the value's STRUCT_HASH at compile time, so a backend with per-type
     // storage (PageStore's StructStorage statics) routes straight to that
     // type's slot. Default = plain `get` — flat backends need nothing extra.
@@ -364,46 +364,53 @@ plain one over it (`LocalHandle`), a `NodeOp` carrying the flag
 (the client `Db`).
 
 The pages/headers/allocator live **behind** this trait, inside the native page
-`Store`. The `Pivot`/`BpTree` logic sits **above** it (the `index` contracts below)
+`Store`. The `Pivot`/`Chain` logic sits **above** it (the `index` contracts below)
 and is `Store`-generic — so the **same index code runs on the node (PageStore) and
 on web (IndexedDB)**; only the backend swaps.
 
 **Reads.** `get(id)` checks the local `Store` first; on a miss it fetches from the
-node and back-fills. Collection queries (`all` / `by_field`) need the `BpTree` —
+node and back-fills. Collection queries (`all` / `by_field`) need the chains —
 which is `Store`-generic, so it runs **wherever the engine is linked**: on the node
 (PageStore) for a thin client, or **in-browser over IndexedDB** for a serverless app.
 
-## Index contracts — `Pivot`, `BpTree`, `IndexKey`
+## Index contracts — `Pivot`, `Chain`, `IndexKey`
 
 The index lives **above** `Store` and depends only on it (`get` + `apply`), so it is
 **portable** — pages and headers are `PageStore` internals, never named here. Core
 declares the contracts; the same code compiles for the node (PageStore) and the web
 (IndexedDB).
 
+Every index a collection holds is a **chain** ([RFC 0050](../../rfcs/0050-clustered-record-chains.md),
+[RFC 0075](../../rfcs/0075-secondary-indexes-as-chains-WIP.md)): a doubly linked run
+of sorted segments keyed by `SecKey { field, rec }` — an order-preserving field
+encoding, then the record's anchor — with a sparse index above it (one entry per
+segment, carrying its count). The recency chain, the removal log, each
+`#[wavedb::pivot]` secondary and each `#[wavedb::fuzzy]` posting set are
+`Chain<()>`: keys and anchors, no payload. A `#[wavedb::list]` is `Chain<Vec<u8>>`,
+the only kind holding whole records. Each kind has a lane of its own (its own
+storage directory and dictionary).
+
 ```rust
-/// Order-preserving key encoding: byte order == value order, so the `BpTree`
+/// Order-preserving key encoding: byte order == value order, so a chain
 /// compares keys by memcmp with no decode. Macro-implemented per indexed type
 /// (u64 → big-endian, i64 → sign-flipped, String → 0x00-terminated, tuples → concat).
 pub trait IndexKey {
     fn encode_key(&self, out: &mut Vec<u8>);
 }
 
-/// The collection's roots holder. `#[wavedb]` generates one per NonUnique type;
-/// this trait is the portable shape the engine reads and rewrites. No element
-/// counter — the `Pivot` is rewritten only when a `BpTree` root moves or its
-/// default permission changes (rare, not a per-write cost).
-///
-/// Root pointers are `LocalId` (80-bit): the tree is tenant-scoped so `TENANT`
-/// is derivable from context — no need to repeat 6 bytes per pointer.
-pub trait Pivot: Wire + Sized {
-    const STRUCT_HASH: u64;                       // identity of the stored pivot record
-
-    fn current(&self)     -> LocalId;             // living-records B+tree root
-    fn dead(&self)        -> LocalId;             // deleted-records B+tree root
-    fn secondaries(&self) -> &[LocalId];          // one root per `#[wavedb::pivot(...)]`
-    fn permission(&self)  -> Option<&PermissionRef>; // collection default; record metadata overrides
-    // engine writes back every moved root (current, dead, one per secondary)
-    fn replace_roots(&self, current: LocalId, dead: LocalId, secondaries: &[LocalId]) -> Self;
+/// The collection's roots holder. `#[wavedb]` generates one per NonUnique type.
+/// Every root is a chain's, and a chain's roots are permanent — an endpoint
+/// moves once, at its first split, and the index root never — so the Pivot is
+/// written at creation and then essentially never.
+pub trait Pivot: WaveWire + Sized {
+    const STRUCT_HASH: u64;
+    fn secondaries(&self) -> &[ChainRoots];   // one per `#[wavedb::pivot(...)]`
+    fn recency(&self)     -> ChainRoots;      // living records, by live instant
+    fn removals(&self)    -> LogRoots;        // the removal log (no index)
+    fn lists(&self)       -> &[ChainRoots];   // one per `#[wavedb::list]`
+    fn fuzzy(&self)       -> &[ChainRoots];   // one per `#[wavedb::fuzzy]`
+    fn permission(&self)  -> Option<&PermissionRef>;
+    fn replace_roots(&self, roots: Roots<'_>) -> Self;
 }
 
 /// A search bound over the order-preserving key space.
@@ -414,47 +421,31 @@ pub enum Bound {
     Prefix(Vec<u8>),
 }
 
-/// A B+tree index over any `Store`, generic over its key (no trait objects):
-/// nodes are values read by `LocalId`, all I/O is delegated to `Store`, so the
-/// same type serves native PageStore and web IndexedDB. The **primary** tree
-/// is `BpTree<LocalId>` (the default — the record pointer is the key, order =
-/// `CREATED_AT`); a **secondary** index is `BpTree<SecKey>`, keyed by the
-/// record's `IndexKey`-encoded field bytes plus its `LocalId` (unique under
-/// duplicate values). It carries `tenant` because node pointers are
-/// tenant-stripped `LocalId`s that must inflate to full `Id`s for
-/// `Store::get`. `search` returns full record `Id`s (two-phase: index →
-/// `Id`s → fetch).
-pub struct BpTree<K: NodeKey = LocalId> { /* root: LocalId, tenant: U48, caps */ }
-pub struct SecKey { pub field: Vec<u8>, pub rec: LocalId }
-
-impl BpTree {
-    pub const fn at(root: LocalId, tenant: U48) -> Self;         // open a tree at a root
-    pub async fn create<S: Store>(store: &S, tenant: U48) -> Result<Self>; // empty tree
-    pub const fn root(&self) -> LocalId;                         // current root pointer
-
-    pub fn search<S: Store>(&self, store: &S, bound: Bound)
-        -> impl Stream<Item = Result<Id>>;                       // walk → matching record Ids
-
-    pub async fn insert<S: Store>(&mut self, store: &S, id: Id) -> Result<()>;
-    pub async fn remove<S: Store>(&mut self, store: &S, id: Id) -> Result<bool>;
+impl<P: WaveWire> Chain<P> {
+    pub fn plan_create(tenant: U48, struct_hash: u64, lane: Lane) -> (Self, Vec<Write>);
+    pub async fn plan_insert<S: Store>(&mut self, store: &S, key: SecKey, payload: P)
+        -> Result<Vec<Write>>;
+    pub async fn plan_remove<S: Store>(&mut self, store: &S, key: &SecKey)
+        -> Result<Option<Vec<Write>>>;
+    pub async fn get<S: Store>(&self, store: &S, key: &SecKey) -> Result<Option<P>>;
+    /// Every entry with a key ≥ `from`, ascending: one sparse-index descent,
+    /// then the `next` links.
+    pub fn scan_from<S: Store>(self, store: &S, from: SecKey)
+        -> impl Stream<Item = Result<(SecKey, P)>>;
 }
 ```
 
-`insert`/`remove` take a record `Id` (full 128-bit — external address) and key it
-by its 10-byte `LocalId` (order = `CREATED_AT`); they update `root()` in place
-when a split or collapse moves it. When a root moves the holder rewrites the
-`Pivot`, otherwise the `Pivot` stays immutable. `remove` merges or redistributes
-underfull nodes (<¼ capacity) with a sibling and collapses an empty root, so
-deleted space is reclaimed. `search` prunes descent by the bound's `CREATED_AT`
-range. Comparison is byte order on the encoded key (== `Ordering`), never a
-typed decode; secondary indexes will key by `IndexKey`-encoded bytes on the
-same machinery. Each mutating op also has a `plan_*` variant returning the node
-`Write`s without applying, so a caller can fold index + record + `Pivot` into
-**one atomic batch**.
+A segment holds `N…2N` entries — splitting 50/50 at `2N`, merging at `N/2` — with
+`N` the declared `page = N` for a list and 256 for the pointer chains. The planners
+return the `Write`s without applying them, so a caller folds record + every chain
+it touched + any `Pivot` rewrite into **one atomic batch**. A bounded read
+(`search_by`, a fuzzy gram) seeks the bound's least key and takes while the bound
+holds: it reads the segments it returns from, and one more at most.
 
 ### `Collection<T>` — the layer application code actually touches
 
-The `BpTree` is engine-internal. What `#[wavedb(NonUnique)]` hands application
+The chains are engine-internal. What `#[wavedb(NonUnique)]` hands application
+
 code is the **typed collection** (`wavedb_core::Collection<T>`), driven through
 generated wrappers — no raw tree, no raw `Id` minting, no pivot bookkeeping:
 
@@ -477,27 +468,8 @@ tenant)` / `value.save(store, tenant)` (save **is** the upsert) — and since
 they don't implement `NonUniqueStruct`, driving one through a collection is a
 compile error.
 
-### BpTree node encoding
-
-A BpTree node is an ordinary `STRUCT_HASH`-headed value packed into the shared
-per-`STRUCT_HASH` page directory — **not** a dedicated one-node-per-page format.
-(A 32 KiB page-per-node layout was measured to waste the dominant B2C case of
-millions of small trees, and dropped —
-[RFC 0031](../../rfcs/0031-node-per-page-bptree-DEPRECATED.md).) Both node kinds
-use the same 18-byte entry:
-
-```
-entry = [ key: [u8; 8] ][ LocalId: 10 bytes ]
-```
-
-- **Internal node**: `LocalId` = child node pointer.
-- **Leaf node**: `LocalId` = NonUnique record pointer.
-
-All `LocalId`s inflate to a full `Id` via `local_id.to_id(tenant)` — 2–3 CPU
-cycles, never disk. Node layout and split/merge policy live in
-[RFC 0011](../../rfcs/0011-bptree-index-and-collections.md).
-
 ### Composite — set algebra on `Id` streams
+
 
 Combining indexes (the no-DSL composite query) is free functions over the `Id`
 streams `search` yields — `Store`-agnostic, so they too run native or web:
@@ -537,7 +509,7 @@ pub trait NonUniqueObject: WaveDbStruct + Sized {
 impl<T: NonUniqueObject> Collection<T> {
     async fn insert(&self, db: &Db, record: T) -> Result<Id>;  // mint Id, local + send
     async fn get(&self, db: &Db, id: Id) -> Result<Option<T>>;
-    fn all(&self, db: &Db) -> impl Stream<Item = Result<T>>;   // node-side BpTree walk, streamed
+    fn all(&self, db: &Db) -> impl Stream<Item = Result<T>>;   // node-side chain walk, streamed
     async fn remove(&self, db: &Db, id: Id) -> Result<()>;
     // + a `by_<field>` lookup per `#[wavedb::pivot(...)]` secondary index, also a Stream.
 }
@@ -545,7 +517,7 @@ impl<T: NonUniqueObject> Collection<T> {
 
 **Collection reads are async iterators.** `all` and every generated `by_<field>`
 return `impl Stream<Item = Result<T>>`, never a buffered `Vec`: the two-phase
-BpTree walk (index → `Id`s → fetch) streams records as it resolves each `Id`, so a
+chain walk (index → `Id`s → fetch) streams records as it resolves each `Id`, so a
 caller can stop early without materialising the whole collection. Use
 `.try_collect().await?` when a `Vec` is actually wanted. The prelude re-exports
 `Stream` / `StreamExt`.
