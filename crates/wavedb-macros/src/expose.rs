@@ -44,8 +44,7 @@ use crate::expose_parse::{Declaration, Entry, Kind};
 
 /// The `StorageRegistry` impl for a registry type — native only, flattening
 /// each listed struct **and `store` entry**'s `storage_entries()` (functions
-/// hold no storage; the reserved BpTree-node slot is added by
-/// `PageStore::open`). The server registry opens the node's engine with it;
+/// hold no storage). The server registry opens the node's engine with it;
 /// the client registry opens `Db::open`'s local cache store with it.
 /// `side` is the schema-crate feature the whole registry rides
 /// (`"server-side"` / `"client-side"`).
