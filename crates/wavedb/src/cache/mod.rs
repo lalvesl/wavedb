@@ -101,7 +101,7 @@ pub fn default_dir(app: &str) -> crate::Result<std::path::PathBuf> {
 }
 
 /// Open the native cache engine rooted at `dir`, registering exactly the
-/// client registry's declared types (plus the reserved B+tree-node slot).
+/// client registry's declared types.
 ///
 /// # Errors
 /// The engine's open faults, converted at the documented seam
