@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! 1. decompose the query into its distinct grams
-//! 2. one Bound::Prefix scan per gram    → per-anchor share counts
+//! 2. one prefix scan per gram            → per-anchor share counts
 //! 3. the COUNT filter                   → reject without reading the record
 //! 4. the LENGTH filter                  → free; the length is in the key
 //! 5. verify                             → one random read each, the real cost
@@ -33,7 +33,7 @@ use crate::fuzzy::{
     levenshtein_within, normalize,
 };
 use crate::id::Id;
-use crate::index::{Bound, Pivot};
+use crate::index::SecKey;
 use crate::local_id::LocalId;
 use crate::record::decode_record;
 use crate::store::Store;
@@ -63,25 +63,33 @@ impl<T: NonUniqueStruct> Collection<T> {
         limit: usize,
     ) -> Result<Vec<Scored<(Id, T)>>> {
         let pivot = self.load_pivot(store).await?;
-        let root = *pivot
-            .fuzzy()
-            .get(index)
+        let chain = self
+            .fuzzy_chains(&pivot)
+            .into_iter()
+            .nth(index)
             .ok_or(Error::FuzzyOutOfRange(index))?;
-        let tree = self.sec_tree(root);
 
         let (n, fold) = T::fuzzy_profile(index);
         let text = normalize(query, fold);
         let grams = gram_prefixes(&text, n);
         let threshold = mode.threshold(grams.len(), n);
 
-        // Steps 1–2: one descent per gram, merged into a share count.
+        // Steps 1–2: one descent per gram, then the chain while the gram
+        // holds (RFC 0075), merged into a share count.
         let mut seen: HashMap<LocalId, Candidate> = HashMap::new();
         for prefix in &grams {
-            let keys = tree
-                .search_keys(store, Bound::Prefix(prefix.clone()))
+            let from = SecKey {
+                field: prefix.clone(),
+                rec: LocalId::default(),
+            };
+            let keys = chain
+                .scan_from(store, from)
+                .try_take_while(|(key, ())| {
+                    futures::future::ready(Ok(key.field.starts_with(prefix)))
+                })
                 .try_collect::<Vec<_>>()
                 .await?;
-            for key in keys {
+            for (key, ()) in keys {
                 // The length rides in the same bytes the descent already
                 // landed on, so reading it costs nothing.
                 let len = key_len(&key.field).unwrap_or(0);
