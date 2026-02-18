@@ -147,7 +147,7 @@ pub fn open_measured(
 
 /// What the fill's write cache is evicted **down to** — not to zero.
 ///
-/// Evicting to zero costs far more than it saves: it drops the hot B+tree
+/// Evicting to zero costs far more than it saves: it drops the hot index
 /// interior nodes with everything else, so the next insert descends through
 /// the page store instead of RAM, and a fill that took 11 s at 4 000 users
 /// took 164 s at 8 000. Cold reads are this engine's known weak path; a fill
