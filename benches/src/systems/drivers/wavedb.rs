@@ -112,7 +112,7 @@ where
     type Driver = WavedbDriver<E>;
 
     /// One. The micro workload lives in a single collection, and a collection
-    /// is indivisible: its B+tree nodes and chain segments belong to the
+    /// is indivisible: its chain segments and index nodes belong to the
     /// Pivot's owner, so a second consumer would contend on shared structure.
     fn consumers(&self) -> usize {
         1
