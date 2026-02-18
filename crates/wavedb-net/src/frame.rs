@@ -99,10 +99,7 @@ pub enum NodeErrorKind {
     PivotMissing,
     /// An index pointed at a record the store no longer holds.
     RecordMissing,
-    /// A dangling `BpTree` node pointer.
-    BpTreeNodeMissing,
-    /// A value read as a `BpTree` node had a foreign tag.
-    BpTreeNodeBadTag,
+
     /// A value read as a chain segment or sparse-index node had a foreign
     /// lane tag.
     LaneBadTag,
@@ -162,8 +159,7 @@ impl NodeError {
             CoreError::Wire(_) => NodeErrorKind::Wire,
             CoreError::U48Overflow(_) => NodeErrorKind::U48Overflow,
             CoreError::UnknownStructHash(_) => NodeErrorKind::UnknownStructHash,
-            CoreError::BpTreeNodeMissing(_) => NodeErrorKind::BpTreeNodeMissing,
-            CoreError::BpTreeNodeBadTag(_) => NodeErrorKind::BpTreeNodeBadTag,
+
             CoreError::LaneBadTag(_) => NodeErrorKind::LaneBadTag,
             CoreError::ChainNodeMissing(_) => NodeErrorKind::ChainNodeMissing,
             CoreError::PivotMissing(_) => NodeErrorKind::PivotMissing,
