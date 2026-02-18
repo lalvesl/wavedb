@@ -15,7 +15,7 @@ use crate::store::{Store, Write};
 use crate::wire::WaveWire;
 
 use super::chain::Chain;
-use super::node_key::SecKey;
+use super::sec_key::SecKey;
 use super::segment::Segment;
 
 impl<P: WaveWire> Chain<P> {
