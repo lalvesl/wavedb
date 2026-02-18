@@ -1,7 +1,7 @@
 //! [`SlotPage`] — the on-disk page format for a homogeneous run of records.
 //!
 //! A page holds records of **exactly one `STRUCT_HASH`** (Unique anchors, NonUnique
-//! records, Pivots, `BpTree` nodes — the node encoding lives in `wavedb_core`'s
+//! records, Pivots, chain segments and index nodes — their encoding lives in `wavedb_core`'s
 //! index layer and is stored here as ordinary bytes).
 //!
 //! ## Layout — checked wire outside, optionally dictionary-zstd inside
@@ -23,7 +23,7 @@
 //!
 //! **Not every page compresses.** The caller picks per write
 //! ([`Directory`](crate::directory::Directory) carries the per-type policy —
-//! e.g. hot, constantly-rewritten `BpTree` node pages skip zstd), and even
+//! e.g. a `#[wavedb(compress = false)]` type skips zstd), and even
 //! with compression on, a body zstd cannot shrink is stored `Raw` — a page
 //! never grows for having been "compressed". `dict_len` pins a `Zstd` page to
 //! the [`Dictionary`] state (an append-only buffer, so a state is a prefix
