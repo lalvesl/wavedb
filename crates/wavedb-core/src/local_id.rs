@@ -1,11 +1,11 @@
-//! `LocalId` — compact 80-bit record identifier for tenant-scoped BpTree nodes.
+//! `LocalId` — compact 80-bit record identifier for tenant-scoped chains.
 //!
 //! ```text
 //! [ KEY (u64) | FLAG (1) | SALT (15) ]
 //!    MSB ──────────────────────── LSB
 //! ```
 //!
-//! Identical to [`Id`] but with `TENANT (u48)` stripped. The BpTree is already
+//! Identical to [`Id`] but with `TENANT (u48)` stripped. A chain is already
 //! scoped to a tenant, so carrying it per-key wastes 6 bytes per entry.
 //! Reconstruct a full [`Id`] via [`LocalId::to_id`] by injecting the ambient tenant.
 
