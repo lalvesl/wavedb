@@ -146,7 +146,7 @@ async fn typed_flow_against_a_live_node_with_indexeddb_cache() {
     assert_eq!(warm.owner, "Ada Lovelace", "read served from IndexedDB");
 
     // Cache the collection read too: one network walk, then the same typed
-    // engine (BpTree over IndexedDB) serves it locally.
+    // engine (chains over IndexedDB) serves it locally.
     let local_pivot = Contact::create_pivot(&cache).await.expect("local pivot");
     let local = Contact::collection(local_pivot);
     let fetched: Vec<Contact> =
