@@ -3,11 +3,11 @@
 //!
 //! These carry no business data — pure addressing. `PivotId` is a `LocalId`
 //! newtype callers store in a field to reference the collection; `Pivot` holds the
-//! `current` / `dead` B+tree roots plus one root per secondary index, and
-//! implements [`wavedb_core::index::Pivot`].
+//! roots of every chain the collection holds — recency, removals, lists,
+//! secondaries, fuzzy — and implements [`wavedb_core::index::Pivot`].
 //!
-//! The full `BpTree` *implementation* lives in `wavedb-storage` (it needs the page
-//! engine); the macro generates only the data-carrying types here.
+//! The chains themselves live in `wavedb-core`'s index layer; the macro
+//! generates only the data-carrying types here.
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -100,15 +100,15 @@ fn pivot_identity(
         ("lists".into(), format!("[ChainRoots;{num_lists}]")),
     ];
     if num_fuzzy > 0 {
-        shape.push(("fuzzy".into(), format!("[LocalId;{num_fuzzy}]")));
+        shape.push(("fuzzy".into(), format!("[ChainRoots;{num_fuzzy}]")));
     }
     shape.push(("permission".into(), "Option<PermissionRef>".into()));
     struct_hash::compute(&pivot.to_string(), "Pivot", &shape)
 }
 
-/// The `Pivot` trait impl for the generated roots holder: the B+tree roots
-/// and the chain roots that are succeeding them (RFC 0050), plus the two
-/// rewrite constructors the engine uses when a root moves.
+/// The `Pivot` trait impl for the generated roots holder: every chain's
+/// roots (RFC 0050, RFC 0075), plus the rewrite constructor the engine uses
+/// when a root moves.
 fn pivot_impl(pivot: &Ident, pivot_hash: u64) -> TokenStream {
     quote! {
         impl ::wavedb_core::index::Pivot for #pivot {
@@ -118,7 +118,7 @@ fn pivot_impl(pivot: &Ident, pivot_hash: u64) -> TokenStream {
             fn recency(&self) -> ::wavedb_core::ChainRoots { self.recency }
             fn removals(&self) -> ::wavedb_core::LogRoots { self.removals }
             fn lists(&self) -> &[::wavedb_core::ChainRoots] { &self.lists }
-            fn fuzzy(&self) -> &[::wavedb_core::LocalId] { &self.fuzzy }
+            fn fuzzy(&self) -> &[::wavedb_core::ChainRoots] { &self.fuzzy }
             fn permission(&self) -> ::core::option::Option<&::wavedb_core::PermissionRef> {
                 self.permission.as_ref()
             }
@@ -206,7 +206,7 @@ pub fn nonunique_types(
             pub removals: ::wavedb_core::LogRoots,
             pub secondaries: [::wavedb_core::ChainRoots; #num_secondaries],
             pub lists: [::wavedb_core::ChainRoots; #num_lists],
-            pub fuzzy: [::wavedb_core::LocalId; #num_fuzzy],
+            pub fuzzy: [::wavedb_core::ChainRoots; #num_fuzzy],
             pub permission: ::core::option::Option<::wavedb_core::PermissionRef>,
         }
     };
