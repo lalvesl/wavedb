@@ -71,7 +71,7 @@ async fn typed_surface_runs_serverless_over_indexeddb() {
     .unwrap();
     assert_eq!(AboutUser::get(&db).await.unwrap().unwrap().city, "porto");
 
-    // NonUnique collection: the BpTree indexes are ordinary values in the
+    // NonUnique collection: the chain segments are ordinary values in the
     // same flat keyspace — the whole engine-above-Store runs unchanged.
     let pivot = Note::create_pivot(&db).await.unwrap();
     let col = Note::collection(pivot);
