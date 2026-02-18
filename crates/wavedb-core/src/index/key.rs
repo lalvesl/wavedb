@@ -1,9 +1,9 @@
-//! [`IndexKey`] — order-preserving key encoding for the `BpTree`.
+//! [`IndexKey`] — order-preserving key encoding for the chains.
 
 use crate::local_id::LocalId;
 use crate::u48::U48;
 
-/// Encode a value so that **byte order equals value order** — the `BpTree`
+/// Encode a value so that **byte order equals value order** — a chain
 /// compares keys with `memcmp` and never decodes them.
 ///
 /// Implemented per indexed type: unsigned ints big-endian, signed ints
