@@ -96,7 +96,7 @@ pub use remote::Remote;
 pub use remote_compact::{MOVE_BLOCKS, RemoteCompacted};
 pub use settle::Progress;
 pub use shard_set::{open_object_shards, open_shards, open_shards_with};
-pub use struct_storage::{BPTREE_NODE_STORAGE, StorageRegistry, StructStorage};
+pub use struct_storage::{StorageRegistry, StructStorage};
 pub use upload::Uploaded;
 
 /// The engine's threading contract, **asserted rather than described**.
