@@ -132,7 +132,7 @@ The node routes the frame through the generated registry — **one `match` on
 `struct_hash`** to the concrete type's arm. For a struct hash the arm runs a
 shape-specific `match command { … }` to that type's compile-time `get`/`save` /
 `insert`/`update`/`remove` fn, which drives the storage engine (allocator,
-record cache, pages, `Pivot`/`BpTree`); for a function hash the same match runs the
+record cache, pages, `Pivot`/`Chain`); for a function hash the same match runs the
 server-fn body on the decoded args instead. Identity and permission are enforced
 **before** the engine runs — see
 [`wavedb-quick-node` § node-side enforcement](../wavedb-quick-node/README.md#node-side-enforcement).
