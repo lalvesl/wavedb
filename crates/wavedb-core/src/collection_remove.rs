@@ -98,7 +98,7 @@ impl<T: NonUniqueStruct> Collection<T> {
             }
         }
         // A fuzzy index holds only living records too — every posting goes.
-        let mut fuzzy = self.fuzzy_trees(&pivot);
+        let mut fuzzy = self.fuzzy_chains(&pivot);
         let mut view = crate::overlay::Overlay::new(store);
         self.plan_fuzzy_removes(&mut view, &mut batch, &mut fuzzy, id, &value)
             .await?;
