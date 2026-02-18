@@ -5,7 +5,7 @@
 //! so it needs both; IndexedDB is already a durable ordered key→value store
 //! doing its own block management and crash safety — stacking WaveDB pages
 //! on top would run two block managers and buy nothing. The `Store` trait
-//! absorbs the difference: `BpTree` / `Collection` / `LocalHandle` run
+//! absorbs the difference: `Chain` / `Collection` / `LocalHandle` run
 //! unchanged over this backend (serverless mode falls out).
 //!
 //! - **Key** = the 128-bit [`Id`] as 16 big-endian bytes — IndexedDB orders
