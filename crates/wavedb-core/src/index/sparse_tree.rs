@@ -14,15 +14,14 @@ use crate::local_id::LocalId;
 use crate::store::{Store, Write};
 use crate::u48::U48;
 
-use super::node_key::SecKey;
+use super::sec_key::SecKey;
 use super::segment::{Lane, mint_lane_id};
 use super::sparse::{Slot, SparseNode, Step};
 
 /// Max entries in a sparse-index node before it splits.
 ///
 /// One constant for both kinds, because a [`Slot`] and a [`Branch`](super::sparse::Branch) are the same
-/// shape — least key, pointer, count — unlike `BpTree`, whose leaf and internal
-/// bodies differ enough to want separate capacities. Sized so a node of
+/// shape — least key, pointer, count. Sized so a node of
 /// instant-keyed entries stays inside the storage engine's 32 KiB bucket target.
 pub const DEFAULT_SPARSE_CAP: usize = 700;
 
