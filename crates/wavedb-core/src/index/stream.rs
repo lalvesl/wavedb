@@ -1,11 +1,9 @@
-//! [`IdStreamExt`] — set algebra over the `Id` streams [`BpTree::search`]
-//! yields: the no-DSL composite query.
+//! [`IdStreamExt`] — set algebra over `Id` streams (an index's anchors): the
+//! no-DSL composite query.
 //!
 //! `Store`-agnostic, so it runs native or web. Streams from different indexes
 //! arrive in different orders, so `intersect`/`except` buffer the argument side
 //! into an `Id` set and probe the receiver; `union` merges and dedups.
-//!
-//! [`BpTree::search`]: super::BpTree::search
 
 use std::collections::HashSet;
 use std::pin::Pin;
