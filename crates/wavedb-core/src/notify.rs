@@ -5,7 +5,7 @@
 //! [`Mutation`] via [`Store::note_mutation`] — the op-level meaning a raw
 //! batch cannot carry (a chained save also writes archive records
 //! metadata-indistinguishable from the live one, and a remove may rewrite
-//! no record at all — only B+tree nodes).
+//! no record at all — only chain segments).
 //!
 //! The default `note_mutation` does nothing and never even builds the
 //! value, so every ordinary store — the engine under a client cache, the
