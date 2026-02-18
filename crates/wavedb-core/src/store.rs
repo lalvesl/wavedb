@@ -1,7 +1,7 @@
 //! `Store` — the backend seam.
 //!
 //! Key→value over [`Id`] + wire bytes, with an atomic batch. This is the only
-//! thing that differs native vs web; the index layer above (`Pivot`/`BpTree`) is
+//! thing that differs native vs web; the index layer above (`Pivot`/`Chain`) is
 //! written once against this contract.
 //!
 //! Async, **no concrete I/O** — the page engine ([`wavedb-storage`]), the native
@@ -72,7 +72,7 @@ impl Write {
 /// Key→value backend over [`Id`] plus an **atomic batch**.
 ///
 /// `apply` commits all-or-nothing: a multi-record op (a record **and** the
-/// `BpTree` node it touches) is one batch, so a reader never sees a half-applied
+/// chain segments it touches) is one batch, so a reader never sees a half-applied
 /// mutation and a crash keeps either the whole batch or none of it. There is no
 /// separate transaction manager — the batch *is* the atomic unit. When a crash
 /// may still take it is the store's: [`apply_durable`](Store::apply_durable)
@@ -83,7 +83,7 @@ pub trait Store {
 
     /// Type-directed fetch: `struct_hash` names the value's type (the same
     /// hash stamped at the head of its stored bytes). The typed layers above
-    /// (`Collection`, `BpTree`) always know it at compile time, so a backend
+    /// (`Collection`, `Chain`) always know it at compile time, so a backend
     /// with per-type storage can route straight to one type's slot instead of
     /// searching a shared keyspace. The default just falls back to [`get`]
     /// — simple backends (one flat map, IndexedDB) need nothing extra.
