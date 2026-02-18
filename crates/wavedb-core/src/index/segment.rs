@@ -36,7 +36,7 @@ use crate::error::{Error, Result};
 use crate::local_id::LocalId;
 use crate::wire::{WaveWire, from_wire, to_wire};
 
-use super::node_key::SecKey;
+use super::sec_key::SecKey;
 
 /// Bytes before the payload: the lane's `STRUCT_HASH` tag.
 const LANE_PREFIX: usize = 8;
@@ -82,6 +82,11 @@ pub enum Lane {
     ///
     /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
     Secondary,
+    /// `#[wavedb::fuzzy]` posting chains ([RFC 0075]): one `[gram][len][anchor]`
+    /// key per gram of a record's value, and no payload.
+    ///
+    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
+    Fuzzy,
 }
 
 impl Lane {
@@ -99,6 +104,7 @@ impl Lane {
             Self::Dead => b"WDB.DEAD",
             Self::Index => b"WDB.IDX",
             Self::Secondary => b"WDB.SEC",
+            Self::Fuzzy => b"WDB.FZY",
         };
         let mut bytes = tag.to_vec();
         bytes.extend_from_slice(&struct_hash.to_le_bytes());
@@ -337,7 +343,7 @@ impl<P: WaveWire> Segment<P> {
 mod tests {
     use super::{Lane, Segment, mint_lane_id};
     use crate::error::Error;
-    use crate::index::node_key::SecKey;
+    use crate::index::sec_key::SecKey;
     use crate::local_id::LocalId;
 
     const TYPE_HASH: u64 = 0xABCD_0123_4567_89AB;
