@@ -26,7 +26,7 @@
 use crate::collection::Collection;
 use crate::error::Result;
 use crate::id::Id;
-use crate::index::{BpTree, Chain, SecKey};
+use crate::index::Chain;
 use crate::local_id::LocalId;
 use crate::metadata::Metadata;
 use crate::overlay::Overlay;
@@ -42,8 +42,8 @@ pub struct Reindex<'a> {
     pub lists: &'a mut [Chain<Vec<u8>>],
     /// The `#[wavedb::pivot(...)]` secondary chains (RFC 0075).
     pub secs: &'a mut [Chain<()>],
-    /// The `#[wavedb::fuzzy]` posting trees (RFC 0056).
-    pub fuzzy: &'a mut [BpTree<SecKey>],
+    /// The `#[wavedb::fuzzy]` posting chains (RFC 0056).
+    pub fuzzy: &'a mut [Chain<()>],
 }
 
 impl<T: NonUniqueStruct> Collection<T> {
