@@ -119,8 +119,8 @@ impl Plan {
 ///
 /// One, except for sharded WaveDB on the `shop` workload — and that exception
 /// is the whole shape of [RFC 0065] §3. The `micro` workload lives in a single
-/// collection, and a collection is indivisible (its B+tree nodes and chain
-/// segments belong to the Pivot's owner), so asking for three consumers there
+/// collection, and a collection is indivisible (its chain segments and index
+/// nodes belong to the Pivot's owner), so asking for three consumers there
 /// would not be a slower measurement but a wrong one. The clamp is here, at
 /// the point the matrix is built, so no row can be *created* with a count it
 /// may not have.
