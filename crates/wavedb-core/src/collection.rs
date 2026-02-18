@@ -4,7 +4,7 @@
 //! `#[wavedb(NonUnique)]` emits `Todo::collection(pivot_id, tenant)` /
 //! `Todo::create_pivot(store, tenant)` wrappers over this type, so application
 //! code drives inserts, removals, and walks through the collection — never a
-//! raw `BpTree`, which stays an index-layer internal:
+//! raw `Chain`, which stays an index-layer internal:
 //!
 //! ```text
 //! let todos = Todo::create_pivot(&store, tenant).await?;   // once, explicit
@@ -26,8 +26,8 @@
 //!
 //! Each mutating op commits **one** [`Store::apply`] batch: the record write
 //! (plus its archived predecessor and chain relinks on a save), the record
-//! chain segments and sparse-index nodes it touched, every touched secondary
-//! B+tree node, and — when a root moved — the rewritten `Pivot` record. A
+//! chain segments and sparse-index nodes it touched — secondary and fuzzy
+//! chains included — and, when a root moved, the rewritten `Pivot` record. A
 //! crash replays the whole batch or none of it.
 
 use std::marker::PhantomData;
@@ -63,9 +63,7 @@ pub struct Collection<T: NonUniqueStruct> {
     // Read by `collection_roots`, which opens the structures this handle names.
     pub(crate) tenant: U48,
     user: U48,
-    pub(crate) leaf_cap: usize,
-    pub(crate) internal_cap: usize,
-    /// The secondary chains' segment minimum (RFC 0075).
+    /// The secondary and fuzzy chains' segment minimum (RFC 0075).
     pub(crate) index_min: usize,
     _record: PhantomData<fn() -> T>,
 }
@@ -89,8 +87,7 @@ impl<T: NonUniqueStruct> Collection<T> {
             pivot,
             tenant,
             user: tenant,
-            leaf_cap: crate::index::DEFAULT_LEAF_CAP,
-            internal_cap: crate::index::DEFAULT_INTERNAL_CAP,
+
             index_min: crate::index::DEFAULT_DEAD_MIN,
             _record: PhantomData,
         }
@@ -104,17 +101,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         self
     }
 
-    /// Override the B+tree node capacities (small caps make deep trees cheap
-    /// to build in tests; production uses the defaults). Use one configuration
-    /// for a collection's whole lifetime.
-    #[must_use]
-    pub const fn with_caps(mut self, leaf: usize, internal: usize) -> Self {
-        self.leaf_cap = leaf;
-        self.internal_cap = internal;
-        self
-    }
-
-    /// Override the secondary chains' segment minimum (small segments make
+    /// Override the secondary and fuzzy chains' segment minimum (small segments make
     /// long chains cheap to build in tests; production uses the default).
     /// Use one for a collection's whole lifetime.
     #[must_use]
@@ -394,7 +381,7 @@ mod tests {
             let store = MemStore::default();
             let pivot =
                 Collection::<Doc>::create(&store, tenant()).await.unwrap();
-            let col = Collection::<Doc>::at(pivot, tenant()).with_caps(4, 4);
+            let col = Collection::<Doc>::at(pivot, tenant()).with_index_min(4);
 
             // Enough inserts to split the current tree's root repeatedly.
             let mut ids = Vec::new();
@@ -405,7 +392,7 @@ mod tests {
             // A fresh handle (same PivotId) must see everything: the moved
             // root came from the rewritten Pivot record, not handle state.
             let reopened =
-                Collection::<Doc>::at(pivot, tenant()).with_caps(4, 4);
+                Collection::<Doc>::at(pivot, tenant()).with_index_min(4);
             let walked: Vec<(crate::id::Id, Doc)> =
                 reopened.all(&store).try_collect().await.unwrap();
             assert_eq!(walked.len(), 64);
