@@ -1,6 +1,6 @@
 //! Fuzzy string search ([RFC 0056]) — the text layer.
 //!
-//! An n-gram posting index over the existing `BpTree<SecKey>`: the indexed
+//! An n-gram posting index over a `Chain<()>` (RFC 0075): the indexed
 //! string is normalized, padded, cut into n-grams, and each distinct gram
 //! becomes a key `[gram][len][anchor]`. A query decomposes the same way, so
 //! looking up one gram is a `Bound::Prefix` scan.
