@@ -833,14 +833,14 @@ mod tests {
         assert!(!crate::Attachment::struct_storage().compress());
 
         // Unique registers itself; NonUnique bundles its Pivot's slot and the
-        // five reserved lanes its collection lives in — declared-list segments,
+        // six reserved lanes its collection lives in — declared-list segments,
         // the recency chain, the removal log, the sparse index and the
-        // secondary chains (RFC 0075). Each is its
+        // secondary and fuzzy chains (RFC 0075). Each is its
         // own directory so a page never mixes fat records with skinny id
         // entries, and so each lane's zstd dictionary models one kind of thing.
         assert_eq!(AboutUser::storage_entries().len(), 1);
         let entries = Note::storage_entries();
-        assert_eq!(entries.len(), 7);
+        assert_eq!(entries.len(), 8);
         assert!(std::ptr::eq(entries[0], Note::struct_storage()));
         assert!(std::ptr::eq(entries[1], NotePivot::struct_storage()));
         assert!(std::ptr::eq(entries[2], Note::records_lane_storage()));
@@ -848,6 +848,7 @@ mod tests {
         assert!(std::ptr::eq(entries[4], Note::dead_lane_storage()));
         assert!(std::ptr::eq(entries[5], Note::index_lane_storage()));
         assert!(std::ptr::eq(entries[6], Note::secondary_lane_storage()));
+        assert!(std::ptr::eq(entries[7], Note::fuzzy_lane_storage()));
 
         // The exposure's StorageRegistry flattens struct entries AND the
         // `store` entry — Attachment's slot registers with no wire surface.
@@ -1489,7 +1490,7 @@ mod tests {
 
     // The generated API end-to-end, in the exact shape application code uses:
     // an explicit `create_pivot`, then `collection(...)` driving
-    // insert / all / save / remove — no raw `BpTree` anywhere.
+    // insert / all / save / remove — no raw `Chain` anywhere.
     #[test]
     fn derived_collection_flow_end_to_end() {
         use futures::TryStreamExt;
@@ -1574,6 +1575,7 @@ mod lane_tests {
             (Lane::Recency, Note::recency_lane_storage()),
             (Lane::Index, Note::index_lane_storage()),
             (Lane::Secondary, Note::secondary_lane_storage()),
+            (Lane::Fuzzy, Note::fuzzy_lane_storage()),
         ] {
             assert_eq!(
                 slot.struct_hash(),
@@ -1599,6 +1601,7 @@ mod lane_tests {
                 Lane::Dead.hash(Note::STRUCT_HASH),
                 Lane::Index.hash(Note::STRUCT_HASH),
                 Lane::Secondary.hash(Note::STRUCT_HASH),
+                Lane::Fuzzy.hash(Note::STRUCT_HASH),
             ],
             "the guard's lane list drifted from the engine's"
         );
@@ -1618,7 +1621,13 @@ mod lane_tests {
             .iter()
             .map(|s| s.struct_hash())
             .collect();
-        for lane in [Lane::Records, Lane::Dead, Lane::Index, Lane::Secondary] {
+        for lane in [
+            Lane::Records,
+            Lane::Dead,
+            Lane::Index,
+            Lane::Secondary,
+            Lane::Fuzzy,
+        ] {
             assert!(
                 registered.contains(&lane.hash(Note::STRUCT_HASH)),
                 "{lane:?} is not in Note::storage_entries()"
