@@ -11,10 +11,10 @@
     clippy::cast_sign_loss,
     clippy::missing_const_for_fn
 )]
-// The `Store` / `BpTree` backend contracts use `async fn` in traits deliberately:
+// The `Store` / `Chain` backend contracts use `async fn` in traits deliberately:
 // these are internal seams, not a public Send-bounded API, so the absence of an
 // auto `Send` bound is intended, not an oversight. Same stance for the futures
-// `BpTree`'s methods return — they are only `Send` when the backing `Store` is.
+// the index layer's methods return — they are only `Send` when the `Store` is.
 #![allow(async_fn_in_trait)]
 #![allow(clippy::future_not_send)]
 
@@ -89,8 +89,8 @@ pub use futures::{Stream, TryStreamExt};
 pub use hooks::LookupHooks;
 pub use id::Id;
 pub use index::{
-    Bound, BpTree, ChainRoots, Except, IdStreamExt, IndexKey, Intersect,
-    LogRoots, NodeKey, Pivot, SecKey, Union,
+    Bound, ChainRoots, Except, IdStreamExt, IndexKey, Intersect, LogRoots,
+    Pivot, SecKey, Union,
 };
 pub use local_id::LocalId;
 pub use metadata::{Metadata, Succession};
