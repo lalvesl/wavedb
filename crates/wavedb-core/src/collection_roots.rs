@@ -18,7 +18,7 @@ use crate::collection::Collection;
 use crate::error::{Error, Result};
 use crate::id::Id;
 use crate::index::{
-    BpTree, Chain, ChainRoots, DEFAULT_DEAD_MIN, Lane, Pivot, Roots, SecKey,
+    Chain, ChainRoots, DEFAULT_DEAD_MIN, Lane, Pivot, Roots, SecKey,
 };
 use crate::local_id::LocalId;
 use crate::record::{encode_envelope, mint_floored_id};
@@ -27,12 +27,6 @@ use crate::traits::NonUniqueStruct;
 use crate::u48::U48;
 
 impl<T: NonUniqueStruct> Collection<T> {
-    /// A posting-tree handle at `root` with the same capacities.
-    pub(crate) fn sec_tree(&self, root: LocalId) -> BpTree<SecKey> {
-        BpTree::at(root, self.tenant)
-            .with_caps(self.leaf_cap, self.internal_cap)
-    }
-
     /// A **secondary chain** at `roots` ([RFC 0075]): the recency chain's
     /// shape — `[field][anchor]` keys, no payload ([RFC 0054]), a sparse
     /// index above — keyed by a declared field instead of an instant.
@@ -68,20 +62,20 @@ impl<T: NonUniqueStruct> Collection<T> {
             .collect()
     }
 
-    /// The **fuzzy posting trees** this pivot declares, in declaration order
+    /// The **fuzzy posting chains** this pivot declares, in declaration order
     /// ([RFC 0056]).
     ///
-    /// Structurally a secondary index and nothing more: the same `BpTree`, the
-    /// same `SecKey`, the same capacities. What differs is only what the key
+    /// Structurally a secondary index and nothing more: the same chain, the
+    /// same `SecKey`, the same capacity, a lane of its own (RFC 0075). What differs is only what the key
     /// means — one gram of the indexed value rather than the whole value — and
     /// that a record contributes many keys instead of one.
     ///
     /// [RFC 0056]: https://github.com/wavedb/wavedb/blob/main/rfcs/0056-fuzzy-string-search-WIP.md
-    pub(crate) fn fuzzy_trees(&self, pivot: &T::Pivot) -> Vec<BpTree<SecKey>> {
+    pub(crate) fn fuzzy_chains(&self, pivot: &T::Pivot) -> Vec<Chain<()>> {
         pivot
             .fuzzy()
             .iter()
-            .map(|root| self.sec_tree(*root))
+            .map(|roots| self.pointer_chain(*roots, Lane::Fuzzy))
             .collect()
     }
 
@@ -289,14 +283,15 @@ impl<T: NonUniqueStruct> Collection<T> {
             list_roots.push(chain.roots());
             batch.extend(writes);
         }
-        // One posting tree per `#[wavedb::fuzzy]` (RFC 0056) — a `BpTree` like
+        // One posting chain per `#[wavedb::fuzzy]` (RFC 0056) — a chain like
         // a secondary, because a posting is a key and an anchor and nothing
         // else. Nothing here duplicates a record.
         let mut fuzzy_roots = Vec::with_capacity(T::NUM_FUZZY);
         for _ in 0..T::NUM_FUZZY {
-            let (tree, write) = BpTree::<SecKey>::plan_create(tenant);
-            fuzzy_roots.push(tree.root());
-            batch.push(write);
+            let (chain, writes) =
+                Chain::<()>::plan_create(tenant, T::STRUCT_HASH, Lane::Fuzzy);
+            fuzzy_roots.push(chain.roots());
+            batch.extend(writes);
         }
         let pivot_record = T::Pivot::default().replace_roots(Roots {
             secondaries: &sec_roots,
