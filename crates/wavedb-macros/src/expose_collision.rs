@@ -14,10 +14,10 @@
 //!   rather than enforced.
 //!
 //! The salt check counts **every occupant**, not one per entry: since RFC 0050
-//! a NonUnique type also reserves five chain lanes (`WDB.SEG`, `WDB.REC`,
-//! `WDB.DEAD`, `WDB.IDX`, `WDB.SEC`), each with a hash of its own and therefore
-//! a salt of its own. A registry of `n` such types puts `6n` values in a 15-bit
-//! space — comparing only the record hashes would leave five sixths of them
+//! a NonUnique type also reserves six chain lanes (`WDB.SEG`, `WDB.REC`,
+//! `WDB.DEAD`, `WDB.IDX`, `WDB.SEC`, `WDB.FZY`), each with a hash of its own and
+//! therefore a salt of its own. A registry of `n` such types puts `7n` values in
+//! a 15-bit space — comparing only the record hashes would leave six sevenths of them
 //! unchecked, over
 //! exactly the property the lanes exist to provide ("a segment id can never
 //! equal a record anchor, an archive slot, or a tree node"). Hence also the
