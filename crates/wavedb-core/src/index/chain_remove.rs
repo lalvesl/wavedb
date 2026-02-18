@@ -1,8 +1,8 @@
 //! [`Chain`]'s removal half ([RFC 0052]) — take an entry out, and rebalance the
 //! segment against a neighbour when it falls to `N/2`.
 //!
-//! Split from [`chain`](super::chain) the same way `BpTree`'s delete is split
-//! from its insert: the shrinking side carries the harder policy.
+//! Split from [`chain`](super::chain) and from its insert: the shrinking side
+//! carries the harder policy.
 //!
 //! ## Why a merge rule exists at all
 //!
@@ -37,7 +37,7 @@ use crate::store::{Store, Write};
 use crate::wire::WaveWire;
 
 use super::chain::Chain;
-use super::node_key::SecKey;
+use super::sec_key::SecKey;
 use super::segment::Segment;
 
 /// One side of a rebalance: the segment, its id, and the separator it is filed
