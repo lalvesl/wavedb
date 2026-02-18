@@ -1,5 +1,5 @@
 //! The write half of `#[wavedb::fuzzy]` ([RFC 0056]): keeping each posting
-//! tree in step with the record, inside the collection's one atomic batch.
+//! chain in step with the record, inside the collection's one atomic batch.
 //!
 //! ## The rule a declared list could not have
 //!
@@ -19,8 +19,9 @@
 //! ## The cost, stated plainly
 //!
 //! Inserting a record writes `L + n - 1` keys scattered across the key space,
-//! so it touches roughly that many leaf pages — a 20-character name is ~22
-//! inserts. Removal is symmetric. It is one barrier, because it rides the
+//! so it touches roughly that many posting segments — a 20-character name is
+//! ~22 inserts, each into a segment of pointers rather than a whole tree leaf
+//! (RFC 0075). Removal is symmetric. It is one barrier, because it rides the
 //! collection's single batch, but it is not one page. That is the honest
 //! headline of this feature the way "one full copy of every record per
 //! declaration" is RFC 0051's.
@@ -31,7 +32,7 @@ use crate::collection::Collection;
 use crate::error::Result;
 use crate::fuzzy::{field_key, gram_prefixes, normalize};
 use crate::id::Id;
-use crate::index::{BpTree, SecKey};
+use crate::index::{Chain, SecKey};
 use crate::local_id::LocalId;
 use crate::overlay::Overlay;
 use crate::store::{Store, Write};
@@ -61,14 +62,14 @@ impl<T: NonUniqueStruct> Collection<T> {
         &self,
         view: &mut Overlay<'_, S>,
         batch: &mut Vec<Write>,
-        trees: &mut [BpTree<SecKey>],
+        chains: &mut [Chain<()>],
         id: Id,
         value: &T,
     ) -> Result<()> {
-        for (i, tree) in trees.iter_mut().enumerate() {
+        for (i, chain) in chains.iter_mut().enumerate() {
             for key in Self::fuzzy_keys(value, i, id) {
-                let writes = tree.plan_insert(&*view, key).await?;
-                // One record contributes many keys to the *same* tree, so
+                let writes = chain.plan_insert(&*view, key, ()).await?;
+                // One record contributes many keys to the *same* chain, so
                 // unlike a secondary index these plans genuinely read each
                 // other back — the overlay is load-bearing here, not
                 // defensive.
@@ -88,27 +89,25 @@ impl<T: NonUniqueStruct> Collection<T> {
         &self,
         view: &mut Overlay<'_, S>,
         batch: &mut Vec<Write>,
-        trees: &mut [BpTree<SecKey>],
+        chains: &mut [Chain<()>],
         id: Id,
         values: (&T, &T),
     ) -> Result<()> {
         let (old_value, value) = values;
-        for (i, tree) in trees.iter_mut().enumerate() {
+        for (i, chain) in chains.iter_mut().enumerate() {
             let old: Vec<SecKey> = Self::fuzzy_keys(old_value, i, id);
             let new: Vec<SecKey> = Self::fuzzy_keys(value, i, id);
             if old == new {
                 continue;
             }
             for key in old.iter().filter(|k| !new.contains(k)) {
-                if let Some(writes) =
-                    tree.plan_remove(&*view, key.clone()).await?
-                {
+                if let Some(writes) = chain.plan_remove(&*view, key).await? {
                     view.stage(&writes);
                     batch.extend(writes);
                 }
             }
             for key in new.iter().filter(|k| !old.contains(k)) {
-                let writes = tree.plan_insert(&*view, key.clone()).await?;
+                let writes = chain.plan_insert(&*view, key.clone(), ()).await?;
                 view.stage(&writes);
                 batch.extend(writes);
             }
@@ -121,13 +120,13 @@ impl<T: NonUniqueStruct> Collection<T> {
         &self,
         view: &mut Overlay<'_, S>,
         batch: &mut Vec<Write>,
-        trees: &mut [BpTree<SecKey>],
+        chains: &mut [Chain<()>],
         id: Id,
         value: &T,
     ) -> Result<()> {
-        for (i, tree) in trees.iter_mut().enumerate() {
+        for (i, chain) in chains.iter_mut().enumerate() {
             for key in Self::fuzzy_keys(value, i, id) {
-                if let Some(writes) = tree.plan_remove(&*view, key).await? {
+                if let Some(writes) = chain.plan_remove(&*view, &key).await? {
                     view.stage(&writes);
                     batch.extend(writes);
                 }
@@ -143,9 +142,8 @@ mod tests {
 
     use crate::collection::Collection;
     use crate::fuzzy::{Fold, gram_prefixes, normalize};
-    use crate::id::Id;
     use crate::index::mem_store::MemStore;
-    use crate::index::{Bound, ChainRoots, LogRoots, Pivot, Roots};
+    use crate::index::{Chain, ChainRoots, LogRoots, Pivot, Roots, SecKey};
     use crate::local_id::LocalId;
     use crate::overlay::Overlay;
     use crate::permission::PermissionRef;
@@ -171,7 +169,7 @@ mod tests {
     struct MemberPivot {
         recency: ChainRoots,
         removals: LogRoots,
-        fuzzy: [LocalId; 1],
+        fuzzy: [ChainRoots; 1],
         permission: Option<PermissionRef>,
     }
 
@@ -186,7 +184,7 @@ mod tests {
         fn removals(&self) -> LogRoots {
             self.removals
         }
-        fn fuzzy(&self) -> &[LocalId] {
+        fn fuzzy(&self) -> &[ChainRoots] {
             &self.fuzzy
         }
         fn permission(&self) -> Option<&PermissionRef> {
@@ -226,38 +224,66 @@ mod tests {
         }
     }
 
-    /// Every anchor the posting tree files under any gram of `query`.
+    /// Every anchor `chain` files under a key starting with `prefix`.
+    async fn under(
+        store: &MemStore,
+        chain: Chain<()>,
+        prefix: &[u8],
+    ) -> Vec<LocalId> {
+        use futures::TryStreamExt;
+        let from = SecKey {
+            field: prefix.to_vec(),
+            rec: LocalId::default(),
+        };
+        chain
+            .scan_from(store, from)
+            .try_take_while(|(k, ())| {
+                futures::future::ready(Ok(k.field.starts_with(prefix)))
+            })
+            .map_ok(|(k, ())| k.rec)
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
+    /// Every posting `chain` holds, in order.
+    async fn all_keys(store: &MemStore, chain: Chain<()>) -> Vec<SecKey> {
+        use futures::TryStreamExt;
+        let from = SecKey {
+            field: Vec::new(),
+            rec: LocalId::default(),
+        };
+        chain
+            .scan_from(store, from)
+            .map_ok(|(k, ())| k)
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
+    /// Every anchor the posting chain files under any gram of `query`.
     async fn candidates(
         store: &MemStore,
         col: &Collection<Member>,
         query: &str,
     ) -> Vec<LocalId> {
-        use futures::TryStreamExt;
         let pivot = col.load_pivot(store).await.unwrap();
-        let tree = col.fuzzy_trees(&pivot).pop().unwrap();
+        let chain = col.fuzzy_chains(&pivot).pop().unwrap();
         let (n, fold) = Member::fuzzy_profile(0);
         let mut out = Vec::new();
         for prefix in gram_prefixes(&normalize(query, fold), n) {
-            let hits: Vec<Id> = tree
-                .search(store, Bound::Prefix(prefix))
-                .try_collect()
-                .await
-                .unwrap();
-            out.extend(hits.into_iter().map(LocalId::from_id));
+            out.extend(under(store, chain, &prefix).await);
         }
         out.sort_unstable();
         out.dedup();
         out
     }
 
-    /// How many postings the tree holds in total.
+    /// How many postings the chain holds in total.
     async fn postings(store: &MemStore, col: &Collection<Member>) -> usize {
-        use futures::TryStreamExt;
         let pivot = col.load_pivot(store).await.unwrap();
-        let tree = col.fuzzy_trees(&pivot).pop().unwrap();
-        let all: Vec<_> =
-            tree.search(store, Bound::All).try_collect().await.unwrap();
-        all.len()
+        let chain = col.fuzzy_chains(&pivot).pop().unwrap();
+        under(store, chain, &[]).await.len()
     }
 
     // The whole point of the index: a typo still finds the record. This is the
@@ -300,7 +326,7 @@ mod tests {
             // claim: not "the postings end up the same" (they would either
             // way) but "no write was planned at all".
             let pivot_rec = col.load_pivot(&store).await.unwrap();
-            let mut trees = col.fuzzy_trees(&pivot_rec);
+            let mut chains = col.fuzzy_chains(&pivot_rec);
             let mut view = Overlay::new(&store);
             let mut batch = Vec::new();
             let same_name = Member {
@@ -310,7 +336,7 @@ mod tests {
             col.plan_fuzzy_moves(
                 &mut view,
                 &mut batch,
-                &mut trees,
+                &mut chains,
                 id,
                 (&member("John Smith"), &same_name),
             )
@@ -347,29 +373,34 @@ mod tests {
             let col = Collection::<Member>::at(pivot, tenant());
             let id = col.insert(&store, &member("John Smith")).await.unwrap();
 
-            let total = postings(&store, &col).await;
             let pivot_rec = col.load_pivot(&store).await.unwrap();
-            let mut trees = col.fuzzy_trees(&pivot_rec);
+            let mut chains = col.fuzzy_chains(&pivot_rec);
+            let before = all_keys(&store, chains[0]).await;
             let mut view = Overlay::new(&store);
             let mut batch = Vec::new();
             col.plan_fuzzy_moves(
                 &mut view,
                 &mut batch,
-                &mut trees,
+                &mut chains,
                 id,
                 (&member("John Smith"), &member("John Smyth")),
             )
             .await
             .unwrap();
 
+            crate::store::Store::apply(&store, &batch).await.unwrap();
+            let after = all_keys(&store, chains[0]).await;
+
             // One substitution disrupts at most `n` grams either side, so the
             // moved set is bounded by ~2n — nowhere near the `L + n - 1` a
             // remove-and-reinsert would touch.
+            let moved = before.iter().filter(|k| !after.contains(k)).count()
+                + after.iter().filter(|k| !before.contains(k)).count();
             assert!(
-                !batch.is_empty() && batch.len() < total,
-                "one edit planned {} writes over a {total}-posting index — \
-                 the difference should be a handful, not the whole set",
-                batch.len()
+                moved > 0 && moved < before.len(),
+                "one edit moved {moved} of {} postings — the difference \
+                 should be a handful, not the whole set",
+                before.len()
             );
         });
     }
@@ -398,20 +429,11 @@ mod tests {
             // the record's posting under a gram unique to the old name.
             let dropped = gram_prefixes(&normalize("smi", Fold::Latin), 3);
             let pivot_rec = col.load_pivot(&store).await.unwrap();
-            let tree = col.fuzzy_trees(&pivot_rec).pop().unwrap();
+            let chain = col.fuzzy_chains(&pivot_rec).pop().unwrap();
             for prefix in dropped {
-                use futures::TryStreamExt;
-                let hits: Vec<Id> = tree
-                    .search(&store, Bound::Prefix(prefix))
-                    .try_collect()
-                    .await
-                    .unwrap();
+                let hits = under(&store, chain, &prefix).await;
                 assert!(
-                    !hits
-                        .iter()
-                        .copied()
-                        .map(LocalId::from_id)
-                        .any(|r| r == anchor),
+                    !hits.contains(&anchor),
                     "the old name's grams still point at the record"
                 );
             }
