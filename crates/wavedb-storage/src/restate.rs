@@ -31,8 +31,8 @@ pub struct TypeView<'a> {
 /// the next, until the room runs out or every type had its turn. Returns
 /// the bytes left.
 ///
-/// By restatement, not by mention: a collection's `Pivot` and its B+tree
-/// nodes keep their ids, so the same few buckets of a type change in every
+/// By restatement, not by mention: a collection's `Pivot` and its chains'
+/// segments keep their ids, so the same few buckets of a type change in every
 /// batch while the rest hold still. Ordered by mention, that type would
 /// never be restated, and its quiet buckets would be known only from ever
 /// older headers.
