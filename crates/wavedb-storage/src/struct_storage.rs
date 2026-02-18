@@ -19,7 +19,6 @@
 //! [`PageStore`]: crate::page_store::PageStore
 
 use std::cell::RefCell;
-use wavedb_core::index::BPTREE_NODE_STRUCT_HASH;
 
 use crate::block::BlockDescriptor;
 use crate::dictionary::DictState;
@@ -58,8 +57,8 @@ impl StructStorage {
     }
 
     /// A slot whose pages never run through zstd — for hot, constantly
-    /// rewritten page kinds where the CPU spend doesn't pay (`BpTree` nodes),
-    /// or a `#[wavedb(compress = false)]` type.
+    /// rewritten page kinds where the CPU spend doesn't pay, or a
+    /// `#[wavedb(compress = false)]` type.
     #[must_use]
     pub const fn without_compression(struct_hash: u64) -> Self {
         Self {
@@ -71,7 +70,7 @@ impl StructStorage {
 
     /// The same declaration, its pages **resident**: an object-backed store
     /// never evicts them (RFC 0070 §10). For what navigation reads — the
-    /// recency and removal chains, sparse indexes, Pivots, `BpTree` nodes —
+    /// recency, removal, secondary and fuzzy chains, sparse indexes, Pivots —
     /// so a walk never waits on the object store, only the record bytes it
     /// leads to do. Behaviour, not bytes: it does not fold into the hash.
     #[must_use]
@@ -184,9 +183,6 @@ impl TypeSlot {
 /// halves: the dispatch surface ([`Exposure`]) *and* the storage surface —
 /// declared once, not discovered.
 ///
-/// The reserved [`BPTREE_NODE_STORAGE`] slot is **not** returned here;
-/// [`PageStore::open`] adds it automatically.
-///
 /// [`Exposure`]: wavedb_core::expose::Exposure
 /// [`PageStore::open`]: crate::page_store::PageStore::open
 pub trait StorageRegistry {
@@ -197,22 +193,11 @@ pub trait StorageRegistry {
     fn storage_entries(&self) -> Vec<&'static StructStorage>;
 }
 
-/// The reserved slot every `BpTree` node value settles into.
-///
-/// Compression off: node pages are rewritten on every index mutation, so zstd
-/// there is CPU for nothing. [`PageStore::open`] registers it automatically —
-/// callers list only their own types.
-///
-/// [`PageStore::open`]: crate::page_store::PageStore::open
-pub static BPTREE_NODE_STORAGE: StructStorage =
-    StructStorage::without_compression(BPTREE_NODE_STRUCT_HASH).resident();
-
-/// One slot per registered type, the `BpTree`-node slot included, sorted
-/// by `STRUCT_HASH`. Generated Pivot types of identical shape may share a
-/// hash; they also share pages today, so one slot serves the hash — dedup.
+/// One slot per registered type, sorted by `STRUCT_HASH`. Generated Pivot
+/// types of identical shape may share a hash; they also share pages today,
+/// so one slot serves the hash — dedup.
 pub(crate) fn slots_of(types: &[&'static StructStorage]) -> Vec<TypeSlot> {
     let mut declared: Vec<&'static StructStorage> = types.to_vec();
-    declared.push(&BPTREE_NODE_STORAGE);
     declared.sort_by_key(|s| s.struct_hash());
     declared.dedup_by_key(|s| s.struct_hash());
     declared.into_iter().map(TypeSlot::new).collect()
@@ -220,9 +205,8 @@ pub(crate) fn slots_of(types: &[&'static StructStorage]) -> Vec<TypeSlot> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BPTREE_NODE_STORAGE, StructStorage, TypeSlot};
+    use super::{StructStorage, TypeSlot};
     use crate::directory::Directory;
-    use wavedb_core::index::BPTREE_NODE_STRUCT_HASH;
 
     static DECLARED: StructStorage = StructStorage::new(0xABCD);
 
@@ -239,18 +223,6 @@ mod tests {
         assert!(
             b.directory().borrow_mut().is_none(),
             "the other slot is untouched"
-        );
-    }
-
-    #[test]
-    fn node_slot_is_reserved_and_uncompressed() {
-        assert_eq!(BPTREE_NODE_STORAGE.struct_hash(), BPTREE_NODE_STRUCT_HASH);
-        assert!(!BPTREE_NODE_STORAGE.compress());
-        assert!(
-            !TypeSlot::new(&BPTREE_NODE_STORAGE)
-                .dictionary()
-                .borrow_mut()
-                .enabled()
         );
     }
 }
