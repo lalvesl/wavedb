@@ -1,17 +1,11 @@
-//! Test-only in-memory [`Store`] and tree-invariant helpers, shared by the
-//! `tree*` module tests.
+//! Test-only in-memory [`Store`], shared by the index and collection tests.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use crate::error::Result;
 use crate::id::Id;
-use crate::local_id::LocalId;
 use crate::store::{Store, Write};
-use crate::u48::U48;
-
-use super::node::NodeBody;
-use super::tree::BpTree;
 
 /// In-memory `Store` for exercising the index layer — counting the batches
 /// asked durable, which it applies like any other.
@@ -86,88 +80,4 @@ impl MemStore {
         drop(m);
         Ok(())
     }
-}
-
-/// Walk the whole tree, asserting the B+tree shape invariants:
-///
-/// - every leaf sits at the same depth;
-/// - every **non-root** node holds at least ¼ of its capacity and at most all
-///   of it;
-/// - separators bound their subtrees (keys strictly ascending globally);
-/// - every reachable node exists (no dangling pointers), and the store holds
-///   **only** reachable nodes (no leaks).
-///
-/// Returns the keys in walk order.
-pub(super) async fn check_invariants(
-    tree: &BpTree,
-    store: &MemStore,
-    tenant: U48,
-) -> Vec<u64> {
-    let mut keys = Vec::new();
-    let mut reachable = 0usize;
-    let mut leaf_depth: Option<usize> = None;
-    // (node, depth, is_root)
-    let mut queue: Vec<(LocalId, usize, bool)> = vec![(tree.root(), 0, true)];
-
-    while let Some((node_id, depth, is_root)) = queue.pop() {
-        reachable += 1;
-        let bytes = store
-            .get(node_id.to_id(tenant))
-            .await
-            .unwrap()
-            .unwrap_or_else(|| panic!("dangling node pointer {node_id:?}"));
-        match NodeBody::<LocalId>::from_bytes(&bytes).unwrap() {
-            NodeBody::Leaf(node_keys) => {
-                match leaf_depth {
-                    None => leaf_depth = Some(depth),
-                    Some(d) => {
-                        assert_eq!(d, depth, "leaves at differing depths");
-                    }
-                }
-                if !is_root {
-                    assert!(
-                        node_keys.len() >= tree.leaf_cap / 4,
-                        "underfull leaf survived: {} < {}",
-                        node_keys.len(),
-                        tree.leaf_cap / 4
-                    );
-                }
-                assert!(node_keys.len() <= tree.leaf_cap, "overfull leaf");
-                keys.extend(node_keys.iter().map(|k| k.key()));
-            }
-            NodeBody::Internal { leftmost, entries } => {
-                if !is_root {
-                    assert!(
-                        entries.len() >= tree.internal_cap / 4,
-                        "underfull internal node survived"
-                    );
-                }
-                assert!(
-                    entries.len() <= tree.internal_cap,
-                    "overfull internal"
-                );
-                assert!(
-                    !entries.is_empty() || is_root,
-                    "empty non-root internal"
-                );
-                // Reverse so the pop-order visits children left→right.
-                for (_, child) in entries.iter().rev() {
-                    queue.push((*child, depth + 1, false));
-                }
-                queue.push((leftmost, depth + 1, false));
-            }
-        }
-    }
-
-    // The walk visits left→right, so keys must come out strictly ascending.
-    assert!(
-        keys.windows(2).all(|w| w[0] < w[1]),
-        "keys not strictly ascending"
-    );
-    assert_eq!(
-        reachable,
-        store.len(),
-        "store holds unreachable nodes (leak) or misses reachable ones"
-    );
-    keys
 }
