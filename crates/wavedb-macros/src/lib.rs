@@ -24,6 +24,7 @@ mod fuzzy;
 mod generated;
 mod lists;
 mod natural_key;
+mod orderings;
 mod secondaries;
 mod server;
 mod server_args;
