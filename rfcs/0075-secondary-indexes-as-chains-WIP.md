@@ -1,7 +1,8 @@
 # RFC 0075 — Secondary indexes as chains
 
-- **Status:** In progress (opened 2026-10-17; phases 1–3 landed 2026-10-18:
-  the seek, secondaries and fuzzy postings on chains, the B+tree deleted)
+- **Status:** In progress (opened 2026-10-17; phases 1–4 landed 2026-10-18:
+  the seek, secondaries and fuzzy postings on chains, the B+tree deleted,
+  pivot and list as one; the measure, with RFC 0074's, is what is left)
 - **Builds on:**
   - [RFC 0050](0050-clustered-record-chains.md) (the chain and its sparse
     index; B+trees opt-in);
