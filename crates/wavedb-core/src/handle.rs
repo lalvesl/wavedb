@@ -224,6 +224,16 @@ pub trait DbHandle: Sized {
         bound: Bound,
     ) -> impl Stream<Item = Result<T, Self::Error>>;
 
+    /// Stream the living records declared list `index` holds under `bound`,
+    /// in the list's order, records inline (RFC 0075). A list's generated
+    /// `by_<field>` lookups call this.
+    fn listed_where<T: NonUniqueStruct + 'static>(
+        &self,
+        pivot: LocalId,
+        index: usize,
+        bound: Bound,
+    ) -> impl Stream<Item = Result<T, Self::Error>>;
+
     /// Stream every living record in declared list `index`'s order, entered at
     /// global `offset` ([RFC 0051]). `offset = 0` is the whole list.
     ///
