@@ -181,6 +181,21 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
         db.search_by(self.pivot, index, bound)
     }
 
+    /// Stream the living records declared list `index` holds under `bound`,
+    /// in its order and inline (RFC 0075). The generated `by_<field>` and
+    /// `by_<field>_range` of a list call this.
+    pub fn listed_where<'d, D: DbHandle>(
+        &self,
+        db: &'d D,
+        index: usize,
+        bound: Bound,
+    ) -> impl Stream<Item = Result<T, D::Error>> + use<'d, D, T>
+    where
+        T: 'static,
+    {
+        db.listed_where(self.pivot, index, bound)
+    }
+
     /// Stream every living record in declared list `index`'s order — one read
     /// per segment with the records **inline** — where `all` walks pointers and
     /// resolves each record at its anchor. The generated `listed_by_<fields>` wrappers
