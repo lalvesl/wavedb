@@ -324,6 +324,20 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
         buffered(async move { values(self.run(T::STRUCT_HASH, op).await?) })
     }
 
+    fn listed_where<T: NonUniqueStruct + 'static>(
+        &self,
+        pivot: LocalId,
+        index: usize,
+        bound: Bound,
+    ) -> impl Stream<Item = Result<T>> {
+        let op = NodeOp::ListedWhere {
+            pivot,
+            index,
+            bound,
+        };
+        buffered(async move { values(self.run(T::STRUCT_HASH, op).await?) })
+    }
+
     fn record_history<T: NonUniqueStruct + 'static>(
         &self,
         pivot: LocalId,
