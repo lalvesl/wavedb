@@ -83,6 +83,12 @@ pub enum NodeOp {
         index: usize,
         bound: Bound,
     },
+    /// A declared list under a bound, records inline (RFC 0075).
+    ListedWhere {
+        pivot: LocalId,
+        index: usize,
+        bound: Bound,
+    },
     /// A declared list from `offset`; `limit` bounds a page.
     Listed {
         pivot: LocalId,
@@ -122,6 +128,7 @@ impl NodeOp {
             | Self::Remove { pivot, .. }
             | Self::All { pivot }
             | Self::SearchBy { pivot, .. }
+            | Self::ListedWhere { pivot, .. }
             | Self::Listed { pivot, .. }
             | Self::ListLen { pivot, .. }
             | Self::Fuzzy { pivot, .. }
@@ -254,29 +261,10 @@ where
         NodeOp::All { pivot } => {
             values(db.all::<T>(pivot).try_collect().await?)
         }
-        NodeOp::SearchBy {
-            pivot,
-            index,
-            bound,
-        } => {
-            values(db.search_by::<T>(pivot, index, bound).try_collect().await?)
-        }
-        NodeOp::Listed {
-            pivot,
-            index,
-            offset,
-            limit,
-        } => values(match limit {
-            Some(limit) => {
-                db.listed_page::<T>(pivot, index, offset, limit)
-                    .try_collect()
-                    .await?
-            }
-            None => db.listed::<T>(pivot, index, offset).try_collect().await?,
-        }),
-        NodeOp::ListLen { pivot, index } => {
-            NodeReply::Count(db.list_len::<T>(pivot, index).await?)
-        }
+        op @ (NodeOp::SearchBy { .. }
+        | NodeOp::ListedWhere { .. }
+        | NodeOp::Listed { .. }
+        | NodeOp::ListLen { .. }) => run_ordered::<T, _>(&db, op).await?,
         NodeOp::Fuzzy {
             pivot,
             index,
@@ -308,5 +296,51 @@ where
         | NodeOp::UniqueHistory => {
             return refuse::<T>();
         }
+    })
+}
+
+/// The ordered reads of [`run_nonunique`]: a secondary or a list under a
+/// bound, a list from an offset, and a list's length.
+async fn run_ordered<T, D>(db: &D, op: NodeOp) -> Result<NodeReply>
+where
+    T: NonUniqueStruct + 'static,
+    D: DbHandle<Error = Error>,
+{
+    let values =
+        |items: Vec<T>| NodeReply::Values(items.iter().map(to_wire).collect());
+    Ok(match op {
+        NodeOp::SearchBy {
+            pivot,
+            index,
+            bound,
+        } => {
+            values(db.search_by::<T>(pivot, index, bound).try_collect().await?)
+        }
+        NodeOp::ListedWhere {
+            pivot,
+            index,
+            bound,
+        } => values(
+            db.listed_where::<T>(pivot, index, bound)
+                .try_collect()
+                .await?,
+        ),
+        NodeOp::Listed {
+            pivot,
+            index,
+            offset,
+            limit,
+        } => values(match limit {
+            Some(limit) => {
+                db.listed_page::<T>(pivot, index, offset, limit)
+                    .try_collect()
+                    .await?
+            }
+            None => db.listed::<T>(pivot, index, offset).try_collect().await?,
+        }),
+        NodeOp::ListLen { pivot, index } => {
+            NodeReply::Count(db.list_len::<T>(pivot, index).await?)
+        }
+        _ => return refuse::<T>(),
     })
 }
