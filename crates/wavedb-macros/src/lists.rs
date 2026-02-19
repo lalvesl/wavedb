@@ -3,13 +3,17 @@
 //! `NonUniqueStruct` key hooks (`NUM_LISTS` + `list_key`), and the typed
 //! `listed_by_<fields>` enumeration surface.
 //!
-//! A list and a `#[wavedb::pivot(...)]` secondary impose the **same** order —
-//! `ResolvedPivot` is reused verbatim for that reason — and differ only in what
-//! they store under it: a secondary stores anchors and pays one random read per
-//! row, a list stores whole records inline and pays one read per segment. The
-//! two coexist on purpose; neither is sugar for the other.
+//! A list and a `#[wavedb::pivot(...)]` secondary are **one structure** — the
+//! same chain over the same order, `ResolvedPivot` reused verbatim — and
+//! differ only in what they store under it ([RFC 0075]): a secondary stores
+//! anchors and pays one random read per row, a list stores whole records
+//! inline and pays one read per segment. So a list answers the same
+//! `by_<fields>` lookups ([`orderings`](crate::orderings)), and declaring both
+//! on one ordering is refused. Swapping one for the other is a one-word
+//! change, and a new type.
 //!
 //! [RFC 0051]: https://github.com/wavedb/wavedb/blob/main/rfcs/0051-ordered-record-lists.md
+//! [RFC 0075]: ../../../rfcs/0075-secondary-indexes-as-chains-WIP.md
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
