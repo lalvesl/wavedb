@@ -227,6 +227,17 @@ impl DbHandle for Db {
         refuse(T::STRUCT_HASH)
     }
 
+    fn listed_where<T: NonUniqueStruct + 'static>(
+        &self,
+        _pivot: LocalId,
+        _index: usize,
+        _bound: Bound,
+    ) -> impl Stream<Item = Result<T>> {
+        // A bounded scan has no limit to page by, so it waits on the
+        // streaming frames with `search_by`.
+        refuse(T::STRUCT_HASH)
+    }
+
     fn listed<T: NonUniqueStruct + 'static>(
         &self,
         pivot: LocalId,
