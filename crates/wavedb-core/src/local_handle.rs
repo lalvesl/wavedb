@@ -194,6 +194,17 @@ impl<S: Store> DbHandle for LocalHandle<'_, S> {
             .map_ok(|(_, value)| value)
     }
 
+    fn listed_where<T: NonUniqueStruct + 'static>(
+        &self,
+        pivot: LocalId,
+        index: usize,
+        bound: Bound,
+    ) -> impl Stream<Item = Result<T, Error>> {
+        self.col::<T>(pivot)
+            .listed_where(self.store, index, bound)
+            .map_ok(|(_, value)| value)
+    }
+
     fn listed<T: NonUniqueStruct + 'static>(
         &self,
         pivot: LocalId,
