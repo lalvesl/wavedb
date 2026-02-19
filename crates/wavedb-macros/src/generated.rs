@@ -184,7 +184,8 @@ pub fn nonunique_types(
     // Secondary-index hooks + the typed `by_<field>` lookup surface, and the
     // declared lists' hooks + their `listed_by_<fields>` enumerations.
     let secondary_items = secondaries::trait_items(secondaries_specs);
-    let by_lookups = secondaries::by_lookups(name, secondaries_specs);
+    let by_lookups =
+        crate::orderings::lookups(name, secondaries_specs, &declared.lists);
     let list_items = lists::trait_items(&declared.lists);
     let listed_readers = lists::listed_readers(name, &declared.lists);
     let fuzzy_items = crate::fuzzy::trait_items(&declared.fuzzy);
