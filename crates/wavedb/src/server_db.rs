@@ -274,6 +274,17 @@ impl<R: Route> DbHandle for ServerDb<'_, R> {
             .map_err(Error::from)
     }
 
+    fn listed_where<T: NonUniqueStruct + 'static>(
+        &self,
+        pivot: LocalId,
+        index: usize,
+        bound: Bound,
+    ) -> impl Stream<Item = Result<T>> {
+        self.local
+            .listed_where(pivot, index, bound)
+            .map_err(Error::from)
+    }
+
     fn record_history<T: NonUniqueStruct + 'static>(
         &self,
         pivot: LocalId,
