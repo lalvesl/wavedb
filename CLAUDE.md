@@ -155,7 +155,10 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   `#[wavedb::list]` (field-level) / `#[wavedb::list((f1, f2))]` (struct-level,
   composite), each taking an optional `page = N` of its own — one more chain per
   declaration, this one holding **whole records inline**, sorted by that
-  property, with `listed_by_*` / `_at_page` / `_len` readers. **A list is the
+  property, with `listed_by_*` / `_at_page` / `_len` readers and the same
+  `by_*` / `by_*_range` lookups a pivot gets, records inline (a pivot and a
+  list on one ordering is a compile error: the list already answers it —
+  RFC 0075). **A list is the
   only way to ask for duplication** (RFC 0054); declarations, their capacities
   *and their order* fold into the STRUCT_HASH (RFCs 0051/0052). `#[server]` emits a fn-type
   (own STRUCT_HASH + dispatch), the body retyped onto `ServerDb`, and a client stub.
@@ -390,7 +393,8 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   page one segment read; the payload-free chains take the large log capacity
   instead, since there is nothing in them to paginate. Every list is maintained in the
   same atomic batch, gated on the built-in chain's liveness verdict, and read by
-  the generated `listed_by_*` / `_at_page` / `_len`. It costs a full copy of
+  the generated `listed_by_*` / `_at_page` / `_len` and `by_*` / `by_*_range`.
+  It costs a full copy of
   every record per declaration — that duplication *is* the design.
 - Every mutating collection op is exactly **one atomic `Store::apply` batch**
   (record + touched chain segments and sparse-index nodes — recency, removals,
