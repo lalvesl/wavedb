@@ -57,6 +57,7 @@ pub fn take_declarations(
             "#[wavedb::pivot(...)] is only valid on a #[wavedb(NonUnique)] struct",
         ));
     }
+    crate::orderings::check(&secondaries, &lists)?;
     fold_secondaries(&secondaries, hash_fields);
     Ok(Declared {
         key_fields,
