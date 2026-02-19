@@ -194,10 +194,18 @@ Per declared pivot the macro:
 - adds a **`ChainRoots` to the `Pivot`** (one per index), and folds the
   declaration into the `STRUCT_HASH` as `#pivot{i}` — reordering or retyping
   them is a new type;
-- generates a **typed lookup** on the collection handle — e.g. `by_amount(&db, v)`
-  / a range query, and `by_customer_date(&db, (c, d))` — returning a record async
+- generates **typed lookups** on the collection handle — `by_amount(&db, v)` and
+  `by_amount_range(&db, lo, hi)` (half-open), `by_customer_date(&db, c, d)` and
+  `by_customer_date_range(&db, (c0, d0), (c1, d1))` — returning a record async
   iterator (`impl Stream<Item = Result<T>>`), resolved two-phase (index → `Id`s →
   fetch): one descent to the bound's least key, then the chain in order.
+
+A `#[wavedb::list]` is the same chain with the records inline, so it gets the
+same `by_` / `by_…_range` lookups without the fetch per record. Declaring a
+pivot and a list on one ordering is a compile error — the list already answers
+it — and swapping `pivot` for `list` (on any ordering, or all) is a one-word
+change that buys reads with no fetch for a copy of every record, and yields a
+new type.
 
 **Maintenance cost.** `insert` and `remove` index / de-index the record in
 every secondary; a `save` (update) **re-keys each secondary whose field values
