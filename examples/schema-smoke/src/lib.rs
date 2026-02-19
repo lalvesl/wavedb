@@ -44,6 +44,22 @@
 //! expose_server! { Probe184, Probe248 }
 //! ```
 //!
+//! # One ordering, one chain
+//!
+//! A `#[wavedb::pivot]` and a `#[wavedb::list]` over the same ordering are
+//! refused (RFC 0075): the list already answers `by_name`, records inline.
+//!
+//! ```compile_fail
+//! use wavedb_macros::wavedb;
+//!
+//! #[wavedb(NonUnique)]
+//! #[wavedb::pivot(name)]
+//! pub struct Twice {
+//!     #[wavedb::list]
+//!     pub name: String,
+//! }
+//! ```
+//!
 //! A registry with no clash stays silent under the same `deny`:
 //!
 //! ```
@@ -600,6 +616,97 @@ mod tests {
             assert_eq!(recent, ["bob", "alice", "carol"]);
 
             assert_eq!(people.list_len(&db, 0).await.unwrap(), 3);
+        });
+    }
+
+    // A list is the same chain a pivot is, with the records inline (RFC 0075):
+    // it answers the same `by_` lookups, exact and ranged, with no fetch.
+    #[test]
+    fn a_list_answers_exact_and_range_lookups() {
+        use super::{Person, PersonSecondaries as _};
+        use futures::TryStreamExt;
+        use futures::executor::block_on;
+        use wavedb_core::U48;
+
+        block_on(async {
+            let store = mem::MemStore::default();
+            let db = wavedb_core::LocalHandle::new(&store, U48::from(7u32));
+            let people =
+                Person::collection(Person::create_pivot(&db).await.unwrap());
+            for (name, city) in [
+                ("carol", "lisboa"),
+                ("alice", "porto"),
+                ("bob", "lisboa"),
+                ("dave", "braga"),
+            ] {
+                let p = Person {
+                    name: name.into(),
+                    city: city.into(),
+                };
+                people.insert(&db, &p).await.unwrap();
+            }
+            let names = |v: Vec<Person>| {
+                v.into_iter().map(|p| p.name).collect::<Vec<_>>()
+            };
+
+            let bob = people.by_name(&db, "bob").try_collect().await.unwrap();
+            assert_eq!(names(bob), ["bob"]);
+            let b_to_d = people
+                .by_name_range(&db, "b", "d")
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(names(b_to_d), ["bob", "carol"], "half-open");
+
+            // The composite: exact on both fields, and a range within a city.
+            let exact = people
+                .by_city_name(&db, "lisboa", "carol")
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(names(exact), ["carol"]);
+            let lisboa = people
+                .by_city_name_range(&db, ("lisboa", ""), ("lisboa", "\u{7f}"))
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(names(lisboa), ["bob", "carol"]);
+        });
+    }
+
+    // A pivot's range reads the chain from the bound's least key while the
+    // bound holds, then fetches each record at its anchor.
+    #[test]
+    fn a_pivot_answers_a_range_in_field_order() {
+        use super::{Member, MemberSecondaries as _};
+        use futures::TryStreamExt;
+        use futures::executor::block_on;
+        use wavedb_core::U48;
+
+        block_on(async {
+            let store = mem::MemStore::default();
+            let db = wavedb_core::LocalHandle::new(&store, U48::from(7u32));
+            let members =
+                Member::collection(Member::create_pivot(&db).await.unwrap());
+            for (name, city) in [
+                ("a", "porto"),
+                ("b", "lisboa"),
+                ("c", "braga"),
+                ("d", "faro"),
+            ] {
+                let m = Member {
+                    name: name.into(),
+                    city: city.into(),
+                };
+                members.insert(&db, &m).await.unwrap();
+            }
+            let cities: Vec<String> = members
+                .by_city_range(&db, "b", "m")
+                .map_ok(|m| m.city)
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(cities, ["braga", "faro", "lisboa"]);
         });
     }
 
