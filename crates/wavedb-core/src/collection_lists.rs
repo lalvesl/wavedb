@@ -34,7 +34,8 @@ use futures::{Stream, TryStreamExt};
 use crate::collection::Collection;
 use crate::error::{Error, Result};
 use crate::id::Id;
-use crate::index::Chain;
+use crate::index::{Bound, Chain, SecKey};
+use crate::local_id::LocalId;
 use crate::record::{Overlay, decode_record};
 use crate::store::{Store, Write};
 use crate::traits::NonUniqueStruct;
@@ -194,6 +195,44 @@ impl<T: NonUniqueStruct> Collection<T> {
         T: 'a,
     {
         self.listed_from(store, index, Some(offset))
+    }
+
+    /// The living records declared list `index` holds under `bound` (over
+    /// its [`IndexKey`](crate::index::IndexKey) encoding), in its order and
+    /// **inline** ([RFC 0075]): one sparse-index descent to the bound's least
+    /// key, then the chain while the bound holds — a secondary's read without
+    /// a fetch per record. The generated `by_<fields>` of a list call this.
+    ///
+    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
+    pub fn listed_where<'a, S: Store>(
+        self,
+        store: &'a S,
+        index: usize,
+        bound: Bound,
+    ) -> impl Stream<Item = Result<(Id, T)>> + 'a
+    where
+        T: 'a,
+    {
+        let handle = self;
+        let tenant = self.tenant();
+        futures::stream::once(async move {
+            let pivot = handle.load_pivot(store).await?;
+            let chain = handle.list_chain(&pivot, index)?;
+            let from = SecKey {
+                field: bound.least().to_vec(),
+                rec: LocalId::default(),
+            };
+            Ok::<_, Error>(chain.scan_from(store, from).try_take_while(
+                move |(key, _)| {
+                    futures::future::ready(Ok(bound.contains(&key.field)))
+                },
+            ))
+        })
+        .try_flatten()
+        .and_then(move |(key, bytes)| async move {
+            let (_, value) = decode_record::<T>(T::STRUCT_HASH, &bytes)?;
+            Ok((key.rec.to_id(tenant), value))
+        })
     }
 
     /// How many living records declared list `index` holds — the pager's
