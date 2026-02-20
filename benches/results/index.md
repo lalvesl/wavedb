@@ -63,3 +63,35 @@ Rows `6f188bef81bf2229`, `868d0b03b49e9e49` (wavedb), `b7e1fe26d6b4a968`,
 (postgres), `7aa21981b1df61d4`, `db1d919c8c5fe638` (mysql),
 `899ba828e288f8d7`, `cd4b7d2ceadce067` (mongodb), `8f2fd54af265036e`,
 `010d54c97ac3ebde` (valkey).
+
+## `2026-10-18T06-54Z` · intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-btrfs-104a · `e63a9d0`
+
+`micro`, `small` tier (200 000 records, 50.8 MB logical), 1 consumer, caged,
+WaveDB only (`--only wavedb`), clock pinned at 2.3 GHz like the `7adaa11` run
+above, so the two compare row for row. The first run with RFC 0074
+(extendible hashing: a page over target splits in the round that rewrites
+it) and RFC 0075 phases 1–4 (every secondary and fuzzy index a chain, the
+B+tree deleted). One store, so one storage shard (RFC 0073).
+
+| system | durability | insert/s | read_hot/s | read_cold/s | update/s | insert p99 | KiB written/insert | KiB written/update | peak MB | compacted MB | log MB |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| wavedb | durable | 94.3 | 1 621.8 | 1 622.1 | 71.3 | 77.7 ms | 201.6 | 240.2 | 33 393.9 | 25.5 | 0 |
+| wavedb | relaxed | 1 031.1 | 1 631.2 | 1 654.7 | 302.7 | 1.0 ms | 5.4 | 23.2 | 2 303.1 | 24.8 | 0 |
+
+Against `7adaa11`, durable: insert +7.7%, update +10.0%, **KiB written per
+insert 305.5 → 201.6 (−34%)**, per update 276.4 → 240.2 (−13%), peak
+55 641.2 → 33 393.9 MB (−40%), compacted 28.8 → 25.5 MB; reads −2.4%.
+Relaxed: insert +13.6%, update +19.0%, KiB per insert 7.4 → 5.4, peak
+2 954.6 → 2 303.1 MB. A durable insert is still one fsync, so its rate moves
+far less than its bytes.
+
+What the bytes are, from the settle-round probe (a `probe` build, which
+records no row; `micro` at the `smoke` tier, durable inserts, KiB written
+per round = per insert, by thousands of records): before RFC 0074 (`0a87229`)
+a round grew with the database, 127.6 KiB at 0–10 k to 265.7 at 90–100 k,
+the B+tree's share alone 37.5 → 158.8 and the recency chain's 21 → 57; now
+it holds flat at 110–126 KiB, the secondary chain 21–25 KiB of it and the
+recency chain 20–29. The fixed 32 KiB header is now about a quarter of every
+round, and the largest single cost left.
+
+Rows `a34996ed82d3e90f`, `13fdaca239500caf`.
