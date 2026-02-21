@@ -7,7 +7,7 @@
 //! the first key past its bound — it reads what it returns, and one segment
 //! more at most.
 //!
-//! [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
+//! [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains.md
 
 use std::collections::VecDeque;
 
