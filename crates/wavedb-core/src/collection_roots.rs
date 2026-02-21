@@ -35,7 +35,7 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// records in here to paginate.
     ///
     /// [RFC 0054]: https://github.com/wavedb/wavedb/blob/main/rfcs/0054-no-duplication-by-default.md
-    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
+    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains.md
     pub(crate) fn sec_chain(&self, roots: ChainRoots) -> Chain<()> {
         self.pointer_chain(roots, Lane::Secondary)
     }
