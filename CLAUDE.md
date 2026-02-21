@@ -180,7 +180,9 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   superblock. Past the compaction ceiling the least recently used uploaded
   pages leave the disk (phase 4): a read of one goes to the object store, a
   write brings its bucket back before it commits, so a settle never meets
-  an evicted bucket. A store
+  an evicted bucket. A database whose disk is gone opens from its files
+  alone (phase 5): chained headers name every type and restate the oldest
+  entries, so no snapshot object is needed. A store
   is used from one thread: plain cells, no lock, no atomic; `Send`, not `Sync`. **One open `PageStore`
   per data directory** — `data.bin` is locked while open, a second open of it is
   `EngineBusy` — and stores over different directories coexist in one process.
