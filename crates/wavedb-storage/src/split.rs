@@ -9,7 +9,7 @@
 //! a single record (a large record is a large page, RFC 0049), or cannot
 //! split ([`Directory::can_split`]).
 //!
-//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing-WIP.md
+//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing.md
 
 use std::collections::BTreeMap;
 
