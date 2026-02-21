@@ -10,7 +10,7 @@
 //! remote directory's depth — arithmetic, no lookup.
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
-//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing-WIP.md
+//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing.md
 
 use std::collections::{BTreeMap, BTreeSet};
 
