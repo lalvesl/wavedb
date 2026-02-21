@@ -90,7 +90,7 @@ impl Run {
 /// The size is a code ([`crate::size_code`]): exactly the block count below
 /// 589, rounded up past that, so a run is always sized by [`round_count`].
 ///
-/// [RFC 0074]: ../../../rfcs/0074-extendible-hashing-WIP.md
+/// [RFC 0074]: ../../../rfcs/0074-extendible-hashing.md
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct BlockDescriptor(u64);
 
