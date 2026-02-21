@@ -13,7 +13,7 @@
 //! The table is computed at compile time from integers alone.
 //!
 //! [`BlockDescriptor`]: crate::block::BlockDescriptor
-//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing-WIP.md
+//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing.md
 
 /// The largest size code (10 bits).
 pub const MAX_CODE: u16 = (1 << 10) - 1;
