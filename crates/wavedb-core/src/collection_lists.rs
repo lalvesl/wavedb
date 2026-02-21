@@ -203,7 +203,7 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// key, then the chain while the bound holds — a secondary's read without
     /// a fetch per record. The generated `by_<fields>` of a list call this.
     ///
-    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
+    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains.md
     pub fn listed_where<'a, S: Store>(
         self,
         store: &'a S,
