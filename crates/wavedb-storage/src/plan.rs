@@ -15,7 +15,7 @@
 //! no page is ever written twice in one round.
 //!
 //! [RFC 0041]: ../../../rfcs/0041-single-barrier-checkpoint.md
-//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing-WIP.md
+//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing.md
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
