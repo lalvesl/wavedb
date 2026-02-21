@@ -105,13 +105,15 @@ impl BlockFile {
         path: impl AsRef<Path>,
         page_cache_bytes: usize,
     ) -> StorageResult<Self> {
-        Self::open_as(path, page_cache_bytes, false)
+        Self::open_as(path, page_cache_bytes, false, None)
     }
 
     /// [`open_with`](Self::open_with), creating a new file object-backed or
     /// not (RFC 0070). An existing file keeps the mode it was created with —
     /// [`object_backed`](Self::object_backed) says which; comparing it with
-    /// what the caller expected is the caller's business.
+    /// what the caller expected is the caller's business. A new file takes
+    /// `seed` when given — a database recovered from its object store keeps
+    /// routing as it did — and a fresh random one otherwise.
     ///
     /// # Errors
     /// The same faults as [`open`](Self::open).
@@ -119,6 +121,7 @@ impl BlockFile {
         path: impl AsRef<Path>,
         page_cache_bytes: usize,
         object_backed: bool,
+        seed: Option<[u64; 4]>,
     ) -> StorageResult<Self> {
         let file = OpenOptions::new()
             .read(true)
@@ -130,7 +133,7 @@ impl BlockFile {
 
         let len = file.metadata()?.len();
         if len == 0 {
-            let seed = random_seed();
+            let seed = seed.unwrap_or_else(random_seed);
             let bf = Self {
                 file,
                 seed,
