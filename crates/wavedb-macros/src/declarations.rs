@@ -73,7 +73,7 @@ pub fn take_declarations(
 /// reordering or retyping the declarations would point `by_` at another
 /// field's chain — a fact about stored bytes, so it is a new type.
 ///
-/// [RFC 0075]: ../../../rfcs/0075-secondary-indexes-as-chains-WIP.md
+/// [RFC 0075]: ../../../rfcs/0075-secondary-indexes-as-chains.md
 fn fold_secondaries(
     secondaries: &[ResolvedPivot],
     hash_fields: &mut Vec<(String, String)>,
