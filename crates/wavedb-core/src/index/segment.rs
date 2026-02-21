@@ -80,12 +80,12 @@ pub enum Lane {
     /// is different content from an instant-keyed one, and a lane is what
     /// lets one dictionary model one kind of thing.
     ///
-    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
+    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains.md
     Secondary,
     /// `#[wavedb::fuzzy]` posting chains ([RFC 0075]): one `[gram][len][anchor]`
     /// key per gram of a record's value, and no payload.
     ///
-    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
+    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains.md
     Fuzzy,
 }
 
