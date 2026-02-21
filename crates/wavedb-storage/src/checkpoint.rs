@@ -103,6 +103,18 @@ impl PageStore {
         self.place_in(Vec::new(), Placement::Snapshot).map(|_| ())
     }
 
+    /// Write already-planned images (a recovery's dictionaries) as one
+    /// ordinary window.
+    ///
+    /// # Errors
+    /// Propagates the window write fault.
+    pub(crate) fn place_plans(
+        &self,
+        plans: Vec<SlotPlan>,
+    ) -> StorageResult<()> {
+        self.place_in(plans, Placement::BestFit).map(|_| ())
+    }
+
     /// Write a page restored from the object store.
     ///
     /// # Errors
