@@ -381,7 +381,7 @@ declares the contracts; the same code compiles for the node (PageStore) and the 
 (IndexedDB).
 
 Every index a collection holds is a **chain** ([RFC 0050](../../rfcs/0050-clustered-record-chains.md),
-[RFC 0075](../../rfcs/0075-secondary-indexes-as-chains-WIP.md)): a doubly linked run
+[RFC 0075](../../rfcs/0075-secondary-indexes-as-chains.md)): a doubly linked run
 of sorted segments keyed by `SecKey { field, rec }` — an order-preserving field
 encoding, then the record's anchor — with a sparse index above it (one entry per
 segment, carrying its count). The recency chain, the removal log, each
