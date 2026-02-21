@@ -211,7 +211,7 @@ share a page and each page compresses against one tight dictionary.
 ### Block descriptor (`u64`) — one format everywhere
 
 Pages (for every `STRUCT_HASH`) **and** dictionary runs share a single 64-bit
-descriptor — there is no second format ([RFC 0074](../../rfcs/0074-extendible-hashing-WIP.md)):
+descriptor — there is no second format ([RFC 0074](../../rfcs/0074-extendible-hashing.md)):
 
 | Bits   | Field         | Width | Meaning                                                         |
 | ------ | ------------- | ----- | --------------------------------------------------------------- |
