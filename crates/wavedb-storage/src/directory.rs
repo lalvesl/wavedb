@@ -21,7 +21,7 @@
 //! the headers on open — routes every record to the same bucket even if the data
 //! files are opened on a different machine.
 //!
-//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing-WIP.md
+//! [RFC 0074]: ../../../rfcs/0074-extendible-hashing.md
 use crate::block::BlockDescriptor;
 use seahash::hash_seeded;
 
@@ -32,7 +32,7 @@ pub const D_MAX: u8 = 32;
 /// Entries a directory may hold per page before a split that would double
 /// it waits: 128 bytes of RAM a page at most ([RFC 0074]).
 ///
-/// [RFC 0074]: ../../../rfcs/0074-extendible-hashing-WIP.md
+/// [RFC 0074]: ../../../rfcs/0074-extendible-hashing.md
 pub const DIR_RATIO: usize = 16;
 
 /// A SeaHash of a 128-bit `Id` under a per-database seed.
