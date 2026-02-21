@@ -123,7 +123,7 @@ pub struct Roots<'a> {
     /// One chain per `#[wavedb::pivot(...)]` secondary index, declaration
     /// order ([RFC 0075]).
     ///
-    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
+    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains.md
     pub secondaries: &'a [ChainRoots],
     /// The built-in modification-ordered record chain.
     pub recency: ChainRoots,
@@ -161,7 +161,7 @@ pub trait Pivot: WaveWire + Sized {
     /// recency chain's shape keyed by a field instead of an instant. Its
     /// roots are permanent, so a secondary write never rewrites the `Pivot`.
     ///
-    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
+    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains.md
     fn secondaries(&self) -> &[ChainRoots];
     /// The **record chain**'s roots: the collection's living records stored
     /// inline in modification order, with a sparse index above them (RFC 0050).
