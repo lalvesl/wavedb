@@ -120,7 +120,7 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// order while the bound holds ([RFC 0075]): a range read touches the
     /// segments it returns from, and one more at most.
     ///
-    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains-WIP.md
+    /// [RFC 0075]: https://github.com/wavedb/wavedb/blob/main/rfcs/0075-secondary-indexes-as-chains.md
     pub fn search_by<'a, S: Store>(
         self,
         store: &'a S,
