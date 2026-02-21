@@ -55,6 +55,15 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   by their reports. The horizon in every header bounds a reconstruction's
   walk (0072), and the page cache holds pages decoded
   ([0044](0044-page-cache.md)).
+- **Extendible directories and every index a chain (2026-10-18,
+  [0074](0074-extendible-hashing.md),
+  [0075](0075-secondary-indexes-as-chains.md), Implemented):** a page over
+  target splits in the round that rewrites it, its local depth and a 10-bit
+  size code in its descriptor, the directory doubling by copying itself and
+  capped at 16 entries a page. Secondary and fuzzy indexes are pointer
+  chains in lanes of their own, the B+tree is gone, and a list answers the
+  same `by_` lookups with the records inline. A durable micro insert writes
+  202 KiB where it wrote 306, and no longer grows with the database.
 - **The storage write path (2026-07-28 → 07-29):**
   [0041](0041-single-barrier-checkpoint.md) *(Implemented)* replaced the per-id
   settle — which read-modify-wrote a bucket page once per record — with a
@@ -644,8 +653,8 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0071](0071-data-files-by-address.md) | Data files named by address (append-only files, compaction forward; supersedes 0069's placement) | Implemented |
 | [0072](0072-the-settle-is-the-durability-point.md) | The settle is the durability point (no journal; `_durable` operations; one header for disk and object store) | Implemented |
 | [0073](0073-data-shards-and-storage-shards.md) | Data shards and storage shards (P data shards write through S storage shards: one write, one `fsync`, one PUT per storage shard) | Implemented |
-| [0074](0074-extendible-hashing-WIP.md) | Extendible hashing for the page directories (a page over target splits at once; ℓ and a 10-bit size code in the descriptor) | In progress (phases 1–4 landed; measured with 0075) |
-| [0075](0075-secondary-indexes-as-chains-WIP.md) | Secondary indexes as chains (`#[wavedb::pivot]` and fuzzy postings over `Chain<()>`; the B+tree deleted; a list also answers `by_f`) | In progress (phases 1–4 landed: the seek, secondaries and fuzzy on chains, the B+tree deleted, pivot and list as one; measured with 0074) |
+| [0074](0074-extendible-hashing.md) | Extendible hashing for the page directories (a page over target splits at once; ℓ and a 10-bit size code in the descriptor) | Implemented |
+| [0075](0075-secondary-indexes-as-chains.md) | Secondary indexes as chains (`#[wavedb::pivot]` and fuzzy postings over `Chain<()>`; the B+tree deleted; a list also answers `by_f`) | Implemented |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
