@@ -13,7 +13,7 @@
 //! change, and a new type.
 //!
 //! [RFC 0051]: https://github.com/wavedb/wavedb/blob/main/rfcs/0051-ordered-record-lists.md
-//! [RFC 0075]: ../../../rfcs/0075-secondary-indexes-as-chains-WIP.md
+//! [RFC 0075]: ../../../rfcs/0075-secondary-indexes-as-chains.md
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
