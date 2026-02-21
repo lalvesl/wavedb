@@ -81,7 +81,7 @@ pub struct TypeEntry {
     /// The directory's global depth: `2^depth` entries; `None` for a type
     /// with no directory yet ([RFC 0074]).
     ///
-    /// [RFC 0074]: ../../../rfcs/0074-extendible-hashing-WIP.md
+    /// [RFC 0074]: ../../../rfcs/0074-extendible-hashing.md
     pub depth: Option<u8>,
     /// The header before this one with entries for this type
     /// ([`NO_FILE`]).
