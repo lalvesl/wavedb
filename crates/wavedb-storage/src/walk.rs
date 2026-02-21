@@ -68,7 +68,7 @@ impl Gathering {
     /// split that made that page was the last change to the entry, and the
     /// round of it named it.
     ///
-    /// [RFC 0074]: ../../../rfcs/0074-extendible-hashing-WIP.md
+    /// [RFC 0074]: ../../../rfcs/0074-extendible-hashing.md
     fn take(&mut self, changed: &[(u32, u64)], last: u64) -> StorageResult<()> {
         for &(bucket, raw) in changed {
             let depth = BlockDescriptor::from_raw(raw).depth();
