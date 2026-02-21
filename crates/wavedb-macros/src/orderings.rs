@@ -8,7 +8,7 @@
 //! list already answers everything the pivot would, and faster, so the pivot
 //! would only cost writes.
 //!
-//! [RFC 0075]: ../../../rfcs/0075-secondary-indexes-as-chains-WIP.md
+//! [RFC 0075]: ../../../rfcs/0075-secondary-indexes-as-chains.md
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
