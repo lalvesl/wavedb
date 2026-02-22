@@ -114,6 +114,29 @@ order of cost:
   (which must keep the create-only fence, `If-None-Match: *`).
 - **Decided** 2026-10-16, after RFC 0070 phase 9: not now.
 
+## Core
+
+### A keyed insert reads a vacant anchor three times
+
+- **Now.** A `#[wavedb::key]` insert at a vacant anchor reads that anchor
+  three times before its batch commits:
+  1. `anchor()` in `upsert_keyed`, to tell vacant, living and dead apart;
+  2. `get_of` in `plan_chained_save`, to find the version to archive;
+  3. the `Expect(id, None)` guard, in `apply`.
+
+  A vacant anchor is never in the record cache, so every one of the three
+  falls through to its page. The first may reach the disk; the other two
+  likely hit the page cache. A plain NonUnique insert reads none of this:
+  its id is minted by `mint_floored_id` and cannot collide, so it carries
+  no guard.
+- **Instead.** Read the anchor once and pass what was read down:
+  `upsert_keyed` hands its verdict and the bytes to `plan_chained_save`,
+  and the guard compares against them. The guard itself stays: it is what
+  turns a race on one key into `Error::Conflict` instead of a lost version.
+- **Decided** 2026-10-18, found while reviewing the write path after
+  RFCs 0074/0075. The micro bench does not exercise it (`Thing` is not
+  keyed), so nothing measured it yet.
+
 ## Storage
 
 ### A bulk fill leaves its free space inside the data files
