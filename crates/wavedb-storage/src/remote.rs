@@ -100,9 +100,10 @@ pub const fn byte_range(desc: BlockDescriptor) -> Range<u64> {
 #[derive(Debug)]
 pub(crate) struct ObjectState {
     pub(crate) remote: Remote,
-    /// The next remote block an upload writes at — the end of everything
-    /// uploaded. It only ever grows: writing is always at the end.
-    pub(crate) end: Cell<u64>,
+    /// Where the chain of uploaded files stands: the remote end (writing is
+    /// always there), the newest file and its header's hash, and per type
+    /// the newest file with entries for it (RFC 0070 §6).
+    pub(crate) chain: RefCell<crate::file_header::Chain>,
     /// Blocks of disk pages the object store has not received yet (an
     /// emptied bucket counts one) — what the upload trigger reads.
     pub(crate) pending_blocks: Cell<u64>,
@@ -137,7 +138,7 @@ impl ObjectState {
     pub(crate) fn new(remote: Remote) -> Self {
         Self {
             remote,
-            end: Cell::new(0),
+            chain: RefCell::default(),
             pending_blocks: Cell::new(0),
             unrecorded: RefCell::new(Unrecorded::default()),
             uploading: Cell::new(false),
@@ -191,9 +192,23 @@ impl PageStore {
             .map_or(0, |o| o.pending_blocks.get() * BLOCK_SIZE as u64)
     }
 
+    /// An object-backed store's open: tally what is still to upload and,
+    /// over a disk that had a database, step past every file the object
+    /// store holds (`step_over_leftovers`).
+    ///
+    /// # Errors
+    /// Object-store faults.
+    pub(crate) fn prepare_object(&self, reopened: bool) -> StorageResult<()> {
+        self.tally_pending();
+        if reopened {
+            self.step_over_leftovers()?;
+        }
+        Ok(())
+    }
+
     /// Count the pending blocks the restored directories hold — once, at
     /// open; every change after it is tallied where it happens.
-    pub(crate) fn tally_pending(&self) {
+    fn tally_pending(&self) {
         let Some(object) = &self.object else { return };
         let mut blocks = 0;
         for slot in &self.types {
@@ -214,7 +229,21 @@ impl PageStore {
         &self,
         desc: BlockDescriptor,
     ) -> StorageResult<Vec<u8>> {
-        let remote = &self.object()?.remote;
+        self.object()?.remote.fetch(desc).await
+    }
+}
+
+impl Remote {
+    /// The image a remote descriptor names — what
+    /// [`PageStore::fetch_image`] reads, usable before there is a store.
+    ///
+    /// # Errors
+    /// As [`PageStore::fetch_image`].
+    pub(crate) async fn fetch(
+        &self,
+        desc: BlockDescriptor,
+    ) -> StorageResult<Vec<u8>> {
+        let remote = self;
         let range = byte_range(desc);
         let want = range.end - range.start;
         let image = remote
@@ -227,7 +256,9 @@ impl PageStore {
         }
         Ok(image)
     }
+}
 
+impl PageStore {
     /// `id`'s bytes as the object store holds them — the uploaded page
     /// covering it, filtered to it. `None` when no uploaded page holds it.
     ///
