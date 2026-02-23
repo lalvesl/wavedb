@@ -77,15 +77,45 @@ impl PageStore {
         struct_hash: u64,
         id: Id,
     ) -> StorageResult<Settled> {
+        #[cfg(feature = "probe")]
+        let start = std::time::Instant::now();
         let Some(idx) = self.slot_index(struct_hash) else {
             return Ok(Settled::Found(None));
         };
         let cached = self.cache.borrow().get(idx, id);
-        match cached {
+        #[cfg(feature = "probe")]
+        crate::probe::record_lookup(&cached);
+        let found = match cached {
             Lookup::Hit(bytes) => Ok(Settled::Found(Some(bytes))),
             Lookup::Removed => Ok(Settled::Found(None)),
             Lookup::Miss => self.read_from_pages(idx, id),
-        }
+        };
+        #[cfg(feature = "probe")]
+        crate::probe::read_done(
+            u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            || self.probe_census(),
+        );
+        found
+    }
+
+    /// The caches as the probe reports them: the record cache's census and
+    /// the page cache's size.
+    #[cfg(feature = "probe")]
+    fn probe_census(&self) -> String {
+        let pages = self.file.page_cache();
+        format!(
+            "{} | page_cache KiB={} pages={}",
+            self.cache.borrow().census(),
+            pages.bytes() >> 10,
+            pages.len(),
+        )
+    }
+
+    /// Close the probe's read counters at a phase boundary, naming the
+    /// phase that just ended (the `probe` feature only).
+    #[cfg(feature = "probe")]
+    pub fn probe_mark(&self, phase: &str) {
+        crate::probe::mark(phase, || self.probe_census());
     }
 
     /// Finish a read [`read_now`](Self::read_now) began: at the object store
