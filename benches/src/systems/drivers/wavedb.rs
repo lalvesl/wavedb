@@ -227,6 +227,7 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
         done: &str,
         _next: &str,
     ) -> Result<(), String> {
+        self.engine.probe_mark(done);
         match done {
             // Settle, so the read phase does not measure the insert phase's
             // deferred work.
@@ -247,6 +248,7 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
     /// anything opens the same directory again, and a footprint read over
     /// an undrained settle queue misses what is still in RAM.
     fn close(self) -> Result<(), String> {
+        self.engine.probe_mark("last");
         self.engine.drain()?;
         self.engine.close();
         Ok(())
