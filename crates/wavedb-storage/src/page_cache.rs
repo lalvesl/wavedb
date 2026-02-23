@@ -295,9 +295,16 @@ impl BlockFile {
         read: impl FnOnce(&SlotPage) -> R,
     ) -> StorageResult<R> {
         let read = match self.cache.with(Lane::Disk, run, read) {
-            Ok(done) => return Ok(done),
+            Ok(done) => {
+                #[cfg(feature = "probe")]
+                crate::probe::page_hit();
+                return Ok(done);
+            }
             Err(read) => read,
         };
+        #[cfg(feature = "probe")]
+        let page = crate::probe::page_miss(|| self.read_run(run), decode)?;
+        #[cfg(not(feature = "probe"))]
         let page = decode(&self.read_run(run)?)?;
         let done = read(&page);
         self.cache.insert(Lane::Disk, run, page);
