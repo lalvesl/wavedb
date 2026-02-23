@@ -72,6 +72,11 @@ pub trait Engineish {
     /// forward, what they leave cut off and deleted (RFC 0071).
     fn compact(&self) -> Result<(), String>;
 
+    /// Close the storage probe's read counters at a phase boundary,
+    /// naming the phase that just ended (the `probe` feature; a no-op
+    /// otherwise).
+    fn probe_mark(&self, _phase: &str) {}
+
     /// Is a committed batch still waiting for its page write?
     fn has_pending(&self) -> bool;
 
@@ -103,6 +108,11 @@ impl Engineish for PageStore {
 
     fn has_pending(&self) -> bool {
         Self::has_pending(self)
+    }
+
+    #[cfg(feature = "probe")]
+    fn probe_mark(&self, phase: &str) {
+        Self::probe_mark(self, phase);
     }
 
     fn close(self) {
