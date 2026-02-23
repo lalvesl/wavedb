@@ -251,6 +251,24 @@ impl TypeLog {
         true
     }
 
+    /// Every entry held, oldest first, with its location — the probe's
+    /// census of what the log spends its bytes on.
+    #[cfg(feature = "probe")]
+    pub fn each(&self, mut f: impl FnMut(Loc, Entry<'_>)) {
+        for (i, chunk) in self.chunks.iter().enumerate() {
+            let mut at = 0;
+            while let Some((entry, len)) = parse(&chunk.bytes, at) {
+                let loc = Loc {
+                    slot: self.slot,
+                    offset: at as u16,
+                    chunk: (self.first + i as u64) as u32,
+                };
+                f(loc, entry);
+                at += len;
+            }
+        }
+    }
+
     /// Bytes the log holds: every chunk's capacity, and the queue of them.
     pub fn footprint(&self) -> usize {
         self.chunks
