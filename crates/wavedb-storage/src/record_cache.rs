@@ -140,6 +140,50 @@ impl RecordCache {
             + self.logs.iter().map(TypeLog::footprint).sum::<usize>()
     }
 
+    /// The probe's census: footprint, records indexed, and per head (the
+    /// value's leading 8 bytes — a type's records, a chain lane, a Pivot)
+    /// the entries the index still names (`live`) and the superseded
+    /// copies waiting for their chunk to go (`dead`), as
+    /// `head:live_n/live_KiB:dead_n/dead_KiB`.
+    #[cfg(feature = "probe")]
+    pub fn census(&self) -> String {
+        use std::collections::BTreeMap;
+        use std::fmt::Write as _;
+        let mut heads: BTreeMap<u64, [u64; 4]> = BTreeMap::new();
+        for log in &self.logs {
+            log.each(|at, entry| {
+                let hash = self.index.hash(entry.id);
+                let live = self.index.get(hash, |l| l == at) == Some(at);
+                let (head, len) = entry.bytes.map_or((0, 0), |b| {
+                    let head = b
+                        .first_chunk::<8>()
+                        .map_or(0, |h| u64::from_le_bytes(*h));
+                    (head, b.len() as u64 + 20)
+                });
+                let row = heads.entry(head).or_default();
+                let i = if live { 0 } else { 2 };
+                row[i] += 1;
+                row[i + 1] += len;
+            });
+        }
+        let mut out = format!(
+            "cache footprint_KiB={} indexed={} unsettled_KiB={} heads=",
+            self.footprint() >> 10,
+            self.len(),
+            self.unsettled_bytes() >> 10,
+        );
+        for (i, (head, [ln, lb, dn, db])) in heads.iter().enumerate() {
+            let sep = if i == 0 { "" } else { "," };
+            let _ = write!(
+                out,
+                "{sep}{head:016x}:{ln}/{}:{dn}/{}",
+                lb >> 10,
+                db >> 10
+            );
+        }
+        out
+    }
+
     /// Bytes of log not settled yet, across every type.
     pub fn unsettled_bytes(&self) -> u64 {
         self.logs.iter().map(TypeLog::unsettled).sum()
