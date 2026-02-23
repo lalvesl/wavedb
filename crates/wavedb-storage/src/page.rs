@@ -250,6 +250,8 @@ impl SlotPage {
             .filter(|&end| end <= buf.len())
             .ok_or(StorageError::Corrupt("page length out of range"))?;
 
+        #[cfg(feature = "probe")]
+        let mut lap = crate::probe::Lap::start();
         let envelope: PageEnvelope =
             from_wire_checked(&buf[LEN_PREFIX..end])
                 .map_err(|_| StorageError::Corrupt("page envelope"))?;
@@ -263,18 +265,32 @@ impl SlotPage {
                 let state = dict.state(dict_len as usize).ok_or(
                     StorageError::Corrupt("page dictionary state unknown"),
                 )?;
-                zstd::bulk::Decompressor::with_dictionary(state)
-                    .and_then(|mut d| d.decompress(&bytes, raw_len as usize))
+                #[cfg(feature = "probe")]
+                lap.split(0);
+                let mut d = zstd::bulk::Decompressor::with_dictionary(state)
+                    .map_err(|_| StorageError::Corrupt("page decompress"))?;
+                #[cfg(feature = "probe")]
+                lap.split(1);
+                d.decompress(&bytes, raw_len as usize)
                     .map_err(|_| StorageError::Corrupt("page decompress"))?
             }
         };
+        #[cfg(feature = "probe")]
+        lap.split(2);
         let body: PageBody =
             from_wire(&raw).map_err(|_| StorageError::Corrupt("page body"))?;
-
-        Ok(Self {
+        #[cfg(feature = "probe")]
+        lap.split(3);
+        let page = Self {
             struct_hash: envelope.struct_hash,
             records: body.records.into_iter().collect(),
-        })
+        };
+        #[cfg(feature = "probe")]
+        {
+            lap.split(4);
+            crate::probe::decode_parts(&lap);
+        }
+        Ok(page)
     }
 }
 
