@@ -50,7 +50,10 @@ scripts/browser_demo.sh    # M5 exit: live node + browser demo (starts the
                            # contact-book example node, handles chromedriver)
 scripts/registry_size.sh   # per-struct wasm cost of the exposure match
                            # (examples/registry-size at widths 1/16/64)
-# settle-round probe: one line per round naming what its window holds
+# probe: one line per settle round naming what its window holds, and a
+# `reads` line per 20 000 typed reads and per bench phase (record- and
+# page-cache hits, page read and decode time by part, what the record
+# cache's log holds live and dead)
 # (wavedb-storage `probe` feature; a probe build records no bench rows)
 WAVEDB_PROBE=/tmp/probe.log cargo test -p wavedb-storage --features probe --test durability
 (cd benches && cargo build --release --features probe --bins && \
