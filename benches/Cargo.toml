@@ -25,8 +25,9 @@ default = ["servers"]
 # `--no-default-features` build stays in the bar because the gates it checks
 # are still here.
 servers = ["dep:mongodb", "dep:postgres", "dep:mysql", "dep:tokio"]
-# The storage engine's settle-round probe (wavedb-storage `probe`): a row
-# run with it logs every window it writes, and records nothing.
+# The storage engine's probe (wavedb-storage `probe`): a row run with it
+# logs every window it writes and its reads, phase by phase, and records
+# nothing.
 probe = ["wavedb-storage/probe"]
 
 [dependencies]
