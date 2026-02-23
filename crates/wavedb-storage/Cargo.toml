@@ -29,9 +29,10 @@ futures.workspace = true
 wavedb-platform.workspace = true
 
 [features]
-# The settle-round probe (`src/probe.rs`): one line per round naming what
-# its window holds, for chasing an issue in a test or a bench. Off by
-# default; a build without it compiles none of it.
+# The probe (`src/probe.rs`): one line per settle round naming what its
+# window holds, and a `reads` line per 20 000 typed reads (and per bench
+# phase) on the read path's caches and decode, for chasing an issue in a
+# test or a bench. Off by default; a build without it compiles none of it.
 probe = []
 
 [dev-dependencies]
