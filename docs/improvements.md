@@ -114,6 +114,40 @@ order of cost:
   (which must keep the create-only fence, `If-None-Match: *`).
 - **Decided** 2026-10-16, after RFC 0070 phase 9: not now.
 
+## Wire
+
+### Decoding copies every record out of its buffer — zero-copy views
+
+- **Now.** `from_wire::<T>` builds an owned `T`: every `String` and
+  `Vec<u8>` is a copy of its bytes (one `memcpy` each since the bulk slice
+  paths), every `Vec<T>` an allocation, and a page body one allocation per
+  record (391 of them in a micro page). A decoded value is free to move —
+  `Send`, no `Rc` — but paid for in allocations and copies its reader may
+  never look at.
+- **Instead.** Zero-copy reads: an owned buffer (`Wire<T>`, one
+  `Box<[u8]>`, `Send`) with accessors the derive generates —
+  `rec.name() -> &str`, `rec.blob() -> &[u8]`, `rec.tags() ->
+  ListView<'_, u64>`, a nested struct as its `View<'_>`, scalars by value
+  through `from_le_bytes` — and `rec.to_owned()` for the owned `T` when a
+  write needs it. The struct a developer declares keeps its `String` and
+  `Vec` (the owned shape writes take); nothing in it borrows, so the only
+  lifetime a user meets is the `'_` of a view held past one call. The
+  format moves each heap region's **offset** into the stack, so any field is
+  O(1) without summing the ones before it. The first user is `SlotPage`:
+  its decompressed buffer plus a sorted `(Id, offset)` index instead of a
+  `BTreeMap<Id, Vec<u8>>`; then collection reads returning `Wire<T>`; then
+  `#[server]` arguments and replies handed between threads as buffers.
+  Safe Rust only: `&[T]` for `u8` alone (any other `T` needs aligned bytes
+  and `unsafe`, so it is a `ListView` reading each element), and `&str`
+  revalidated per access (`from_utf8`), unless an explicit `unsafe`
+  exception is granted. Building the owned struct inside one allocation is
+  not an option: `GlobalAlloc::dealloc` must receive the exact pointer and
+  layout `alloc` returned, so a `Vec`/`String` carved out of a larger block
+  is undefined behaviour when it drops.
+- **Decided** 2026-10-18, after the read probe measured a page decode at
+  1.39 ms, 1.1 ms of it the codec walking `Vec<u8>` byte by byte: the bulk
+  `memcpy` for byte vectors now, the views as an RFC when they are taken up.
+
 ## Core
 
 ### A keyed insert reads a vacant anchor three times
