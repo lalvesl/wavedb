@@ -154,6 +154,48 @@ pub trait WaveWire: Sized {
     /// Reconstruct a value, reading `STACK_SIZE` bytes from `stack` and any
     /// payload from `heap`.
     fn decode(stack: &mut Cursor, heap: &mut Cursor) -> Result<Self>;
+
+    /// Heap bytes a `Vec` of these takes: each element a self-contained
+    /// unit, its stack then its heap. A fixed-width scalar overrides it with
+    /// a product, so a byte vector's length is not a walk over its bytes.
+    fn slice_heap_size(items: &[Self]) -> usize {
+        items.iter().map(|e| Self::STACK_SIZE + e.heap_size()).sum()
+    }
+
+    /// Append a `Vec` of these to `heap`, element by element as units. A
+    /// fixed-width scalar overrides it, `u8` with one copy.
+    fn encode_slice(items: &[Self], heap: &mut Vec<u8>) {
+        for e in items {
+            e.encode_stack(heap);
+            e.encode_heap(heap);
+        }
+    }
+
+    /// Decode a `Vec` of these from its whole heap `region`, element by
+    /// element as units. A fixed-width scalar overrides it with a walk over
+    /// fixed chunks, `u8` with one copy — the same bytes either way.
+    ///
+    /// # Errors
+    /// [`Error::UnexpectedEof`] when an element runs past the region, or an
+    /// element's own decode fault.
+    fn decode_slice(region: &[u8]) -> Result<Vec<Self>> {
+        let mut out = Vec::new();
+        let mut cur = 0;
+        while cur < region.len() {
+            // The element's stack is the next STACK_SIZE bytes; its heap is
+            // the remainder of the region, of which it consumes only what it
+            // needs.
+            let stack_end = cur + Self::STACK_SIZE;
+            let Some(stack) = region.get(cur..stack_end) else {
+                return Err(Error::UnexpectedEof);
+            };
+            let mut es = Cursor::new(stack);
+            let mut eh = Cursor::new(&region[stack_end..]);
+            out.push(Self::decode(&mut es, &mut eh)?);
+            cur = stack_end + eh.pos();
+        }
+        Ok(out)
+    }
 }
 
 /// Serialise a value to a single `[stack][heap]` byte vector in one allocation.
@@ -277,6 +319,29 @@ mod tests {
         roundtrip(&vec![1u32, 2, 3]);
         roundtrip(&vec!["a".to_string(), String::new(), "ccc".to_string()]);
         roundtrip(&vec![vec![1u8], vec![], vec![2u8, 3]]);
+    }
+
+    /// A scalar vector is its length then its elements' LE bytes back to
+    /// back — the bulk paths write exactly the bytes the per-element walk
+    /// did, so the layout is the same with or without them.
+    #[test]
+    fn scalar_vectors_keep_the_unit_layout() {
+        assert_eq!(to_wire(&vec![7u8, 8, 9]), [3, 0, 0, 0, 7, 8, 9]);
+        assert_eq!(to_wire(&vec![1u16, 0x0302]), [4, 0, 0, 0, 1, 0, 2, 3]);
+        assert_eq!(to_wire(&Vec::<u64>::new()), [0, 0, 0, 0]);
+        roundtrip(&vec![0xA5u8; 100_000]);
+        roundtrip(&vec![u64::MAX, 0, 42]);
+        roundtrip(&vec![i16::MIN, -1, i16::MAX]);
+    }
+
+    /// A scalar vector whose region is not a whole number of elements is
+    /// short, not silently truncated.
+    #[test]
+    fn a_ragged_scalar_region_is_eof() {
+        use super::Error;
+        // Region of 3 bytes declared for a Vec<u16>.
+        let bytes = [3u8, 0, 0, 0, 1, 2, 3];
+        assert_eq!(from_wire::<Vec<u16>>(&bytes), Err(Error::UnexpectedEof));
     }
 
     #[test]
