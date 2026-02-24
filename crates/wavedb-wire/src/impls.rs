@@ -19,14 +19,58 @@ macro_rules! wire_le {
             fn decode(stack: &mut Cursor, _heap: &mut Cursor) -> Result<Self> {
                 Ok(<$t>::from_le_bytes(stack.take(size_of::<$t>())?.try_into().unwrap()))
             }
+            fn slice_heap_size(items: &[Self]) -> usize {
+                items.len() * size_of::<$t>()
+            }
+            fn encode_slice(items: &[Self], heap: &mut Vec<u8>) {
+                heap.reserve(items.len() * size_of::<$t>());
+                for e in items {
+                    heap.extend_from_slice(&e.to_le_bytes());
+                }
+            }
+            fn decode_slice(region: &[u8]) -> Result<Vec<Self>> {
+                let chunks = region.chunks_exact(size_of::<$t>());
+                if !chunks.remainder().is_empty() {
+                    return Err(Error::UnexpectedEof);
+                }
+                Ok(chunks
+                    .map(|c| <$t>::from_le_bytes(c.try_into().unwrap()))
+                    .collect())
+            }
         }
     )*};
 }
 
 wire_le! {
-    u8, u16, u32, u64, u128,
+    u16, u32, u64, u128,
     i8, i16, i32, i64, i128,
     f32, f64,
+}
+
+// `u8` is the scalar above with its slice methods one copy each: a byte
+// vector is the commonest heap payload (a page's records, a frame's body),
+// and element by element it cost a cursor and a push per byte.
+impl WaveWire for u8 {
+    const STACK_SIZE: usize = 1;
+    fn heap_size(&self) -> usize {
+        0
+    }
+    fn encode_stack(&self, stack: &mut Vec<u8>) {
+        stack.push(*self);
+    }
+    fn encode_heap(&self, _heap: &mut Vec<u8>) {}
+    fn decode(stack: &mut Cursor, _heap: &mut Cursor) -> Result<Self> {
+        stack.u8()
+    }
+    fn slice_heap_size(items: &[Self]) -> usize {
+        items.len()
+    }
+    fn encode_slice(items: &[Self], heap: &mut Vec<u8>) {
+        heap.extend_from_slice(items);
+    }
+    fn decode_slice(region: &[u8]) -> Result<Vec<Self>> {
+        Ok(region.to_vec())
+    }
 }
 
 impl WaveWire for bool {
@@ -86,34 +130,17 @@ impl<T: WaveWire> WaveWire for Vec<T> {
     const STACK_SIZE: usize = size_of::<u32>(); // byte-length
     fn heap_size(&self) -> usize {
         // Each element is a self-contained unit: its stack bytes then its heap.
-        self.iter().map(|e| T::STACK_SIZE + e.heap_size()).sum()
+        T::slice_heap_size(self)
     }
     fn encode_stack(&self, stack: &mut Vec<u8>) {
         stack.extend_from_slice(&(self.heap_size() as u32).to_le_bytes());
     }
     fn encode_heap(&self, heap: &mut Vec<u8>) {
-        for e in self {
-            e.encode_stack(heap);
-            e.encode_heap(heap);
-        }
+        T::encode_slice(self, heap);
     }
     fn decode(stack: &mut Cursor, heap: &mut Cursor) -> Result<Self> {
         let region_len = stack.u32()? as usize;
-        let region = heap.take(region_len)?;
-        let mut out = Self::new();
-        let mut cur = 0;
-        while cur < region.len() {
-            // The element's stack is the next STACK_SIZE bytes; its heap is the
-            // remainder of the region, of which it consumes only what it needs.
-            if cur + T::STACK_SIZE > region.len() {
-                return Err(Error::UnexpectedEof);
-            }
-            let mut es = Cursor::new(&region[cur..cur + T::STACK_SIZE]);
-            let mut eh = Cursor::new(&region[cur + T::STACK_SIZE..]);
-            out.push(T::decode(&mut es, &mut eh)?);
-            cur += T::STACK_SIZE + eh.pos();
-        }
-        Ok(out)
+        T::decode_slice(heap.take(region_len)?)
     }
 }
 
