@@ -93,7 +93,7 @@ impl RecordCache {
         let loc = log.append(id.raw(), bytes, &mut self.clock);
         let seed = self.index.seed();
         let logs = &self.logs;
-        self.index.upsert(
+        let replaced = self.index.upsert(
             hash_of(id.raw(), seed),
             loc,
             |at| at.slot == loc.slot && holds(logs, at, id.raw()),
@@ -102,6 +102,13 @@ impl RecordCache {
                 held.map_or(0, |entry| hash_of(entry.id, seed))
             },
         );
+        // The copy it replaced is dead now; its chunk counts it, which is
+        // what makes the chunk worth compacting.
+        if let Some(old) = replaced
+            && let Some(log) = self.logs.get_mut(old.slot as usize)
+        {
+            log.mark_dead(old);
+        }
     }
 
     /// What the cache knows about `id` in `slot`.
@@ -261,17 +268,42 @@ impl RecordCache {
                 log.advance(mark.end);
             }
             for &(hash, at) in &mark.tombstones {
-                self.index.remove(hash, |l| l == at);
+                if self.index.remove(hash, |l| l == at).is_some()
+                    && let Some(log) = self.logs.get_mut(at.slot as usize)
+                {
+                    log.mark_dead(at);
+                }
             }
         }
     }
 
-    /// Drop settled chunks, oldest first across every type, until the cache
-    /// holds at most `budget` bytes or nothing settled is left. An entry
-    /// whose chunk goes leaves the index if the index still names it; a
-    /// read of it then falls through to its page.
+    /// Bring the cache to at most `budget` bytes, or as near as what is
+    /// settled allows: first compact the settled chunks that are mostly
+    /// dead copies ([`crate::record_compact`]) — the deadest first, every
+    /// live entry kept — and only when none is left, drop settled chunks,
+    /// oldest first across every type. An entry whose chunk is dropped
+    /// leaves the index if the index still names it; a read of it then
+    /// falls through to its page.
     pub fn evict(&mut self, budget: usize) {
         while self.footprint() > budget {
+            let deadest = self
+                .logs
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, log)| {
+                    log.compactable().map(|(dead, n)| (dead, slot, n))
+                })
+                .max();
+            if let Some((_, slot, n)) = deadest {
+                let seed = self.index.seed();
+                let index = &mut self.index;
+                if let Some(log) = self.logs.get_mut(slot) {
+                    log.compact(n, |id, from, to| {
+                        index.repoint(hash_of(id, seed), from, to)
+                    });
+                }
+                continue;
+            }
             let oldest = self
                 .logs
                 .iter()
@@ -385,6 +417,48 @@ mod tests {
         );
         c.advance(&round);
         assert!(!c.owes() && c.has_pending());
+    }
+
+    /// The micro bench's shape: every insert also rewrites a hot segment.
+    /// Settled, eviction to a budget the live records fit compacts the dead
+    /// copies away and keeps every record — where dropping whole chunks
+    /// kept almost none.
+    #[test]
+    fn eviction_compacts_dead_copies_before_dropping_records() {
+        let mut c = cache();
+        let segment = vec![5u8; 8_000];
+        for k in 0..400 {
+            c.put(0, id(k), Some(&[k as u8; 300]));
+            c.put(0, id(1_000_000), Some(&segment));
+        }
+        let round = c.round(usize::MAX);
+        c.advance(&round);
+        let live = 400 * (300 + 20) + 8_020;
+        c.evict(live * 2 + (64 << 10) + c.index.footprint());
+        for k in 0..400 {
+            assert_eq!(c.get(0, id(k)), hit(&[k as u8; 300]), "record {k}");
+        }
+        assert_eq!(c.get(0, id(1_000_000)), hit(&segment));
+        assert_eq!(c.len(), 401);
+    }
+
+    /// A rewrite counts its old copy dead, and a settled tombstone counts
+    /// itself: the chunk's tally is what compaction weighs.
+    #[test]
+    fn superseded_copies_count_as_dead() {
+        let mut c = cache();
+        c.put(0, id(1), Some(&[1u8; 100]));
+        c.put(0, id(1), Some(&[2u8; 100]));
+        c.put(0, id(2), Some(b"x"));
+        c.put(0, id(2), None);
+        let round = c.round(usize::MAX);
+        c.advance(&round);
+        let log = &c.logs[0];
+        let dead: usize =
+            log.order.iter().map(|&n| log.chunk(n).unwrap().dead).sum();
+        // The first copy of 1 (20 + 100), the bytes of 2 (20 + 1) and its
+        // settled tombstone (20).
+        assert_eq!(dead, 120 + 21 + 20);
     }
 
     /// Eviction never drops what is unsettled, drops what is, and the
