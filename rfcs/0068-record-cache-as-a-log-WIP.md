@@ -2,7 +2,7 @@
 
 - **Status:** WIP — opened 2026-10-10
 - **Crates:** `wavedb-storage`
-- **Code:** `crates/wavedb-storage/src/{record_index,record_log,record_cache,settle,apply,plan}.rs`, `tests/record_cache.rs`
+- **Code:** `crates/wavedb-storage/src/{record_index,record_log,record_compact,record_cache,settle,apply,plan}.rs`, `tests/record_cache.rs`
 - **Builds on:** [0041](0041-single-barrier-checkpoint.md) (the checkpoint and
   its settle), [0063](0063-engine-yield-map-and-interruptible-engine-PLANNED.md)
   part 3 (the settle in bounded rounds), [0067](0067-thread-per-core-shards-WIP.md)
@@ -241,9 +241,55 @@ trait, and every caller above `wavedb-storage` — except that a store is now
 - **Records over `u32::MAX - 1` bytes** are refused before the journal sees
   them (`StorageError::RecordTooLarge`) — a log entry's length is a `u32`.
 
+## Amendment (2026-10-18): compact before dropping
+
+The read probe (the `probe` feature's `reads` lines) measured what FIFO
+eviction does to a collection: every write rewrites the chain segment and
+the sparse-index node it touches **whole**, so the log holds a dead copy of
+each per write — on the micro bench ~8 KiB of segment and ~12 KiB of index
+node beside each 300-byte record. At the end of the inserts the 96 MiB
+cache held 1 437 of 200 000 records, ~85 % of it dead copies, and a hot
+read hit it 0.8 % of the time. Dropping a chunk to reclaim its dead copies
+dropped the records beside them.
+
+So eviction now **compacts first** (`record_compact.rs`):
+
+- Each chunk counts its **dead bytes**: a write that repoints the index
+  marks the copy it replaced, and a settled tombstone leaving the index
+  marks itself.
+- A chunk wholly before `S`, not the one being filled, with at least a
+  quarter of it dead is **compactable**. Eviction compacts the deadest such
+  chunk across every type while the store is over budget, and drops
+  settled chunks oldest first only when none is left.
+- A compaction rewrites the chunk with the entries the index still names,
+  repointing each (`RecordIndex::repoint`), and **folds** it into the chunk
+  before it when both fit 64 KiB, so the log does not end as one tiny chunk
+  per original one. A chunk left empty is freed.
+- Chunks live in a **slab** and keep their number — a `Loc`'s `chunk` — for
+  as long as they are held, a freed number reused; the log's order is a
+  separate queue of numbers. That is what lets a chunk leave from the middle
+  of the log without moving any other `Loc`.
+- A compacted chunk keeps its logical span: only chunks wholly before `S`
+  are rewritten and a round reads from `S` on, so no position a round or a
+  mark uses moves.
+
+What it does not reach: `[S, W)`. A store that settles in a long window
+holds that window's dead copies until it settles — on the relaxed micro row
+(a settle per second) up to ~70 MB of the 96 MiB, so its records still
+leave and hot reads there still miss; a node settles every 200 ms, and a
+durable write settles at once. Compacting the unsettled span would need the
+round's scan to step over the holes compaction leaves, and the batch mark
+to pass a span with nothing left in it — not done. The root of the volume,
+a segment rewritten whole per write, is the chain's (RFC 0050).
+
+Measured on the relaxed micro row (probe, caged): over the update phase the
+index held 22 220 records against 3 576 before, a read 9.5 µs against 11.0.
+
 ## Deliberately out of scope
 
-- **Keeping settled records hot.** Eviction is FIFO by chunk, so a hot record
+- **Keeping settled records hot** (beyond the compaction of the amendment
+  above, which keeps every live entry of a mostly dead chunk). Eviction is
+  FIFO by chunk, so a hot record
   — a B+tree's interior node — can leave and be read back from its page, as it
   could before (`evict_up_to` popped by smallest id). Keeping it would mean copying
   it forward into a region the settle skips, and reads do not deposit into the
