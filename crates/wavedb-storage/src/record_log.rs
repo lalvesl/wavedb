@@ -3,7 +3,8 @@
 //!
 //! An entry is `[Id u128 LE][len u32 LE][bytes]`; a remove is a **tombstone**,
 //! `len = u32::MAX` and no bytes. A rewritten record is appended again and its
-//! old copy stays where it was, dead, until its chunk goes.
+//! old copy stays where it was, **dead**, until its chunk goes or is
+//! compacted ([`crate::record_compact`]); each chunk counts its dead bytes.
 //!
 //! Chunks hold up to [`CHUNK`] bytes. The chunk being filled starts at
 //! [`MIN_CHUNK`] and doubles as it fills, so a type that is barely written
@@ -11,15 +12,24 @@
 //! has not used yet never exceeds what it already holds. A record larger
 //! than a chunk gets one of its own size.
 //!
+//! A chunk keeps its **number** — the `chunk` of every [`Loc`] into it — for
+//! as long as it is held: chunks live in a slab, a freed number is reused,
+//! and the log's order is a separate queue of numbers. That is what lets a
+//! compaction free a chunk from the middle of the log without moving any
+//! other.
+//!
 //! Positions are **logical**: a byte count over every entry ever appended, so
-//! a chunk starts where the previous one ended and three plain numbers say
-//! everything about settledness:
+//! a chunk spans `[start, end)` where the previous one ended and three plain
+//! numbers say everything about settledness:
 //!
 //! - `w` — where the next entry goes;
 //! - `s` — how far the settle has reached: before it, every entry's page is
 //!   written;
 //! - `r` — `w` when a settle cycle last opened a batch: it owes a settle
 //!   while `s < r`.
+//!
+//! A compaction rewrites a chunk wholly before `s` and keeps its span, so the
+//! positions after it never move.
 //!
 //! [RFC 0068]: ../../../rfcs/0068-record-cache-as-a-log-WIP.md
 
@@ -29,7 +39,7 @@ use std::mem::size_of;
 use crate::record_index::Loc;
 
 /// An entry's head: the id and the length.
-const HEAD: usize = 20;
+pub const HEAD: usize = 20;
 /// The first capacity of a chunk being filled.
 const MIN_CHUNK: usize = 512;
 /// A chunk is sealed once the next entry would take it past this.
@@ -47,22 +57,21 @@ pub struct Entry<'a> {
 }
 
 #[derive(Debug)]
-struct Chunk {
+pub struct Chunk {
     /// Logical position of its first byte.
-    start: u64,
+    pub start: u64,
+    /// Logical position just past it — `start` plus what was appended. A
+    /// compaction shrinks the bytes and keeps the span.
+    pub end: u64,
     /// When it was started, on the store's clock — eviction's age.
-    born: u64,
-    bytes: Vec<u8>,
-}
-
-impl Chunk {
-    const fn end(&self) -> u64 {
-        self.start + self.bytes.len() as u64
-    }
+    pub born: u64,
+    /// Bytes of its entries the index no longer names.
+    pub dead: usize,
+    pub bytes: Vec<u8>,
 }
 
 /// The entry at `at` in `bytes`, and its length.
-fn parse(bytes: &[u8], at: usize) -> Option<(Entry<'_>, usize)> {
+pub fn parse(bytes: &[u8], at: usize) -> Option<(Entry<'_>, usize)> {
     let head = bytes.get(at..at + HEAD)?;
     let id = u128::from_le_bytes(head[..16].try_into().ok()?);
     let len = u32::from_le_bytes(head[16..].try_into().ok()?);
@@ -84,12 +93,14 @@ fn parse(bytes: &[u8], at: usize) -> Option<(Entry<'_>, usize)> {
 #[derive(Debug)]
 pub struct TypeLog {
     /// The type's slot in its store, stamped into every [`Loc`].
-    slot: u16,
-    chunks: VecDeque<Chunk>,
-    /// Sequence number of `chunks[0]`; a [`Loc`] carries it truncated.
-    first: u64,
+    pub slot: u16,
+    /// Chunks by number; `None` is a freed number, listed in `free`.
+    pub slab: Vec<Option<Chunk>>,
+    free: Vec<u32>,
+    /// The numbers of the chunks held, in log order.
+    pub order: VecDeque<u32>,
     w: u64,
-    s: u64,
+    pub s: u64,
     r: u64,
 }
 
@@ -97,12 +108,49 @@ impl TypeLog {
     pub const fn new(slot: u16) -> Self {
         Self {
             slot,
-            chunks: VecDeque::new(),
-            first: 0,
+            slab: Vec::new(),
+            free: Vec::new(),
+            order: VecDeque::new(),
             w: 0,
             s: 0,
             r: 0,
         }
+    }
+
+    pub fn chunk(&self, n: u32) -> Option<&Chunk> {
+        self.slab.get(n as usize).and_then(Option::as_ref)
+    }
+
+    pub fn chunk_mut(&mut self, n: u32) -> Option<&mut Chunk> {
+        self.slab.get_mut(n as usize).and_then(Option::as_mut)
+    }
+
+    /// Hold `chunk` under a free number, or a new one.
+    fn alloc(&mut self, chunk: Chunk) -> u32 {
+        if let Some(n) = self.free.pop() {
+            if let Some(slot) = self.slab.get_mut(n as usize) {
+                *slot = Some(chunk);
+            }
+            n
+        } else {
+            self.slab.push(Some(chunk));
+            (self.slab.len() - 1) as u32
+        }
+    }
+
+    /// Let chunk `n` go: out of the log's order, its number free again.
+    pub fn release(&mut self, n: u32) -> Option<Chunk> {
+        if let Some(at) = self.order.iter().position(|&m| m == n) {
+            self.order.remove(at);
+        }
+        let chunk = self.slab.get_mut(n as usize).and_then(Option::take)?;
+        self.free.push(n);
+        Some(chunk)
+    }
+
+    /// The number of the chunk being filled — never compacted.
+    pub fn back(&self) -> Option<u32> {
+        self.order.back().copied()
     }
 
     /// Append `id`'s bytes — `None` for a tombstone — and say where they
@@ -117,26 +165,30 @@ impl TypeLog {
         clock: &mut u64,
     ) -> Loc {
         let len = HEAD + bytes.map_or(0, <[u8]>::len);
-        let fits = self
-            .chunks
-            .back()
-            .is_some_and(|c| c.bytes.len() + len <= CHUNK);
-        if !fits {
+        let open = self.back().filter(|&n| {
+            self.chunk(n).is_some_and(|c| c.bytes.len() + len <= CHUNK)
+        });
+        let n = open.unwrap_or_else(|| {
             let cap = if len > CHUNK {
                 len
             } else {
                 len.next_power_of_two().max(MIN_CHUNK)
             };
-            self.chunks.push_back(Chunk {
+            let n = self.alloc(Chunk {
                 start: self.w,
+                end: self.w,
                 born: *clock,
+                dead: 0,
                 bytes: Vec::with_capacity(cap),
             });
+            self.order.push_back(n);
             *clock += 1;
-        }
-        let last = self.chunks.len() - 1;
-        let seq = self.first + last as u64;
-        let chunk = &mut self.chunks[last];
+            n
+        });
+        let slot = self.slot;
+        let Some(chunk) = self.chunk_mut(n) else {
+            return Loc::default();
+        };
         let offset = chunk.bytes.len();
         let room = chunk.bytes.capacity() - offset;
         if room < len {
@@ -154,35 +206,28 @@ impl TypeLog {
             }
             None => chunk.bytes.extend_from_slice(&TOMBSTONE.to_le_bytes()),
         }
+        chunk.end += len as u64;
         self.w += len as u64;
         Loc {
-            slot: self.slot,
+            slot,
             offset: offset as u16,
-            chunk: seq as u32,
+            chunk: n,
         }
     }
 
     /// The entry at `loc`, while its chunk is held.
     pub fn entry(&self, loc: Loc) -> Option<Entry<'_>> {
-        let at = loc.chunk.wrapping_sub(self.first as u32) as usize;
-        let chunk = self.chunks.get(at)?;
+        let chunk = self.chunk(loc.chunk)?;
         parse(&chunk.bytes, loc.offset as usize).map(|(entry, _)| entry)
     }
 
-    /// The entries from `s` up to `until`, each with its location and the
-    /// position just past it.
-    pub fn scan(&self, until: u64) -> Scan<'_> {
-        let at = self.chunks.partition_point(|c| c.end() <= self.s);
-        let offset = self
-            .chunks
-            .get(at)
-            .map_or(0, |c| (self.s.saturating_sub(c.start)) as usize);
-        Scan {
-            log: self,
-            at,
-            offset,
-            pos: self.s,
-            until,
+    /// The entry at `loc` is no longer named by the index: count its bytes
+    /// as dead in its chunk.
+    pub fn mark_dead(&mut self, loc: Loc) {
+        if let Some(chunk) = self.chunk_mut(loc.chunk)
+            && let Some((_, len)) = parse(&chunk.bytes, loc.offset as usize)
+        {
+            chunk.dead += len;
         }
     }
 
@@ -221,9 +266,10 @@ impl TypeLog {
 
     /// The age of the oldest chunk, when it is wholly settled.
     pub fn oldest_settled(&self) -> Option<u64> {
-        self.chunks
+        self.order
             .front()
-            .filter(|c| c.end() <= self.s)
+            .and_then(|&n| self.chunk(n))
+            .filter(|c| c.end <= self.s)
             .map(|c| c.born)
     }
 
@@ -233,17 +279,18 @@ impl TypeLog {
         if self.oldest_settled().is_none() {
             return false;
         }
-        let Some(chunk) = self.chunks.pop_front() else {
+        let Some(n) = self.order.front().copied() else {
             return false;
         };
-        let seq = self.first as u32;
-        self.first += 1;
+        let Some(chunk) = self.release(n) else {
+            return false;
+        };
         let mut at = 0;
         while let Some((entry, len)) = parse(&chunk.bytes, at) {
             let loc = Loc {
                 slot: self.slot,
                 offset: at as u16,
-                chunk: seq,
+                chunk: n,
             };
             each(loc, entry.id);
             at += len;
@@ -251,64 +298,16 @@ impl TypeLog {
         true
     }
 
-    /// Every entry held, oldest first, with its location — the probe's
-    /// census of what the log spends its bytes on.
-    #[cfg(feature = "probe")]
-    pub fn each(&self, mut f: impl FnMut(Loc, Entry<'_>)) {
-        for (i, chunk) in self.chunks.iter().enumerate() {
-            let mut at = 0;
-            while let Some((entry, len)) = parse(&chunk.bytes, at) {
-                let loc = Loc {
-                    slot: self.slot,
-                    offset: at as u16,
-                    chunk: (self.first + i as u64) as u32,
-                };
-                f(loc, entry);
-                at += len;
-            }
-        }
-    }
-
-    /// Bytes the log holds: every chunk's capacity, and the queue of them.
+    /// Bytes the log holds: every chunk's capacity, and the slab and queues
+    /// that hold them.
     pub fn footprint(&self) -> usize {
-        self.chunks
+        self.order
             .iter()
+            .filter_map(|&n| self.chunk(n))
             .map(|c| c.bytes.capacity())
             .sum::<usize>()
-            + self.chunks.capacity() * size_of::<Chunk>()
-    }
-}
-
-/// [`TypeLog::scan`]'s walk.
-pub struct Scan<'a> {
-    log: &'a TypeLog,
-    at: usize,
-    offset: usize,
-    pos: u64,
-    until: u64,
-}
-
-impl<'a> Iterator for Scan<'a> {
-    type Item = (Loc, Entry<'a>, u64);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.pos < self.until {
-            let chunk = self.log.chunks.get(self.at)?;
-            let Some((entry, len)) = parse(&chunk.bytes, self.offset) else {
-                self.at += 1;
-                self.offset = 0;
-                continue;
-            };
-            let loc = Loc {
-                slot: self.log.slot,
-                offset: self.offset as u16,
-                chunk: (self.log.first + self.at as u64) as u32,
-            };
-            self.offset += len;
-            self.pos += len as u64;
-            return Some((loc, entry, self.pos));
-        }
-        None
+            + self.slab.capacity() * size_of::<Option<Chunk>>()
+            + (self.order.capacity() + self.free.capacity()) * size_of::<u32>()
     }
 }
 
@@ -344,16 +343,18 @@ mod tests {
     #[test]
     fn a_chunk_doubles_as_it_fills_and_is_sealed_at_its_cap() {
         let (log, clock) = filled(1, 10);
-        assert_eq!(log.chunks[0].bytes.capacity(), MIN_CHUNK);
+        assert_eq!(log.chunk(0).unwrap().bytes.capacity(), MIN_CHUNK);
         assert_eq!(clock, 1);
 
         let (log, _) = filled(5_000, 100);
-        assert!(log.chunks.len() > 1);
-        for c in log.chunks.iter().take(log.chunks.len() - 1) {
+        assert!(log.order.len() > 1);
+        let chunks: Vec<_> =
+            log.order.iter().map(|&n| log.chunk(n).unwrap()).collect();
+        for c in chunks.iter().take(chunks.len() - 1) {
             assert!(c.bytes.len() > CHUNK - 120, "sealed chunks are full");
             assert_eq!(c.bytes.capacity(), CHUNK);
         }
-        let last = log.chunks.back().unwrap();
+        let last = chunks.last().unwrap();
         assert!(last.bytes.capacity() <= (last.bytes.len() * 2).max(MIN_CHUNK));
     }
 
