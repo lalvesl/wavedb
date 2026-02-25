@@ -206,7 +206,8 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   declarations: hash + compression policy); the per-type state (directory,
   dictionary) belongs to the open store (RFC 0067 step 1), and so does the
   record cache — one log per type in chunks + one Dashtable-shaped index;
-  settledness is a cursor, eviction drops settled chunks (RFC 0068). Compaction
+  settledness is a cursor, eviction compacts settled chunks that are mostly
+  superseded copies and only then drops settled chunks (RFC 0068). Compaction
   carries the runs of the emptiest data files (≥ `victim_free_percent`
   free, 50) forward into the active one — after restating every address, so
   no header in them is live — and once a batch over the moves is durable,
