@@ -160,6 +160,26 @@ impl RecordIndex {
         }
     }
 
+    /// Point the key hashed `hash` that sits at `from` at `to` instead — a
+    /// compaction moving its entry. `false` when no key sits at `from`: the
+    /// entry there was a dead copy.
+    pub fn repoint(&mut self, hash: u64, from: Loc, to: Loc) -> bool {
+        let s = self.segment_of(hash);
+        if let Some((b, at)) = self.segments[s].find(hash, &mut |l| l == from) {
+            self.segments[s].buckets[b].locs[at] = to;
+            return true;
+        }
+        if let Some(entry) = self
+            .overflow
+            .iter_mut()
+            .find(|(h, loc)| *h == hash && *loc == from)
+        {
+            entry.1 = to;
+            return true;
+        }
+        false
+    }
+
     /// Remove the key `is` recognises; the location it named.
     pub fn remove(
         &mut self,
