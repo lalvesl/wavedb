@@ -151,3 +151,39 @@ fn steady_writes_stay_inside_the_budget() {
         assert_eq!(read(&s, k), Some(record(k, 1, 300)), "record {k}");
     }
 }
+
+/// Records written between rewrites of one hot entry — a chain segment's
+/// shape — survive an eviction that has to reclaim room: the dead copies of
+/// the hot entry are compacted away, the records stay cached (their pages
+/// are not touched), and a reopen afterwards reads every one back.
+#[test]
+fn compaction_keeps_records_through_eviction_and_a_reopen() {
+    const HOT: u64 = 1 << 40;
+    let d = tempfile::tempdir().unwrap();
+    {
+        let s = open(d.path());
+        for k in 0..600 {
+            put(&s, k, 1, 200);
+            put(&s, HOT, (k % 250) as u8, 6_000);
+        }
+        s.drain().unwrap();
+        let before = s.cache_bytes();
+        // Room for the live records and some slack, far less than the
+        // dead copies take.
+        s.evict_settled(before / 8);
+        assert!(
+            s.cache_bytes() <= before / 8,
+            "{} of {before}",
+            s.cache_bytes()
+        );
+        for k in 0..600 {
+            assert_eq!(read(&s, k), Some(record(k, 1, 200)), "record {k}");
+        }
+        put(&s, HOT, 7, 6_000);
+    }
+    let s = open(d.path());
+    for k in 0..600 {
+        assert_eq!(read(&s, k), Some(record(k, 1, 200)), "record {k}");
+    }
+    assert_eq!(read(&s, HOT), Some(record(HOT, 7, 6_000)));
+}
