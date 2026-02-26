@@ -2,12 +2,20 @@
 //!
 //! ## Why the factory hands over a `PageStore` rather than a built engine
 //!
-//! One store per row: the row opens one data directory, and a directory open
-//! twice is `EngineBusy`. So the factory holds the one store behind a
-//! `Mutex<Option<_>>` and the first `build` **takes** it. That is sound here
-//! because the micro workload runs one consumer — a collection is indivisible,
-//! so `wavedb/multi` is a `shop` row only (RFC 0065 §3) — and a second `build`
-//! is refused rather than silently sharing.
+//! One store per consumer: a data shard opened twice is `EngineBusy`. So the
+//! factory holds the row's stores — one on `wavedb/single`, one per consumer
+//! on `wavedb/multi` — each behind a `Mutex<Option<_>>` slot, and consumer
+//! `i`'s `build` **takes** store `i`. A second claim on a store is refused
+//! rather than silently sharing.
+//!
+//! ## How `wavedb/multi` partitions one dataset
+//!
+//! A collection is indivisible — its chain segments and index nodes belong
+//! to the Pivot's owner — so the multi row does what a node does with many
+//! owners: **one `Thing` collection per consumer**, each on that consumer's
+//! own data shard, and row `n` belongs to consumer `n % N`. Every consumer
+//! mints its own Pivot; the dataset, the operations and their order per
+//! row are the single row's.
 //!
 //! The engine is then constructed *on the consumer's thread*, which is the
 //! constraint the whole seam is shaped by: an engine built on one thread
@@ -44,8 +52,9 @@ const CACHE_BUDGET_BYTES: usize = 96 << 20;
 
 /// Building one engine from the process's single store.
 ///
-/// One implementation today — the direct engine; `micro` has no sharded row —
-/// and no `dyn`: a row monomorphises to its concrete engine.
+/// One implementation — a `PageStore`, on both rows: the multi row is the
+/// same engine, one per consumer — and no `dyn`: a row monomorphises to its
+/// concrete engine.
 pub trait FromStore: Engineish + Sized {
     fn from_store(store: PageStore) -> Result<Self, String>;
 }
@@ -59,7 +68,10 @@ impl FromStore for PageStore {
 /// What a consumer needs to build its engine. `Send`: a `PageStore` crosses,
 /// the engine made from it does not have to.
 pub struct Factory<E> {
-    store: Mutex<Option<PageStore>>,
+    /// Consumer `i`'s store, until it takes it.
+    stores: Mutex<Vec<Option<PageStore>>>,
+    /// How many consumers, which is how many stores the row opened.
+    consumers: usize,
     /// The anchors a seeded row was filled with, and its Pivot. `None` means
     /// the row inserts its own.
     seeded: Option<(Vec<Id>, ThingPivotId)>,
@@ -74,13 +86,14 @@ pub struct Factory<E> {
 impl<E> Factory<E> {
     #[must_use]
     pub fn new(
-        store: PageStore,
+        stores: Vec<PageStore>,
         seeded: Option<(Vec<Id>, ThingPivotId)>,
         rows: usize,
         durable: bool,
     ) -> Self {
         Self {
-            store: Mutex::new(Some(store)),
+            consumers: stores.len().max(1),
+            stores: Mutex::new(stores.into_iter().map(Some).collect()),
             seeded,
             rows,
             durable,
@@ -92,10 +105,13 @@ impl<E> Factory<E> {
 pub struct WavedbDriver<E: Engineish> {
     engine: E,
     pivot: ThingPivotId,
-    /// Minted anchors, indexed by the dataset's logical row number. A
-    /// NonUnique anchor is minted from the clock at insert, so it cannot be
-    /// recomputed from the seed — this table is how `n` becomes an `Id`.
+    /// Minted anchors of this consumer's rows, row `n` at `n / consumers`.
+    /// A NonUnique anchor is minted from the clock at insert, so it cannot
+    /// be recomputed from the seed — this table is how `n` becomes an `Id`.
     ids: Vec<Id>,
+    /// How many consumers share the dataset (row `n` is consumer
+    /// `n % consumers`'s).
+    consumers: u64,
     /// Whether every write is made durable before it returns.
     durable: bool,
     /// When the store was last settled.
@@ -111,24 +127,28 @@ where
 {
     type Driver = WavedbDriver<E>;
 
-    /// One. The micro workload lives in a single collection, and a collection
-    /// is indivisible: its chain segments and index nodes belong to the
-    /// Pivot's owner, so a second consumer would contend on shared structure.
+    /// One per store: a collection is indivisible, so each consumer owns a
+    /// collection of its own on a data shard of its own.
     fn consumers(&self) -> usize {
-        1
+        self.consumers
     }
 
     fn build(&self, shard: usize) -> Result<WavedbDriver<E>, String> {
+        if self.seeded.is_some() && self.consumers > 1 {
+            return Err("a seed is one collection on one store: a seeded \
+                        micro row runs one consumer"
+                .into());
+        }
         let store = self
-            .store
+            .stores
             .lock()
             .map_err(|_| "the store mutex was poisoned".to_string())?
-            .take()
+            .get_mut(shard)
+            .and_then(Option::take)
             .ok_or_else(|| {
                 format!(
-                    "consumer {shard} asked for a second store: one \
-                     `PageStore` per process, and the micro workload has one \
-                     consumer"
+                    "consumer {shard} asked for a second store, or one not \
+                     its own: each consumer owns exactly one"
                 )
             })?;
         // On this thread: the engine never has to cross one.
@@ -140,20 +160,22 @@ where
                 let db = LocalHandle::new(engine.store(), U48::from(TENANT));
                 let pivot = block_on(Thing::create_pivot(&db))
                     .map_err(|e| format!("create_pivot: {e}"))?;
-                (Vec::with_capacity(self.rows), pivot)
+                (Vec::with_capacity(self.rows / self.consumers + 1), pivot)
             }
         };
         Ok(WavedbDriver {
             engine,
             pivot,
             ids,
+            consumers: self.consumers as u64,
             durable: self.durable,
             settled: Instant::now(),
         })
     }
 
-    fn route(&self, _op: &MicroOp) -> usize {
-        0
+    /// Row `n` is consumer `n % N`'s: its collection, its store, its thread.
+    fn route(&self, op: &MicroOp) -> usize {
+        (op.partition_key() % self.consumers as u64) as usize
     }
 }
 
@@ -161,7 +183,7 @@ impl<E: Engineish> WavedbDriver<E> {
     /// The anchor for dataset row `n`.
     fn id_of(&self, n: u64) -> Result<Id, String> {
         self.ids
-            .get(n as usize)
+            .get((n / self.consumers) as usize)
             .copied()
             .ok_or_else(|| format!("row {n} was never inserted"))
     }
@@ -184,6 +206,9 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
                     block_on(col.insert(&db, &row))
                 }
                 .map_err(|e| format!("insert {n}: {e}"))?;
+                // Inserts arrive in row order, so this consumer's rows land
+                // at `n / N` — checked, since a gap would misfile every read.
+                debug_assert_eq!(self.ids.len() as u64, n / self.consumers);
                 self.ids.push(id);
             }
             MicroOp::Read { n } => {
@@ -312,7 +337,7 @@ mod tests {
         E: crate::systems::engine::Engineish + FromStore,
     {
         let factory: Factory<E> =
-            Factory::new(open(&scratch.0), None, 120, false);
+            Factory::new(vec![open(&scratch.0)], None, 120, false);
         run(&factory, workload()).expect("run")
     }
 
@@ -336,7 +361,7 @@ mod tests {
     fn a_second_build_is_refused_rather_than_sharing_the_store() {
         let scratch = Scratch::new();
         let factory: Factory<PageStore> =
-            Factory::new(open(&scratch.0), None, 10, false);
+            Factory::new(vec![open(&scratch.0)], None, 10, false);
 
         let first = factory.build(0);
         assert!(first.is_ok());
@@ -346,13 +371,37 @@ mod tests {
         drop(first);
     }
 
-    /// Micro is one consumer, because a collection is indivisible — the
-    /// constraint that makes `wavedb/multi` a `shop` row.
+    /// One consumer per store: the single row has one, the multi row as
+    /// many as data shards.
     #[test]
-    fn micro_asks_for_exactly_one_consumer() {
+    fn a_consumer_per_store() {
         let scratch = Scratch::new();
         let direct: Factory<PageStore> =
-            Factory::new(open(&scratch.0), None, 1, false);
+            Factory::new(vec![open(&scratch.0)], None, 1, false);
         assert_eq!(direct.consumers(), 1);
+    }
+
+    /// The multi row end to end: three data shards, three consumers, each
+    /// its own collection, every read finding its row on its own shard.
+    #[test]
+    fn a_multi_micro_row_partitions_rows_across_consumers() {
+        let scratch = Scratch::new();
+        let stores = wavedb_storage::open_shards(
+            &scratch.0,
+            &Thing::storage_entries(),
+            StoreOptions {
+                storage_shards: 1,
+                ..StoreOptions::default()
+            },
+            3,
+        )
+        .expect("open");
+        let factory: Factory<PageStore> =
+            Factory::new(stores, None, 120, false);
+        assert_eq!(factory.consumers(), 3);
+        let phases = run(&factory, workload()).expect("run");
+        assert_eq!(phases[0].samples.len(), 120, "insert");
+        assert_eq!(phases[1].samples.len(), 60, "read_hot");
+        assert_eq!(phases[3].samples.len(), 60, "update");
     }
 }
