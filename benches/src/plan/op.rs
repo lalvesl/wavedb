@@ -98,23 +98,20 @@ impl MicroOp {
         }
     }
 
-    /// Which consumer owns this op, out of `consumers`.
+    /// What decides which consumer owns this op: the row, `n`.
     ///
-    /// **Always zero, and that is a finding rather than a stub.** The micro
-    /// workload lives in exactly one collection (`systems/wavedb.rs` mints one
-    /// `Thing::create_pivot`), and a collection is indivisible: its chain
-    /// segments and index nodes carry ids of their own and belong to the
-    /// Pivot's owner, so two consumers writing disjoint *records* would still
-    /// contend on shared *structure* — silent index loss, not a cache miss
-    /// (`wavedb-quick-node/src/shard/route.rs` states the rule).
-    ///
-    /// So `wavedb/multi` is a `shop` row only, and this method is where that
-    /// is enforced instead of being a comment in a plan. A run that asks for
-    /// more than one consumer on `micro` gets them all fed from one queue,
-    /// which the planner refuses earlier — this is the backstop.
+    /// A collection is indivisible — its chain segments and index nodes
+    /// carry ids of their own and belong to the Pivot's owner, so two
+    /// consumers writing disjoint *records* of one collection would still
+    /// contend on shared *structure* (`wavedb-quick-node/src/shard/route.rs`
+    /// states the rule). So the only row with several consumers,
+    /// `wavedb/multi`, gives each one a collection of its own on its own
+    /// data shard, and row `n` belongs to consumer `n % N` — the rows
+    /// partition, the collections never share. Every other micro row has
+    /// one consumer, where any key routes to it.
     #[must_use]
     pub const fn partition_key(&self) -> u64 {
-        0
+        self.key()
     }
 }
 
@@ -193,13 +190,12 @@ mod tests {
         );
     }
 
-    /// The micro workload is one collection, so every op belongs to one
-    /// consumer. If this ever varies, `wavedb/multi` has silently become a
-    /// micro row and the index is at risk.
+    /// A micro op partitions by its row: on `wavedb/multi`, row `n` is
+    /// consumer `n % N`'s, and every op on it reaches the same one.
     #[test]
-    fn every_micro_op_partitions_to_the_same_consumer() {
+    fn a_micro_op_partitions_by_its_row() {
         for n in 0..1000 {
-            assert_eq!(MicroOp::Read { n }.partition_key(), 0);
+            assert_eq!(MicroOp::Read { n }.partition_key(), n);
         }
     }
 
