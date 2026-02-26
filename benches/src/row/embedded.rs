@@ -107,7 +107,15 @@ where
     let dir =
         cfg.work_dir
             .join(format!("wavedb-{}-{}", engine.name(), d.name()));
-    let (seeded, materialise_ms) = materialise(&dir, cfg.seed_wavedb.as_ref())?;
+    let multi = engine == Engine::Sharded;
+    // A seed is one collection on one store; the multi row fills itself
+    // (the planner never seeds it).
+    let seed = if multi {
+        None
+    } else {
+        cfg.seed_wavedb.as_ref()
+    };
+    let (seeded, materialise_ms) = materialise(&dir, seed)?;
     // A seed arrives as `<store>/data` plus its `ids.bin`/`pivot.bin`
     // sidecar; the sidecar is what makes it usable at all, since a NonUnique
     // anchor id is minted from the clock and cannot be recomputed.
@@ -118,14 +126,29 @@ where
     };
 
     let data = dir.join("data");
-    let store = wavedb_adapter::open(&data)?;
+    let consumers = run.key.consumers.max(1) as usize;
+    let stores = if multi {
+        wavedb_adapter::open_shards(&data, consumers)?
+    } else {
+        vec![wavedb_adapter::open(&data)?]
+    };
     let durable = d == Durability::Durable;
     let factory = drivers::wavedb::Factory::<E>::new(
-        store,
+        stores,
         sidecar,
         cfg.rows as usize,
         durable,
     );
+    let used = crate::harness::DriverFactory::consumers(&factory);
+    // The consumer count is part of the row's identity: a row asked for
+    // three that ran on one would file the wrong number under the right name.
+    if used != consumers {
+        return Err(format!(
+            "wavedb/{} on micro was asked for {consumers} consumers and runs \
+             {used}",
+            run.key.variant
+        ));
+    }
 
     let points = RefCell::new(Points::of(&data, wavedb_is_log));
     let phases =
@@ -133,6 +156,27 @@ where
             points.borrow_mut().take(Point::Hot)
         })?;
     let mut points = points.into_inner();
+    drop(factory);
+    if multi {
+        // Every consumer drained and closed its shard. Compaction of a
+        // sharded database is the storage shard's to direct (RFC 0073), so
+        // the multi row takes `settled` and no `compacted` — as the shop's.
+        points.take(Point::Settled)?;
+        return Ok(record(
+            run,
+            phases,
+            Meta {
+                bracket: "embedded",
+                settings: settings(engine, d, used),
+                compression: "zstd (per-type dictionaries)",
+                retains_history: true,
+                notes: multi_notes(used),
+                seed_path: None,
+                materialise_ms,
+                footprints: points.into_vec(),
+            },
+        ));
+    }
 
     // Reopened as a plain `PageStore`, whichever seam the row measured. The
     // footprint is bytes on disk, and the actor changes none of them — while
@@ -151,7 +195,7 @@ where
         phases,
         Meta {
             bracket: "embedded",
-            settings: settings(engine, d),
+            settings: settings(engine, d, used),
             compression: "zstd (per-type dictionaries)",
             retains_history: true,
             notes: wavedb_adapter::notes(seeded),
@@ -183,9 +227,28 @@ fn quiesce<E: Engineish>(engine: &E, points: &Points) -> Result<(), String> {
     Ok(())
 }
 
-fn settings(engine: Engine, d: Durability) -> Vec<(String, String)> {
+/// The multi row's notes: the single row's, and how it splits the dataset.
+fn multi_notes(consumers: usize) -> Vec<String> {
+    let mut notes = wavedb_adapter::notes(false);
+    notes.push(format!(
+        "Multi: {consumers} consumers, each its own thread owning one data \
+         shard and one `Thing` collection on it; row n is consumer \
+         n % {consumers}'s. A collection is indivisible (its chains belong to \
+         its owner), so the dataset is split by owner, as a node splits its \
+         owners across workers. Every data shard writes through one storage \
+         shard (RFC 0073)."
+    ));
+    notes
+}
+
+fn settings(
+    engine: Engine,
+    d: Durability,
+    consumers: usize,
+) -> Vec<(String, String)> {
     vec![
         ("mode".into(), engine.mode().into()),
+        ("consumers".into(), consumers.to_string()),
         // Counted, not assumed.
         (
             "threads".into(),
