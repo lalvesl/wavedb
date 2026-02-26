@@ -117,13 +117,13 @@ impl Plan {
 
 /// How many consumers a given configuration runs with.
 ///
-/// One, except for sharded WaveDB on the `shop` workload — and that exception
-/// is the whole shape of [RFC 0065] §3. The `micro` workload lives in a single
-/// collection, and a collection is indivisible (its chain segments and index
-/// nodes belong to the Pivot's owner), so asking for three consumers there
-/// would not be a slower measurement but a wrong one. The clamp is here, at
-/// the point the matrix is built, so no row can be *created* with a count it
-/// may not have.
+/// One, except for sharded WaveDB — the shape of [RFC 0065] §3. A collection
+/// is indivisible (its chain segments and index nodes belong to the Pivot's
+/// owner), so `wavedb/multi` splits by owner: on `shop` a user is a tenant is
+/// a collection, and on `micro` each consumer gets a `Thing` collection of
+/// its own, on its own data shard, row `n` going to `n % N`. The clamp is
+/// here, at the point the matrix is built, so no row can be *created* with a
+/// count it may not have.
 ///
 /// [RFC 0065]: ../../../rfcs/0065-benchmark-suite-ii-the-row-as-the-unit.md
 #[must_use]
@@ -136,18 +136,8 @@ pub const fn consumers_for(
     // `const fn` has no string equality, so compare bytes.
     let sharded = matches!(system.as_bytes(), b"wavedb")
         && matches!(variant.as_bytes(), b"multi");
-    let shop = matches!(workload.as_bytes(), b"shop");
-    if sharded && shop { asked } else { 1 }
-}
-
-/// Whether this configuration is a row at all.
-///
-/// `wavedb/multi` exists only on `shop`: with one consumer it would be an
-/// expensive re-run of `wavedb/single` — one collection is one owner, so one
-/// thread however many exist.
-#[must_use]
-fn is_a_row(system: &str, variant: &str, workload: &str) -> bool {
-    !(system == "wavedb" && variant == "multi" && workload != "shop")
+    let partitioned = matches!(workload.as_bytes(), b"shop" | b"micro");
+    if sharded && partitioned { asked } else { 1 }
 }
 
 /// Build the requested matrix and split it against the corpus.
@@ -169,9 +159,6 @@ pub fn resolve(req: &Request, corpus: &Corpus) -> Result<Plan, String> {
             if !req.workloads.is_empty()
                 && !req.workloads.iter().any(|w| w == workload)
             {
-                continue;
-            }
-            if !is_a_row(system, variant, workload) {
                 continue;
             }
             for durability in DURABILITIES {
@@ -241,10 +228,13 @@ impl Request {
             // everyone else.
             wavedb_git_sha: (system == "wavedb")
                 .then(|| self.wavedb_git_sha.clone()),
-            seeded: seeded(
-                workload,
-                self.seeded_systems.iter().any(|s| s == system),
-            ),
+            // A seed is one collection on one store, so the multi row
+            // fills itself.
+            seeded: variant != "multi"
+                && seeded(
+                    workload,
+                    self.seeded_systems.iter().any(|s| s == system),
+                ),
         }
     }
 }
@@ -332,61 +322,50 @@ mod tests {
         resolve(req, &Corpus::at(&scratch.0)).expect("resolve")
     }
 
-    /// 12 micro rows + 14 shop rows. The asymmetry is `wavedb/multi`, which
-    /// exists on `shop` only.
+    /// 14 micro rows + 14 shop rows: every system on both workloads, WaveDB
+    /// single and multi.
     #[test]
-    fn the_full_matrix_is_twenty_six_rows() {
+    fn the_full_matrix_is_twenty_eight_rows() {
         let scratch = Scratch::new();
         let plan = plan_of(&request(), &scratch);
-        assert_eq!(plan.measure.len(), 26);
+        assert_eq!(plan.measure.len(), 28);
         assert!(plan.reuse.is_empty());
 
         let micro = plan.measure.iter().filter(|k| k.workload == "micro");
-        assert_eq!(micro.count(), 12);
+        assert_eq!(micro.count(), 14);
     }
 
-    /// The constraint from `MicroOp::partition_key`, enforced where rows are
-    /// created rather than trusted downstream.
+    /// Only sharded WaveDB gets three consumers — on both workloads, since
+    /// each splits by owner — and nothing else ever does.
     #[test]
-    fn no_micro_row_ever_asks_for_more_than_one_consumer() {
-        let scratch = Scratch::new();
-        for key in plan_of(&request(), &scratch).measure {
-            if key.workload == "micro" {
-                assert_eq!(key.consumers, 1, "{}/{}", key.system, key.variant);
-            }
-        }
-    }
-
-    #[test]
-    fn only_sharded_wavedb_on_shop_gets_three_consumers() {
+    fn only_sharded_wavedb_gets_three_consumers() {
         let scratch = Scratch::new();
         let three: Vec<_> = plan_of(&request(), &scratch)
             .measure
             .into_iter()
             .filter(|k| k.consumers == 3)
             .collect();
-        assert_eq!(three.len(), 2, "durable and relaxed, nothing else");
+        assert_eq!(three.len(), 4, "durable and relaxed, on each workload");
         for key in three {
             assert_eq!(
-                (
-                    key.system.as_str(),
-                    key.variant.as_str(),
-                    key.workload.as_str()
-                ),
-                ("wavedb", "multi", "shop")
+                (key.system.as_str(), key.variant.as_str()),
+                ("wavedb", "multi")
             );
         }
     }
 
+    /// A seed is one collection on one store: the multi micro row fills
+    /// itself even when a seed is offered.
     #[test]
-    fn sharded_wavedb_is_not_a_micro_row() {
+    fn the_multi_micro_row_is_never_seeded() {
         let scratch = Scratch::new();
-        assert!(
-            !plan_of(&request(), &scratch)
-                .measure
-                .iter()
-                .any(|k| { k.variant == "multi" && k.workload == "micro" })
-        );
+        let mut req = request();
+        req.seeded_systems = vec!["wavedb".into()];
+        for key in plan_of(&req, &scratch).measure {
+            if key.system == "wavedb" && key.workload == "micro" {
+                assert_eq!(key.seeded, key.variant == "single", "{key:?}");
+            }
+        }
     }
 
     /// The point of the whole restructure: a stored peer row is served, not
@@ -409,7 +388,7 @@ mod tests {
 
         assert_eq!(plan.reused(), 4, "postgres should have been reused");
         assert!(!plan.measure.iter().any(|k| k.system == "postgres"));
-        assert_eq!(plan.measure.len(), 22);
+        assert_eq!(plan.measure.len(), 24);
     }
 
     /// And the other half: a WaveDB row is *not* reusable across commits.
@@ -461,7 +440,7 @@ mod tests {
         let mut forced = request();
         forced.refresh = Refresh::All;
         let plan = plan_of(&forced, &scratch);
-        assert_eq!(plan.measure.len(), 26);
+        assert_eq!(plan.measure.len(), 28);
         assert_eq!(plan.reused(), 0);
     }
 
@@ -479,7 +458,7 @@ mod tests {
 
         assert_eq!(plan.measure.len(), 4, "mysql: 2 workloads × 2 rows");
         assert!(plan.measure.iter().all(|k| k.system == "mysql"));
-        assert_eq!(plan.reused(), 22);
+        assert_eq!(plan.reused(), 24);
     }
 
     #[test]
@@ -514,7 +493,7 @@ mod tests {
     #[test]
     fn the_consumer_clamp_only_opens_for_one_configuration() {
         assert_eq!(consumers_for("wavedb", "multi", "shop", 3), 3);
-        assert_eq!(consumers_for("wavedb", "multi", "micro", 3), 1);
+        assert_eq!(consumers_for("wavedb", "multi", "micro", 3), 3);
         assert_eq!(consumers_for("wavedb", "single", "shop", 3), 1);
         assert_eq!(consumers_for("postgres", "-", "shop", 3), 1);
     }
