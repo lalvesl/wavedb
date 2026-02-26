@@ -218,7 +218,7 @@ Inside one row's cage:
 | system | workload | generators | consumers | database |
 |---|---|--:|--:|---|
 | `wavedb/single` | both | 1 | 1 | same binary, `PageStore` in the consumer thread |
-| `wavedb/multi` | **`shop` only** | 1 | **3** | same binary, one data shard per consumer, each owning its `PageStore` (§11) |
+| `wavedb/multi` | both (micro since 2026-10-18) | 1 | **3** | same binary, one data shard per consumer, each owning its `PageStore` (§11) |
 | `sqlite` | both | 1 | 1 | same binary, one `Connection` |
 | `postgres` / `mysql` / `mongodb` | both | 1 | 1 | child process, **same cage** |
 
@@ -241,8 +241,19 @@ has. `shop` partitions for free and for a real reason — a user *is* a tenant
 *is* one `Shopping` collection, and every shop phase already picks its user
 first — so it is where a sharded engine gets priced.
 
-`MicroOp::partition_key()` returns a constant `0`, and its test asserts that,
-so the constraint is enforced in code rather than remembered from a plan.
+**Revised 2026-10-18 (user decision): `wavedb/multi` runs `micro` too.** It
+does so the only way a collection allows: **one `Thing` collection per
+consumer**, each on that consumer's own data shard and thread, row `n`
+going to consumer `n % N` (`MicroOp::partition_key()` is now `n`). The
+structural rule above still holds — no collection is ever shared — and the
+objections stand as caveats rather than vetoes: the multi micro row is a
+partition chosen by the benchmark, its `all()` is N recency orders, and it
+is comparable with `wavedb/single` only as "the same dataset, split by
+owner", which is what a node does with many owners. `wavedb/single` stays
+the micro row the corpus compares across commits. The multi row is never
+seeded (a seed is one collection on one store), and takes `settled` but no
+`compacted` footprint, as the shop's multi row: compacting a sharded
+database is the storage shard's to direct (RFC 0073).
 
 The generator builds `thing(n, seed)` / the shop's operation stream and pushes
 descriptors down a bounded channel; consumers pop, execute, and time only the
