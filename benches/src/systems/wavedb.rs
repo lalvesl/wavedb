@@ -54,3 +54,18 @@ pub fn open(dir: &Path) -> Result<PageStore, String> {
     PageStore::open(dir, &Thing::storage_entries())
         .map_err(|e| format!("open: {e}"))
 }
+
+/// The multi row's database: `shards` data shards, one per consumer, all
+/// writing through **one** storage shard (RFC 0073) — the shop's shape, and
+/// a node's in miniature.
+pub fn open_shards(
+    dir: &Path,
+    shards: usize,
+) -> Result<Vec<PageStore>, String> {
+    let options = wavedb_storage::StoreOptions {
+        storage_shards: 1,
+        ..wavedb_storage::StoreOptions::default()
+    };
+    wavedb_storage::open_shards(dir, &Thing::storage_entries(), options, shards)
+        .map_err(|e| format!("open: {e}"))
+}
