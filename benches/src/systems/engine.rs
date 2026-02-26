@@ -5,14 +5,14 @@
 //!
 //! - [`Engine::Direct`] — the `PageStore` in this thread. One thread does
 //!   everything, and a `get` that hits the cache is a function call.
-//! - [`Engine::Sharded`] — the RFC 0067 step 4 shape, on `shop` only: the
-//!   database is N data shards, one per consumer, and each consumer owns its
-//!   shard's `PageStore` on its own thread, as a node worker does. Users are
-//!   placed by `u % N` — the bench's stand-in for the node's owner hash,
-//!   with the property that matters: one user's records are on one thread.
-//!
-//! `micro` has no sharded row: it is one collection, so one owner, so one
-//! thread however many exist (RFC 0065 §3).
+//! - [`Engine::Sharded`] — the RFC 0067 step 4 shape: the database is N
+//!   data shards, one per consumer, and each consumer owns its shard's
+//!   `PageStore` on its own thread, as a node worker does. Owners are placed
+//!   by `% N` — the bench's stand-in for the node's owner hash, with the
+//!   property that matters: one owner's records are on one thread. On
+//!   `shop` the owner is a user; on `micro` each consumer owns a `Thing`
+//!   collection of its own, and row `n` is consumer `n % N`'s (RFC 0065 §3,
+//!   revised 2026-10-18).
 //!
 //! No `dyn`: the seam is a trait bound and each row monomorphises to its own
 //! concrete engine, the same rule the workspace holds itself to.
@@ -26,7 +26,7 @@ use wavedb_storage::PageStore;
 pub enum Engine {
     /// `PageStore` here, in this thread.
     Direct,
-    /// N data shards, each owned by one consumer thread (`shop` only).
+    /// N data shards, each owned by one consumer thread.
     Sharded,
 }
 
