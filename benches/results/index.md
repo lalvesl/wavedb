@@ -95,3 +95,69 @@ recency chain 20–29. The fixed 32 KiB header is now about a quarter of every
 round, and the largest single cost left.
 
 Rows `a34996ed82d3e90f`, `13fdaca239500caf`.
+
+## `2026-10-18T17-30Z` · intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-btrfs-104a · `1fd1c9f`
+
+`micro`, `small` tier (200 000 records, 50.8 MB logical), caged, WaveDB only
+(`--only wavedb`), clock pinned at 2.3 GHz like the `e63a9d0` run above.
+The first run with the bulk wire codec (`7ee2042`: a `Vec<u8>` and a vector of
+fixed-width scalars encode and decode as one copy, not per element), the
+compacting record cache (`7f03357`, RFC 0068 amendment: eviction rewrites
+settled chunks that are mostly superseded copies before it drops any), and
+the first `wavedb/multi` micro rows (`1fd1c9f`, RFC 0065 revision): three
+consumers, each its own thread owning one data shard and one `Thing`
+collection on it, row `n` consumer `n % 3`'s, every data shard writing
+through one storage shard. `wavedb/single` is the row that compares across
+commits; `multi` is the same dataset split by owner, so its rates are the
+three threads together.
+
+| system | durability | consumers | insert/s | read_hot/s | read_cold/s | update/s | insert p99 | KiB written/insert | KiB written/update | peak MB | compacted MB | log MB |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| wavedb/single | durable | 1 | 110.4 | 185 914.4 | 21 413.6 | 87.2 | 76.0 ms | 202.7 | 241.3 | 33 569.4 | 25.5 | 0 |
+| wavedb/single | relaxed | 1 | 1 829.5 | 21 381.9 | 23 815.3 | 817.1 | 0.6 ms | 3.8 | 12.6 | 1 420.7 | 24.6 | 0 |
+| wavedb/multi | durable | 3 | 208.2 | 664 070.8 | 85 018.4 | 163.6 | 82.8 ms | 187.6 | 217.0 | 9 296.6 | — | 0 |
+| wavedb/multi | relaxed | 3 | — | — | — | — | — | — | — | — | — | — |
+
+`wavedb/multi relaxed` was OOM-killed in the cage (exit 137) and recorded
+nothing. Each of its three stores opens with the default caches, a 64 MiB
+page cache and a 96 MiB record cache, so the budgets alone are 480 MiB of the
+cage's 500 MiB; a relaxed store also holds its unsettled span, which the
+record cache cannot evict, and the shared storage thread holds each window
+in RAM until it lands. The durable row survives because its unsettled span
+is near zero. The `multi` rows take no compacted footprint (never seeded,
+RFC 0065), so `peak` is the settled one.
+
+Against `e63a9d0`, `wavedb/single` durable: **read_hot 1 621.8 → 185 914.4
+(×115, p50 1.06 µs)**, read_cold 1 622.1 → 21 413.6 (×13), insert +17%,
+update +22%; bytes written, peak and compacted footprint unchanged. Relaxed:
+read_hot 1 631.2 → 21 381.9 (×13), read_cold 1 654.7 → 23 815.3 (×14),
+**insert +77%, update ×2.7**, KiB per insert 5.4 → 3.8 and per update
+23.2 → 12.6, peak 2 303.1 → 1 420.7 MB (−38%).
+
+Where it comes from, from the read-path probe (a `probe` build, which records
+no row; `micro` relaxed at this tier, in the cage). Before, a hot read was
+605 µs. The record cache answered 0.8% of reads, because its 96 MiB were
+almost all dead copies of chain segments and index nodes, rewritten whole by
+every write, and eviction dropped whole chunks, records and all. Every miss
+decoded a page in 1.39 ms, 1.1 ms of it WaveWire walking the page's
+`Vec<u8>` records one byte at a time. The bulk codec cut the decode to
+0.34 ms, of which zstd is now 0.27 ms. Exact capacities also let the 64 MiB
+page cache hold 467 pages instead of 297, so its hit rate went from 58% to
+90%. Compaction is what lifts the durable read_hot: each durable write
+settles at once, so nearly the whole log is compactable and the records stay
+in the cache. On the relaxed row the 1 s window keeps up to ~70 MB of the
+96 MiB unsettled, which compaction cannot touch (RFC 0068 amendment), so its
+read_hot is the page path, level with read_cold. The relaxed write gain is
+the codec on the settle side (every rewritten page encodes its records). A
+faster insert also likely carries more records per 1 s window, so each
+round's segment rewrites spread over more of them; that is plausible but not
+measured.
+
+`multi` durable against `single` durable: insert ×1.89 and update ×1.88 on
+three threads, each fsync-bound on its own batches; read_hot ×3.6 and
+read_cold ×4.0, more than the thread count, since each store's caches hold a
+third of the dataset. Bytes written per insert are close (187.6 against
+202.7 KiB), yet the end-of-load footprint is 9.3 GB against 33.6 GB. That gap
+is not yet explained.
+
+Rows `20bdf2d53b48a0c3`, `1c569a761bf08be3`, `94408997a9d9ae54`.
