@@ -38,9 +38,6 @@ use crate::shop::{
 use super::SETTLE_AFTER;
 use super::engine::ShopEngine;
 
-/// Cache budget a settle evicts down to.
-const CACHE_BUDGET_BYTES: usize = 96 << 20;
-
 /// What a consumer needs to build its engine.
 pub struct Factory<E: ShopEngine> {
     shared: E::Shared,
@@ -149,13 +146,15 @@ impl<E: ShopEngine> Driver for ShopWavedb<E> {
 
     /// A relaxed row settles once per elapsed window — a node's tick, as the
     /// embedded bracket's counterpart to a server's background threads,
-    /// outside the timed window — and evicts to the budget.
+    /// outside the timed window — and evicts to the store's budget: its data
+    /// shard's share of the database's, which one constant per consumer
+    /// would multiply by the consumers.
     fn after_op(&mut self) -> Result<(), String> {
         if !self.durable && self.settled.elapsed() >= crate::RELAXED_WINDOW {
             self.engine.drain()?;
             self.settled = std::time::Instant::now();
         }
-        self.engine.evict(CACHE_BUDGET_BYTES);
+        self.engine.evict_to_budget();
         Ok(())
     }
 
