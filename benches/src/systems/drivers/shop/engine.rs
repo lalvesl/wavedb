@@ -56,6 +56,9 @@ pub trait ShopEngine: Sized {
     /// A settle that failed.
     fn drain(&self) -> Result<(), String>;
     fn evict(&self, budget: usize);
+    /// Drop settled cache entries down to the budget the store was opened
+    /// with — on a sharded database, this data shard's share of it.
+    fn evict_to_budget(&self);
 }
 
 /// One data shard per consumer: consumer `i` takes store `i`, once.
@@ -115,6 +118,10 @@ impl ShopEngine for PageStore {
     fn evict(&self, budget: usize) {
         self.evict_settled(budget);
     }
+
+    fn evict_to_budget(&self) {
+        Self::evict_to_budget(self);
+    }
 }
 
 /// The sharded seam: N shards, each owned by one consumer thread.
@@ -150,5 +157,9 @@ impl ShopEngine for ShopShard {
 
     fn evict(&self, budget: usize) {
         self.0.evict_settled(budget);
+    }
+
+    fn evict_to_budget(&self) {
+        self.0.evict_to_budget();
     }
 }
