@@ -47,9 +47,6 @@ use crate::schema::{Thing, ThingPivotId};
 use crate::seed::TENANT;
 use crate::systems::engine::Engineish;
 
-/// Cache budget a settle evicts down to.
-const CACHE_BUDGET_BYTES: usize = 96 << 20;
-
 /// Building one engine from the process's single store.
 ///
 /// One implementation — a `PageStore`, on both rows: the multi row is the
@@ -236,13 +233,15 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
 
     /// A relaxed row settles once per elapsed window — a node's tick, as
     /// the embedded bracket's counterpart to a server's background threads,
-    /// outside the timed window — and evicts to the budget.
+    /// outside the timed window — and evicts to the store's budget: its data
+    /// shard's share of the database's, which one constant per consumer
+    /// would multiply by the consumers.
     fn after_op(&mut self) -> Result<(), String> {
         if !self.durable && self.settled.elapsed() >= crate::RELAXED_WINDOW {
             self.engine.drain()?;
             self.settled = Instant::now();
         }
-        self.engine.evict(CACHE_BUDGET_BYTES);
+        self.engine.evict_to_budget();
         Ok(())
     }
 
