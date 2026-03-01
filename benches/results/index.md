@@ -161,3 +161,55 @@ third of the dataset. Bytes written per insert are close (187.6 against
 is not yet explained.
 
 Rows `20bdf2d53b48a0c3`, `1c569a761bf08be3`, `94408997a9d9ae54`.
+
+## `2026-10-18T20-29Z` · intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-btrfs-104a · `da2ce57`
+
+`shop`, `small` tier (200 000 users preloaded, each a tenant with their orders
+and line items), caged, every system, clock pinned at 2.3 GHz. Each row
+preloads, untimed, then times 100 signups, 200 checkouts, 10 000 profile
+reads, 1 000 order pages and 1 000 order details. `peak` is the footprint at
+the end of the load, `compacted` after the row's own compaction.
+
+| system | durability | signup/s | checkout/s | profile/s | order_page/s | order_detail/s | checkout p99 | peak MB | compacted MB |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| wavedb | durable | — | — | — | — | — | — | — | — |
+| wavedb | relaxed | — | — | — | — | — | — | — | — |
+| wavedb/multi | durable | — | — | — | — | — | — | — | — |
+| wavedb/multi | relaxed | — | — | — | — | — | — | — | — |
+| sqlite | durable | 564.9 | 565.5 | 148 591.3 | 21 241.4 | 22 144.2 | 2.3 ms | 46.7 | 44.1 |
+| sqlite | relaxed | 1 317.3 | 9 816.3 | 147 368.4 | 24 120.8 | 21 738.3 | 0.2 ms | 46.7 | 44.1 |
+| postgres | durable | 520.1 | 488.8 | 20 351.2 | 5 314.3 | 4 054.2 | 3.2 ms | 373.1 | 355.1 |
+| postgres | relaxed | 7 794.9 | 3 843.1 | 20 850.4 | 5 322.2 | 4 010.9 | 0.5 ms | 373.1 | 355.1 |
+| mysql | durable | 228.8 | 163.8 | 13 852.4 | 3 583.9 | 2 180.7 | 59.2 ms | 359.0 | 345.6 |
+| mysql | relaxed | 8 854.3 | 2 528.9 | 13 459.3 | 2 270.2 | 2 249.2 | 0.6 ms | 359.0 | 345.6 |
+| mongodb | durable | 194.5 | 141.0 | 4 423.7 | 1 293.7 | 429.5 | 66.7 ms | 337.2 | 337.3 |
+| mongodb | relaxed | 1 606.1 | 464.3 | 4 336.7 | 1 308.8 | 564.5 | 2.8 ms | 337.1 | 337.3 |
+| valkey | durable | 579.2 | 544.1 | 33 855.5 | 12 615.6 | 10 280.9 | 2.2 ms | 177.6 | 97.8 |
+| valkey | relaxed | 23 628.4 | 11 342.8 | 33 978.2 | 12 586.4 | 10 224.5 | 0.2 ms | 177.6 | 97.8 |
+
+All four WaveDB rows were OOM-killed in the cage (exit 137), 12–16 s in,
+still in the untimed preload, durable and relaxed alike. They recorded
+nothing, as in the `4590276` run. A heaptrack profile of the
+`wavedb/single relaxed` row run outside the cage puts the heap peak at
+788.8 MB, in the preload's last `drain()`:
+
+- 474 MB in one settle round's plan:
+  - every page the round touches decoded at once (`plan::staged_page`,
+    222 MB);
+  - their images (64 MB);
+  - the rest of the round.
+- 230 MB in the record cache, which the fill evicts to 192 MiB.
+- 84.5 MB in the assembled window.
+
+`drain()` steps the settle with an unbounded round (`usize::MAX` ids), so a
+round is everything unsettled, up to the fill's 64 MiB. A plan holds every
+page it stages until it has applied the whole round, because each image must
+bind one dictionary state and splits are decided last. A round's memory is
+therefore the number of distinct pages it touches. A node's 4 096-id bound
+does not cap it either, since 4 096 ids spread over a nesting shape can
+touch as many pages.
+
+Rows `881aa4504b0ab49a`, `80a3b4fbaa2a71be`, `b2038921c693c8f0`,
+`bbcfb8007bf8d0a0`, `fc50563a10570306`, `e298462eaa825aea`,
+`5bd33ad5241e1e27`, `4fe8309ca0fa7af7`, `17654b00eb0c4610`,
+`a2b3d67de3091ec0`.
