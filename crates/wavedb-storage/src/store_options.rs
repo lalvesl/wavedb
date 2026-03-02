@@ -36,6 +36,20 @@ pub struct StoreOptions {
     /// remembered separately at every call site.
     pub record_cache_bytes: usize,
 
+    /// The share of [`record_cache_bytes`](Self::record_cache_bytes), in
+    /// percent, that committed writes not settled yet may reach before
+    /// [`under_pressure`](crate::PageStore::under_pressure) says so — 50 by
+    /// default, anything past 100 read as 100.
+    ///
+    /// What is not settled cannot leave the cache (its page is stale), so a
+    /// burst of writes between two settles can fill the budget with bytes
+    /// no eviction may touch. Settling once this share is reached keeps the
+    /// rest of the budget for settled records, which eviction can compact
+    /// and keep. Like the budget, it is the caller's to act on: the store
+    /// only answers. `0` asks for a settle after every write, `100` only
+    /// once the whole budget is unsettled.
+    pub pressure_percent: u8,
+
     /// Where the pages live besides the disk (RFC 0070): `Some` makes the
     /// disk a cache of this object store. Fixed when the database is
     /// created — the `MANIFEST` records it, and opening with the other
@@ -72,6 +86,19 @@ pub struct StoreOptions {
 /// caller asks.
 pub const DEFAULT_RECORD_CACHE_BYTES: usize = 96 << 20;
 
+impl StoreOptions {
+    /// Unsettled bytes past which a store opened with these options is
+    /// under pressure: [`pressure_percent`](Self::pressure_percent) of
+    /// [`record_cache_bytes`](Self::record_cache_bytes), the percent capped
+    /// at 100.
+    #[must_use]
+    pub fn pressure_bytes(&self) -> u64 {
+        let budget = u64::try_from(self.record_cache_bytes).unwrap_or(u64::MAX);
+        budget / 100 * u64::from(self.pressure_percent.min(100))
+            + budget % 100 * u64::from(self.pressure_percent.min(100)) / 100
+    }
+}
+
 impl Default for StoreOptions {
     /// A 64 MiB page cache, and a record-cache budget nothing applies
     /// unless asked.
@@ -79,6 +106,7 @@ impl Default for StoreOptions {
         Self {
             page_cache_bytes: crate::page_cache::DEFAULT_BUDGET_BYTES,
             record_cache_bytes: DEFAULT_RECORD_CACHE_BYTES,
+            pressure_percent: 50,
             remote: None,
             file_bytes: crate::alloc::DEFAULT_FILE_BYTES,
             victim_free_percent: 50,
