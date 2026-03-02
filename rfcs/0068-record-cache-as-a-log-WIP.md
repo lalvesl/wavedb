@@ -285,6 +285,27 @@ a segment rewritten whole per write, is the chain's (RFC 0050).
 Measured on the relaxed micro row (probe, caged): over the update phase the
 index held 22 220 records against 3 576 before, a read 9.5 µs against 11.0.
 
+## Amendment (2026-10-23): pressure
+
+What is unsettled cannot be evicted, so a store settled only on a clock
+lets a burst between two ticks fill its budget with bytes no eviction may
+touch — the relaxed micro row above, ~70 MB of 96 MiB. `PageStore::under_pressure()`
+says when the unsettled bytes (`W − S`, summed over the types: one
+subtraction each, cheap after every write) pass `StoreOptions::pressure_percent`
+of the record budget — 50 by default, a `u8` read as at most 100, worked out
+at open from the store's own budget, so a sharded database's line is each
+data shard's share like its budget. The store does not act on it, as it does
+not evict on its own; a caller asks after a write and settles, then evicts.
+A read never adds to either, so it asks nothing.
+
+The benchmark's drivers had evicted after every operation, reads included,
+each time summing every chunk's capacity to find nothing to do — paid by
+every hot read, outside its timed window (how much of the read row's wall
+time it was is for the next run to say). They now act only after a write:
+a durable one evicts (it settled already), a relaxed one settles and evicts
+on its window or on pressure. A node's valve already weighs the unsettled
+bytes against a band of its own.
+
 ## Deliberately out of scope
 
 - **Keeping settled records hot** (beyond the compaction of the amendment
