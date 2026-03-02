@@ -59,6 +59,9 @@ pub trait ShopEngine: Sized {
     /// Drop settled cache entries down to the budget the store was opened
     /// with — on a sharded database, this data shard's share of it.
     fn evict_to_budget(&self);
+    /// Whether what is not settled has passed the store's pressure line
+    /// (`StoreOptions::pressure_percent` of its record budget).
+    fn under_pressure(&self) -> bool;
 }
 
 /// One data shard per consumer: consumer `i` takes store `i`, once.
@@ -122,6 +125,10 @@ impl ShopEngine for PageStore {
     fn evict_to_budget(&self) {
         Self::evict_to_budget(self);
     }
+
+    fn under_pressure(&self) -> bool {
+        Self::under_pressure(self)
+    }
 }
 
 /// The sharded seam: N shards, each owned by one consumer thread.
@@ -161,5 +168,9 @@ impl ShopEngine for ShopShard {
 
     fn evict_to_budget(&self) {
         self.0.evict_to_budget();
+    }
+
+    fn under_pressure(&self) -> bool {
+        self.0.under_pressure()
     }
 }
