@@ -207,7 +207,9 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   dictionary) belongs to the open store (RFC 0067 step 1), and so does the
   record cache — one log per type in chunks + one Dashtable-shaped index;
   settledness is a cursor, eviction compacts settled chunks that are mostly
-  superseded copies and only then drops settled chunks (RFC 0068). Compaction
+  superseded copies and only then drops settled chunks, and
+  `under_pressure()` says when the unsettled bytes pass `pressure_percent`
+  (50) of the record budget — the caller settles then (RFC 0068). Compaction
   carries the runs of the emptiest data files (≥ `victim_free_percent`
   free, 50) forward into the active one — after restating every address, so
   no header in them is live — and once a batch over the moves is durable,
