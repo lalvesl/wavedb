@@ -113,6 +113,9 @@ pub struct WavedbDriver<E: Engineish> {
     durable: bool,
     /// When the store was last settled.
     settled: Instant,
+    /// Whether the last op wrote: only a write can leave work to settle or
+    /// records to evict.
+    wrote: bool,
 }
 
 // No `Send` bound on `E`: the engine is built on the consumer's thread and
@@ -167,6 +170,7 @@ where
             consumers: self.consumers as u64,
             durable: self.durable,
             settled: Instant::now(),
+            wrote: false,
         })
     }
 
@@ -192,6 +196,7 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
     fn execute(&mut self, op: MicroOp) -> Result<(), String> {
         let db = LocalHandle::new(self.engine.store(), U48::from(TENANT));
         let col = Thing::collection(self.pivot);
+        self.wrote = !matches!(op, MicroOp::Read { .. });
         match op {
             // A durable row writes through the `_durable` twin (RFC 0072
             // §12): it returns once its batch is durable — on a store nobody
@@ -231,13 +236,21 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
         Ok(())
     }
 
-    /// A relaxed row settles once per elapsed window — a node's tick, as
-    /// the embedded bracket's counterpart to a server's background threads,
-    /// outside the timed window — and evicts to the store's budget: its data
-    /// shard's share of the database's, which one constant per consumer
-    /// would multiply by the consumers.
+    /// After a write, never a read — a read adds nothing to settle and
+    /// nothing to evict. A durable write has settled already, so it only
+    /// evicts; a relaxed one settles, then evicts, once the window has
+    /// elapsed (a node's tick, outside the timed window) or once what is
+    /// not settled has passed the store's pressure line (a node's valve).
+    /// Both evict to the store's budget: its data shard's share of the
+    /// database's.
     fn after_op(&mut self) -> Result<(), String> {
-        if !self.durable && self.settled.elapsed() >= crate::RELAXED_WINDOW {
+        if !std::mem::take(&mut self.wrote) {
+            return Ok(());
+        }
+        if !self.durable
+            && (self.settled.elapsed() >= crate::RELAXED_WINDOW
+                || self.engine.under_pressure())
+        {
             self.engine.drain()?;
             self.settled = Instant::now();
         }
@@ -352,6 +365,54 @@ mod tests {
         assert_eq!(phases[1].samples.len(), 60, "read_hot");
         assert_eq!(phases[3].samples.len(), 60, "update");
         assert!(phases.iter().all(|p| p.wall_ns > 0));
+    }
+
+    /// A relaxed row settles on pressure, not only on its window: with a
+    /// record budget a few inserts fill, what is unsettled never stays past
+    /// the store's line once the op is done — long before a 1 s window
+    /// elapses — and a read leaves the store as it found it.
+    #[test]
+    fn a_relaxed_row_settles_on_pressure_and_never_after_a_read() {
+        use crate::harness::Driver as _;
+        use crate::plan::op::MicroOp;
+        use crate::schema::thing;
+
+        let scratch = Scratch::new();
+        let options = StoreOptions {
+            record_cache_bytes: 64 << 10,
+            ..StoreOptions::default()
+        };
+        let line = options.pressure_bytes();
+        let store = PageStore::open_with(
+            &scratch.0,
+            &Thing::storage_entries(),
+            options,
+        )
+        .expect("open");
+        let factory: Factory<PageStore> =
+            Factory::new(vec![store], None, 400, false);
+        let mut driver = factory.build(0).expect("build");
+        let mut settled_by_pressure = false;
+        for n in 0..400 {
+            driver
+                .execute(MicroOp::Insert {
+                    n,
+                    row: thing(n, 42),
+                })
+                .expect("insert");
+            let owed = driver.engine.unsettled_bytes();
+            driver.after_op().expect("after insert");
+            settled_by_pressure |= owed > line;
+            assert!(driver.engine.unsettled_bytes() <= line, "row {n}");
+        }
+        assert!(settled_by_pressure, "the inserts never reached the line");
+        let owed = driver.engine.unsettled_bytes();
+        let held = driver.engine.cache_bytes();
+        driver.execute(MicroOp::Read { n: 7 }).expect("read");
+        driver.after_op().expect("after read");
+        assert_eq!(driver.engine.unsettled_bytes(), owed, "a read settled");
+        assert_eq!(driver.engine.cache_bytes(), held, "a read evicted");
+        drop(driver);
     }
 
     /// The rule that forces the `Mutex<Option<_>>`: a second consumer asking
