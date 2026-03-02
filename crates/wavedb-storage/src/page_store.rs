@@ -101,6 +101,9 @@ pub struct PageStore {
     /// The record-cache budget this store was opened with — carried, not
     /// applied (see [`StoreOptions::record_cache_bytes`]).
     pub(crate) record_cache_bytes: usize,
+    /// Unsettled bytes past which the store is under pressure: the
+    /// [`StoreOptions::pressure_percent`] share of `record_cache_bytes`.
+    pub(crate) pressure_bytes: u64,
     /// The thread's `fsync` helper, once the store has one: batch barriers
     /// are then taken there ([`crate::barrier`]).
     pub(crate) barrier: Option<crate::barrier::Barrier>,
@@ -253,6 +256,7 @@ impl PageStore {
                 crate::block_file::random_seed(),
             )),
             record_cache_bytes: options.record_cache_bytes,
+            pressure_bytes: options.pressure_bytes(),
             barrier: None,
             compaction: std::cell::Cell::default(),
             victims: RefCell::default(),
@@ -355,6 +359,64 @@ mod tests {
         let o = StoreOptions::default();
         assert_eq!(o.page_cache_bytes, 64 << 20);
         assert_eq!(o.record_cache_bytes, 96 << 20);
+        assert_eq!(o.pressure_percent, 50);
+    }
+
+    /// The pressure line is its percent of the record-cache budget, exact
+    /// to the byte, with a percent past 100 read as the whole budget.
+    #[test]
+    fn the_pressure_line_is_a_share_of_the_record_budget() {
+        let at = |record_cache_bytes, pressure_percent| {
+            StoreOptions {
+                record_cache_bytes,
+                pressure_percent,
+                ..StoreOptions::default()
+            }
+            .pressure_bytes()
+        };
+        assert_eq!(at(96 << 20, 50), 48 << 20);
+        assert_eq!(at(96 << 20, 0), 0);
+        assert_eq!(at(96 << 20, 100), 96 << 20);
+        assert_eq!(at(96 << 20, 255), 96 << 20);
+        assert_eq!(at(199, 50), 99, "rounded down, never past the share");
+        assert_eq!(at(usize::MAX, 100), u64::MAX, "no overflow");
+    }
+
+    /// Writes past the pressure line put the store under pressure, and a
+    /// settle takes it off — without evicting anything: the store answers,
+    /// the caller acts.
+    #[test]
+    fn unsettled_writes_past_the_line_are_pressure_until_settled() {
+        let d = tempfile::tempdir().unwrap();
+        let s = PageStore::open_with(
+            d.path(),
+            &[&TEST_SLOT],
+            StoreOptions {
+                record_cache_bytes: 8 << 10,
+                pressure_percent: 50, // 4 KiB
+                ..StoreOptions::default()
+            },
+        )
+        .unwrap();
+        let body = [7u8; 200];
+        block_on(async {
+            let mut k = 0u64;
+            while !s.under_pressure() {
+                assert!(
+                    s.unsettled_bytes() <= 4 << 10,
+                    "past the line, unseen"
+                );
+                s.apply(&[Write::Put(nonunique(k), rec(SH, &body))])
+                    .await
+                    .unwrap();
+                k += 1;
+            }
+            assert!(k > 1, "one record is not 4 KiB");
+        });
+        let held = s.cache_len();
+        s.drain().unwrap();
+        assert!(!s.under_pressure(), "settled, nothing is owed");
+        assert_eq!(s.cache_len(), held, "answering evicted nothing");
     }
 
     /// Each budget reaches the layer that spends it, and `open` still means
