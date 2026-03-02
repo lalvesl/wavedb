@@ -85,6 +85,7 @@ where
             consumers: self.consumers,
             durable: self.durable,
             settled: std::time::Instant::now(),
+            wrote: false,
         })
     }
 
@@ -111,6 +112,9 @@ pub struct ShopWavedb<E: ShopEngine> {
     durable: bool,
     /// When the store was last settled.
     settled: std::time::Instant,
+    /// Whether the last op wrote: only a write can leave work to settle or
+    /// records to evict.
+    wrote: bool,
 }
 
 impl<E: ShopEngine> Driver for ShopWavedb<E> {
@@ -135,6 +139,8 @@ impl<E: ShopEngine> Driver for ShopWavedb<E> {
             self.shard,
             u as usize % self.consumers.max(1)
         );
+        self.wrote =
+            matches!(op, ShopOp::Signup { .. } | ShopOp::Checkout { .. });
         let store = self.engine.store();
         let db = tenant(store, u);
         // A durable row ends each writing op with a `_durable` write (RFC
@@ -144,13 +150,21 @@ impl<E: ShopEngine> Driver for ShopWavedb<E> {
         block_on(run(&db, op, self.durable))
     }
 
-    /// A relaxed row settles once per elapsed window — a node's tick, as the
-    /// embedded bracket's counterpart to a server's background threads,
-    /// outside the timed window — and evicts to the store's budget: its data
-    /// shard's share of the database's, which one constant per consumer
-    /// would multiply by the consumers.
+    /// After a write, never a read — a read adds nothing to settle and
+    /// nothing to evict. A durable write has settled already, so it only
+    /// evicts; a relaxed one settles, then evicts, once the window has
+    /// elapsed (a node's tick, outside the timed window) or once what is
+    /// not settled has passed the store's pressure line (a node's valve).
+    /// Both evict to the store's budget: its data shard's share of the
+    /// database's.
     fn after_op(&mut self) -> Result<(), String> {
-        if !self.durable && self.settled.elapsed() >= crate::RELAXED_WINDOW {
+        if !std::mem::take(&mut self.wrote) {
+            return Ok(());
+        }
+        if !self.durable
+            && (self.settled.elapsed() >= crate::RELAXED_WINDOW
+                || self.engine.under_pressure())
+        {
             self.engine.drain()?;
             self.settled = std::time::Instant::now();
         }
