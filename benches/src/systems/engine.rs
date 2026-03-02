@@ -72,6 +72,10 @@ pub trait Engineish {
     /// with — on a sharded database, this data shard's share of it.
     fn evict_to_budget(&self);
 
+    /// Whether what is not settled has passed the store's pressure line
+    /// (`StoreOptions::pressure_percent` of its record budget).
+    fn under_pressure(&self) -> bool;
+
     /// Compact to the end: the live pages of the emptiest data files carried
     /// forward, what they leave cut off and deleted (RFC 0071).
     fn compact(&self) -> Result<(), String>;
@@ -106,6 +110,10 @@ impl Engineish for PageStore {
 
     fn evict_to_budget(&self) {
         Self::evict_to_budget(self);
+    }
+
+    fn under_pressure(&self) -> bool {
+        Self::under_pressure(self)
     }
 
     fn compact(&self) -> Result<(), String> {
