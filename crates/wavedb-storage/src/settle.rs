@@ -58,4 +58,18 @@ impl PageStore {
     pub fn evict_to_budget(&self) {
         self.evict_settled(self.record_cache_bytes);
     }
+
+    /// Whether committed writes not settled yet have passed the store's
+    /// [`pressure_percent`](crate::StoreOptions::pressure_percent) share of
+    /// its record-cache budget — the moment to settle, then
+    /// [`evict_to_budget`](Self::evict_to_budget), rather than wait for
+    /// the next tick.
+    ///
+    /// The store never acts on it, as it never evicts on its own: a caller
+    /// asks after a write (a read adds nothing unsettled) and decides. It
+    /// sums one subtraction per type, so asking after every write is cheap.
+    #[must_use]
+    pub fn under_pressure(&self) -> bool {
+        self.unsettled_bytes() > self.pressure_bytes
+    }
 }
