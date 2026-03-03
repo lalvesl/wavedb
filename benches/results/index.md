@@ -213,3 +213,64 @@ Rows `881aa4504b0ab49a`, `80a3b4fbaa2a71be`, `b2038921c693c8f0`,
 `bbcfb8007bf8d0a0`, `fc50563a10570306`, `e298462eaa825aea`,
 `5bd33ad5241e1e27`, `4fe8309ca0fa7af7`, `17654b00eb0c4610`,
 `a2b3d67de3091ec0`.
+
+## `2026-10-23T19-07Z` · intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-btrfs-cee3 · `5fc77d4`
+
+`micro`, `small` tier (200 000 records, 50.8 MB logical), caged, WaveDB only,
+clock pinned at 2.3 GHz. The lane key differs from the `104a` runs above. Its
+hash covers CPU, cores, CPU and memory budgets, total memory, kernel,
+filesystem, disk class, virtualisation and clock. The code computing it is
+unchanged, the CPU, clock, cage and kernel (6.18.38) are the same, and the
+NixOS system was reconfigured on 2026-10-19 and rebooted since. Total memory
+is the likely field; this is unconfirmed. The comparison below with `1fd1c9f`
+is therefore across lanes, on the same hardware.
+
+What changed (`da2ce57`, `5fc77d4`):
+
+- The bench drivers evict to the store's own record budget, a data shard's
+  share, instead of a 96 MiB constant per consumer.
+- They act only after a write: a durable write evicts, and a relaxed write
+  settles and evicts on its window or once `PageStore::under_pressure()`
+  says the unsettled bytes passed half the record budget (RFC 0068,
+  amendment 2026-10-23).
+- Before, they evicted after every operation, reads included, each time
+  summing every chunk of the record cache.
+
+| system | durability | consumers | insert/s | read_hot/s | read_cold/s | update/s | insert p99 | KiB written/insert | KiB written/update | peak MB | compacted MB | log MB |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| wavedb/single | durable | 1 | 115.2 | 616 707.2 | 21 963.0 | 87.5 | 74.4 ms | 201.2 | 238.8 | 33 191.5 | 25.5 | 0 |
+| wavedb/single | relaxed | 1 | 1 376.0 | 52 674.0 | 23 846.4 | 671.0 | 0.6 ms | 7.5 | 18.7 | 2 477.5 | 24.5 | 0 |
+| wavedb/multi | durable | 3 | 208.5 | 2 102 350.8 | 101 423.8 | 165.7 | 81.0 ms | 188.1 | 215.4 | 9 405.3 | — | 0 |
+| wavedb/multi | relaxed | 3 | 5 463.5 | 204 311.3 | 107 096.9 | 2 379.1 | 0.4 ms | 5.0 | 14.3 | 1 705.7 | — | 0 |
+
+`wavedb/multi relaxed`, OOM-killed on `1fd1c9f`, now completes. Its three
+stores together evicted to 288 MiB of records before the budget fix, and to
+96 MiB after it.
+
+**The per-read eviction was most of a hot read.** On `wavedb/single`
+durable, read_hot went from 185 914.4 to **616 707.2/s (×3.3)**. Its wall time
+per read fell from 5.38 to 1.62 µs, while the timed read stayed at ~0.9 µs.
+About 3.8 µs of every read was the driver's eviction walk. The ~0.7 µs left
+outside the timed window is the generator-to-consumer hand-off.
+`wavedb/multi` durable reads **2 102 350.8/s** on three threads, against
+664 070.8. Writes are unchanged on the durable rows: insert 110.4 → 115.2,
+update 87.2 → 87.5, multi 208.2 → 208.5.
+
+**Pressure helps relaxed reads and costs relaxed writes, as built.**
+
+Reads: `wavedb/single` relaxed read_hot went from 21 381.9 to **52 674.0/s
+(×2.5)**. Settling at half the budget leaves the other half settled,
+which compaction can keep.
+
+Writes: insert fell 1 829.5 → 1 376.0 (−25%) and update 817.1 → 671.0
+(−18%). Bytes written rose, 3.8 → 7.5 KiB per insert and 12.6 → 18.7 per
+update, and peak rose 1 420.7 → 2 477.5 MB. Settles are more frequent and
+smaller, and each one is the driver's `drain()`, which waits for its barrier
+on the consumer thread and is counted in wall time. A relaxed insert's
+wall time is 727 µs against 367 µs timed. A node settles with
+`settle_step` and takes the barrier on a helper (`use_barrier`), never
+waiting. The relaxed driver should do the same: settle without awaiting
+the barrier.
+
+Rows `873ba15255870fa9`, `a78ee165b302c1c9`, `974caf2ecc391932`,
+`d67b6af9a022d936`.
