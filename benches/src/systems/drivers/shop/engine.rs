@@ -55,6 +55,12 @@ pub trait ShopEngine: Sized {
     /// # Errors
     /// A settle that failed.
     fn drain(&self) -> Result<(), String>;
+    /// Settle without waiting for durability
+    /// ([`settle_unwaited`](crate::systems::engine::settle_unwaited)).
+    ///
+    /// # Errors
+    /// A settle or an earlier barrier failed.
+    fn settle(&self) -> Result<(), String>;
     fn evict(&self, budget: usize);
     /// Drop settled cache entries down to the budget the store was opened
     /// with — on a sharded database, this data shard's share of it.
@@ -118,6 +124,10 @@ impl ShopEngine for PageStore {
         Self::drain(self).map_err(|e| format!("settle: {e}"))
     }
 
+    fn settle(&self) -> Result<(), String> {
+        crate::systems::engine::settle_unwaited(self)
+    }
+
     fn evict(&self, budget: usize) {
         self.evict_settled(budget);
     }
@@ -160,6 +170,10 @@ impl ShopEngine for ShopShard {
 
     fn drain(&self) -> Result<(), String> {
         self.0.drain().map_err(|e| format!("settle: {e}"))
+    }
+
+    fn settle(&self) -> Result<(), String> {
+        crate::systems::engine::settle_unwaited(&self.0)
     }
 
     fn evict(&self, budget: usize) {
