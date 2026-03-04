@@ -55,6 +55,24 @@ pub fn open(dir: &Path) -> Result<PageStore, String> {
         .map_err(|e| format!("open: {e}"))
 }
 
+/// A relaxed row's stores take their batch barriers on one helper thread,
+/// as a node's worker does (RFC 0067 §4): a settle then hands its `fsync`
+/// over and goes on, and the consumer never waits for the disk. A durable
+/// row keeps its barriers inline — waiting for them is what it measures.
+/// Stores writing through a storage thread already hand theirs to it; the
+/// helper is idle for them.
+///
+/// # Errors
+/// The helper thread could not be started.
+pub fn relax(stores: &mut [PageStore]) -> Result<(), String> {
+    let barrier = wavedb_storage::Barrier::spawn("bench-fsync")
+        .map_err(|e| format!("fsync helper: {e}"))?;
+    for store in stores {
+        store.use_barrier(barrier.clone());
+    }
+    Ok(())
+}
+
 /// The multi row's database: `shards` data shards, one per consumer, all
 /// writing through **one** storage shard (RFC 0073) — the shop's shape, and
 /// a node's in miniature.
