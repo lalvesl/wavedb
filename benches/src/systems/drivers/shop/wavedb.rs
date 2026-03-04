@@ -152,7 +152,8 @@ impl<E: ShopEngine> Driver for ShopWavedb<E> {
 
     /// After a write, never a read — a read adds nothing to settle and
     /// nothing to evict. A durable write has settled already, so it only
-    /// evicts; a relaxed one settles, then evicts, once the window has
+    /// evicts; a relaxed one settles (never waiting for the `fsync`, which
+    /// a helper takes), then evicts, once the window has
     /// elapsed (a node's tick, outside the timed window) or once what is
     /// not settled has passed the store's pressure line (a node's valve).
     /// Both evict to the store's budget: its data shard's share of the
@@ -165,7 +166,7 @@ impl<E: ShopEngine> Driver for ShopWavedb<E> {
             && (self.settled.elapsed() >= crate::RELAXED_WINDOW
                 || self.engine.under_pressure())
         {
-            self.engine.drain()?;
+            self.engine.settle()?;
             self.settled = std::time::Instant::now();
         }
         self.engine.evict_to_budget();
