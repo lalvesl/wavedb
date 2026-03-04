@@ -238,7 +238,8 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
 
     /// After a write, never a read — a read adds nothing to settle and
     /// nothing to evict. A durable write has settled already, so it only
-    /// evicts; a relaxed one settles, then evicts, once the window has
+    /// evicts; a relaxed one settles (never waiting for the `fsync`, which
+    /// a helper takes), then evicts, once the window has
     /// elapsed (a node's tick, outside the timed window) or once what is
     /// not settled has passed the store's pressure line (a node's valve).
     /// Both evict to the store's budget: its data shard's share of the
@@ -251,7 +252,7 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
             && (self.settled.elapsed() >= crate::RELAXED_WINDOW
                 || self.engine.under_pressure())
         {
-            self.engine.drain()?;
+            self.engine.settle()?;
             self.settled = Instant::now();
         }
         self.engine.evict_to_budget();
@@ -413,6 +414,47 @@ mod tests {
         assert_eq!(driver.engine.unsettled_bytes(), owed, "a read settled");
         assert_eq!(driver.engine.cache_bytes(), held, "a read evicted");
         drop(driver);
+    }
+
+    /// A relaxed store settles without waiting for its `fsync`: the
+    /// helper takes the barrier, nothing is left unsettled when the call
+    /// returns, and the records are there after a reopen.
+    #[test]
+    fn an_unwaited_settle_leaves_nothing_owed_and_survives_a_reopen() {
+        use wavedb_core::{LocalHandle, U48};
+
+        use crate::schema::thing;
+        use crate::seed::TENANT;
+        use crate::systems::engine::settle_unwaited;
+
+        let scratch = Scratch::new();
+        let mut stores = vec![open(&scratch.0)];
+        crate::systems::wavedb::relax(&mut stores).expect("relax");
+        let store = stores.pop().expect("one store");
+        let (pivot, ids) = {
+            let db = LocalHandle::new(&store, U48::from(TENANT));
+            let pivot = futures::executor::block_on(Thing::create_pivot(&db))
+                .expect("pivot");
+            let col = Thing::collection(pivot);
+            let ids: Vec<_> = (0..50)
+                .map(|n| {
+                    futures::executor::block_on(col.insert(&db, &thing(n, 42)))
+                        .expect("insert")
+                })
+                .collect();
+            (pivot, ids)
+        };
+        settle_unwaited(&store).expect("settle");
+        assert_eq!(store.unsettled_bytes(), 0, "the round owed nothing");
+        drop(store);
+        let store = open(&scratch.0);
+        let db = LocalHandle::new(&store, U48::from(TENANT));
+        let col = Thing::collection(pivot);
+        for (n, id) in ids.into_iter().enumerate() {
+            let got =
+                futures::executor::block_on(col.get(&db, id)).expect("get");
+            assert!(got.is_some(), "row {n} after the reopen");
+        }
     }
 
     /// The rule that forces the `Mutex<Option<_>>`: a second consumer asking
