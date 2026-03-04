@@ -127,12 +127,15 @@ where
 
     let data = dir.join("data");
     let consumers = run.key.consumers.max(1) as usize;
-    let stores = if multi {
+    let mut stores = if multi {
         wavedb_adapter::open_shards(&data, consumers)?
     } else {
         vec![wavedb_adapter::open(&data)?]
     };
     let durable = d == Durability::Durable;
+    if !durable {
+        wavedb_adapter::relax(&mut stores)?;
+    }
     let factory = drivers::wavedb::Factory::<E>::new(
         stores,
         sidecar,
@@ -269,7 +272,9 @@ fn settings(
                 }
                 Durability::Relaxed => {
                     format!(
-                        "standard writes: a settle per elapsed {:?}",
+                        "standard writes: a settle per elapsed {:?} or past half the \
+                         record budget (pressure), its fsync on a helper, never \
+                         awaited",
                         crate::RELAXED_WINDOW
                     )
                 }
