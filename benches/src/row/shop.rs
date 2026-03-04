@@ -175,8 +175,11 @@ where
     // preload just wrote would otherwise still be warm and the read phases
     // would measure RAM. The measured durability is the driver's: every write
     // durable, or a settle per window.
-    let stores = crate::systems::shop::wavedb::open_measured(&dir, shards)?;
+    let mut stores = crate::systems::shop::wavedb::open_measured(&dir, shards)?;
     let durable = d == Durability::Durable;
+    if !durable {
+        crate::systems::wavedb::relax(&mut stores)?;
+    }
     let factory = drv::wavedb::Factory::<E>::new(stores, asked, durable)?;
     let used = crate::harness::DriverFactory::consumers(&factory);
     // The consumer count is a **row-identity field**: it is in the digest, and
@@ -236,7 +239,9 @@ where
                                 .to_string()
                         }
                         Durability::Relaxed => format!(
-                            "standard writes: a settle per elapsed {:?}",
+                            "standard writes: a settle per elapsed {:?} or past half the \
+                             record budget (pressure), its fsync on a helper, \
+                             never awaited",
                             crate::RELAXED_WINDOW
                         ),
                     },
