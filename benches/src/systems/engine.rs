@@ -18,7 +18,26 @@
 //! concrete engine, the same rule the workspace holds itself to.
 
 use wavedb_core::Store;
-use wavedb_storage::PageStore;
+use wavedb_storage::{PageStore, Progress};
+
+/// Settle what is committed **without waiting for it to be durable**: open
+/// a batch and step it to its end, its barrier asked of the helper (or the
+/// storage thread), the answer read on a later call — a node's
+/// `settle_step`, on a thread with nothing else to run. No batch opens
+/// while the previous one is not yet durable, so batches never pile up
+/// behind the disk.
+///
+/// # Errors
+/// A settle or an earlier barrier failed.
+pub fn settle_unwaited(store: &PageStore) -> Result<(), String> {
+    let settle = |e| format!("settle: {e}");
+    if store.begin_cycle().map_err(settle)? {
+        while store.cycle_step(usize::MAX).map_err(settle)? == Progress::Settled
+        {
+        }
+    }
+    Ok(())
+}
 
 /// The axis. Named for what differs — where the engine lives — rather than for
 /// a thread count, because the thread count is a consequence.
@@ -65,6 +84,9 @@ pub trait Engineish {
     /// Settle everything committed into a durable batch (RFC 0072).
     fn drain(&self) -> Result<(), String>;
 
+    /// Settle without waiting for durability ([`settle_unwaited`]).
+    fn settle(&self) -> Result<(), String>;
+
     /// Drop settled cache entries down to `budget`.
     fn evict(&self, budget: usize);
 
@@ -102,6 +124,10 @@ impl Engineish for PageStore {
 
     fn drain(&self) -> Result<(), String> {
         Self::drain(self).map_err(|e| format!("drain: {e}"))
+    }
+
+    fn settle(&self) -> Result<(), String> {
+        settle_unwaited(self)
     }
 
     fn evict(&self, budget: usize) {
