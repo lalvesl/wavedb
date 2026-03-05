@@ -147,6 +147,9 @@ order of cost:
 - **Decided** 2026-10-18, after the read probe measured a page decode at
   1.39 ms, 1.1 ms of it the codec walking `Vec<u8>` byte by byte: the bulk
   `memcpy` for byte vectors now, the views as an RFC when they are taken up.
+- **Taken up** 2026-10-23 as [RFC 0076](../rfcs/0076-zero-copy-views-WIP.md),
+  which keeps the format: the views are built eagerly in one pass, so the
+  offsets in the stack this entry planned buy nothing.
 
 ## Core
 
