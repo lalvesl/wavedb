@@ -42,9 +42,14 @@ use thiserror::Error;
 /// shapes (structs: named/tuple/unit; enums: canonical tag form).
 pub use wavedb_wire_derive::WaveWire;
 
-// `WaveWire` impls for the supported std types (scalars, String, Vec, Option,
-// arrays, tuples).
+// `WaveWire` impls for the supported std types: the scalars, then String,
+// Vec, Option, arrays and tuples.
+mod compound;
 mod impls;
+// Borrowed views over the bytes (RFC 0076).
+mod view;
+
+pub use view::{ListIter, ListRef, Wire, view_wire};
 
 /// A wire (de)serialization fault.
 ///
@@ -155,6 +160,37 @@ pub trait WaveWire: Sized {
     /// payload from `heap`.
     fn decode(stack: &mut Cursor, heap: &mut Cursor) -> Result<Self>;
 
+    /// The borrowed twin (RFC 0076): what [`view`](WaveWire::view) builds
+    /// over a value's bytes — `&'a str` for a `String`, `&'a [u8]` for a
+    /// `Vec<u8>`, a [`ListRef`] for any other `Vec`, a number as itself, and
+    /// for a derived `Name`, the `NameRef<'a>` the derive emits beside it.
+    type Ref<'a>: Copy + core::fmt::Debug;
+
+    /// What a `Vec` of these borrows as: a [`ListRef`], or `&'a [u8]` for
+    /// bytes.
+    type SliceRef<'a>: Copy + core::fmt::Debug;
+
+    /// Build the twin from `STACK_SIZE` bytes of `stack` and this value's
+    /// payload in `heap` — the walk [`decode`](WaveWire::decode) makes,
+    /// borrowing what it would copy. Every check `decode` makes happens here.
+    fn view<'a>(
+        stack: &mut Cursor<'a>,
+        heap: &mut Cursor<'a>,
+    ) -> Result<Self::Ref<'a>>;
+
+    /// The owned value back from its twin: the copies `decode` would have
+    /// made.
+    fn from_ref(r: Self::Ref<'_>) -> Self;
+
+    /// View a `Vec` of these from its whole heap `region`.
+    ///
+    /// # Errors
+    /// As [`decode_slice`](WaveWire::decode_slice) on the same region.
+    fn view_slice(region: &[u8]) -> Result<Self::SliceRef<'_>>;
+
+    /// The owned `Vec` back from its view.
+    fn from_slice_ref(r: Self::SliceRef<'_>) -> Vec<Self>;
+
     /// Heap bytes a `Vec` of these takes: each element a self-contained
     /// unit, its stack then its heap. A fixed-width scalar overrides it with
     /// a product, so a byte vector's length is not a walk over its bytes.
@@ -192,6 +228,11 @@ pub trait WaveWire: Sized {
             let mut es = Cursor::new(stack);
             let mut eh = Cursor::new(&region[stack_end..]);
             out.push(Self::decode(&mut es, &mut eh)?);
+            // A unit of no bytes would spin here forever on a region that
+            // is not empty (a `Vec<()>`'s, say), never using it up.
+            if stack_end + eh.pos() == cur {
+                return Err(Error::UnexpectedEof);
+            }
             cur = stack_end + eh.pos();
         }
         Ok(out)
