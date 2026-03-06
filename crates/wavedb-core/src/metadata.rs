@@ -86,6 +86,7 @@ impl WaveWire for Succession {
             other => Err(wavedb_wire::Error::InvalidTag(other)),
         }
     }
+    wavedb_wire::own_view!();
 }
 
 /// Per-record metadata. Injected alongside the record body; serialised through
