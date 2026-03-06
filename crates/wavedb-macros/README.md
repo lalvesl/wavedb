@@ -19,7 +19,7 @@ because both compile this crate.
 | `server`            | `#[server]`: server body + client stub + composed `STRUCT_HASH`. |
 | `args`              | Parse `#[wavedb(...)]` attribute arguments.                     |
 | `struct_hash`       | Compute the `STRUCT_HASH: u64` const from name/shape/fields.    |
-| `wire_derive`       | `WaveWire` — the no-serde, no-`repr(C)` `WaveWire` impl.            |
+| `wire_derive`       | `WaveWire` and the `NameRef` twin, via `wavedb-wire-codegen`.   |
 | `generated`         | Auto-emit the per-NonUnique `Pivot` + `PivotId` types.          |
 | `crud`              | Generated accessors / CRUD glue (the per-item execution steps). |
 | `expose`            | `expose_server!` / `expose_client!` — the declared registry.    |
