@@ -1,0 +1,199 @@
+//! The expansion behind `#[derive(WaveWire)]`, shared by the two derives:
+//! `wavedb-wire-derive`, whose output names `::wavedb_wire`, and
+//! `wavedb-macros`, whose output names `::wavedb_core::wire` (so a schema
+//! crate needs only `wavedb-core`). Each passes its path as `k`.
+//!
+//! For a type `Name` it emits the `WaveWire` impl and the type's borrowed
+//! twin `NameRef<'a>` (RFC 0076): one field per field, each the field type's
+//! view, with `to_owned()` and `From<NameRef>` back to `Name`.
+//!
+//! - **structs** (named, tuple, unit): field stack slots inline in
+//!   declaration order; heap payloads append depth-first to the shared heap.
+//! - **enums**: the canonical tag form. If every variant is field-less the
+//!   value is a single `u8` tag; if any variant carries fields, the stack
+//!   slot is `tag (u8) + payload-length (u32)` and the active variant's
+//!   fields are written as a self-contained unit in the heap (all field
+//!   stacks, then all field heaps), tagged by declaration order. Mirrors
+//!   `docs/wire_format.md`.
+//!
+//! Unions are rejected.
+
+use proc_macro2::{Ident, TokenStream};
+use quote::{format_ident, quote};
+use syn::{Data, DataStruct, DeriveInput, Fields, spanned::Spanned};
+
+mod enums;
+mod twin;
+
+use twin::{Twin, field_list};
+
+/// Expand `#[derive(WaveWire)]` for `input`, naming the wire crate by `k`
+/// (`::wavedb_wire`, or a path that re-exports it).
+///
+/// # Errors
+/// A union, or an enum of more than 256 variants.
+pub fn expand(
+    input: &DeriveInput,
+    k: &TokenStream,
+) -> syn::Result<TokenStream> {
+    match &input.data {
+        Data::Struct(data) => Ok(expand_struct(input, data, k)),
+        Data::Enum(data) => enums::expand_enum(input, data, k),
+        Data::Union(_) => Err(syn::Error::new(
+            input.span(),
+            "WaveWire cannot be derived for unions",
+        )),
+    }
+}
+
+/// The bodies of one `WaveWire` impl's methods.
+pub(crate) struct Bodies {
+    stack_size: TokenStream,
+    heap_size: TokenStream,
+    encode_stack: TokenStream,
+    encode_heap: TokenStream,
+    decode: TokenStream,
+    view: TokenStream,
+    from_ref: TokenStream,
+}
+
+/// The `WaveWire` impl for `input`, its view the twin type `twin_ty`.
+pub(crate) fn wire_impl(
+    input: &DeriveInput,
+    k: &TokenStream,
+    twin_ty: &TokenStream,
+    b: &Bodies,
+) -> TokenStream {
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) =
+        input.generics.split_for_impl();
+    let Bodies {
+        stack_size,
+        heap_size,
+        encode_stack,
+        encode_heap,
+        decode,
+        view,
+        from_ref,
+    } = b;
+    quote! {
+        #[automatically_derived]
+        impl #impl_generics #k::WaveWire for #name #ty_generics #where_clause {
+            const STACK_SIZE: usize = #stack_size;
+
+            type Ref<'a> = #twin_ty;
+
+            type SliceRef<'a> = #k::ListRef<'a, Self>;
+
+            fn heap_size(&self) -> usize { #heap_size }
+
+            fn encode_stack(&self, stack: &mut ::std::vec::Vec<u8>) { #encode_stack }
+
+            fn encode_heap(&self, heap: &mut ::std::vec::Vec<u8>) { #encode_heap }
+
+            fn decode(
+                stack: &mut #k::Cursor,
+                heap: &mut #k::Cursor,
+            ) -> #k::Result<Self> {
+                #decode
+            }
+
+            fn view<'a>(
+                stack: &mut #k::Cursor<'a>,
+                heap: &mut #k::Cursor<'a>,
+            ) -> #k::Result<Self::Ref<'a>> {
+                #view
+            }
+
+            fn from_ref(r: Self::Ref<'_>) -> Self { #from_ref }
+
+            fn view_slice(region: &[u8]) -> #k::Result<#k::ListRef<'_, Self>> {
+                #k::ListRef::view(region)
+            }
+
+            fn from_slice_ref(r: #k::ListRef<'_, Self>) -> ::std::vec::Vec<Self> {
+                r.to_vec()
+            }
+        }
+    }
+}
+
+/// `NameRef`: the twin's identifier.
+pub(crate) fn twin_ident(name: &Ident) -> Ident {
+    format_ident!("{name}Ref")
+}
+
+// ---- structs ----------------------------------------------------------------
+
+fn expand_struct(
+    input: &DeriveInput,
+    data: &DataStruct,
+    k: &TokenStream,
+) -> TokenStream {
+    let fields = field_list(&data.fields);
+    let tys: Vec<_> = fields.iter().map(|f| f.ty).collect();
+    let members: Vec<_> = fields.iter().map(|f| &f.member).collect();
+    let twin = Twin::new(input, k, &tys);
+    let tw = &twin.ident;
+
+    let wire = |m: &str| -> Vec<TokenStream> {
+        let m = format_ident!("{m}");
+        tys.iter()
+            .map(|ty| quote!(<#ty as #k::WaveWire>::#m(stack, heap)?))
+            .collect()
+    };
+    let (decoders, viewers) = (wire("decode"), wire("view"));
+    let owners = fields
+        .iter()
+        .map(|f| {
+            let (ty, m) = (f.ty, &f.member);
+            quote!(<#ty as #k::WaveWire>::from_ref(r.#m))
+        })
+        .collect::<Vec<_>>();
+    let (decode, view, from_ref) = match &data.fields {
+        Fields::Named(_) => (
+            quote!(::core::result::Result::Ok(Self { #(#members: #decoders,)* })),
+            quote!(::core::result::Result::Ok(#tw { #(#members: #viewers,)* })),
+            quote!(Self { #(#members: #owners,)* }),
+        ),
+        Fields::Unnamed(_) => (
+            quote!(::core::result::Result::Ok(Self( #(#decoders,)* ))),
+            quote!(::core::result::Result::Ok(#tw( #(#viewers,)* ))),
+            quote!(Self( #(#owners,)* )),
+        ),
+        Fields::Unit => (
+            quote!(::core::result::Result::Ok(Self)),
+            quote!(::core::result::Result::Ok(#tw)),
+            quote!(Self),
+        ),
+    };
+    // A struct of no fields has nothing to borrow: its twin is a unit.
+    let (decode, view, from_ref) = if fields.is_empty() {
+        let own = match &data.fields {
+            Fields::Named(_) => quote!(Self {}),
+            Fields::Unnamed(_) => quote!(Self()),
+            Fields::Unit => quote!(Self),
+        };
+        (
+            quote!(::core::result::Result::Ok(#own)),
+            quote!(::core::result::Result::Ok(#tw)),
+            own,
+        )
+    } else {
+        (decode, view, from_ref)
+    };
+
+    let bodies = Bodies {
+        stack_size: quote!(0 #( + <#tys as #k::WaveWire>::STACK_SIZE )*),
+        heap_size: quote!(0 #( + #k::WaveWire::heap_size(&self.#members) )*),
+        encode_stack: quote!(#( #k::WaveWire::encode_stack(&self.#members, stack); )*),
+        encode_heap: quote!(#( #k::WaveWire::encode_heap(&self.#members, heap); )*),
+        decode,
+        view,
+        from_ref,
+    };
+    let def = twin.struct_def(&data.fields, &fields);
+    let support = twin.support(&twin.debug_struct(&data.fields, &fields));
+    let imp = wire_impl(input, k, &twin.ty(), &bodies);
+    quote!(#def #support #imp)
+}
