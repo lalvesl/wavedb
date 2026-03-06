@@ -133,6 +133,12 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   `::wavedb_wire::` paths, so any crate using it needs `wavedb-wire` as a direct dep.
   Feature `validation` adds `to_wire_checked`/`from_wire_checked` (`[crc32][wire]`) —
   every disk/transport boundary uses it; no structure hand-rolls a byte layout.
+  Every type also has a **borrowed twin** (RFC 0076): `type Ref<'a>` + `view`
+  (`view_wire::<T>(bytes)`, one checked walk, `&str`/`&[u8]`/`ListRef` where
+  decode copies), the derive emitting `NameRef<'a>` beside `Name` with
+  `to_owned()`/`From` back; `Wire<T>` is the one-buffer `Send` owner. Both
+  derives (this one and `wavedb-macros`') expand through `wavedb-wire-codegen`;
+  a hand impl of a heap-free `Copy` type adds `wavedb_wire::own_view!()`.
 - **wavedb-core** — `Id` (`KEY u64 · TENANT u48 · FLAG 1 · SALT 15`), `LocalId`
   (80-bit, tenant-stripped), `U48`, `Metadata` (version chain + `pivot_id` back-link +
   permission), the `Store` trait (`get`/`get_of`/atomic `apply`, and
