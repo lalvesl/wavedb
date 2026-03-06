@@ -1,6 +1,7 @@
 # RFC 0076 — Zero-copy views over the wire
 
-- **Status:** In progress (opened 2026-10-23: the design, before the code)
+- **Status:** In progress (opened 2026-10-23; step 1 — the codec and the
+  derives — landed 2026-10-23)
 - **Grows out of:** the `docs/improvements.md` entry "Decoding copies every
   record out of its buffer — zero-copy views" (2026-10-18)
 - **Builds on:** [RFC 0044](0044-page-cache.md) (the page cache holds decoded
@@ -9,8 +10,10 @@
   (`SlotPage`), `wavedb-core` (collection reads), `wavedb-macros`
   (`#[server]`)
 - **Code:**
-  - `crates/wavedb-wire/src/{lib,impls}.rs` (the trait, the built-in impls)
-  - `crates/wavedb-wire-derive/src/{lib,enums}.rs` (the derive)
+  - `crates/wavedb-wire/src/{lib,impls,compound,view}.rs` (the trait, the
+    built-in impls, `ListRef`, `Wire<T>`, `view_wire`)
+  - `crates/wavedb-wire-codegen/src/{lib,twin,enums}.rs` (the expansion both
+    derives share)
   - `crates/wavedb-storage/src/page.rs` (the first user)
 
 ## Summary
@@ -75,7 +78,9 @@ pub trait WaveWire: Sized {
     // … STACK_SIZE, heap_size, encode_stack, encode_heap, decode, …
 
     /// The borrowed twin: what `view` builds over a value's bytes.
-    type Ref<'a>;
+    type Ref<'a>: Copy + Debug;
+    /// What a `Vec` of these borrows as: `ListRef`, or `&'a [u8]` for bytes.
+    type SliceRef<'a>: Copy + Debug;
 
     /// Build the twin from `STACK_SIZE` bytes of `stack` and this value's
     /// payload in `heap` — the walk `decode` makes, borrowing what it would
@@ -84,13 +89,26 @@ pub trait WaveWire: Sized {
         -> Result<Self::Ref<'a>>;
 
     /// The owned value back: the copy `decode` would have made.
-    fn from_ref(r: &Self::Ref<'_>) -> Self;
+    fn from_ref(r: Self::Ref<'_>) -> Self;
+
+    /// The same pair for a `Vec` of these, over its whole heap region.
+    fn view_slice(region: &[u8]) -> Result<Self::SliceRef<'_>>;
+    fn from_slice_ref(r: Self::SliceRef<'_>) -> Vec<Self>;
 }
 ```
 
+- **`Copy`, so `from_ref` takes the view by value.** Every view is made of
+  references, numbers and counts; passing one is copying a few words.
+- **`SliceRef` is how `Vec<T>` picks its view per element type**, the way
+  `decode_slice` already lets a scalar decode its `Vec` in bulk: `Vec<T>`'s
+  `Ref<'a>` is `T::SliceRef<'a>`. Without it a `Vec<u8>` could not be
+  `&[u8]`.
+
 `view_wire::<T>(bytes) -> Result<T::Ref<'_>>` is the entry point, the twin
-of `from_wire`. A hand-written impl (`Succession`) writes its own `view` and
-`from_ref`. The derive writes the rest.
+of `from_wire`. A hand-written impl writes its own items; one with no heap
+bytes that is `Copy + Debug` (`U48`, `Succession`, `BlockDescriptor`) is its
+own view, and `wavedb_wire::own_view!()` writes them. The derive writes the
+rest.
 
 ### 3. What each type borrows as
 
@@ -99,31 +117,36 @@ of `from_wire`. A hand-written impl (`Succession`) writes its own `view` and
 | `u8..u128`, `i8..i128`, `f32`, `f64`, `bool`, `char` | the value itself | `from_le_bytes` on the stack slot, as `decode` |
 | `String` | `&'a str` | the heap bytes, `str::from_utf8` once in `view` |
 | `Vec<u8>` | `&'a [u8]` | the heap region as is |
-| `Vec<T>`, `T` a fixed-width scalar | `Scalars<'a, T>` | the region, `len`/`get(i)`/`iter()` by `from_le_bytes` over `chunks_exact`, any alignment |
+| `Vec<T>`, `T` a fixed-width number | `ListRef<'a, T>` | the region; the count is a division, nothing walked (any bytes are a number), and every read a `from_le_bytes`, any alignment |
 | `Vec<T>`, any other `T` | `ListRef<'a, T>` | the region and its element count, every element checked once in `view` |
 | `Option<T>` | `Option<T::Ref<'a>>` | the flag, then `T`'s view |
 | `[T; N]` | `[T::Ref<'a>; N]` | element by element |
 | tuple | tuple of `Ref`s | member by member |
-| struct (derive) | `NameRef<'a>`, one public field per field | the fields' views in declaration order |
+| struct (derive) | `NameRef<'a>`, one field per field, each as visible as its own | the fields' views in declaration order |
 | enum (derive) | `NameRef<'a>`, one variant per variant | the tag, then the variant's fields |
+| a type with no fields anywhere (derive) | `NameRef`, the same shape, no lifetime | the tag, or nothing |
 
 `ListRef::iter()` yields `T::Ref<'a>` and cannot fail, because `view`
 already walked every element. Its `get(i)` is O(1) when `T` has no heap
-(every unit is `T::STACK_SIZE` bytes) and O(i) otherwise. `Scalars` and
-`ListRef` give their owned form back with `to_vec()`.
+(every unit is `T::STACK_SIZE` bytes) and O(i) otherwise. It gives its
+owned form back with `to_vec()`. A separate `Scalars` type was planned for
+lists of numbers; a `ListRef` built without the walk does the same job.
 
 ### 4. `Wire<T>`, the owner
 
 ```rust
 pub struct Wire<T> {
     bytes: Box<[u8]>,
-    start: u32,                 // where T's encoding begins, past any envelope
+    start: usize,               // where T's encoding begins, past any envelope
     _type: PhantomData<fn() -> T>,
 }
 impl<T: WaveWire> Wire<T> {
-    pub fn new(bytes: Box<[u8]>, start: u32) -> Self;
+    pub fn new(bytes: Box<[u8]>, start: usize) -> Self;
+    pub fn encode(value: &T) -> Self;           // a buffer of its own
     pub fn view(&self) -> Result<T::Ref<'_>>;
-    pub fn bytes(&self) -> &[u8];
+    pub fn decode(&self) -> Result<T>;          // the owned value
+    pub fn bytes(&self) -> &[u8];               // envelope included
+    pub fn into_parts(self) -> (Box<[u8]>, usize);
 }
 ```
 
@@ -196,6 +219,39 @@ needs them pays.
    - Whether it becomes the default is decided by a measurement.
 4. **`#[server]`.** Arguments and replies cross threads as `Wire<T>`
    buffers.
+
+## Progress
+
+**Step 1 landed (2026-10-23): the codec and the derives.**
+
+- **The trait and the built-ins** (`crates/wavedb-wire`): `Ref`, `SliceRef`,
+  `view`, `from_ref`, `view_slice`, `from_slice_ref` on every impl;
+  `ListRef`/`ListIter`, `Wire<T>`, `view_wire` and `own_view!` in `view.rs`;
+  the compound impls moved to `compound.rs` to keep `impls.rs` in budget.
+- **One expansion for both derives.** The derive in `wavedb-wire-derive`
+  (paths through `::wavedb_wire`) and the one in `wavedb-macros` (through
+  `::wavedb_core::wire`, which `#[wavedb]` uses for records, Pivots and
+  Pivot ids) were two copies of the codec's codegen. Each now calls
+  `wavedb-wire-codegen::expand` with its path, so the twin is written once;
+  the `wavedb-macros` derive gains enums with it.
+- **What the twin carries.** `Clone`, `Copy` and `Debug` are written by hand,
+  so a type parameter is not asked to be `Clone` or `Debug` itself; the
+  twin's bounds are the type's own, which already make every field
+  `WaveWire`. A type with no fields anywhere (a unit struct, a field-less
+  enum) has a twin of the same shape with no lifetime, and derives
+  `PartialEq`, `Eq` and `Hash` too.
+- **Found on the way:** a `Vec` of zero-byte units (`Vec<()>`) over a region
+  that is not empty sent `decode_slice` round forever, since no unit used up
+  any of it. Both walks now refuse it as `UnexpectedEof`.
+- **Tests:** `crates/wavedb-wire/tests/views.rs`, which checks
+  `from_ref(view(encode(x))) == x` for every built-in and derived shape (a
+  generic one included), that views borrow from the buffer (pointer ranges),
+  every decode error raised alike by the view, `ListRef` indexing, and
+  `Wire<T>` past an envelope and across a thread. Also
+  `crates/wavedb-macros/tests/wire_derive.rs`, for the twin through the
+  `wavedb_core::wire` paths.
+
+Next: step 2, `SlotPage`.
 
 ## Alternatives
 
