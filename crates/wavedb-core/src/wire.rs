@@ -13,7 +13,8 @@
 //! [`PermissionRef`](crate::PermissionRef)) live next to those types.
 
 pub use wavedb_wire::{
-    Cursor, Error, Result, WaveWire, from_wire, to_wire, to_wire_pair,
+    Cursor, Error, ListIter, ListRef, Result, WaveWire, Wire, from_wire,
+    to_wire, to_wire_pair, view_wire,
 };
 
 // The crc32-framed checked encoding, behind the same-named `validation`
