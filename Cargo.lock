@@ -1836,6 +1836,7 @@ dependencies = [
  "trybuild",
  "wavedb-core",
  "wavedb-storage",
+ "wavedb-wire-codegen",
 ]
 
 [[package]]
@@ -1939,12 +1940,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "wavedb-wire-codegen"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
 name = "wavedb-wire-derive"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+ "wavedb-wire-codegen",
 ]
 
 [[package]]
