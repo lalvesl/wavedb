@@ -242,6 +242,7 @@ impl WaveWire for BlockDescriptor {
         raw.copy_from_slice(stack.take(8)?);
         Ok(Self(u64::from_le_bytes(raw)))
     }
+    wavedb_wire::own_view!();
 }
 
 #[cfg(test)]
