@@ -1,0 +1,18 @@
+[package]
+name = "wavedb-wire-codegen"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+# The expansion behind `#[derive(WaveWire)]`, as a plain library: both
+# derives — `wavedb-wire-derive` (paths through `::wavedb_wire`) and
+# `wavedb-macros` (through `::wavedb_core::wire`) — call it with their own
+# path, so the codec and its borrowed twin are written once.
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
