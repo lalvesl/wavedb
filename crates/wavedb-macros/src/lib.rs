@@ -34,7 +34,8 @@ mod struct_hash;
 mod wavedb_attr;
 mod wire_derive;
 
-/// Derive `WaveWire` for a struct (named, tuple, or unit).
+/// Derive `WaveWire` for a struct or enum, and its borrowed twin `NameRef`
+/// (RFC 0076).
 ///
 /// Field stack slots encode inline in declaration order; heap payloads append
 /// depth-first. See [`docs/wire_format.md`](../../../docs/wire_format.md).
