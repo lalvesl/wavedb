@@ -30,7 +30,35 @@ Built-in impls cover the common types: integers and floats, `bool`, `char`,
   Tags follow variant declaration order.
 
 The derive emits absolute `::wavedb_wire::` paths, so it works from any crate that
-depends on `wavedb-wire`.
+depends on `wavedb-wire`. Its expansion lives in `wavedb-wire-codegen`, which
+`wavedb-macros` shares (its paths go through `::wavedb_core::wire`).
+
+## Views — reading without copying (RFC 0076)
+
+Beside `Point`, the derive emits `PointRef<'a>`, its **borrowed twin**: the
+same fields, each the field's view over the bytes — `&'a str` for a `String`,
+`&'a [u8]` for a `Vec<u8>`, a `ListRef<'a, T>` for any other `Vec`, numbers
+by value, nested twins for nested types.
+
+```rust
+let p: PersonRef<'_> = wavedb_wire::view_wire::<Person>(&bytes)?; // one checked walk
+println!("{}", p.name);              // a &str into `bytes`, nothing allocated
+let owned: Person = p.to_owned();    // back to owned, for a write
+```
+
+- `view_wire` makes the walk `from_wire` makes and raises the same errors on
+  the same bytes, but borrows where the decode copies, so reading the view
+  afterwards cannot fail.
+- `Wire<T>` owns one buffer (`Box<[u8]>`, plus where `T` starts in it), is
+  `Send + Sync` whatever `T` is, and drops as one deallocation;
+  `wire.view()` checks its bytes on each call, so view once and keep the view.
+- `ListRef::get(i)` is O(1) when no element has heap bytes, O(i) otherwise.
+- A twin is `Copy`. `to_owned()` and `From<NameRef> for Name` give the owned
+  value back. A field alone comes back with std's own `to_owned()` /
+  `to_vec()`.
+- A hand-written impl provides `Ref`, `SliceRef`, `view`, `from_ref`,
+  `view_slice` and `from_slice_ref`; a type with no heap bytes that is
+  `Copy + Debug` is its own view, and `wavedb_wire::own_view!()` writes them.
 
 ## Layout
 
