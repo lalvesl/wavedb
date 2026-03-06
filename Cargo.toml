@@ -7,6 +7,7 @@ members = [
   "crates/seahash",
   "crates/wavedb-wire",
   "crates/wavedb-wire-derive",
+  "crates/wavedb-wire-codegen",
   "crates/wavedb-platform",
   "crates/wavedb-core",
   "crates/wavedb-macros",
@@ -54,6 +55,9 @@ trivially_copy_pass_by_ref = "allow"
 wavedb-wire = { path = "crates/wavedb-wire" }
 # Its companion `#[derive(WaveWire)]` proc-macro, re-exported by `wavedb-wire`.
 wavedb-wire-derive = { path = "crates/wavedb-wire-derive" }
+# The expansion both WaveWire derives share (a plain library, so the two
+# proc-macro crates can call it).
+wavedb-wire-codegen = { path = "crates/wavedb-wire-codegen" }
 # The native ⇄ browser seam: wall clock, entropy, and the client half of the
 # HTTP tunnel, one API compiled two ways (`SystemTime`/`TcpStream` vs
 # `Date.now()`/`fetch`). Everything above it stays target-independent.
