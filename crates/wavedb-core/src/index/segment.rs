@@ -30,7 +30,8 @@
 //!
 //! [RFC 0050]: https://github.com/wavedb/wavedb/blob/main/rfcs/0050-clustered-record-chains.md
 
-use wavedb_wire::Cursor;
+// The codec: the layout of `(prev, next, entries)`, and its view.
+mod wire;
 
 use crate::error::{Error, Result};
 use crate::local_id::LocalId;
@@ -271,43 +272,6 @@ impl<P> Segment<P> {
     /// Where `key` sits: `Ok(i)` when present, `Err(i)` where it would go.
     fn position(&self, key: &SecKey) -> core::result::Result<usize, usize> {
         self.entries.binary_search_by(|(k, _)| k.cmp(key))
-    }
-}
-
-// Hand impl rather than a derive: the derive would need an owned wire-shape
-// twin, and copying a segment's entries to encode them would double the bytes a
-// write already moves. The composition is exactly the derive's — each field's
-// stack slots inline in order, heaps appended in the same order — so this is the
-// tuple `(prev, next, entries)` layout without owning the tuple.
-impl<P: WaveWire> WaveWire for Segment<P> {
-    const STACK_SIZE: usize = <Option<LocalId> as WaveWire>::STACK_SIZE * 2
-        + <Vec<(SecKey, P)> as WaveWire>::STACK_SIZE;
-
-    fn heap_size(&self) -> usize {
-        self.prev.heap_size() + self.next.heap_size() + self.entries.heap_size()
-    }
-
-    fn encode_stack(&self, stack: &mut Vec<u8>) {
-        self.prev.encode_stack(stack);
-        self.next.encode_stack(stack);
-        self.entries.encode_stack(stack);
-    }
-
-    fn encode_heap(&self, heap: &mut Vec<u8>) {
-        self.prev.encode_heap(heap);
-        self.next.encode_heap(heap);
-        self.entries.encode_heap(heap);
-    }
-
-    fn decode(
-        stack: &mut Cursor,
-        heap: &mut Cursor,
-    ) -> wavedb_wire::Result<Self> {
-        Ok(Self {
-            prev: Option::decode(stack, heap)?,
-            next: Option::decode(stack, heap)?,
-            entries: Vec::decode(stack, heap)?,
-        })
     }
 }
 
