@@ -85,6 +85,7 @@ impl WaveWire for U48 {
         bytes[..6].copy_from_slice(stack.take(6)?);
         Ok(Self(u64::from_le_bytes(bytes)))
     }
+    wavedb_wire::own_view!();
 }
 
 #[cfg(test)]
