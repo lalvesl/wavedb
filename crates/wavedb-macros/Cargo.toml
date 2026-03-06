@@ -17,6 +17,8 @@ quote = { workspace = true }
 syn = { workspace = true }
 # STRUCT_HASH is computed here at macro-expansion time.
 seahash = { workspace = true }
+# `#[derive(WaveWire)]`'s expansion, shared with `wavedb-wire-derive`.
+wavedb-wire-codegen.workspace = true
 
 [dev-dependencies]
 trybuild.workspace = true
