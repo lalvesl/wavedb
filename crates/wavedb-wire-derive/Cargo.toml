@@ -15,3 +15,5 @@ proc-macro = true
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
+# The derive's expansion, shared with `wavedb-macros`.
+wavedb-wire-codegen.workspace = true
