@@ -66,3 +66,28 @@ fn named_stack_size_is_field_sum() {
     // u32(4) + String(4) + Vec(4) + Option(1) = 13
     assert_eq!(<Named as wavedb_core::wire::WaveWire>::STACK_SIZE, 13);
 }
+
+/// The twin comes through the `wavedb_core::wire` paths too: a schema crate
+/// needs no direct `wavedb-wire` dependency for it.
+#[test]
+fn the_twin_views_and_comes_back() {
+    let value = Named {
+        a: 3,
+        b: "wavedb".into(),
+        c: vec![4, 5],
+        d: Some(6),
+    };
+    let bytes = to_wire(&value);
+    let view: NamedRef<'_> =
+        wavedb_core::wire::view_wire::<Named>(&bytes).expect("view");
+    assert_eq!((view.a, view.b, view.d), (3, "wavedb", Some(6)));
+    assert_eq!(view.c.to_vec(), [4, 5]);
+    assert_eq!(view.to_owned(), value);
+    let tuple = to_wire(&Tuple(1, "t".into(), false));
+    let view = wavedb_core::wire::view_wire::<Tuple>(&tuple).expect("view");
+    assert_eq!(Tuple::from(view), Tuple(1, "t".into(), false));
+    assert_eq!(
+        wavedb_core::wire::view_wire::<Unit>(&[]).expect("view"),
+        UnitRef
+    );
+}
