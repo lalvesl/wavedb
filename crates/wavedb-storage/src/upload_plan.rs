@@ -98,12 +98,12 @@ impl SlotUpload {
             }
         }
         for page in std::mem::take(&mut self.pages) {
-            for (id, bytes) in page.into_entries() {
+            for (id, bytes) in page.iter() {
                 let bucket = self.remote.bucket_of(id.raw());
                 self.staged
                     .get_mut(&bucket)
                     .ok_or(StorageError::Corrupt("upload congruence"))?
-                    .upsert(id, bytes);
+                    .upsert(id, bytes.to_vec());
             }
         }
         Ok(())
@@ -116,7 +116,7 @@ impl PageStore {
     pub(crate) fn encode_remote(
         &self,
         idx: usize,
-        page: &SlotPage,
+        page: &mut SlotPage,
     ) -> StorageResult<Vec<u8>> {
         if page.is_empty() {
             return Ok(Vec::new());
@@ -142,7 +142,7 @@ impl PageStore {
         work: &mut SlotUpload,
     ) -> StorageResult<BTreeMap<usize, Vec<u8>>> {
         let mut images = BTreeMap::new();
-        for (&bucket, page) in &work.staged {
+        for (&bucket, page) in &mut work.staged {
             images.insert(bucket, self.encode_remote(work.idx, page)?);
         }
         let idx = work.idx;
