@@ -190,7 +190,9 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   of 4 KiB blocks named by the block each starts at (16 hex digits, found by
   listing the directory; writing only appends, a file closes at
   `StoreOptions::file_bytes`, 10 GiB — RFC 0071), per-STRUCT_HASH extendible-hashed page directories (a page over target splits in the round that rewrites it; RFC 0074), `SlotPage`
-  (checked-wire envelope, per-type zstd dictionaries with version = prefix length),
+  (checked-wire envelope, per-type zstd dictionaries with version = prefix length;
+  the body three columns — ids, ends, records — held as read, one buffer, with
+  the writes since beside it until an encode seals them, RFC 0076),
   **no journal** (RFC 0072): `apply` commits a batch to the record cache
   and returns; a **settle cycle** (every 200 ms on a node — a tick with
   nothing written opens none) marks the logs' ends and settles them in
