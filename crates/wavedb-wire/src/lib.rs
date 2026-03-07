@@ -51,6 +51,15 @@ mod view;
 
 pub use view::{ListIter, ListRef, Wire, view_wire};
 
+// The crc32-framed encoding.
+#[cfg(feature = "validation")]
+mod checked;
+
+#[cfg(feature = "validation")]
+pub use checked::{
+    CRC_PREFIX_LEN, from_wire_checked, to_wire_checked, view_wire_checked,
+};
+
 /// A wire (de)serialization fault.
 ///
 /// Every variant is a layout/shape mismatch between the bytes and the type the
@@ -287,51 +296,6 @@ pub fn from_wire<T: WaveWire>(bytes: &[u8]) -> Result<T> {
     T::decode(&mut sc, &mut hc)
 }
 
-// ---- checked encoding (crc32-framed) — feature `validation` -----------------
-
-/// Framing bytes [`to_wire_checked`] prepends: one little-endian `u32` CRC32 of
-/// the `[stack][heap]` payload that follows.
-#[cfg(feature = "validation")]
-pub const CRC_PREFIX_LEN: usize = 4;
-
-/// Serialise like [`to_wire`], prefixed with a CRC32 of the payload:
-/// `[crc32 (4 B LE)][stack][heap]`.
-///
-/// Still a single allocation: the CRC slot is reserved up front and patched
-/// after the payload is written. Decode with [`from_wire_checked`] — plain
-/// [`from_wire`] on this buffer would read the CRC bytes as the value's stack.
-#[cfg(feature = "validation")]
-#[must_use]
-pub fn to_wire_checked<T: WaveWire>(value: &T) -> Vec<u8> {
-    let mut buf =
-        Vec::with_capacity(CRC_PREFIX_LEN + T::STACK_SIZE + value.heap_size());
-    buf.extend_from_slice(&[0u8; CRC_PREFIX_LEN]); // slot, patched below
-    value.encode_stack(&mut buf);
-    value.encode_heap(&mut buf);
-    let crc = crc32fast::hash(&buf[CRC_PREFIX_LEN..]);
-    buf[..CRC_PREFIX_LEN].copy_from_slice(&crc.to_le_bytes());
-    buf
-}
-
-/// Deserialise a [`to_wire_checked`] buffer: verify the 4-byte CRC32 prefix
-/// against the payload, then decode like [`from_wire`].
-///
-/// A buffer shorter than the prefix fails as [`Error::UnexpectedEof`]; a prefix
-/// that doesn't match the payload as [`Error::CrcMismatch`].
-#[cfg(feature = "validation")]
-pub fn from_wire_checked<T: WaveWire>(bytes: &[u8]) -> Result<T> {
-    if bytes.len() < CRC_PREFIX_LEN {
-        return Err(Error::UnexpectedEof);
-    }
-    let (prefix, payload) = bytes.split_at(CRC_PREFIX_LEN);
-    let stored = u32::from_le_bytes(prefix.try_into().unwrap());
-    let computed = crc32fast::hash(payload);
-    if stored != computed {
-        return Err(Error::CrcMismatch { stored, computed });
-    }
-    from_wire(payload)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{WaveWire, from_wire, to_wire};
@@ -517,6 +481,28 @@ mod tests {
                 from_wire_checked::<u64>(&bytes),
                 Err(Error::CrcMismatch { .. })
             ));
+        }
+
+        #[test]
+        fn a_checked_view_borrows_and_checks_the_crc() {
+            let v = Named {
+                a: 7,
+                b: "wave".to_string(),
+                c: vec![1, 2, 3],
+            };
+            let mut bytes = to_wire_checked(&v);
+            let view = crate::view_wire_checked::<Named>(&bytes).unwrap();
+            assert_eq!((view.a, view.b), (7, "wave"));
+            assert_eq!(view.to_owned(), v);
+            *bytes.last_mut().unwrap() ^= 0xFF;
+            assert!(matches!(
+                crate::view_wire_checked::<Named>(&bytes),
+                Err(Error::CrcMismatch { .. })
+            ));
+            assert_eq!(
+                crate::view_wire_checked::<u64>(&[0u8; 3]),
+                Err(Error::UnexpectedEof)
+            );
         }
 
         #[test]
