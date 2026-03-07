@@ -228,9 +228,9 @@ impl PageStore {
         }
         let mut page = SlotPage::new(slot.struct_hash());
         for image in images {
-            for (id, bytes) in image.into_entries() {
+            for (id, bytes) in image.iter() {
                 if disk.bucket_of(id.raw()) == bucket {
-                    page.upsert(id, bytes);
+                    page.upsert(id, bytes.to_vec());
                 }
             }
         }
