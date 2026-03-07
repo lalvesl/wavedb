@@ -28,7 +28,7 @@ pub fn split_staged(
     staged: &mut BTreeMap<usize, SlotPage>,
     images: &mut BTreeMap<usize, Vec<u8>>,
     target: u64,
-    mut encode: impl FnMut(&SlotPage) -> StorageResult<Vec<u8>>,
+    mut encode: impl FnMut(&mut SlotPage) -> StorageResult<Vec<u8>>,
 ) -> StorageResult<()> {
     let mut queue: Vec<usize> = images.keys().copied().collect();
     // Pages that could not split yet: the round's other splits may make
@@ -60,17 +60,17 @@ pub fn split_staged(
         let page = std::mem::replace(page, SlotPage::new(hash));
         let depth = dir.descriptor(bucket).depth();
         let (mut keep, mut moved) = (SlotPage::new(hash), SlotPage::new(hash));
-        for (id, bytes) in page.into_entries() {
+        for (id, bytes) in page.iter() {
             // Bit ℓ decides: 0 stays put, 1 moves to the new bucket.
             if (dir.hash(id.raw()) >> depth) & 1 == 0 {
-                keep.upsert(id, bytes);
+                keep.upsert(id, bytes.to_vec());
             } else {
-                moved.upsert(id, bytes);
+                moved.upsert(id, bytes.to_vec());
             }
         }
         let new = dir.split(bucket);
-        images.insert(bucket, encode(&keep)?);
-        images.insert(new, encode(&moved)?);
+        images.insert(bucket, encode(&mut keep)?);
+        images.insert(new, encode(&mut moved)?);
         staged.insert(bucket, keep);
         staged.insert(new, moved);
         queue.extend([bucket, new]);
@@ -96,7 +96,7 @@ mod tests {
     }
 
     /// A stand-in encoding: one block per record.
-    fn encode(page: &SlotPage) -> StorageResult<Vec<u8>> {
+    fn encode(page: &mut SlotPage) -> StorageResult<Vec<u8>> {
         let blocks = vec![0; page.len() * 4096];
         if page.len() > 1_000 {
             return Err(crate::error::StorageError::PageTooLarge(0));
