@@ -14,7 +14,7 @@
     built-in impls, `ListRef`, `Wire<T>`, `view_wire`)
   - `crates/wavedb-wire-codegen/src/{lib,twin,enums}.rs` (the expansion both
     derives share)
-  - `crates/wavedb-storage/src/page.rs` (the first user)
+  - `crates/wavedb-storage/src/page{,/codec}.rs` (the first user)
 
 ## Summary
 
@@ -207,9 +207,11 @@ needs them pays.
      - every decode error a view must also raise, asserted by variant
        (`UnexpectedEof`, invalid UTF-8, a bad tag).
 2. **`SlotPage`.**
-   - A page decoded from disk becomes its decompressed body and a sorted
-     index of `(id, offset, len)`: two allocations instead of one per
-     record. The page cache holds that.
+   - A page decoded from disk becomes its decompressed body, kept as it
+     is: one allocation instead of one per record. The page cache holds
+     that. (The plan was the body plus a sorted index of `(id, offset,
+     len)`; storing the body as columns made the index the body itself —
+     see [Progress](#progress).)
    - A read copies one record's bytes out (the store's `Vec<u8>`, as
      today): one `memcpy`, independent of the page from then on.
    - A settle stages a page as that buffer plus its changes and merges them
@@ -251,7 +253,32 @@ needs them pays.
   `crates/wavedb-macros/tests/wire_derive.rs`, for the twin through the
   `wavedb_core::wire` paths.
 
-Next: step 2, `SlotPage`.
+**Step 2 landed (2026-10-23): `SlotPage` is its body and its changes.**
+
+- **The body is columns.** `PageBody { ids: Vec<u128>, ends: Vec<u32>,
+  data: Vec<u8> }` — the ids ascending, where each record ends, the records
+  back to back — instead of `Vec<(u128, Vec<u8>)>`. Its view is O(1) (a
+  list of numbers is counted by a division, `data` is a slice), and record
+  `i` is `data[ends[i-1]..ends[i]]`, so the decompressed buffer *is* the
+  index: a page opened from disk is **one allocation**, a lookup a binary
+  search over the id column's bytes. The page format changed (no format
+  versioning pre-release); the codec's did not.
+- **Checked once, on open.** `from_bytes` checks the columns agree (as many
+  ends as ids, ids strictly ascending, ends never going back, the last one
+  the data's length), so every read after it is in range.
+- **Writes are changes beside the body**, a map of `Some(bytes)` puts and
+  `None` removals read first; iteration merges the two in id order.
+  `to_bytes` now takes `&mut self` and **seals**: the merged body it
+  encodes becomes the page's body, so a page a settle writes and the cache
+  then holds carries no per-record allocations either.
+- **The envelope is viewed, not decoded** (`view_wire_checked`, new in
+  `wavedb-wire`): a compressed payload is decompressed straight from the
+  read buffer, where the decode first copied it out.
+- `SlotPage::remove` returns whether the record was there, not a copy of
+  it; `into_entries` is gone (its three callers, a split, an eviction
+  restore and an upload, iterate and copy what they keep).
+
+Next: step 3, collection reads.
 
 ## Alternatives
 
