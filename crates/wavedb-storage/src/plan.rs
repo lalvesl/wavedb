@@ -119,7 +119,7 @@ impl PageStore {
         }
 
         let mut pages = BTreeMap::new();
-        for (bucket, page) in &staged {
+        for (bucket, page) in &mut staged {
             pages.insert(*bucket, image_of(page, &dict)?);
         }
         split_staged(
@@ -142,7 +142,10 @@ impl PageStore {
 
 /// `page` serialised — refused, typed, past the largest page a descriptor
 /// can size ([`MAX_PAGE_BYTES`]), never truncated.
-pub fn image_of(page: &SlotPage, dict: &DictState) -> StorageResult<Vec<u8>> {
+pub fn image_of(
+    page: &mut SlotPage,
+    dict: &DictState,
+) -> StorageResult<Vec<u8>> {
     let bytes = page.to_bytes(dict.dictionary(), dict.enabled())?;
     if bytes.len() as u64 > MAX_PAGE_BYTES {
         return Err(StorageError::PageTooLarge(bytes.len() as u64));
