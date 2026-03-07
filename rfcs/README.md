@@ -655,7 +655,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0073](0073-data-shards-and-storage-shards.md) | Data shards and storage shards (P data shards write through S storage shards: one write, one `fsync`, one PUT per storage shard) | Implemented |
 | [0074](0074-extendible-hashing.md) | Extendible hashing for the page directories (a page over target splits at once; ℓ and a 10-bit size code in the descriptor) | Implemented |
 | [0075](0075-secondary-indexes-as-chains.md) | Secondary indexes as chains (`#[wavedb::pivot]` and fuzzy postings over `Chain<()>`; the B+tree deleted; a list also answers `by_f`) | Implemented |
-| [0076](0076-zero-copy-views-WIP.md) | Zero-copy views over the wire (a derived `NameRef<'a>` built in one pass, `Wire<T>` one `Send` buffer, `to_owned()` back; the format unchanged — step 1, the codec and both derives, landed) | In progress |
+| [0076](0076-zero-copy-views-WIP.md) | Zero-copy views over the wire (a derived `NameRef<'a>` built in one pass, `Wire<T>` one `Send` buffer, `to_owned()` back; the format unchanged — steps 1–2, the codec and both derives, then `SlotPage` as one buffer, landed) | In progress |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
