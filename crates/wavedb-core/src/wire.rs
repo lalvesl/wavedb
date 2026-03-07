@@ -20,4 +20,6 @@ pub use wavedb_wire::{
 // The crc32-framed checked encoding, behind the same-named `validation`
 // feature (forwarded to `wavedb-wire/validation` in Cargo.toml).
 #[cfg(feature = "validation")]
-pub use wavedb_wire::{CRC_PREFIX_LEN, from_wire_checked, to_wire_checked};
+pub use wavedb_wire::{
+    CRC_PREFIX_LEN, from_wire_checked, to_wire_checked, view_wire_checked,
+};
