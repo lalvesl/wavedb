@@ -4,44 +4,50 @@
 //! records, Pivots, chain segments and index nodes — their encoding lives in `wavedb_core`'s
 //! index layer and is stored here as ordinary bytes).
 //!
-//! ## Layout — checked wire outside, optionally dictionary-zstd inside
+//! ## Stored — checked wire outside, optionally dictionary-zstd inside
 //!
-//! ```text
-//! [ payload_len (u32 LE) ][ to_wire_checked(PageEnvelope) ]  … zero-padded to the run
-//!                          └── [ crc32 ][ struct_hash · PagePayload ] ──┘
-//! PagePayload::Raw ( to_wire(PageBody) )                               — stored plain
-//! PagePayload::Zstd { dict_len, raw_len, zstd(to_wire(PageBody)) }     — dictionary-compressed
-//! ```
-//!
-//! The envelopes are plain `WaveWire` structs/enums — no page-private byte
-//! format. The order is deliberate: the crc covers the **stored** bytes, so
-//! corruption is caught by the codec before zstd ever runs; `struct_hash` and
-//! the payload kind sit outside the compressed body so a page is
-//! self-describing without decompression. The only framing outside the codec
-//! is the leading length — a page reads back from a run of whole zero-padded
-//! blocks, and the checked decoder needs the exact payload slice.
+//! The layout is in `page/codec.rs`: a checked envelope (`struct_hash`, then the
+//! body plain or zstd'd against the type's dictionary), the body itself
+//! three columns — ids, ends, the records back to back. The envelopes are
+//! plain `WaveWire` structs/enums — no page-private byte format. The order
+//! is deliberate: the crc covers the **stored** bytes, so corruption is
+//! caught by the codec before zstd ever runs; `struct_hash` and the payload
+//! kind sit outside the compressed body so a page is self-describing without
+//! decompression. The only framing outside the codec is the leading length
+//! — a page reads back from a run of whole zero-padded blocks, and the
+//! checked decoder needs the exact payload slice.
 //!
 //! **Not every page compresses.** The caller picks per write
 //! ([`Directory`](crate::directory::Directory) carries the per-type policy —
 //! e.g. a `#[wavedb(compress = false)]` type skips zstd), and even
 //! with compression on, a body zstd cannot shrink is stored `Raw` — a page
 //! never grows for having been "compressed". `dict_len` pins a `Zstd` page to
-//! the [`Dictionary`] state (an append-only buffer, so a state is a prefix
-//! length) it was compressed against; see [`crate::dictionary`].
+//! the [`Dictionary`](crate::dictionary::Dictionary) state (an append-only
+//! buffer, so a state is a prefix length) it was compressed against; see
+//! [`crate::dictionary`].
 //!
-//! In memory a page is a `BTreeMap<u128, Vec<u8>>` keyed by the record `Id`'s raw
-//! `u128`, so iteration is in `Id` order (which, `KEY`-first, is type/time order)
-//! and serialisation is deterministic.
+//! ## In RAM — the body as read, and the changes on it (RFC 0076)
+//!
+//! A page read from disk is **its decompressed body**, one buffer kept as it
+//! is: a record is a range of it, found by a binary search over the id
+//! column, so opening a page allocates once whatever it holds. Writes land
+//! in a map of **changes** beside it — a record put, or one of the body's
+//! removed — which a read consults first and an encode
+//! ([`to_bytes`](SlotPage::to_bytes)) seals into a new body, which the page
+//! then keeps. Iteration is in `Id` order (which, `KEY`-first, is type/time
+//! order), so serialisation is deterministic.
 
 use std::collections::BTreeMap;
+use std::collections::btree_map;
+use std::iter::Peekable;
 
 use wavedb_core::Id;
-use wavedb_core::wire::{
-    WaveWire, from_wire, from_wire_checked, to_wire, to_wire_checked,
-};
 
-use crate::dictionary::Dictionary;
-use crate::error::{StorageError, StorageResult};
+use crate::error::StorageResult;
+
+mod codec;
+
+use codec::Columns;
 
 /// Per-page prefix: `payload_len (u32)`.
 const LEN_PREFIX: usize = 4;
@@ -50,55 +56,39 @@ const LEN_PREFIX: usize = 4;
 /// here — no join processing competes for it).
 const LEVEL: i32 = 3;
 
-/// The stored envelope: everything needed to open the page, uncompressed.
-#[derive(Debug, Clone, PartialEq, Eq, WaveWire)]
-struct PageEnvelope {
-    /// The `STRUCT_HASH` every record in this page shares — readable without
-    /// the dictionary.
-    struct_hash: u64,
-    /// The body, stored plain or dictionary-compressed.
-    payload: PagePayload,
-}
-
-/// How the page body is stored.
-#[derive(Debug, Clone, PartialEq, Eq, WaveWire)]
-enum PagePayload {
-    /// `to_wire(PageBody)`, plain — compression off for this page's type, or
-    /// zstd could not shrink the body.
-    Raw(Vec<u8>),
-    /// `to_wire(PageBody)` compressed against `dictionary[..dict_len]`.
-    Zstd {
-        /// The [`Dictionary`] state (prefix length) the body binds.
-        dict_len: u32,
-        /// Decompressed body length (the decompressor's exact capacity).
-        raw_len: u32,
-        /// The zstd frame.
-        bytes: Vec<u8>,
-    },
-}
-
-/// The compressed body — the records themselves.
-#[derive(Debug, Clone, PartialEq, Eq, WaveWire)]
-struct PageBody {
-    /// `(Id.raw(), record wire bytes)` in ascending `Id` order.
-    records: Vec<(u128, Vec<u8>)>,
-}
-
 /// A homogeneous in-memory page of records, all of one `STRUCT_HASH`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct SlotPage {
     struct_hash: u64,
-    /// `Id.raw()` → wire-encoded record bytes, ordered by `Id`.
-    records: BTreeMap<u128, Vec<u8>>,
+    /// The encoded body the page was read as (or last sealed into); empty
+    /// for a page never encoded. Its records are ranges of it.
+    body: Box<[u8]>,
+    /// The writes since: `Some` a record put, `None` one of the body's
+    /// removed. Ordered by `Id.raw()`.
+    changes: BTreeMap<u128, Option<Vec<u8>>>,
+    /// Records held, the changes counted in.
+    len: usize,
 }
 
 impl SlotPage {
     /// A new, empty page for `struct_hash`.
     #[must_use]
-    pub const fn new(struct_hash: u64) -> Self {
+    pub fn new(struct_hash: u64) -> Self {
         Self {
             struct_hash,
-            records: BTreeMap::new(),
+            body: Box::default(),
+            changes: BTreeMap::new(),
+            len: 0,
+        }
+    }
+
+    /// A page over a checked `body` of `len` records.
+    const fn opened(struct_hash: u64, body: Box<[u8]>, len: usize) -> Self {
+        Self {
+            struct_hash,
+            body,
+            changes: BTreeMap::new(),
+            len,
         }
     }
 
@@ -110,187 +100,174 @@ impl SlotPage {
 
     /// Number of records held.
     #[must_use]
-    pub fn len(&self) -> usize {
-        self.records.len()
+    pub const fn len(&self) -> usize {
+        self.len
     }
 
     /// `true` if the page holds no records.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
-    /// What the page takes in RAM, decoded — what the page cache charges
-    /// it: the record bytes, and per record its id, its `Vec` and its share
-    /// of the map's nodes.
+    /// What the page takes in RAM — what the page cache charges it: its
+    /// body, and per change its bytes, its `Vec` and its share of the map's
+    /// nodes.
     #[must_use]
     pub fn footprint(&self) -> usize {
         /// The id, the `Vec` and a share of a B-tree node, about.
-        const PER_RECORD: usize = 64;
+        const PER_CHANGE: usize = 64;
         size_of::<Self>()
+            + self.body.len()
             + self
-                .records
+                .changes
                 .values()
-                .map(|bytes| bytes.capacity() + PER_RECORD)
+                .map(|v| v.as_ref().map_or(0, Vec::capacity) + PER_CHANGE)
                 .sum::<usize>()
     }
 
     /// Insert or overwrite the record stored at `id`.
     pub fn upsert(&mut self, id: Id, bytes: Vec<u8>) {
-        self.records.insert(id.raw(), bytes);
+        if self.get(id).is_none() {
+            self.len += 1;
+        }
+        self.changes.insert(id.raw(), Some(bytes));
     }
 
     /// The record bytes stored at `id`, if present.
     #[must_use]
     pub fn get(&self, id: Id) -> Option<&[u8]> {
-        self.records.get(&id.raw()).map(Vec::as_slice)
+        let raw = id.raw();
+        if let Some(change) = self.changes.get(&raw) {
+            return change.as_deref();
+        }
+        let cols = self.columns()?;
+        cols.record(cols.find(raw).ok()?)
     }
 
-    /// Remove the record at `id`, returning its bytes if it was present.
-    pub fn remove(&mut self, id: Id) -> Option<Vec<u8>> {
-        self.records.remove(&id.raw())
+    /// Remove the record at `id`; whether it was there.
+    pub fn remove(&mut self, id: Id) -> bool {
+        if self.get(id).is_none() {
+            return false;
+        }
+        self.len -= 1;
+        let raw = id.raw();
+        if self.columns().is_some_and(|c| c.find(raw).is_ok()) {
+            self.changes.insert(raw, None);
+        } else {
+            self.changes.remove(&raw);
+        }
+        true
     }
 
     /// Iterate `(Id, bytes)` in `Id` order.
     pub fn iter(&self) -> impl Iterator<Item = (Id, &[u8])> {
-        self.records
-            .iter()
-            .map(|(&raw, bytes)| (Id::from_raw(raw), bytes.as_slice()))
-    }
-
-    /// Consume the page into its `(Id, bytes)` entries, in `Id` order.
-    pub fn into_entries(self) -> impl Iterator<Item = (Id, Vec<u8>)> {
-        self.records
-            .into_iter()
-            .map(|(raw, bytes)| (Id::from_raw(raw), bytes))
-    }
-
-    /// Serialise, framed `[len][checked envelope]`. With `compress` the body
-    /// is zstd'd against `dict`'s **latest** state — but stored `Raw` anyway
-    /// when zstd cannot shrink it (a page never grows for having been
-    /// "compressed"). Without `compress` (a hot page type opting out), zstd
-    /// never runs.
-    ///
-    /// # Errors
-    /// [`StorageError::Io`] if zstd fails (allocation-class faults only).
-    pub fn to_bytes(
-        &self,
-        dict: &Dictionary,
-        compress: bool,
-    ) -> StorageResult<Vec<u8>> {
-        let body = PageBody {
-            records: self
-                .records
-                .iter()
-                .map(|(&raw, bytes)| (raw, bytes.clone()))
-                .collect(),
-        };
-        let raw = to_wire(&body);
-
-        let payload = if compress {
-            let zstd =
-                zstd::bulk::Compressor::with_dictionary(LEVEL, dict.latest())?
-                    .compress(&raw)?;
-            if zstd.len() < raw.len() {
-                PagePayload::Zstd {
-                    dict_len: dict.len() as u32,
-                    raw_len: raw.len() as u32,
-                    bytes: zstd,
-                }
-            } else {
-                PagePayload::Raw(raw)
+        Entries {
+            body: Body {
+                cols: self.columns(),
+                at: 0,
             }
-        } else {
-            PagePayload::Raw(raw)
-        };
-
-        let payload = to_wire_checked(&PageEnvelope {
-            struct_hash: self.struct_hash,
-            payload,
-        });
-        let mut out = Vec::with_capacity(LEN_PREFIX + payload.len());
-        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        out.extend_from_slice(&payload);
-        Ok(out)
-    }
-
-    /// Whether `buf` holds a whole page: its length prefix in range and its
-    /// envelope's crc right — what a reconstruction checks of the batch a
-    /// crash may have cut (RFC 0072 §7), without decompressing it.
-    #[must_use]
-    pub fn intact(buf: &[u8]) -> bool {
-        let Some(len) = buf
-            .get(..LEN_PREFIX)
-            .and_then(|s| s.try_into().ok())
-            .map(u32::from_le_bytes)
-        else {
-            return false;
-        };
-        buf.get(LEN_PREFIX..LEN_PREFIX + len as usize)
-            .is_some_and(|env| from_wire_checked::<PageEnvelope>(env).is_ok())
-    }
-
-    /// Parse a page from bytes (typically a whole zero-padded run): length
-    /// prefix, crc + envelope decode through the checked codec, then — for a
-    /// `Zstd` payload — decompress against the dictionary
-    /// state the page was written under.
-    ///
-    /// # Errors
-    /// [`StorageError::Corrupt`] on a truncated buffer, an out-of-range
-    /// length, a crc mismatch, an undecodable envelope/body, or a `dict_len`
-    /// stamping a state `dict` never reached.
-    pub fn from_bytes(buf: &[u8], dict: &Dictionary) -> StorageResult<Self> {
-        let len_bytes: [u8; LEN_PREFIX] = buf
-            .get(..LEN_PREFIX)
-            .and_then(|s| s.try_into().ok())
-            .ok_or(StorageError::Corrupt("page length truncated"))?;
-        let len = u32::from_le_bytes(len_bytes) as usize;
-        let end = LEN_PREFIX
-            .checked_add(len)
-            .filter(|&end| end <= buf.len())
-            .ok_or(StorageError::Corrupt("page length out of range"))?;
-
-        #[cfg(feature = "probe")]
-        let mut lap = crate::probe::Lap::start();
-        let envelope: PageEnvelope =
-            from_wire_checked(&buf[LEN_PREFIX..end])
-                .map_err(|_| StorageError::Corrupt("page envelope"))?;
-        let raw = match envelope.payload {
-            PagePayload::Raw(raw) => raw,
-            PagePayload::Zstd {
-                dict_len,
-                raw_len,
-                bytes,
-            } => {
-                let state = dict.state(dict_len as usize).ok_or(
-                    StorageError::Corrupt("page dictionary state unknown"),
-                )?;
-                #[cfg(feature = "probe")]
-                lap.split(0);
-                let mut d = zstd::bulk::Decompressor::with_dictionary(state)
-                    .map_err(|_| StorageError::Corrupt("page decompress"))?;
-                #[cfg(feature = "probe")]
-                lap.split(1);
-                d.decompress(&bytes, raw_len as usize)
-                    .map_err(|_| StorageError::Corrupt("page decompress"))?
-            }
-        };
-        #[cfg(feature = "probe")]
-        lap.split(2);
-        let body: PageBody =
-            from_wire(&raw).map_err(|_| StorageError::Corrupt("page body"))?;
-        #[cfg(feature = "probe")]
-        lap.split(3);
-        let page = Self {
-            struct_hash: envelope.struct_hash,
-            records: body.records.into_iter().collect(),
-        };
-        #[cfg(feature = "probe")]
-        {
-            lap.split(4);
-            crate::probe::decode_parts(&lap);
+            .peekable(),
+            changes: self.changes.iter().peekable(),
         }
-        Ok(page)
+    }
+
+    /// The body's columns; `None` while the page has none.
+    fn columns(&self) -> Option<Columns<'_>> {
+        Columns::of(&self.body)
+    }
+
+    /// Fold the changes into a new body, which the page keeps.
+    fn seal(&mut self) -> StorageResult<()> {
+        if self.changes.is_empty() && !self.body.is_empty() {
+            return Ok(());
+        }
+        let bytes = self.body.len()
+            + self.changes.values().flatten().map(Vec::len).sum::<usize>();
+        let body = codec::body_of(
+            self.iter().map(|(id, b)| (id.raw(), b)),
+            self.len,
+            bytes,
+        )?;
+        self.body = body.into_boxed_slice();
+        self.changes.clear();
+        Ok(())
+    }
+}
+
+impl PartialEq for SlotPage {
+    /// The same records under the same type, however each page holds them.
+    fn eq(&self, other: &Self) -> bool {
+        self.struct_hash == other.struct_hash
+            && self.len == other.len
+            && self.iter().eq(other.iter())
+    }
+}
+
+impl Eq for SlotPage {}
+
+impl core::fmt::Debug for SlotPage {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SlotPage")
+            .field("struct_hash", &self.struct_hash)
+            .field("len", &self.len)
+            .field("body", &self.body.len())
+            .field("changes", &self.changes.len())
+            .finish()
+    }
+}
+
+/// The body's records from `at` on; none without a body.
+struct Body<'p> {
+    cols: Option<Columns<'p>>,
+    at: usize,
+}
+
+impl<'p> Iterator for Body<'p> {
+    type Item = (u128, &'p [u8]);
+    fn next(&mut self) -> Option<Self::Item> {
+        let cols = self.cols.as_ref()?;
+        let id = cols.ids.get(self.at)?;
+        let record = cols.record(self.at)?;
+        self.at += 1;
+        Some((id, record))
+    }
+}
+
+/// The body's records and the changes, merged in id order: a change wins
+/// over the body's record at its id, and a removal drops it.
+struct Entries<'p> {
+    body: Peekable<Body<'p>>,
+    changes: Peekable<btree_map::Iter<'p, u128, Option<Vec<u8>>>>,
+}
+
+impl<'p> Iterator for Entries<'p> {
+    type Item = (Id, &'p [u8]);
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let body = self.body.peek().map(|&(raw, _)| raw);
+            let change = self.changes.peek().map(|&(&raw, _)| raw);
+            let raw = match (body, change) {
+                (None, None) => return None,
+                (Some(b), Some(c)) if c <= b => {
+                    if c == b {
+                        self.body.next();
+                    }
+                    c
+                }
+                (Some(_), _) => {
+                    return self
+                        .body
+                        .next()
+                        .map(|(raw, record)| (Id::from_raw(raw), record));
+                }
+                (None, Some(c)) => c,
+            };
+            // A change at `raw`: its record, or a removal to skip.
+            if let Some((_, Some(record))) = self.changes.next() {
+                return Some((Id::from_raw(raw), record.as_slice()));
+            }
+        }
     }
 }
 
@@ -317,8 +294,10 @@ mod tests {
         // Overwrite.
         p.upsert(id(1), vec![9]);
         assert_eq!(p.get(id(1)), Some(&[9][..]));
-        assert_eq!(p.remove(id(2)), Some(vec![4, 5]));
+        assert!(p.remove(id(2)));
+        assert!(!p.remove(id(2)), "a second removal finds nothing");
         assert_eq!(p.get(id(2)), None);
+        assert_eq!(p.len(), 1);
     }
 
     #[test]
@@ -396,7 +375,7 @@ mod tests {
     #[test]
     fn empty_page_roundtrips() {
         let d = Dictionary::new();
-        let p = SlotPage::new(7);
+        let mut p = SlotPage::new(7);
         let back =
             SlotPage::from_bytes(&p.to_bytes(&d, true).unwrap(), &d).unwrap();
         assert!(back.is_empty());
@@ -447,6 +426,69 @@ mod tests {
         bytes.resize(BLOCK_SIZE * 2, 0);
         let back = SlotPage::from_bytes(&bytes, &d).unwrap();
         assert_eq!(back, p);
+    }
+
+    /// A page read back is its body: the changes on top of it win, a removal
+    /// hides a body record, and iteration merges both in id order.
+    #[test]
+    fn changes_on_a_read_page_win_over_its_body() {
+        let d = Dictionary::new();
+        let mut p = SlotPage::new(3);
+        for k in [10, 20, 30, 40] {
+            p.upsert(id(k), vec![k as u8; 3]);
+        }
+        let mut back =
+            SlotPage::from_bytes(&p.to_bytes(&d, true).unwrap(), &d).unwrap();
+        back.upsert(id(20), b"new".to_vec()); // over a body record
+        back.upsert(id(25), b"mid".to_vec()); // between two
+        back.upsert(id(50), b"end".to_vec()); // past the last
+        assert!(back.remove(id(30))); // a body record
+        assert!(back.remove(id(50))); // a change
+        assert!(!back.remove(id(99)));
+        assert_eq!(back.len(), 4);
+        assert_eq!(back.get(id(10)), Some(&[10u8; 3][..]));
+        assert_eq!(back.get(id(20)), Some(&b"new"[..]));
+        assert_eq!(back.get(id(30)), None);
+        assert_eq!(back.get(id(50)), None);
+        let seen: Vec<(u64, Vec<u8>)> =
+            back.iter().map(|(i, b)| (i.key(), b.to_vec())).collect();
+        assert_eq!(
+            seen,
+            [
+                (10, vec![10; 3]),
+                (20, b"new".to_vec()),
+                (25, b"mid".to_vec()),
+                (40, vec![40; 3]),
+            ]
+        );
+        // And it encodes as what it holds.
+        let again = SlotPage::from_bytes(&back.to_bytes(&d, true).unwrap(), &d)
+            .unwrap();
+        assert_eq!(again, back);
+    }
+
+    /// Encoding seals the changes into the body the page keeps: nothing
+    /// per record is left, and the page held is the page written.
+    #[test]
+    fn an_encoded_page_keeps_one_buffer() {
+        let d = Dictionary::new();
+        let mut p = SlotPage::new(4);
+        for k in 1..=500 {
+            p.upsert(id(k), vec![7; 40]);
+        }
+        let bytes = p.to_bytes(&d, false).unwrap();
+        // The body alone: three column lengths, then per record its id, its
+        // end and its 40 bytes.
+        let body = 3 * 4 + 500 * (16 + 4 + 40);
+        assert_eq!(p.footprint(), size_of::<SlotPage>() + body);
+        assert_eq!(
+            p.to_bytes(&d, false).unwrap(),
+            bytes,
+            "sealing twice changes nothing"
+        );
+        let read = SlotPage::from_bytes(&bytes, &d).unwrap();
+        assert_eq!(read.footprint(), p.footprint());
+        assert_eq!(read, p);
     }
 
     // Repetitive records must actually shrink on disk once the dictionary has
