@@ -1,6 +1,7 @@
 //! The borrowed twin `NameRef<'a>` a derive emits beside `Name` (RFC 0076):
 //! its generics, its definition for a struct, and the impls every twin
-//! carries — `Clone`, `Copy`, `Debug`, `to_owned()` and `From<NameRef>`.
+//! carries — `Clone`, `Copy`, `Debug`, `From<NameRef> for Name` — and the
+//! `TryFrom<Wire<Name>>` the owned type takes.
 
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
@@ -80,7 +81,7 @@ impl<'i> Twin<'i> {
         format!(
             "The borrowed twin of `{}`: each field's view over the bytes, \
              built by `WaveWire::view` in one checked walk (RFC 0076). \
-             `to_owned()` gives the owned value back.",
+             `Name::from` (or `.into()`) gives the owned value back.",
             self.input.ident
         )
     }
@@ -164,24 +165,22 @@ impl<'i> Twin<'i> {
                 }
             }
         };
-        let doc = format!(
-            "The owned `{name}` back: every copy and allocation its view saved."
-        );
+        // `TryFrom` per type: a blanket `impl<T> TryFrom<Wire<T>> for T`
+        // is an orphan. Over the type's own generics: no view is involved.
+        let (oig, _, owc) = self.input.generics.split_for_impl();
         quote! {
             #traits
-            #[automatically_derived]
-            impl #ig #tw #tg #wc {
-                #[doc = #doc]
-                #[must_use]
-                #[allow(clippy::wrong_self_convention)]
-                pub fn to_owned(&self) -> #name #owned_tg {
-                    <#name #owned_tg as #k::WaveWire>::from_ref(*self)
-                }
-            }
             #[automatically_derived]
             impl #ig ::core::convert::From<#tw #tg> for #name #owned_tg #wc {
                 fn from(r: #tw #tg) -> Self {
                     <Self as #k::WaveWire>::from_ref(r)
+                }
+            }
+            #[automatically_derived]
+            impl #oig ::core::convert::TryFrom<#k::Wire<Self>> for #name #owned_tg #owc {
+                type Error = #k::Error;
+                fn try_from(w: #k::Wire<Self>) -> #k::Result<Self> {
+                    w.decode()
                 }
             }
         }
