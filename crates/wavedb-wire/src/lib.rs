@@ -493,7 +493,7 @@ mod tests {
             let mut bytes = to_wire_checked(&v);
             let view = crate::view_wire_checked::<Named>(&bytes).unwrap();
             assert_eq!((view.a, view.b), (7, "wave"));
-            assert_eq!(view.to_owned(), v);
+            assert_eq!(Named::from(view), v);
             *bytes.last_mut().unwrap() ^= 0xFF;
             assert!(matches!(
                 crate::view_wire_checked::<Named>(&bytes),
