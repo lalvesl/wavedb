@@ -144,11 +144,18 @@ fn a_twin_borrows_its_strings_and_bytes_from_the_buffer() {
 }
 
 #[test]
-fn a_twin_goes_back_to_owned_by_to_owned_or_from() {
+fn a_twin_goes_back_to_owned_by_from_and_a_wire_by_try_from() {
     let bytes = to_wire(&person());
     let p = view_wire::<Person>(&bytes).expect("view");
-    assert_eq!(p.to_owned(), person());
     assert_eq!(Person::from(p), person());
+    let owned: Person = p.into();
+    assert_eq!(owned, person());
+    let wire = Wire::<Person>::encode(&person());
+    let owned: Person = wire.try_into().expect("decode");
+    assert_eq!(owned, person());
+    // Bad bytes are an error to convert, not a panic.
+    let bad = Wire::<Person>::new(Box::new([1, 2]), 0);
+    assert_eq!(Person::try_from(bad), Err(Error::UnexpectedEof));
     // A field alone comes back with what std already has.
     assert_eq!(p.name.to_owned(), "Ada");
     assert_eq!(p.avatar.to_vec(), [1, 2, 3, 250]);
@@ -158,7 +165,10 @@ fn a_twin_goes_back_to_owned_by_to_owned_or_from() {
         at: (3, 4),
     };
     let bytes = to_wire(&shape);
-    assert_eq!(view_wire::<Shape>(&bytes).expect("view").to_owned(), shape);
+    assert_eq!(
+        Shape::from(view_wire::<Shape>(&bytes).expect("view")),
+        shape
+    );
     assert_eq!(view_wire::<Colour>(&[1]).expect("view"), ColourRef::Green);
 }
 
@@ -259,7 +269,7 @@ fn a_wire_encodes_and_moves_between_threads_whatever_it_holds() {
     // It claims no `T`, so even one that is neither is fine to move.
     send_sync::<Wire<std::rc::Rc<u8>>>();
     let wire = Wire::encode(&person());
-    let back = std::thread::spawn(move || wire.view().map(|p| p.to_owned()))
+    let back = std::thread::spawn(move || wire.view().map(Person::from))
         .join()
         .expect("thread");
     assert_eq!(back, Ok(person()));
