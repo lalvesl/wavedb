@@ -25,7 +25,7 @@ and list views. `Wire<T>` is the owned buffer they borrow from: one
 `Box<[u8]>`, `Send`, dropped as one deallocation.
 
 `wire.view()?` validates once (bounds, UTF-8, tags) and hands back the
-`ThingRef`, whose fields are then plain field reads. `r.to_owned()` gives
+`ThingRef`, whose fields are then plain field reads. `Thing::from(r)` gives
 back the owned `Thing`, with its `String`s and `Vec`s, for a write. There
 is no `Cow` anywhere.
 
@@ -169,14 +169,23 @@ must receive exactly the pointer and layout `alloc` returned, so a `String`
 carved out of a larger block is undefined behaviour when it drops. Views are
 what makes the single allocation sound.
 
-### 5. Back to owned: `to_owned()`
+### 5. Back to owned: `From` and `TryFrom`
 
 A write takes the owned `T`, as today. The derive emits two ways back:
 
-- `impl NameRef<'_> { pub fn to_owned(&self) -> Name }`, an inherent method
-  (it takes precedence over the blanket `ToOwned` a `Clone` `Ref` would
-  have);
-- `impl From<NameRef<'_>> for Name`.
+- `impl From<NameRef<'_>> for Name`: `Name::from(r)`, or `r.into()`;
+- `impl TryFrom<Wire<Name>> for Name` — fallible, since a `Wire`'s bytes
+  are only checked when read: `wire.try_into()?`. Per type, because a
+  blanket `impl<T> TryFrom<Wire<T>> for T` is an orphan; generic code calls
+  `Wire::decode`.
+
+**Not `ToOwned`.** The trait asks `Owned: Borrow<Self>` — a `&NameRef` out
+of a `&Name` — and no `NameRef` lives inside a `Name` to point at (`str` and
+`String` work because the `str` *is* the `String`'s buffer, its length
+carried in the reference). It is taken anyway: a twin is `Clone`, so std's
+blanket gives it `ToOwned` to itself. An inherent `to_owned()` returning
+`Name` was tried in step 1 and dropped, as a method that looks like the
+trait's and is not.
 
 A field alone comes back with what Rust already has: `r.name.to_owned()`
 for a `String`, `r.blob.to_vec()` for a `Vec<u8>`. A read that ends in a
@@ -200,7 +209,7 @@ needs them pays.
 
 1. **`wavedb-wire` and the derive.**
    - The trait, the built-in impls, `Scalars`, `ListRef`, `Wire<T>`,
-     `view_wire`, and the derive's `NameRef<'a>` with `to_owned`/`From`.
+     `view_wire`, and the derive's `NameRef<'a>` with `From` back.
    - Tests:
      - `from_ref(view(encode(x))) == x` for every built-in and a nested
        derive;
@@ -274,6 +283,8 @@ needs them pays.
 - **The envelope is viewed, not decoded** (`view_wire_checked`, new in
   `wavedb-wire`): a compressed payload is decompressed straight from the
   read buffer, where the decode first copied it out.
+- **`to_owned()` gave way to `From`/`TryFrom`** (§5), and the derive emits
+  `TryFrom<Wire<Name>> for Name`.
 - `SlotPage::remove` returns whether the record was there, not a copy of
   it; `into_entries` is gone (its three callers, a split, an eviction
   restore and an upload, iterate and copy what they keep).
@@ -300,7 +311,7 @@ Next: step 3, collection reads.
 - **`Cow` fields** in the declared struct, borrowed on read and owned on
   write. They put a lifetime on every user type and make a write's copies
   implicit. The split here keeps the declared struct owned and the twin
-  borrowed, with `to_owned()` between them.
+  borrowed, with `From` between them.
 - **The owned struct in one allocation.** Unsound by the allocator's
   contract (§4).
 
