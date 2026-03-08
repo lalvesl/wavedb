@@ -136,7 +136,7 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   Every type also has a **borrowed twin** (RFC 0076): `type Ref<'a>` + `view`
   (`view_wire::<T>(bytes)`, one checked walk, `&str`/`&[u8]`/`ListRef` where
   decode copies), the derive emitting `NameRef<'a>` beside `Name` with
-  `to_owned()`/`From` back; `Wire<T>` is the one-buffer `Send` owner. Both
+  `From` back (and `TryFrom<Wire<Name>>`); `Wire<T>` is the one-buffer `Send` owner. Both
   derives (this one and `wavedb-macros`') expand through `wavedb-wire-codegen`;
   a hand impl of a heap-free `Copy` type adds `wavedb_wire::own_view!()`.
 - **wavedb-core** — `Id` (`KEY u64 · TENANT u48 · FLAG 1 · SALT 15`), `LocalId`
