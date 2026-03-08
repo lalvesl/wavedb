@@ -5,7 +5,7 @@
 //!
 //! For a type `Name` it emits the `WaveWire` impl and the type's borrowed
 //! twin `NameRef<'a>` (RFC 0076): one field per field, each the field type's
-//! view, with `to_owned()` and `From<NameRef>` back to `Name`.
+//! view, with `From<NameRef>` back to `Name` and `TryFrom<Wire<Name>>`.
 //!
 //! - **structs** (named, tuple, unit): field stack slots inline in
 //!   declaration order; heap payloads append depth-first to the shared heap.
