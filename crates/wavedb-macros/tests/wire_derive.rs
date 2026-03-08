@@ -82,7 +82,9 @@ fn the_twin_views_and_comes_back() {
         wavedb_core::wire::view_wire::<Named>(&bytes).expect("view");
     assert_eq!((view.a, view.b, view.d), (3, "wavedb", Some(6)));
     assert_eq!(view.c.to_vec(), [4, 5]);
-    assert_eq!(view.to_owned(), value);
+    assert_eq!(Named::from(view), value);
+    let wire = wavedb_core::wire::Wire::<Named>::encode(&value);
+    assert_eq!(Named::try_from(wire), Ok(value));
     let tuple = to_wire(&Tuple(1, "t".into(), false));
     let view = wavedb_core::wire::view_wire::<Tuple>(&tuple).expect("view");
     assert_eq!(Tuple::from(view), Tuple(1, "t".into(), false));
