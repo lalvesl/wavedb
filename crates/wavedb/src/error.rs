@@ -67,5 +67,13 @@ impl From<Error> for wavedb_core::Error {
     }
 }
 
+/// A view or decode fault (`wire.view()?`, `wire.try_into()?`) through the
+/// core seam: it is [`wavedb_core::Error::Wire`].
+impl From<wavedb_core::wire::Error> for Error {
+    fn from(e: wavedb_core::wire::Error) -> Self {
+        Self::Core(e.into())
+    }
+}
+
 /// Shorthand for a `Result` carrying the client [`Error`](enum@Error).
 pub type Result<T> = core::result::Result<T, Error>;
