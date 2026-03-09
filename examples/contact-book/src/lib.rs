@@ -86,7 +86,7 @@ pub async fn contacts_in(db: &Db, city: String) -> Result<Vec<Contact>> {
     let book = ContactBook::get(db)
         .await?
         .ok_or_else(|| Error::not_found("book missing — call open_book"))?;
-    Contact::collection(book.contacts)
+    Contact::collection(book.view()?.contacts)
         .by_city(db, &city)
         .try_collect()
         .await
