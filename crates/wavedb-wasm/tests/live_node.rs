@@ -65,7 +65,11 @@ async fn typed_flow_against_a_live_node_with_indexeddb_cache() {
 
     // ── `#[server]` call over fetch: bootstrap the tenant's book ──────────
     open_book(&db, "Ada".into()).await.expect("open_book");
-    let book = ContactBook::get(&db).await.expect("get").expect("exists");
+    let book = ContactBook::get(&db)
+        .await
+        .expect("get")
+        .map(|w| w.decode().unwrap())
+        .expect("exists");
     assert_eq!(book.owner, "Ada");
 
     // ── Typed Unique save over the wire (old version chains node-side) ────
@@ -76,7 +80,11 @@ async fn typed_flow_against_a_live_node_with_indexeddb_cache() {
     .save(&db)
     .await
     .expect("save book");
-    let book = ContactBook::get(&db).await.expect("get").expect("exists");
+    let book = ContactBook::get(&db)
+        .await
+        .expect("get")
+        .map(|w| w.decode().unwrap())
+        .expect("exists");
     assert_eq!(book.owner, "Ada Lovelace");
 
     // ── Collection over the wire: insert / update / streamed walk ─────────
@@ -134,14 +142,23 @@ async fn typed_flow_against_a_live_node_with_indexeddb_cache() {
     let cache = LocalHandle::new(&idb, tenant);
 
     assert!(
-        ContactBook::get(&cache).await.expect("cold").is_none(),
+        ContactBook::get(&cache)
+            .await
+            .expect("cold")
+            .map(|w| w.decode().unwrap())
+            .is_none(),
         "cold cache misses"
     );
-    let fetched = ContactBook::get(&db).await.expect("get").expect("exists");
+    let fetched = ContactBook::get(&db)
+        .await
+        .expect("get")
+        .map(|w| w.decode().unwrap())
+        .expect("exists");
     fetched.save(&cache).await.expect("back-fill");
     let warm = ContactBook::get(&cache)
         .await
         .expect("warm")
+        .map(|w| w.decode().unwrap())
         .expect("cached");
     assert_eq!(warm.owner, "Ada Lovelace", "read served from IndexedDB");
 
