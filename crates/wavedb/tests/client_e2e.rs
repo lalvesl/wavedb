@@ -131,20 +131,37 @@ fn typed_surface_drives_a_live_node() {
 
 /// Unique: get (empty) → save → upsert → history over the wire.
 async fn unique_phase(db: &Db) {
-    assert_eq!(AboutUser::get(db).await.expect("get"), None);
+    assert_eq!(
+        AboutUser::get(db)
+            .await
+            .expect("get")
+            .map(|w| w.decode().unwrap()),
+        None
+    );
 
     let mut me = AboutUser {
         name: "Ada".into(),
         city: "London".into(),
     };
     me.save(db).await.expect("save");
-    assert_eq!(AboutUser::get(db).await.expect("get"), Some(me.clone()));
+    assert_eq!(
+        AboutUser::get(db)
+            .await
+            .expect("get")
+            .map(|w| w.decode().unwrap()),
+        Some(me.clone())
+    );
 
     // save is an upsert — a second save overwrites the live record.
     me.city = "Paris".into();
     me.save(db).await.expect("resave");
     assert_eq!(
-        AboutUser::get(db).await.expect("get").unwrap().city,
+        AboutUser::get(db)
+            .await
+            .expect("get")
+            .map(|w| w.decode().unwrap())
+            .unwrap()
+            .city,
         "Paris"
     );
 
@@ -184,7 +201,13 @@ async fn nonunique_phase(db: &Db, pivot: NotePivotId) {
         .await
         .expect("insert");
     assert_eq!(
-        notes.get(db, id).await.expect("get").unwrap().body,
+        notes
+            .get(db, id)
+            .await
+            .expect("get")
+            .map(|w| w.decode().unwrap())
+            .unwrap()
+            .body,
         "buy milk"
     );
 
@@ -199,7 +222,15 @@ async fn nonunique_phase(db: &Db, pivot: NotePivotId) {
         )
         .await
         .expect("update");
-    assert!(notes.get(db, id).await.expect("get").unwrap().pinned);
+    assert!(
+        notes
+            .get(db, id)
+            .await
+            .expect("get")
+            .map(|w| w.decode().unwrap())
+            .unwrap()
+            .pinned
+    );
 
     // A second insert, then walk the whole collection — newest write first.
     notes
