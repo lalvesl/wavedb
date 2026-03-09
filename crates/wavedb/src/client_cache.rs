@@ -29,7 +29,7 @@
 use futures::{Stream, StreamExt, TryStreamExt};
 use wavedb_core::expose::Command;
 use wavedb_core::index::Pivot;
-use wavedb_core::wire::{from_wire, to_wire};
+use wavedb_core::wire::{Wire, from_wire, to_wire};
 use wavedb_core::{
     Collection, DbHandle, Id, LocalHandle, LocalId, NonUniqueStruct, Store,
     UniqueStruct,
@@ -65,11 +65,35 @@ pub async fn mirror_unique<T: UniqueStruct>(db: &Db, value: &T) {
     };
     let unchanged = matches!(
         local.get_unique::<T>().await,
-        Ok(Some(existing)) if to_wire(&existing) == to_wire(value)
+        Ok(Some(existing)) if existing.body() == to_wire(value)
     );
     if !unchanged {
         let _ = local.save_unique(value).await;
     }
+}
+
+/// Mirror a Unique record a `Get` fetched as `wire`: compared by its bytes,
+/// and decoded only when the cache's copy differs.
+///
+/// # Errors
+/// The node's bytes not decoding as `T` — what a `Get` reported before it
+/// answered views (RFC 0076), so a bad record still fails the read.
+pub async fn mirror_unique_wire<T: UniqueStruct>(
+    db: &Db,
+    wire: &Wire<T>,
+) -> Result<()> {
+    let Some((local, _turn)) = mirroring(db).await else {
+        return Ok(());
+    };
+    let unchanged = matches!(
+        local.get_unique::<T>().await,
+        Ok(Some(existing)) if existing.body() == wire.body()
+    );
+    if !unchanged {
+        let value = wire.decode().map_err(wavedb_core::Error::from)?;
+        let _ = local.save_unique(&value).await;
+    }
+    Ok(())
 }
 
 /// Mirror a Unique version with the node's [`Metadata`] written verbatim —
@@ -97,7 +121,7 @@ pub async fn mirror_unique_meta<T: UniqueStruct>(
 pub async fn unique_fallback<T: UniqueStruct>(
     db: &Db,
     err: Error,
-) -> Result<Option<T>> {
+) -> Result<Option<Wire<T>>> {
     if let Some(local) = db.local()
         && let Ok(Some(value)) = local.get_unique::<T>().await
     {
@@ -174,7 +198,7 @@ pub async fn record_fallback<T: NonUniqueStruct>(
     pivot: LocalId,
     id: Id,
     err: Error,
-) -> Result<Option<T>> {
+) -> Result<Option<Wire<T>>> {
     if let Some(local) = db.local()
         && let Ok(Some(value)) = local.get_record::<T>(pivot, id).await
     {
