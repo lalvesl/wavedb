@@ -306,7 +306,10 @@ mod tests {
         block_on(async {
             let store = MemStore::default();
             assert_eq!(
-                get_unique::<Settings, _>(&store, tenant()).await.unwrap(),
+                get_unique::<Settings, _>(&store, tenant())
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
                 None
             );
             save_unique(&store, tenant(), &Settings { volume: 3 })
@@ -316,14 +319,18 @@ mod tests {
                 .await
                 .unwrap(); // overwrite, same anchor
             assert_eq!(
-                get_unique::<Settings, _>(&store, tenant()).await.unwrap(),
+                get_unique::<Settings, _>(&store, tenant())
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
                 Some(Settings { volume: 7 })
             );
             // A different tenant sees nothing.
             assert_eq!(
                 get_unique::<Settings, _>(&store, U48::from(TENANT + 1))
                     .await
-                    .unwrap(),
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
                 None
             );
         });
@@ -356,7 +363,13 @@ mod tests {
 
             // Update in place: same Id, new bytes, still one walk entry.
             col.save(&store, b, &Doc { n: 22 }).await.unwrap();
-            assert_eq!(col.get(&store, b).await.unwrap(), Some(Doc { n: 22 }));
+            assert_eq!(
+                col.get(&store, b)
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
+                Some(Doc { n: 22 })
+            );
 
             // Remove drops it from the walk but keeps the bytes (history).
             assert!(col.remove(&store, b).await.unwrap());
@@ -368,7 +381,10 @@ mod tests {
                 vec![c, a]
             );
             assert_eq!(
-                col.get(&store, b).await.unwrap(),
+                col.get(&store, b)
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
                 Some(Doc { n: 22 }),
                 "removed record bytes must survive"
             );
@@ -467,7 +483,13 @@ mod tests {
             );
 
             // The live read is unaffected; `get` still yields the value only.
-            assert_eq!(col.get(&store, id).await.unwrap(), Some(Doc { n: 3 }));
+            assert_eq!(
+                col.get(&store, id)
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
+                Some(Doc { n: 3 })
+            );
         });
     }
 
@@ -492,7 +514,10 @@ mod tests {
                     .unwrap();
             }
             assert_eq!(
-                get_unique::<Settings, _>(&store, tenant()).await.unwrap(),
+                get_unique::<Settings, _>(&store, tenant())
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
                 Some(Settings { volume: 3 })
             );
             let versions: Vec<(crate::metadata::Metadata, Settings)> =
@@ -659,7 +684,13 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(matches!(err, Error::Conflict(at) if at == id));
-            assert_eq!(col.get(&store, id).await.unwrap(), Some(Doc { n: 2 }));
+            assert_eq!(
+                col.get(&store, id)
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
+                Some(Doc { n: 2 })
+            );
             let versions: Vec<(crate::metadata::Metadata, Doc)> =
                 col.history(&store, id).try_collect().await.unwrap();
             assert_eq!(
@@ -976,7 +1007,10 @@ mod tests {
                 archive_id(Doc::STRUCT_HASH, Doc::SHAPE, id.key(), tenant());
             assert!(slot.flag(), "a NonUnique archive flips to FLAG = 1");
             assert_eq!(
-                col.get(&store, slot).await.unwrap(),
+                col.get(&store, slot)
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
                 Some(Doc { n: 1 }),
                 "the superseded version resolves at the derived slot"
             );
