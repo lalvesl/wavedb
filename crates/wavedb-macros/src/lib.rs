@@ -39,7 +39,7 @@ mod wire_derive;
 ///
 /// Field stack slots encode inline in declaration order; heap payloads append
 /// depth-first. See [`docs/wire_format.md`](../../../docs/wire_format.md).
-#[proc_macro_derive(WaveWire)]
+#[proc_macro_derive(WaveWire, attributes(wave_wire))]
 pub fn wave_wire(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
     wire_derive::derive(&input)
