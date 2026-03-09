@@ -88,7 +88,7 @@ async fn flow() -> Result<()> {
 
     // 4. ordinary requests: save (versioned) + get (1 lookup)
     Note { body: "ship it".into(), pinned: true }.create(&db).await?;
-    let me: Option<AboutUser> = AboutUser::get(&db).await?;
+    let me: Option<Wire<AboutUser>> = AboutUser::get(&db).await?; // .view()? reads it
 
     // 5. filtered read via server fn — async iterator (collect, or .next().await)
     let pins: Vec<Note> = pinned_notes(&db).try_collect().await?;
