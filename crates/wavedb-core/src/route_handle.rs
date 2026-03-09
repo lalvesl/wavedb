@@ -26,9 +26,10 @@ use crate::metadata::Metadata;
 use crate::node_op::{NodeOp, NodeReply};
 use crate::placement::Owner;
 use crate::route::Route;
-use crate::route_reply::{buffered, decode, mismatch, value, values, versions};
+use crate::route_reply::{buffered, decode, mismatch, values, versions, wire};
 use crate::traits::{NonUniqueStruct, UniqueStruct};
 use crate::u48::U48;
+use crate::wire::Wire;
 
 mod ops;
 
@@ -134,8 +135,8 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
         }
     }
 
-    async fn get_unique<T: UniqueStruct>(&self) -> Result<Option<T>> {
-        value(self.run(T::STRUCT_HASH, NodeOp::GetUnique).await?)
+    async fn get_unique<T: UniqueStruct>(&self) -> Result<Option<Wire<T>>> {
+        wire(self.run(T::STRUCT_HASH, NodeOp::GetUnique).await?)
     }
 
     async fn save_unique<T: UniqueStruct>(&self, value: &T) -> Result<()> {
@@ -187,8 +188,8 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
         &self,
         pivot: LocalId,
         id: Id,
-    ) -> Result<Option<T>> {
-        value(
+    ) -> Result<Option<Wire<T>>> {
+        wire(
             self.run(T::STRUCT_HASH, NodeOp::GetRecord { pivot, id })
                 .await?,
         )
