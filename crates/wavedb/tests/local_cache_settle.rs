@@ -55,7 +55,11 @@ async fn after_a_crash(dir: &Path, n: u32) -> Option<AboutUser> {
     copy_dir(dir, &crashed);
     let db = open(&crashed).await;
     let local = db.local().expect("a cache");
-    local.get_unique::<AboutUser>().await.expect("local read")
+    local
+        .get_unique::<AboutUser>()
+        .await
+        .expect("local read")
+        .map(|w| w.decode().unwrap())
 }
 
 #[test]
@@ -97,7 +101,11 @@ fn an_ordinary_local_write_settles_on_the_tick() {
             wavedb_platform::time::sleep(Duration::from_millis(100)).await;
         }
         assert_eq!(
-            local.get_unique::<AboutUser>().await.expect("read"),
+            local
+                .get_unique::<AboutUser>()
+                .await
+                .expect("read")
+                .map(|w| w.decode().unwrap()),
             Some(ada()),
             "the cache still answers from its record cache"
         );
@@ -117,7 +125,11 @@ fn dropping_the_db_settles_and_frees_the_directory() {
         let db = open(dir.path()).await;
         let local = db.local().expect("a cache");
         assert_eq!(
-            local.get_unique::<AboutUser>().await.expect("read"),
+            local
+                .get_unique::<AboutUser>()
+                .await
+                .expect("read")
+                .map(|w| w.decode().unwrap()),
             Some(ada())
         );
     });
@@ -141,7 +153,8 @@ fn a_durable_save_offline_refuses_instead_of_queueing() {
                 .expect("a cache")
                 .get_unique::<AboutUser>()
                 .await
-                .expect("read"),
+                .expect("read")
+                .map(|w| w.decode().unwrap()),
             None,
             "nothing was mirrored"
         );
