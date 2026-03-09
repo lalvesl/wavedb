@@ -28,6 +28,7 @@ const SALT_MASK: u128 = (1 << SALT_BITS) - 1;
 #[derive(
     Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, WaveWire,
 )]
+#[wave_wire(own_view)]
 pub struct Id(u128);
 
 impl Id {
