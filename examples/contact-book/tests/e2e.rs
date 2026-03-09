@@ -95,7 +95,11 @@ fn contact_book_flow_over_the_wire() {
         // ── Bootstrap (server-side): pivot minted, holder saved ──────────────
         open_book(&db, "Ada".into()).await.expect("open_book");
         open_book(&db, "ignored".into()).await.expect("idempotent");
-        let book = ContactBook::get(&db).await.expect("get").expect("exists");
+        let book = ContactBook::get(&db)
+            .await
+            .expect("get")
+            .map(|w| w.decode().unwrap())
+            .expect("exists");
         assert_eq!(book.owner, "Ada");
 
         // ── The typed collection handle, from the Unique holder ──────────────
@@ -140,7 +144,13 @@ fn contact_book_flow_over_the_wire() {
             .await
             .expect("update grace");
         assert_eq!(
-            contacts.get(&db, grace).await.expect("get").unwrap().city,
+            contacts
+                .get(&db, grace)
+                .await
+                .expect("get")
+                .map(|w| w.decode().unwrap())
+                .unwrap()
+                .city,
             "London"
         );
 
@@ -162,7 +172,14 @@ fn contact_book_flow_over_the_wire() {
             vec!["Grace"]
         );
         // The removed record still resolves by Id.
-        assert!(contacts.get(&db, alan).await.expect("get").is_some());
+        assert!(
+            contacts
+                .get(&db, alan)
+                .await
+                .expect("get")
+                .map(|w| w.decode().unwrap())
+                .is_some()
+        );
 
         node.shutdown();
     });
