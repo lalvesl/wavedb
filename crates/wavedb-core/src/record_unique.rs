@@ -6,9 +6,10 @@
 use crate::error::Result;
 use crate::id::Id;
 use crate::metadata::Metadata;
-use crate::record::{decode_record, history_stream, plan_chained_save};
+use crate::record::{history_stream, plan_chained_save, wire_record};
 use crate::store::Store;
 use crate::u48::U48;
+use crate::wire::Wire;
 
 /// The fixed anchor a `Unique` type's live record sits at under `tenant`.
 fn unique_anchor<T: crate::traits::WaveDbStruct>(tenant: U48) -> Id {
@@ -16,18 +17,20 @@ fn unique_anchor<T: crate::traits::WaveDbStruct>(tenant: U48) -> Id {
 }
 
 /// Fetch a `Unique` record from its anchor (`KEY = STRUCT_HASH`, `FLAG = 1`,
-/// `SALT = 0`) under `tenant`. `None` = never saved.
+/// `SALT = 0`) under `tenant`, as a [`Wire`] over its body (RFC 0076).
+/// `None` = never saved.
 ///
 /// # Errors
-/// Propagates a [`Store`] failure or a decode fault.
-pub async fn get_unique<T, S>(store: &S, tenant: U48) -> Result<Option<T>>
+/// Propagates a [`Store`] failure, or a head or metadata fault; the body is
+/// checked when viewed.
+pub async fn get_unique<T, S>(store: &S, tenant: U48) -> Result<Option<Wire<T>>>
 where
     T: crate::traits::WaveDbStruct,
     S: Store,
 {
     let anchor = unique_anchor::<T>(tenant);
     match store.get_of(T::STRUCT_HASH, anchor).await? {
-        Some(bytes) => Ok(Some(decode_record(T::STRUCT_HASH, &bytes)?.1)),
+        Some(bytes) => Ok(Some(wire_record(T::STRUCT_HASH, bytes)?.1)),
         None => Ok(None),
     }
 }
