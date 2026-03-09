@@ -128,7 +128,7 @@ fn workers_own_their_shards_and_close_them_cleanly() {
             ids.push(col.insert(&db, &note).await.expect("insert"));
         }
         let got = col.get(&db, ids[7]).await.expect("get").expect("present");
-        assert_eq!(got.body, "note 7");
+        assert_eq!(got.view().expect("view").body, "note 7");
 
         // ---- 3. stop: every worker closes its stores, and says so ----------
         drop(router);
@@ -155,7 +155,10 @@ fn workers_own_their_shards_and_close_them_cleanly() {
         let notes_at = Owner::Collection(pivot.local_id()).shard(SHARDS);
         for (i, store) in stores.iter().enumerate() {
             let local = LocalHandle::new(store, tenant);
-            let found = AboutUser::get(&local).await.expect("read profile");
+            let found = AboutUser::get(&local)
+                .await
+                .expect("read profile")
+                .map(decoded);
             assert_eq!(
                 found.as_ref(),
                 (i == profile_at).then_some(&profile),
@@ -169,4 +172,9 @@ fn workers_own_their_shards_and_close_them_cleanly() {
             );
         }
     });
+}
+
+/// A fetched record, owned — for the comparisons.
+fn decoded<T: wavedb_core::WaveWire>(w: wavedb_core::wire::Wire<T>) -> T {
+    wavedb_core::wire::from_wire(&w.into_body()).expect("decode")
 }
