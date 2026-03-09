@@ -244,10 +244,11 @@ pub async fn search_todos(
 pub async fn complete_todo(db: &Db, id: Id) -> Result<()> {
     let profile = get_profile(db).await?;
     let col = Todo::collection(profile.todos);
-    let mut todo = col
+    let mut todo: Todo = col
         .get(db, id)
         .await?
-        .ok_or_else(|| Error::not_found("todo not found"))?;
+        .ok_or_else(|| Error::not_found("todo not found"))?
+        .try_into()?;
     todo.completed = true;
     col.save(db, id, &todo).await
 }
