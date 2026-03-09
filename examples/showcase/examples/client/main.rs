@@ -103,7 +103,13 @@ async fn online_tour(db: &Db) {
     open_workspace(db, "Ada".into())
         .await
         .expect("open workspace");
-    let ws = Workspace::get(db).await.expect("get").expect("exists");
+    // Owned: the upsert below builds on it.
+    let ws: Workspace = Workspace::get(db)
+        .await
+        .expect("get")
+        .expect("exists")
+        .try_into()
+        .expect("decode");
     println!("workspace of {:?} is open", ws.owner);
 
     let project = add_project(db, "launch".into()).await.expect("project");
@@ -240,8 +246,13 @@ async fn save_with_retry(
 ) {
     let tasks = Task::collection(pivot);
     for _ in 0..3 {
-        let current =
-            tasks.get(db, id).await.expect("read").expect("task exists");
+        let current: Task = tasks
+            .get(db, id)
+            .await
+            .expect("read")
+            .expect("task exists")
+            .try_into()
+            .expect("decode");
         match tasks.save(db, id, &change(current)).await {
             Ok(()) => return,
             Err(Error::Node(refusal))
