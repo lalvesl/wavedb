@@ -43,6 +43,7 @@ use crate::local_id::LocalId;
 use crate::metadata::Metadata;
 use crate::traits::{NonUniqueStruct, UniqueStruct};
 use crate::u48::U48;
+use crate::wire::Wire;
 
 /// An execution context bound to one tenant: somewhere typed operations can
 /// run — locally against a [`Store`](crate::Store), or remotely over a
@@ -53,9 +54,11 @@ use crate::u48::U48;
 /// collection by the `Pivot` record's [`LocalId`] (the generated typed
 /// wrappers pass it from a `{Name}PivotId`).
 pub trait DbHandle: Sized {
-    /// This context's error. Core faults convert in; a context may add its
-    /// own layers (node refusal, transport) on top.
-    type Error: From<Error>;
+    /// This context's error. Core faults convert in, and so do wire faults —
+    /// a `wire.view()?` over what a read returned (RFC 0076), through
+    /// [`Error::Wire`]; a context may add its own layers (node refusal,
+    /// transport) on top.
+    type Error: From<Error> + From<crate::wire::Error>;
 
     /// The tenant this handle is bound to.
     fn tenant(&self) -> U48;
@@ -67,14 +70,16 @@ pub trait DbHandle: Sized {
     #[must_use]
     fn as_tenant(&self, tenant: U48) -> Self;
 
-    /// Fetch this tenant's `Unique` record from its anchor. `None` = never
-    /// saved.
+    /// Fetch this tenant's `Unique` record from its anchor, as a [`Wire`]
+    /// over its body: `.view()` reads it, `.try_into()` owns it (RFC 0076).
+    /// `None` = never saved.
     ///
     /// # Errors
-    /// A backend/transport failure or a decode fault.
+    /// A backend/transport failure or a head fault; the body is checked
+    /// when viewed.
     async fn get_unique<T: UniqueStruct>(
         &self,
-    ) -> Result<Option<T>, Self::Error>;
+    ) -> Result<Option<Wire<T>>, Self::Error>;
 
     /// Save (insert-or-overwrite) this tenant's `Unique` record at its
     /// anchor. Save **is** the upsert; the superseded version is archived on
@@ -149,18 +154,20 @@ pub trait DbHandle: Sized {
         value: &T,
     ) -> Result<Id, Self::Error>;
 
-    /// Fetch the record at `id`. `None` = no such record. A removed record
-    /// still resolves (history stays navigable); `pivot` scopes the typed
-    /// wrapper, remote contexts may not need it.
+    /// Fetch the record at `id`, as a [`Wire`] over its body (RFC 0076).
+    /// `None` = no such record. A removed record still resolves (history
+    /// stays navigable); `pivot` scopes the typed wrapper, remote contexts
+    /// may not need it.
     ///
     /// # Errors
-    /// A backend/transport failure or a decode fault (including an `id`
-    /// resolving to a different type's record).
+    /// A backend/transport failure or a head fault (including an `id`
+    /// resolving to a different type's record); the body is checked when
+    /// viewed.
     async fn get_record<T: NonUniqueStruct>(
         &self,
         pivot: LocalId,
         id: Id,
-    ) -> Result<Option<T>, Self::Error>;
+    ) -> Result<Option<Wire<T>>, Self::Error>;
 
     /// Update the record at `id` to `value` — same identity, new bytes; the
     /// superseded version is archived, changed secondary indexes re-key.
