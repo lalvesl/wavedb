@@ -25,7 +25,7 @@
 
 use futures::{Stream, StreamExt, TryStreamExt};
 use wavedb_core::expose::Command;
-use wavedb_core::wire::{WaveWire, from_wire, to_wire};
+use wavedb_core::wire::{WaveWire, Wire, from_wire, to_wire};
 use wavedb_core::{
     Bound, DbHandle, Id, LocalId, Metadata, NonUniqueStruct, U48, UniqueStruct,
 };
@@ -87,12 +87,12 @@ impl DbHandle for Db {
         Self::as_tenant(self, tenant)
     }
 
-    async fn get_unique<T: UniqueStruct>(&self) -> Result<Option<T>> {
+    async fn get_unique<T: UniqueStruct>(&self) -> Result<Option<Wire<T>>> {
         match self.command(T::STRUCT_HASH, Command::Get, Vec::new()).await {
             Ok(r) => {
-                let value: Option<T> = reply::value(r)?;
-                if let Some(v) = &value {
-                    cache::mirror_unique(self, v).await;
+                let value: Option<Wire<T>> = reply::wire(r)?;
+                if let Some(w) = &value {
+                    cache::mirror_unique_wire(self, w).await?;
                 }
                 Ok(value)
             }
@@ -155,7 +155,7 @@ impl DbHandle for Db {
         &self,
         pivot: LocalId,
         id: Id,
-    ) -> Result<Option<T>> {
+    ) -> Result<Option<Wire<T>>> {
         // No back-fill on the read: a `Get` also resolves *removed* records
         // (history stays navigable), and adopting one would resurrect it
         // into the cached living set. Walks and writes warm the cache.
@@ -163,7 +163,7 @@ impl DbHandle for Db {
             .command(T::STRUCT_HASH, Command::Get, to_wire(&(pivot, id)))
             .await
         {
-            Ok(r) => reply::value(r),
+            Ok(r) => reply::wire(r),
             Err(err) if cache::is_transport(&err) => {
                 cache::record_fallback(self, pivot, id, err).await
             }
