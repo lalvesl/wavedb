@@ -17,7 +17,7 @@ pub async fn ensure_registry<D: DbHandle>(
     db: &D,
 ) -> core::result::Result<AllUserNamesToTenants, D::Error> {
     if let Some(r) = AllUserNamesToTenants::get(db).await? {
-        return Ok(r);
+        return Ok(r.try_into()?);
     }
     let entries = UserEntry::create_pivot(db).await?;
     let r = AllUserNamesToTenants { entries };
@@ -30,9 +30,10 @@ pub async fn ensure_registry<D: DbHandle>(
 pub async fn get_profile<D: DbHandle<Error = Error>>(
     db: &D,
 ) -> Result<Profile> {
-    Profile::get(db)
+    Ok(Profile::get(db)
         .await?
-        .ok_or_else(|| Error::not_found("profile missing"))
+        .ok_or_else(|| Error::not_found("profile missing"))?
+        .try_into()?)
 }
 
 #[cfg(feature = "server-side")]
