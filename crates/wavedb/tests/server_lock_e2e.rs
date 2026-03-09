@@ -52,7 +52,11 @@ pub async fn bump(db: &Db, times: u32) -> Result<u32> {
     let held = db.lock(&[tally(db)]).await?;
     let mut last = 0;
     for _ in 0..times {
-        let mut t = Tally::get(db).await?.unwrap_or_default();
+        let mut t = Tally::get(db)
+            .await?
+            .map(Tally::try_from)
+            .transpose()?
+            .unwrap_or_default();
         t.n += 1;
         t.save(db).await?;
         last = t.n;
@@ -64,7 +68,12 @@ pub async fn bump(db: &Db, times: u32) -> Result<u32> {
 /// Read the counter.
 #[server]
 pub async fn read_tally(db: &Db) -> Result<u32> {
-    Ok(Tally::get(db).await?.unwrap_or_default().n)
+    Ok(Tally::get(db)
+        .await?
+        .map(Tally::try_from)
+        .transpose()?
+        .unwrap_or_default()
+        .n)
 }
 
 /// Open an empty ledger.
