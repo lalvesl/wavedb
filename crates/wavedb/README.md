@@ -70,7 +70,12 @@ use wavedb::prelude::*;
 let db = Db::connect("wss://wavedb.example", /* user */ 42, /* tenant */ 42).await?;
 
 // Unique (UniqueObject): one record per tenant. No create — save is upsert.
-let mut profile: AboutUser = AboutUser::get(&db).await?.unwrap_or_default();
+// A read is the record's bytes (RFC 0076): `.view()?` reads them — fields
+// borrowed, `&str` for a `String` — and `.try_into()?` owns them, for a write.
+let mut profile: AboutUser = match AboutUser::get(&db).await? {
+    Some(read) => read.try_into()?,
+    None => AboutUser::default(),
+};
 profile.city = "Lisbon".into();
 profile.save(&db).await?;
 
@@ -80,7 +85,9 @@ let id = orders.insert(&db, Order { amount: 120 }).await?; // assigns identity I
 let mut recent = orders.all(&db);                          // async iterator: streams BpTree → Ids → fetch
 while let Some(order) = recent.next().await { let order = order?; /* … */ }
 
-let mut o = orders.get(&db, id).await?.unwrap();
+let read = orders.get(&db, id).await?.unwrap();
+println!("{}", read.view()?.amount);           // read-only: nothing copied out
+let mut o: Order = read.try_into()?;          // owned, to change it
 o.amount = 130;
 o.save(&db).await?;          // reindex current + secondary trees; old version chained, dead untouched
 orders.remove(&db, id).await?; // move Id current → dead BpTree (history kept)
