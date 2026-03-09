@@ -22,7 +22,7 @@ use crate::route::Route;
 use crate::store::Store;
 use crate::traits::WaveDbStruct;
 use crate::u48::U48;
-use crate::wire::{WaveWire, from_wire, to_wire};
+use crate::wire::{WaveWire, from_wire};
 
 // The 15-bit salt guard is part of this module's surface — the `expose_*`
 // macros emit `::wavedb_core::expose::SaltGuard` — but lives in its own file
@@ -265,10 +265,11 @@ where
     S: Store,
 {
     match store.get_of(T::STRUCT_HASH, id).await? {
+        // The body as it is stored: nothing decoded, nothing re-encoded —
+        // the client checks it when it views it (RFC 0076).
         Some(bytes) => {
-            let (_, value) =
-                record::decode_record::<T>(T::STRUCT_HASH, &bytes)?;
-            Ok(Reply::Value(Some(to_wire(&value))))
+            let (_, body) = record::split_record(T::STRUCT_HASH, &bytes)?;
+            Ok(Reply::Value(Some(body.to_vec())))
         }
         None => Ok(Reply::Value(None)),
     }
