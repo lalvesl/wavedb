@@ -111,7 +111,11 @@ fn a_unique_save_survives_offline_and_replays_on_reconnect() {
 
         // ── Online: create the book (owner "Ada") ───────────────────────────
         open_book(&db, "Ada".into()).await.expect("open_book");
-        let book = ContactBook::get(&db).await.expect("get").expect("exists");
+        let book = ContactBook::get(&db)
+            .await
+            .expect("get")
+            .map(|w| w.decode().unwrap())
+            .expect("exists");
         assert_eq!(book.owner, "Ada");
 
         // ── Node down: a Unique save queues offline instead of refusing ──────
@@ -132,6 +136,7 @@ fn a_unique_save_survives_offline_and_replays_on_reconnect() {
         let warm = ContactBook::get(&db)
             .await
             .expect("warm read")
+            .map(|w| w.decode().unwrap())
             .expect("exists");
         assert_eq!(
             warm.owner, "Ada Lovelace",
@@ -153,6 +158,7 @@ fn a_unique_save_survives_offline_and_replays_on_reconnect() {
         let on_node = ContactBook::get(&direct)
             .await
             .expect("node read")
+            .map(|w| w.decode().unwrap())
             .expect("exists");
         assert_eq!(
             on_node.owner, "Ada Lovelace",
