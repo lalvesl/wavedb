@@ -139,7 +139,11 @@ fn polling_watcher_sees_mutations_and_keeps_the_cache_warm() {
 
         // Bootstrap, then watch — both watches share one poll loop.
         open_book(&a, "Ada".into()).await.expect("open_book");
-        let book = ContactBook::get(&b).await.expect("get").expect("exists");
+        let book = ContactBook::get(&b)
+            .await
+            .expect("get")
+            .map(|w| w.decode().unwrap())
+            .expect("exists");
         let mut book_watch =
             b.watch_unique::<ContactBook>().await.expect("watch anchor");
         let mut contact_watch = b
@@ -178,7 +182,10 @@ fn polling_watcher_sees_mutations_and_keeps_the_cache_warm() {
         node.kill().expect("kill the node");
         node.wait().expect("reap the node");
 
-        let warm = ContactBook::get(&b).await.expect("warm unique read");
+        let warm = ContactBook::get(&b)
+            .await
+            .expect("warm unique read")
+            .map(|w| w.decode().unwrap());
         assert_eq!(warm, Some(renamed), "the watched save, not the bootstrap");
         let warm_walk: Vec<Contact> =
             col.all(&b).try_collect().await.expect("warm walk");
