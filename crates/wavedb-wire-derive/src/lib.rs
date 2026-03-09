@@ -16,7 +16,7 @@ use quote::quote;
 use syn::parse_macro_input;
 
 /// Derive `WaveWire` for a struct or enum, and its borrowed twin `NameRef`.
-#[proc_macro_derive(WaveWire)]
+#[proc_macro_derive(WaveWire, attributes(wave_wire))]
 pub fn wave_wire(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as syn::DeriveInput);
     wavedb_wire_codegen::expand(&input, &quote!(::wavedb_wire))
