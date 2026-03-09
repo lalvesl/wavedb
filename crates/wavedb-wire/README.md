@@ -60,6 +60,9 @@ let owned: Person = p.into();       // back to owned, for a write
 - A hand-written impl provides `Ref`, `SliceRef`, `view`, `from_ref`,
   `view_slice` and `from_slice_ref`; a type with no heap bytes that is
   `Copy + Debug` is its own view, and `wavedb_wire::own_view!()` writes them.
+  A derived one says so with `#[wave_wire(own_view)]`: no twin, the type
+  itself is the view (an id, a handle — where a twin would only be a copy
+  to convert back).
 
 ## Layout
 
