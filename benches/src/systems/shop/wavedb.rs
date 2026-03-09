@@ -92,15 +92,18 @@ async fn create_order(
     s: u64,
 ) -> Result<(), String> {
     let db = tenant(store, u);
-    let user = User::get(&db)
+    let shoppings = User::get(&db)
         .await
         .map_err(|e| format!("get user: {e}"))?
-        .ok_or("checkout: user is missing")?;
+        .ok_or("checkout: user is missing")?
+        .view()
+        .map_err(|e| format!("view user: {e}"))?
+        .shoppings;
     let items = Product::create_pivot(&db)
         .await
         .map_err(|e| format!("create product pivot: {e}"))?;
     let r = shopping_row(u, s, cfg.seed);
-    Shopping::collection(user.shoppings)
+    Shopping::collection(shoppings)
         .insert(
             &db,
             &Shopping {
