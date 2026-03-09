@@ -138,7 +138,8 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   decode copies), the derive emitting `NameRef<'a>` beside `Name` with
   `From` back (and `TryFrom<Wire<Name>>`); `Wire<T>` is the one-buffer `Send` owner. Both
   derives (this one and `wavedb-macros`') expand through `wavedb-wire-codegen`;
-  a hand impl of a heap-free `Copy` type adds `wavedb_wire::own_view!()`.
+  a hand impl of a heap-free `Copy` type adds `wavedb_wire::own_view!()`, a
+  derived one `#[wave_wire(own_view)]` (`Id`, `LocalId`, every `{Name}PivotId`).
 - **wavedb-core** — `Id` (`KEY u64 · TENANT u48 · FLAG 1 · SALT 15`), `LocalId`
   (80-bit, tenant-stripped), `U48`, `Metadata` (version chain + `pivot_id` back-link +
   permission), the `Store` trait (`get`/`get_of`/atomic `apply`, and
@@ -332,7 +333,9 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   always refuses offline. `db.local()` is the cache's direct `LocalHandle`. One
   engine per process ⇒ a `Db::open` client and a node never share one (tests run
   the node as a child process — see `local_cache_e2e.rs`). Typed calls spell
-  `T::get(&db)` / `v.save(&db)` / `T::collection(pivot)` via the `DbHandle` seam,
+  `T::get(&db)` / `v.save(&db)` / `T::collection(pivot)` via the `DbHandle` seam —
+  a `get` returns `Option<Wire<T>>`, read by `.view()?`, owned by `.try_into()?`
+  (RFC 0076; `DbHandle::Error` takes wire faults, so `?` works anywhere) —
   every write with a `_durable` twin (`v.save_durable(&db)`,
   `col.insert_durable(&db, v)`, `T::create_pivot_durable(&db)`, …) answered
   once durable on the node — one `durable` bit on the `CommandFrame`;
