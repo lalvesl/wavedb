@@ -117,6 +117,7 @@ pub async fn add_project(db: &Db, name: String) -> Result<Project> {
     let ws = Workspace::get(db)
         .await?
         .ok_or_else(|| Error::not_found("workspace missing — open it first"))?;
+    let ws = ws.view()?;
     let existing: Vec<Project> = Project::collection(ws.projects)
         .by_name(db, &name)
         .try_collect()
@@ -145,6 +146,7 @@ pub async fn tasks_with_status(
     let ws = Workspace::get(db)
         .await?
         .ok_or_else(|| Error::not_found("workspace missing — open it first"))?;
+    let ws = ws.view()?;
     let found: Vec<Project> = Project::collection(ws.projects)
         .by_name(db, &project)
         .try_collect()
