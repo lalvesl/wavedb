@@ -226,8 +226,11 @@ needs them pays.
    - A settle stages a page as that buffer plus its changes and merges them
      when it encodes. Nothing is decoded per record.
 3. **Collection reads.**
-   - `get`, `all` and the list readers gain a `Wire<T>`-returning form.
-   - Whether it becomes the default is decided by a measurement.
+   - `get`, `all` and the list readers **return** `Wire<T>` — no owned
+     twin of each (decided 2026-10-24: most reads only look, and the one
+     that writes converts, `.try_into()?`).
+   - The node answers a `Get` with the stored body, nothing decoded or
+     re-encoded.
 4. **`#[server]`.** Arguments and replies cross threads as `Wire<T>`
    buffers.
 
@@ -289,7 +292,34 @@ needs them pays.
   it; `into_entries` is gone (its three callers, a split, an eviction
   restore and an upload, iterate and copy what they keep).
 
-Next: step 3, collection reads.
+**Step 3, first half (2026-10-24): `get` returns `Wire<T>`.**
+
+- **Every `get`** — `T::get(&db)` for a Unique, `col.get(&db, id)` for a
+  NonUnique, through all four `DbHandle`s (local, routed on the node, the
+  client, `ServerDb`) — returns `Option<Wire<T>>`: the record's buffer as
+  the store or the frame handed it over, its head and metadata checked, its
+  body checked when viewed. There is no `get_owned`: `.view()?` reads,
+  `.try_into()?` owns.
+- **The node sends the stored body** for a `Get` (`expose::get_value`,
+  `node_op`): it used to decode the record and encode it again.
+- **The client's cache mirror compares bytes.** A Unique `Get` mirrors into
+  the cache only when the cached body differs, and decodes only then
+  (`client_cache::mirror_unique_wire`); a body that does not decode still
+  fails the read, as before.
+- **`#[wave_wire(own_view)]`** makes a `Copy` type with no heap bytes its
+  own view, with no twin: `Id`, `LocalId`, and every generated
+  `{Name}PivotId` — so `user.view()?.orders` is the handle itself, not a
+  twin to convert.
+- **`DbHandle::Error` takes wire faults** (`From<wire::Error>`, through
+  `core::Error::Wire`; `wavedb::Error` gained the conversion), so
+  `wire.view()?` works in any context, a `#[server]` body included.
+- `Wire` is in `wavedb::prelude`; it gained `body()` and `into_body()`.
+- **The bench reads what it fetched**: the micro `read` and the shop
+  `profile` view the record (every field checked), as the other systems
+  fetch a row's columns; the shop's order reads take the user's orders
+  handle off a view, copying nothing else out.
+
+Next: the walks — `all`, the list readers, `by_*`, history.
 
 ## Alternatives
 
@@ -320,5 +350,9 @@ Next: step 3, collection reads.
 1. **O(1) indexing of lists of dynamic elements** (`Vec<String>`,
    `Vec<Struct>`). This needs an offset table in the format. Take it only if
    a measurement asks for it.
-2. **The default read.** Whether `col.get` returns `Wire<T>` or keeps
-   returning `T`, with `get_wire` beside it.
+2. ~~**The default read.**~~ Settled: a read returns `Wire<T>`, and there
+   is no `get_owned` (step 3 in [Progress](#progress)).
+3. **One owner per page for the walks.** `all` and the list readers return
+   one `Wire` per record, one allocation each; a page's records could share
+   one buffer the caller holds, viewed record by record. Later, if a
+   measurement asks.
