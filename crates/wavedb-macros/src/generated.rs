@@ -26,7 +26,7 @@ fn pivot_id_tokens(pivot_id: &Ident) -> syn::Result<TokenStream> {
                  ::core::fmt::Debug, ::core::default::Default)]
         pub struct #pivot_id(pub ::wavedb_core::LocalId);
     };
-    let pivot_id_wire = wire_derive::derive(&pivot_id_def)?;
+    let pivot_id_wire = wire_derive::derive_own_view(&pivot_id_def)?;
     Ok(quote! {
         #pivot_id_def
         #pivot_id_wire
