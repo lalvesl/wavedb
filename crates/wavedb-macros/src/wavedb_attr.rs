@@ -137,15 +137,20 @@ pub fn expand(
 fn unique_ops(name: &Ident) -> TokenStream {
     quote! {
         impl #name {
-            /// Fetch this tenant's record from its `STRUCT_HASH` anchor.
-            /// `None` = never saved.
+            /// Fetch this tenant's record from its `STRUCT_HASH` anchor, as a
+            /// `Wire` over its bytes: `.view()` reads it, `.try_into()` owns
+            /// it. `None` = never saved.
             ///
             /// # Errors
-            /// The context's failure (backend/transport) or a decode fault.
+            /// The context's failure (backend/transport) or a head fault; the
+            /// body is checked when viewed.
             #[allow(clippy::future_not_send)]
             pub async fn get<D: ::wavedb_core::DbHandle>(
                 db: &D,
-            ) -> ::core::result::Result<::core::option::Option<Self>, D::Error>
+            ) -> ::core::result::Result<
+                ::core::option::Option<::wavedb_core::wire::Wire<Self>>,
+                D::Error,
+            >
             {
                 db.get_unique::<Self>().await
             }
