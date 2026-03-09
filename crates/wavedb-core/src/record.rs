@@ -36,7 +36,7 @@ use crate::metadata::{Metadata, Succession};
 use crate::store::{Store, Write};
 use crate::traits::Shape;
 use crate::u48::U48;
-use crate::wire::{WaveWire, from_wire, to_wire};
+use crate::wire::{WaveWire, Wire, from_wire, to_wire};
 
 // The plan-time read view and the minting half live in their own modules;
 // re-exported so the established `crate::record::*` paths still resolve.
@@ -138,6 +138,21 @@ pub(crate) fn split_record(
         .ok_or(Error::Wire(wavedb_wire::Error::UnexpectedEof))?;
     let meta = from_wire::<Metadata>(&bytes[RECORD_PREFIX..meta_end])?;
     Ok((meta, &bytes[meta_end..]))
+}
+
+/// A stored record as its [`Metadata`] and a [`Wire`] over its body — the
+/// record's own buffer, kept: the body is read by viewing it (RFC 0076),
+/// and only the head and the metadata are checked here.
+///
+/// # Errors
+/// As [`split_record`].
+pub(crate) fn wire_record<V: WaveWire>(
+    hash: u64,
+    bytes: Vec<u8>,
+) -> Result<(Metadata, Wire<V>)> {
+    let (meta, body) = split_record(hash, &bytes)?;
+    let start = bytes.len() - body.len();
+    Ok((meta, Wire::new(bytes.into_boxed_slice(), start)))
 }
 
 /// Decode a stored record into its [`Metadata`] and typed body.
