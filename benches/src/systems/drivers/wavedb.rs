@@ -218,10 +218,11 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
                 let got = block_on(col.get(&db, id))
                     .map_err(|e| format!("get {n}: {e}"))?;
                 // A `get` that found nothing is a fast operation and a wrong
-                // one.
-                if got.is_none() {
-                    return Err(format!("row {n} came back empty"));
-                }
+                // one. What it found is read: its view checks every field,
+                // as a row's columns are fetched by the other systems.
+                got.ok_or_else(|| format!("row {n} came back empty"))?
+                    .view()
+                    .map_err(|e| format!("view {n}: {e}"))?;
             }
             MicroOp::Update { n, row } => {
                 let id = self.id_of(n)?;
