@@ -27,6 +27,7 @@ use crate::index::Bound;
 use crate::local_id::LocalId;
 use crate::metadata::Metadata;
 use crate::traits::NonUniqueStruct;
+use crate::wire::Wire;
 
 /// The typed handle into one NonUnique collection, addressed by its `Pivot`
 /// record's [`LocalId`]. Holds no context — pass the [`DbHandle`] per call.
@@ -85,16 +86,18 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
         db.insert_durable(self.pivot, value).await
     }
 
-    /// Fetch the record at `id`. `None` = no such record; a removed record
-    /// still resolves (history stays navigable).
+    /// Fetch the record at `id`, as a [`Wire`] over its body: `.view()` reads
+    /// it, `.try_into()` owns it (RFC 0076). `None` = no such record; a
+    /// removed record still resolves (history stays navigable).
     ///
     /// # Errors
-    /// A backend/transport failure or a decode fault.
+    /// A backend/transport failure or a head fault; the body is checked
+    /// when viewed.
     pub async fn get<D: DbHandle>(
         &self,
         db: &D,
         id: Id,
-    ) -> Result<Option<T>, D::Error> {
+    ) -> Result<Option<Wire<T>>, D::Error> {
         db.get_record(self.pivot, id).await
     }
 
