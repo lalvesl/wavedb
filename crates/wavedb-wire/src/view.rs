@@ -244,7 +244,7 @@ impl<T: WaveWire> Wire<T> {
     /// Every error [`from_wire`] raises on the same bytes; `start` past the
     /// buffer's end is [`Error::UnexpectedEof`].
     pub fn view(&self) -> Result<T::Ref<'_>> {
-        view_wire::<T>(self.body()?)
+        view_wire::<T>(self.body())
     }
 
     /// The owned value, decoded: every copy a view saves.
@@ -252,7 +252,7 @@ impl<T: WaveWire> Wire<T> {
     /// # Errors
     /// As [`view`](Self::view).
     pub fn decode(&self) -> Result<T> {
-        from_wire(self.body()?)
+        from_wire(self.body())
     }
 
     /// The whole buffer, envelope included.
@@ -267,8 +267,21 @@ impl<T: WaveWire> Wire<T> {
         (self.bytes, self.start)
     }
 
-    fn body(&self) -> Result<&[u8]> {
-        self.bytes.get(self.start..).ok_or(Error::UnexpectedEof)
+    /// `T`'s encoding, past the envelope — unchecked; empty when `start`
+    /// is past the end, which any view of it then refuses.
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        self.bytes.get(self.start..).unwrap_or_default()
+    }
+
+    /// `T`'s encoding as a `Vec`, to hand on: the buffer itself when there
+    /// is no envelope, a copy of the body otherwise.
+    #[must_use]
+    pub fn into_body(self) -> Vec<u8> {
+        if self.start == 0 {
+            return self.bytes.into_vec();
+        }
+        self.body().to_vec()
     }
 }
 
