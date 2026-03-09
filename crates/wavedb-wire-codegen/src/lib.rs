@@ -30,15 +30,34 @@ use twin::{Twin, field_list};
 /// Expand `#[derive(WaveWire)]` for `input`, naming the wire crate by `k`
 /// (`::wavedb_wire`, or a path that re-exports it).
 ///
+/// `#[wave_wire(own_view)]` on the type makes it its own view, with no
+/// twin: for a `Copy + Debug` type with no heap bytes (an id, a handle),
+/// where a twin would only be a copy to convert back.
+///
 /// # Errors
-/// A union, or an enum of more than 256 variants.
+/// A union, an enum of more than 256 variants, or an unknown
+/// `wave_wire` option.
 pub fn expand(
     input: &DeriveInput,
     k: &TokenStream,
 ) -> syn::Result<TokenStream> {
+    let own = own_view(input)?;
+    expand_as(input, k, own)
+}
+
+/// [`expand`], the type its own view when `own` — for a derive that builds
+/// its input, and so has no attribute to read.
+///
+/// # Errors
+/// As [`expand`].
+pub fn expand_as(
+    input: &DeriveInput,
+    k: &TokenStream,
+    own: bool,
+) -> syn::Result<TokenStream> {
     match &input.data {
-        Data::Struct(data) => Ok(expand_struct(input, data, k)),
-        Data::Enum(data) => enums::expand_enum(input, data, k),
+        Data::Struct(data) => Ok(expand_struct(input, data, k, own)),
+        Data::Enum(data) => enums::expand_enum(input, data, k, own),
         Data::Union(_) => Err(syn::Error::new(
             input.span(),
             "WaveWire cannot be derived for unions",
@@ -55,6 +74,38 @@ pub(crate) struct Bodies {
     decode: TokenStream,
     view: TokenStream,
     from_ref: TokenStream,
+}
+
+impl Bodies {
+    /// The impl of a type that is its own view: its view is its decode.
+    pub fn own(self, k: &TokenStream) -> Self {
+        Self {
+            view: quote!(<Self as #k::WaveWire>::decode(stack, heap)),
+            from_ref: quote!(r),
+            ..self
+        }
+    }
+}
+
+/// Whether `input` carries `#[wave_wire(own_view)]`.
+fn own_view(input: &DeriveInput) -> syn::Result<bool> {
+    let mut own = false;
+    for attr in input
+        .attrs
+        .iter()
+        .filter(|a| a.path().is_ident("wave_wire"))
+    {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("own_view") {
+                own = true;
+                Ok(())
+            } else {
+                Err(meta
+                    .error("unknown `wave_wire` option; expected `own_view`"))
+            }
+        })?;
+    }
+    Ok(own)
 }
 
 /// The `WaveWire` impl for `input`, its view the twin type `twin_ty`.
@@ -129,6 +180,7 @@ fn expand_struct(
     input: &DeriveInput,
     data: &DataStruct,
     k: &TokenStream,
+    own: bool,
 ) -> TokenStream {
     let fields = field_list(&data.fields);
     let tys: Vec<_> = fields.iter().map(|f| f.ty).collect();
@@ -192,6 +244,9 @@ fn expand_struct(
         view,
         from_ref,
     };
+    if own {
+        return wire_impl(input, k, &quote!(Self), &bodies.own(k));
+    }
     let def = twin.struct_def(&data.fields, &fields);
     let support = twin.support(&twin.debug_struct(&data.fields, &fields));
     let imp = wire_impl(input, k, &twin.ty(), &bodies);
