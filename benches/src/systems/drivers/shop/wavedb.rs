@@ -32,7 +32,8 @@ use wavedb_storage::PageStore;
 use crate::harness::{Driver, DriverFactory};
 use crate::plan::op::ShopOp;
 use crate::shop::{
-    PAGE, Product, ProductLists as _, Shopping, ShoppingLists as _, User,
+    PAGE, Product, ProductLists as _, Shopping, ShoppingLists as _,
+    ShoppingPivotId, User,
 };
 
 use super::SETTLE_AFTER;
@@ -222,11 +223,8 @@ async fn run<S: Store>(
             }
             .map_err(|e| format!("save user: {e}"))
         }
-        ShopOp::Checkout { row, items, .. } => {
-            let user = User::get(db)
-                .await
-                .map_err(|e| format!("get user: {e}"))?
-                .ok_or("checkout: user is missing")?;
+        ShopOp::Checkout { u, row, items, .. } => {
+            let shoppings = user_of(db, u).await?;
             let pivot = Product::create_pivot(db)
                 .await
                 .map_err(|e| format!("create product pivot: {e}"))?;
@@ -238,7 +236,7 @@ async fn run<S: Store>(
                 transport_cents: row.transport_cents,
                 items: pivot,
             };
-            let shoppings = Shopping::collection(user.shoppings);
+            let shoppings = Shopping::collection(shoppings);
             insert(db, shoppings, &shopping, durable && last == 0)
                 .await
                 .map_err(|e| format!("insert shopping: {e}"))?;
@@ -256,15 +254,18 @@ async fn run<S: Store>(
             Ok(())
         }
         ShopOp::Profile { u } => {
+            // A profile read reads the record: its view checks every field.
             User::get(db)
                 .await
                 .map_err(|e| format!("get user: {e}"))?
-                .ok_or_else(|| format!("profile: user {u} is missing"))?;
+                .ok_or_else(|| format!("profile: user {u} is missing"))?
+                .view()
+                .map_err(|e| format!("view user: {e}"))?;
             Ok(())
         }
         ShopOp::OrderPage { u, page } => {
-            let user = user_of(db, u).await?;
-            let orders: Vec<Shopping> = Shopping::collection(user.shoppings)
+            let shoppings = user_of(db, u).await?;
+            let orders: Vec<Shopping> = Shopping::collection(shoppings)
                 .listed_by_bought_at_at_page(db, page, PAGE)
                 .try_collect()
                 .await
@@ -275,8 +276,8 @@ async fn run<S: Store>(
             Ok(())
         }
         ShopOp::OrderDetail { u } => {
-            let user = user_of(db, u).await?;
-            let orders: Vec<Shopping> = Shopping::collection(user.shoppings)
+            let shoppings = user_of(db, u).await?;
+            let orders: Vec<Shopping> = Shopping::collection(shoppings)
                 .listed_by_bought_at_at_page(db, 0, PAGE)
                 .try_collect()
                 .await
@@ -311,14 +312,19 @@ async fn insert<S: Store, T: NonUniqueStruct>(
     }
 }
 
+/// User `u`'s orders collection, read off a view of the record: nothing of
+/// the user is copied out but the handle.
 async fn user_of<S: Store>(
     db: &LocalHandle<'_, S>,
     u: u64,
-) -> Result<User, String> {
-    User::get(db)
+) -> Result<ShoppingPivotId, String> {
+    Ok(User::get(db)
         .await
         .map_err(|e| format!("get user: {e}"))?
-        .ok_or_else(|| format!("user {u} is missing"))
+        .ok_or_else(|| format!("user {u} is missing"))?
+        .view()
+        .map_err(|e| format!("view user: {e}"))?
+        .shoppings)
 }
 
 /// The tenant a user's records live under. `u + 1` because tenant 0 is not a
