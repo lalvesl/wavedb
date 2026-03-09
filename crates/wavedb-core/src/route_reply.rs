@@ -8,7 +8,7 @@ use std::future::Future;
 use crate::error::{Error, Result};
 use crate::metadata::Metadata;
 use crate::node_op::NodeReply;
-use crate::wire::{WaveWire, from_wire};
+use crate::wire::{WaveWire, Wire, from_wire};
 use futures::{Stream, StreamExt};
 
 /// A reply of the wrong kind: the node's own fault, never the caller's.
@@ -20,9 +20,13 @@ pub fn decode<T: WaveWire>(bytes: &[u8]) -> Result<T> {
     Ok(from_wire(bytes)?)
 }
 
-pub fn value<T: WaveWire>(reply: NodeReply) -> Result<Option<T>> {
+/// A `Value` reply as a [`Wire`] over the body bytes it carries: kept as
+/// they came, checked when viewed (RFC 0076).
+pub fn wire<T: WaveWire>(reply: NodeReply) -> Result<Option<Wire<T>>> {
     match reply {
-        NodeReply::Value(bytes) => bytes.as_deref().map(decode).transpose(),
+        NodeReply::Value(bytes) => {
+            Ok(bytes.map(|b| Wire::new(b.into_boxed_slice(), 0)))
+        }
         _ => Err(mismatch()),
     }
 }
