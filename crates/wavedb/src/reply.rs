@@ -8,20 +8,17 @@
 
 use wavedb_core::Id;
 use wavedb_core::expose::Reply;
-use wavedb_core::wire::{WaveWire, from_wire};
+use wavedb_core::wire::{WaveWire, Wire, from_wire};
 
 use crate::error::{Error, Result};
 
-/// A `Get`'s reply → an optional decoded value (consumes the reply to move
-/// the body bytes out without a copy).
-pub fn value<T: WaveWire>(reply: Reply) -> Result<Option<T>> {
+/// A `Get`'s reply → a [`Wire`] over the body bytes it carries, moved out
+/// of the reply without a copy and checked when viewed (RFC 0076).
+pub fn wire<T: WaveWire>(reply: Reply) -> Result<Option<Wire<T>>> {
     match reply {
-        Reply::Value(Some(bytes)) => {
-            let value =
-                from_wire::<T>(&bytes).map_err(wavedb_core::Error::from)?;
-            Ok(Some(value))
+        Reply::Value(bytes) => {
+            Ok(bytes.map(|b| Wire::new(b.into_boxed_slice(), 0)))
         }
-        Reply::Value(None) => Ok(None),
         _ => Err(Error::UnexpectedReply),
     }
 }
