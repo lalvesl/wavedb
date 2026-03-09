@@ -105,7 +105,7 @@ pub async fn login(
     let auth = Auth::get(&user_db)
         .await?
         .ok_or_else(|| Error::not_found("auth record missing"))?;
-    if auth.password_hash != hash_password(&password) {
+    if auth.view()?.password_hash != hash_password(&password) {
         return Err(Error::unauthorized("wrong password"));
     }
 
