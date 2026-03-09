@@ -333,7 +333,9 @@ use wavedb::prelude::*;
 let db = Db::connect("wss://wavedb.example", /* user */ 42, /* tenant */ 42).await?;
 
 // Unique: one record per tenant. No create — save is upsert.
-let profile: Option<AboutUser> = AboutUser::get(&db).await?;
+// A read is the record's bytes (RFC 0076): `.view()?` reads them, fields
+// borrowed (`&str` for a `String`); `.try_into()?` owns them, for a write.
+let profile: Option<Wire<AboutUser>> = AboutUser::get(&db).await?;
 profile_var.save(&db).await?;
 
 // NonUnique: open the collection from a stored PivotId.
