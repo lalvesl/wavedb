@@ -34,7 +34,11 @@ pub struct Profile {
 /// Set the tenant's city (upsert), returning the stored value.
 #[server]
 pub async fn set_city(db: &Db, city: String) -> Result<String> {
-    let mut me = Profile::get(db).await?.unwrap_or_default();
+    let mut me = Profile::get(db)
+        .await?
+        .map(Profile::try_from)
+        .transpose()?
+        .unwrap_or_default();
     me.city = city;
     me.save(db).await?;
     Ok(me.city)
@@ -43,7 +47,11 @@ pub async fn set_city(db: &Db, city: String) -> Result<String> {
 /// Read the tenant's city (empty when unset).
 #[server]
 pub async fn get_city(db: &Db) -> Result<String> {
-    let me = Profile::get(db).await?.unwrap_or_default();
+    let me = Profile::get(db)
+        .await?
+        .map(Profile::try_from)
+        .transpose()?
+        .unwrap_or_default();
     Ok(me.city)
 }
 
