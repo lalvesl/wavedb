@@ -23,9 +23,10 @@ use crate::id::Id;
 use crate::index::{Bound, Pivot, SecKey};
 use crate::local_id::LocalId;
 use crate::metadata::Metadata;
-use crate::record::{decode_record, history_stream};
+use crate::record::{decode_record, history_stream, wire_record};
 use crate::store::Store;
 use crate::traits::NonUniqueStruct;
+use crate::wire::Wire;
 
 /// What an anchor holds — the answer a membership tree used to give, read
 /// off the record itself (RFC 0050).
@@ -71,16 +72,22 @@ impl<T: NonUniqueStruct> Collection<T> {
 }
 
 impl<T: NonUniqueStruct> Collection<T> {
-    /// Fetch and decode the record at `id`. `None` = no such record. Resolves
-    /// by direct address — a removed (dead-indexed) record still resolves,
-    /// which is what keeps history navigable.
+    /// Fetch the record at `id` as a [`Wire`] over its body: read it with
+    /// `.view()`, own it with `.try_into()` (RFC 0076). `None` = no such
+    /// record. Resolves by direct address — a removed (dead-indexed) record
+    /// still resolves, which is what keeps history navigable.
     ///
     /// # Errors
-    /// Propagates a [`Store`] failure or a decode fault (including an `id`
-    /// that resolves to a different type's record).
-    pub async fn get<S: Store>(&self, store: &S, id: Id) -> Result<Option<T>> {
+    /// Propagates a [`Store`] failure, or a head or metadata fault
+    /// (including an `id` that resolves to a different type's record); the
+    /// body is checked when viewed.
+    pub async fn get<S: Store>(
+        &self,
+        store: &S,
+        id: Id,
+    ) -> Result<Option<Wire<T>>> {
         match store.get_of(T::STRUCT_HASH, id).await? {
-            Some(bytes) => Ok(Some(decode_record(T::STRUCT_HASH, &bytes)?.1)),
+            Some(bytes) => Ok(Some(wire_record(T::STRUCT_HASH, bytes)?.1)),
             None => Ok(None),
         }
     }
