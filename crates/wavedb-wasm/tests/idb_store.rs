@@ -61,7 +61,13 @@ async fn typed_surface_runs_serverless_over_indexeddb() {
     let db = LocalHandle::new(&store, U48::from(7u32));
 
     // Unique anchor: absent, saved, read back.
-    assert!(AboutUser::get(&db).await.unwrap().is_none());
+    assert!(
+        AboutUser::get(&db)
+            .await
+            .unwrap()
+            .map(|w| w.decode().unwrap())
+            .is_none()
+    );
     AboutUser {
         name: "ada".into(),
         city: "porto".into(),
@@ -69,7 +75,15 @@ async fn typed_surface_runs_serverless_over_indexeddb() {
     .save(&db)
     .await
     .unwrap();
-    assert_eq!(AboutUser::get(&db).await.unwrap().unwrap().city, "porto");
+    assert_eq!(
+        AboutUser::get(&db)
+            .await
+            .unwrap()
+            .map(|w| w.decode().unwrap())
+            .unwrap()
+            .city,
+        "porto"
+    );
 
     // NonUnique collection: the chain segments are ordinary values in the
     // same flat keyspace — the whole engine-above-Store runs unchanged.
@@ -95,7 +109,15 @@ async fn typed_surface_runs_serverless_over_indexeddb() {
     .await
     .unwrap();
 
-    assert_eq!(col.get(&db, first).await.unwrap().unwrap().body, "hello");
+    assert_eq!(
+        col.get(&db, first)
+            .await
+            .unwrap()
+            .map(|w| w.decode().unwrap())
+            .unwrap()
+            .body,
+        "hello"
+    );
     let all: Vec<Note> = col.all(&db).try_collect().await.unwrap();
     assert_eq!(all.len(), 2);
 
