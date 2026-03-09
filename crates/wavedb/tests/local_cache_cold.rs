@@ -41,7 +41,10 @@ fn cold_cache_propagates_the_fault_and_a_warm_one_answers() {
         };
         local.save_unique(&profile).await.expect("local save");
         assert_eq!(
-            AboutUser::get(&db).await.expect("warm read"),
+            AboutUser::get(&db)
+                .await
+                .expect("warm read")
+                .map(|w| w.decode().unwrap()),
             Some(profile)
         );
 
@@ -63,6 +66,7 @@ fn cold_cache_propagates_the_fault_and_a_warm_one_answers() {
             AboutUser::get(&db)
                 .await
                 .expect("still warm")
+                .map(|w| w.decode().unwrap())
                 .map(|p| p.city),
             Some(String::from("NYC")),
             "the queued offline save mirrored into the cache"
