@@ -17,6 +17,7 @@
 use futures::{Stream, TryStreamExt};
 use wavedb_core::fuzzy::{Fuzzy, Scored};
 use wavedb_core::placement::Owner;
+use wavedb_core::wire::Wire;
 use wavedb_core::{
     Bound, DbHandle, Id, Leases, LocalId, Locked, Metadata, NonUniqueStruct,
     Route, RouteHandle, U48, UniqueStruct,
@@ -121,7 +122,7 @@ impl<R: Route> DbHandle for ServerDb<'_, R> {
         }
     }
 
-    async fn get_unique<T: UniqueStruct>(&self) -> Result<Option<T>> {
+    async fn get_unique<T: UniqueStruct>(&self) -> Result<Option<Wire<T>>> {
         Ok(self.local.get_unique().await?)
     }
 
@@ -172,7 +173,7 @@ impl<R: Route> DbHandle for ServerDb<'_, R> {
         &self,
         pivot: LocalId,
         id: Id,
-    ) -> Result<Option<T>> {
+    ) -> Result<Option<Wire<T>>> {
         Ok(self.local.get_record(pivot, id).await?)
     }
 
