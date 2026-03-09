@@ -30,6 +30,7 @@ pub fn expand_enum(
     input: &DeriveInput,
     data: &DataEnum,
     k: &TokenStream,
+    own: bool,
 ) -> syn::Result<TokenStream> {
     if data.variants.len() > 256 {
         return Err(syn::Error::new(
@@ -105,6 +106,9 @@ pub fn expand_enum(
         from_ref: quote!(match r { #(#from_ref,)* }),
     };
 
+    if own {
+        return Ok(wire_impl(input, k, &quote!(Self), &bodies.own(k)));
+    }
     let (tw, vis, doc) = (&twin.ident, &input.vis, twin.doc());
     let g = twin.generics();
     let wc = &g.where_clause;
