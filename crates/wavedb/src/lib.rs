@@ -79,6 +79,10 @@ pub mod prelude {
         PermissionRef, PivotHandle, U48, UniqueStruct, WaveDbStruct, WaveWire,
     };
 
+    // What a read returns (RFC 0076): `.view()` reads it, `.try_into()`
+    // owns it.
+    pub use wavedb_core::wire::Wire;
+
     // What a `#[wavedb::fuzzy]` lookup takes and yields (RFC 0056).
     pub use wavedb_core::fuzzy::{Fuzzy, Scored};
 
