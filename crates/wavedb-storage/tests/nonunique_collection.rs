@@ -133,7 +133,13 @@ fn save_and_remove_survive_reopen() {
         assert!(walked[0].completed, "update must survive reopen");
 
         // The dead record's bytes are still resolvable (history navigable).
-        assert_eq!(col.get(&db, dropped).await.unwrap(), Some(todo("drop")));
+        assert_eq!(
+            col.get(&db, dropped)
+                .await
+                .unwrap()
+                .map(|w| w.decode().unwrap()),
+            Some(todo("drop"))
+        );
     });
 }
 
