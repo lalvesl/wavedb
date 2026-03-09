@@ -51,7 +51,7 @@ pub async fn cache_peek(db: &Db) {
     println!();
     println!(
         "local cache holds the workspace of {:?} — the --offline run reads this",
-        cached.map(|w| w.owner)
+        cached.map(|w| w.view().expect("view").owner.to_owned())
     );
 }
 
@@ -60,10 +60,13 @@ pub async fn cache_peek(db: &Db) {
 /// cache can actually answer); writes refuse instead of diverging.
 pub async fn offline_tour(db: &Db) {
     println!("offline pass — the node should be down now.");
-    let ws = Workspace::get(db)
+    // Owned: the offline edit below builds on it.
+    let ws: Workspace = Workspace::get(db)
         .await
         .expect("warm cache answers the unique read")
-        .expect("run the online tour first");
+        .expect("run the online tour first")
+        .try_into()
+        .expect("decode");
     println!("workspace owner from the cache: {:?}", ws.owner);
 
     let projects: Vec<showcase::Project> =
