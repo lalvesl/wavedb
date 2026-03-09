@@ -35,7 +35,7 @@ use crate::placement::Owner;
 use crate::store::Store;
 use crate::traits::{NonUniqueStruct, UniqueStruct, WaveDbStruct};
 use crate::u48::U48;
-use crate::wire::{from_wire, to_wire};
+use crate::wire::{Wire, from_wire, to_wire};
 
 /// One operation of a [`DbHandle`], as data. Bodies are wire bytes.
 ///
@@ -200,8 +200,9 @@ where
     let db = LocalHandle::new(store, tenant);
     match op {
         NodeOp::GetUnique => {
+            // The body as it is stored: nothing decoded, nothing re-encoded.
             let value = db.get_unique::<T>().await?;
-            Ok(NodeReply::Value(value.as_ref().map(to_wire)))
+            Ok(NodeReply::Value(value.map(Wire::into_body)))
         }
         NodeOp::SaveUnique { body, .. } => {
             db.save_unique(&from_wire::<T>(&body)?).await?;
@@ -247,7 +248,7 @@ where
         ),
         NodeOp::GetRecord { pivot, id } => {
             let value = db.get_record::<T>(pivot, id).await?;
-            NodeReply::Value(value.as_ref().map(to_wire))
+            NodeReply::Value(value.map(Wire::into_body))
         }
         NodeOp::Update {
             pivot, id, body, ..
