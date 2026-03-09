@@ -89,7 +89,7 @@ async fn ensure_sessions<D: DbHandle<Error = Error>>(
     db: &D,
 ) -> Result<AuthSessions> {
     if let Some(anchor) = AuthSessions::get(db).await? {
-        return Ok(anchor);
+        return Ok(anchor.try_into()?);
     }
     let sessions = AuthSession::create_pivot(db).await?;
     let anchor = AuthSessions { sessions };
@@ -192,7 +192,11 @@ pub async fn refresh_pair<D: DbHandle<Error = Error>>(
     let anchor = ensure_sessions(db).await?;
     let col = AuthSession::collection(anchor.sessions);
     let id = Id::from_raw(claims.session);
-    let mut session = col.get(db, id).await?.ok_or_else(unauthorized)?;
+    let mut session: AuthSession = col
+        .get(db, id)
+        .await?
+        .ok_or_else(unauthorized)?
+        .try_into()?;
     if session.revoked {
         return Err(unauthorized());
     }
@@ -231,9 +235,10 @@ pub async fn revoke<D: DbHandle<Error = Error>>(
     let anchor = ensure_sessions(db).await?;
     let col = AuthSession::collection(anchor.sessions);
     let id = Id::from_raw(claims.session);
-    if let Some(mut session) = col.get(db, id).await?
-        && !session.revoked
+    if let Some(wire) = col.get(db, id).await?
+        && !wire.view()?.revoked
     {
+        let mut session: AuthSession = wire.try_into()?;
         session.revoked = true;
         col.save(db, id, &session).await?;
     }
