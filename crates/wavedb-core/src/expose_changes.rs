@@ -565,7 +565,10 @@ mod tests {
                 .unwrap();
             }
             assert_eq!(
-                get_unique::<Cfg, _>(&cache, tenant()).await.unwrap(),
+                get_unique::<Cfg, _>(&cache, tenant())
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
                 Some(Cfg { v: 3 })
             );
             // The strongest claim: every stored byte — the live anchor AND
