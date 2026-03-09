@@ -146,7 +146,7 @@ fn watcher_sees_remote_mutations_and_keeps_the_cache_warm() {
 
         // Bootstrap: A opens the book; B reads it once to learn the pivot.
         open_book(&a, "Ada".into()).await.expect("open_book");
-        let book = ContactBook::get(&b).await.expect("get").expect("exists");
+        let book = present(ContactBook::get(&b).await.expect("get"));
 
         // B's watchers — live from the moment these return (acked subscribe).
         let mut book_watch =
@@ -197,7 +197,10 @@ fn watcher_sees_remote_mutations_and_keeps_the_cache_warm() {
         node.wait().expect("reap the node");
 
         // The Unique holder: the watcher's mirror superseded B's earlier read.
-        let warm = ContactBook::get(&b).await.expect("warm unique read");
+        let warm = ContactBook::get(&b)
+            .await
+            .expect("warm unique read")
+            .map(decoded);
         assert_eq!(warm, Some(renamed), "the watched save, not the bootstrap");
 
         // The collection: B NEVER walked it online — everything below was put
@@ -205,11 +208,8 @@ fn watcher_sees_remote_mutations_and_keeps_the_cache_warm() {
         let warm_walk: Vec<Contact> =
             col.all(&b).try_collect().await.expect("warm walk");
         assert_eq!(warm_walk, vec![grace_ldn.clone()], "insert+update−remove");
-        let warm_grace = col
-            .get(&b, grace_id)
-            .await
-            .expect("warm by-id read")
-            .expect("grace cached");
+        let warm_grace =
+            present(col.get(&b, grace_id).await.expect("warm by-id read"));
         assert_eq!(warm_grace, grace_ldn);
         // By-id resolution still answers for the removed record — bytes are
         // never destroyed (remove only moves it to the dead tree, which the
@@ -222,4 +222,14 @@ fn watcher_sees_remote_mutations_and_keeps_the_cache_warm() {
             "a removed record keeps resolving by id (history stays navigable)"
         );
     });
+}
+
+/// A fetched record that must be there, owned.
+fn present<T: WaveWire>(got: Option<Wire<T>>) -> T {
+    got.map(decoded).expect("present")
+}
+
+/// A fetched record, owned — for the comparisons.
+fn decoded<T: WaveWire>(w: Wire<T>) -> T {
+    wavedb_core::wire::from_wire(&w.into_body()).expect("decode")
 }
