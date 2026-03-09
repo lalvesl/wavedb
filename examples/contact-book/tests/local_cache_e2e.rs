@@ -124,7 +124,7 @@ fn client_survives_node_restart_with_warm_local_reads() {
 
         // ── Online: write through, read through ─────────────────────────────
         open_book(&db, "Ada".into()).await.expect("open_book");
-        let book = ContactBook::get(&db).await.expect("get").expect("exists");
+        let book = present(ContactBook::get(&db).await.expect("get"));
         let contacts = Contact::collection(book.contacts);
         let grace = contacts
             .insert(&db, &contact("Grace", "555-0001", "NYC"))
@@ -158,12 +158,10 @@ fn client_survives_node_restart_with_warm_local_reads() {
         node.wait().expect("reap the node");
 
         let warm_book = ContactBook::get(&db).await.expect("warm unique read");
+        let warm_book = warm_book.map(decoded);
         assert_eq!(warm_book, Some(book), "the holder answers from the cache");
-        let warm_grace = contacts
-            .get(&db, grace)
-            .await
-            .expect("warm by-id read")
-            .expect("grace cached");
+        let warm_grace =
+            present(contacts.get(&db, grace).await.expect("warm by-id read"));
         assert_eq!(warm_grace.city, "London", "the mirrored update, not NYC");
         let warm_walk: Vec<Contact> =
             contacts.all(&db).try_collect().await.expect("warm walk");
@@ -210,4 +208,14 @@ fn client_survives_node_restart_with_warm_local_reads() {
         node.kill().expect("kill the node");
         node.wait().expect("reap the node");
     });
+}
+
+/// A fetched record that must be there, owned.
+fn present<T: WaveWire>(got: Option<Wire<T>>) -> T {
+    got.map(decoded).expect("present")
+}
+
+/// A fetched record, owned — for the comparisons.
+fn decoded<T: WaveWire>(w: Wire<T>) -> T {
+    wavedb_core::wire::from_wire(&w.into_body()).expect("decode")
 }
