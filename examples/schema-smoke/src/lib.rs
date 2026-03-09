@@ -1395,7 +1395,10 @@ mod tests {
             media.save(&db).await.unwrap();
             Attachment { media: vec![3] }.save(&db).await.unwrap();
             assert_eq!(
-                Attachment::get(&db).await.unwrap(),
+                Attachment::get(&db)
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
                 Some(Attachment { media: vec![3] })
             );
             let versions: Vec<_> =
@@ -1411,7 +1414,10 @@ mod tests {
                 pinned: false,
             };
             let id = col.insert(&db, &note).await.unwrap();
-            assert_eq!(col.get(&db, id).await.unwrap(), Some(note));
+            assert_eq!(
+                col.get(&db, id).await.unwrap().map(|w| w.decode().unwrap()),
+                Some(note)
+            );
             let pinned = Note {
                 body: "a".into(),
                 pinned: true,
@@ -1456,7 +1462,12 @@ mod tests {
                 "newest-first timeline"
             );
             assert_eq!(
-                AboutUser::get(&db).await.unwrap().unwrap().city,
+                AboutUser::get(&db)
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap())
+                    .unwrap()
+                    .city,
                 "Lima"
             );
         });
@@ -1615,7 +1626,13 @@ mod tests {
                 city: "London".into(),
             };
             about.save(&db).await.unwrap();
-            assert_eq!(AboutUser::get(&db).await.unwrap(), Some(about));
+            assert_eq!(
+                AboutUser::get(&db)
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
+                Some(about)
+            );
 
             // Drive the collection through the typed handle.
             let col = Note::collection(notes);
@@ -1651,14 +1668,23 @@ mod tests {
             let mut second = walked[0].clone();
             second.pinned = false;
             col.save(&db, b, &second).await.unwrap();
-            assert_eq!(col.get(&db, b).await.unwrap(), Some(second));
+            assert_eq!(
+                col.get(&db, b).await.unwrap().map(|w| w.decode().unwrap()),
+                Some(second)
+            );
 
             // Remove drops it from the walk; bytes stay (history).
             assert!(col.remove(&db, a).await.unwrap());
             let after: Vec<Note> = col.all(&db).try_collect().await.unwrap();
             assert_eq!(after.len(), 1);
             assert_eq!(after[0].body, "second");
-            assert!(col.get(&db, a).await.unwrap().is_some());
+            assert!(
+                col.get(&db, a)
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap())
+                    .is_some()
+            );
         });
     }
 }
