@@ -25,6 +25,7 @@ const SALT_MASK: u16 = (1 << FLAG_SHIFT) - 1;
 #[derive(
     Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, WaveWire,
 )]
+#[wave_wire(own_view)]
 pub struct LocalId {
     /// KEY field — a `STRUCT_HASH` or `CREATED_AT` timestamp.
     key: u64,
