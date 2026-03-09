@@ -23,6 +23,7 @@ use crate::record;
 use crate::store::Store;
 use crate::traits::{NonUniqueStruct, UniqueStruct};
 use crate::u48::U48;
+use crate::wire::Wire;
 
 /// A [`DbHandle`] over a borrowed [`Store`] — the engine-local context.
 ///
@@ -82,7 +83,9 @@ impl<S: Store> DbHandle for LocalHandle<'_, S> {
         }
     }
 
-    async fn get_unique<T: UniqueStruct>(&self) -> Result<Option<T>, Error> {
+    async fn get_unique<T: UniqueStruct>(
+        &self,
+    ) -> Result<Option<Wire<T>>, Error> {
         record::get_unique(self.store, self.tenant).await
     }
 
@@ -136,7 +139,7 @@ impl<S: Store> DbHandle for LocalHandle<'_, S> {
         &self,
         pivot: LocalId,
         id: Id,
-    ) -> Result<Option<T>, Error> {
+    ) -> Result<Option<Wire<T>>, Error> {
         self.col::<T>(pivot).get(self.store, id).await
     }
 
@@ -348,11 +351,20 @@ mod tests {
             let store = MemStore::default();
             let db = LocalHandle::new(&store, tenant());
 
-            assert_eq!(db.get_unique::<Settings>().await.unwrap(), None);
+            assert_eq!(
+                db.get_unique::<Settings>()
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
+                None
+            );
             db.save_unique(&Settings { volume: 3 }).await.unwrap();
             db.save_unique(&Settings { volume: 7 }).await.unwrap();
             assert_eq!(
-                db.get_unique::<Settings>().await.unwrap(),
+                db.get_unique::<Settings>()
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
                 Some(Settings { volume: 7 })
             );
 
@@ -366,7 +378,14 @@ mod tests {
 
             // Another tenant's context sees nothing — same store, own space.
             let other = db.as_tenant(U48::from(8u32));
-            assert_eq!(other.get_unique::<Settings>().await.unwrap(), None);
+            assert_eq!(
+                other
+                    .get_unique::<Settings>()
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
+                None
+            );
             assert_eq!(other.tenant(), U48::from(8u32));
         });
     }
@@ -395,7 +414,10 @@ mod tests {
 
             db.update(pivot, b, &note("blue", 22)).await.unwrap();
             assert_eq!(
-                db.get_record::<Note>(pivot, b).await.unwrap(),
+                db.get_record::<Note>(pivot, b)
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
                 Some(note("blue", 22))
             );
 
@@ -417,7 +439,10 @@ mod tests {
                 db.all::<Note>(pivot).try_collect().await.unwrap();
             assert_eq!(after, vec![note("blue", 22)]);
             assert_eq!(
-                db.get_record::<Note>(pivot, a).await.unwrap(),
+                db.get_record::<Note>(pivot, a)
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
                 Some(note("red", 1)),
                 "removed record bytes survive (history)"
             );
@@ -451,7 +476,10 @@ mod tests {
             assert!(db.remove_durable::<Note>(pivot, b).await.unwrap());
             assert_eq!(store.durable_batches(), 5);
             assert_eq!(
-                db.get_unique::<Settings>().await.unwrap(),
+                db.get_unique::<Settings>()
+                    .await
+                    .unwrap()
+                    .map(|w| w.decode().unwrap()),
                 Some(Settings { volume: 2 })
             );
         });
