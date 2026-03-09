@@ -16,3 +16,10 @@ use syn::DeriveInput;
 pub fn derive(input: &DeriveInput) -> syn::Result<TokenStream> {
     wavedb_wire_codegen::expand(input, &quote!(::wavedb_core::wire))
 }
+
+/// [`derive`] for a type the macro builds itself, made its own view (a
+/// generated `{Name}PivotId`): `Copy`, no heap bytes, so a twin would only
+/// be a copy to convert back.
+pub fn derive_own_view(input: &DeriveInput) -> syn::Result<TokenStream> {
+    wavedb_wire_codegen::expand_as(input, &quote!(::wavedb_core::wire), true)
+}
