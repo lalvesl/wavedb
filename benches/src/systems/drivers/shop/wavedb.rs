@@ -26,6 +26,7 @@
 
 use futures::TryStreamExt as _;
 use futures::executor::block_on;
+use wavedb_core::wire::{WaveWire, Wire};
 use wavedb_core::{CollectionHandle, LocalHandle, NonUniqueStruct, Store, U48};
 use wavedb_storage::PageStore;
 
@@ -265,11 +266,12 @@ async fn run<S: Store>(
         }
         ShopOp::OrderPage { u, page } => {
             let shoppings = user_of(db, u).await?;
-            let orders: Vec<Shopping> = Shopping::collection(shoppings)
+            let orders: Vec<Wire<Shopping>> = Shopping::collection(shoppings)
                 .listed_by_bought_at_at_page(db, page, PAGE)
                 .try_collect()
                 .await
                 .map_err(|e| format!("order page: {e}"))?;
+            read_all(&orders)?;
             if orders.is_empty() && page == 0 {
                 return Err(format!("order_page: user {u} has no first page"));
             }
@@ -277,25 +279,37 @@ async fn run<S: Store>(
         }
         ShopOp::OrderDetail { u } => {
             let shoppings = user_of(db, u).await?;
-            let orders: Vec<Shopping> = Shopping::collection(shoppings)
+            let orders: Vec<Wire<Shopping>> = Shopping::collection(shoppings)
                 .listed_by_bought_at_at_page(db, 0, PAGE)
                 .try_collect()
                 .await
                 .map_err(|e| format!("order detail: {e}"))?;
+            read_all(&orders)?;
             let order = orders.first().ok_or_else(|| {
                 format!("order_detail: user {u} has no order")
             })?;
-            let items: Vec<Product> = Product::collection(order.items)
+            let pivot = order.view().map_err(|e| format!("view: {e}"))?.items;
+            let items: Vec<Wire<Product>> = Product::collection(pivot)
                 .listed_by_name_at_page(db, 0, PAGE)
                 .try_collect()
                 .await
                 .map_err(|e| format!("order items: {e}"))?;
+            read_all(&items)?;
             if items.is_empty() {
                 return Err(format!("order_detail: user {u}'s order is empty"));
             }
             Ok(())
         }
     }
+}
+
+/// Read every record a page brought back: each viewed, every field checked —
+/// the work the other systems do fetching a row's columns.
+fn read_all<T: WaveWire>(page: &[Wire<T>]) -> Result<(), String> {
+    for record in page {
+        record.view().map_err(|e| format!("view: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Insert `value` into `col`, through the `_durable` twin when `durable`.
