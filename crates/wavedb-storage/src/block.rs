@@ -237,7 +237,10 @@ impl WaveWire for BlockDescriptor {
         stack.extend_from_slice(&self.0.to_le_bytes());
     }
     fn encode_heap(&self, _heap: &mut Vec<u8>) {}
-    fn decode(stack: &mut Cursor, _heap: &mut Cursor) -> Result<Self> {
+    fn decode<'a>(
+        stack: &mut Cursor<'a>,
+        _heap: &mut Cursor<'a>,
+    ) -> Result<Self> {
         let mut raw = [0; 8];
         raw.copy_from_slice(stack.take(8)?);
         Ok(Self(u64::from_le_bytes(raw)))
