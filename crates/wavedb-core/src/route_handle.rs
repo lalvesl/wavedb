@@ -26,7 +26,7 @@ use crate::metadata::Metadata;
 use crate::node_op::{NodeOp, NodeReply};
 use crate::placement::Owner;
 use crate::route::Route;
-use crate::route_reply::{buffered, decode, mismatch, values, versions, wire};
+use crate::route_reply::{body, buffered, mismatch, values, versions, wire};
 use crate::traits::{NonUniqueStruct, UniqueStruct};
 use crate::u48::U48;
 use crate::wire::Wire;
@@ -152,7 +152,7 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
 
     fn unique_history<T: UniqueStruct + 'static>(
         &self,
-    ) -> impl Stream<Item = Result<(Metadata, T)>> {
+    ) -> impl Stream<Item = Result<(Metadata, Wire<T>)>> {
         buffered(async move {
             versions(self.run(T::STRUCT_HASH, NodeOp::UniqueHistory).await?)
         })
@@ -232,7 +232,7 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
     fn all<T: NonUniqueStruct + 'static>(
         &self,
         pivot: LocalId,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         buffered(async move {
             values(self.run(T::STRUCT_HASH, NodeOp::All { pivot }).await?)
         })
@@ -243,7 +243,7 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
         pivot: LocalId,
         index: usize,
         offset: u64,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         let op = NodeOp::Listed {
             pivot,
             index,
@@ -259,7 +259,7 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
         index: usize,
         offset: u64,
         limit: u32,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         let op = NodeOp::Listed {
             pivot,
             index,
@@ -288,7 +288,7 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
         query: &str,
         mode: Fuzzy,
         limit: usize,
-    ) -> Result<Vec<Scored<(Id, T)>>> {
+    ) -> Result<Vec<Scored<(Id, Wire<T>)>>> {
         let op = NodeOp::Fuzzy {
             pivot,
             index,
@@ -300,15 +300,14 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
         else {
             return Err(mismatch());
         };
-        hits.into_iter()
-            .map(|hit| {
-                Ok(Scored {
-                    item: (hit.item.0, decode(&hit.item.1)?),
-                    score: hit.score,
-                    rank: hit.rank,
-                })
+        Ok(hits
+            .into_iter()
+            .map(|hit| Scored {
+                item: (hit.item.0, body(hit.item.1)),
+                score: hit.score,
+                rank: hit.rank,
             })
-            .collect()
+            .collect())
     }
 
     fn search_by<T: NonUniqueStruct + 'static>(
@@ -316,7 +315,7 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
         pivot: LocalId,
         index: usize,
         bound: Bound,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         let op = NodeOp::SearchBy {
             pivot,
             index,
@@ -330,7 +329,7 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
         pivot: LocalId,
         index: usize,
         bound: Bound,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         let op = NodeOp::ListedWhere {
             pivot,
             index,
@@ -343,7 +342,7 @@ impl<R: Route> DbHandle for RouteHandle<'_, R> {
         &self,
         pivot: LocalId,
         id: Id,
-    ) -> impl Stream<Item = Result<(Metadata, T)>> {
+    ) -> impl Stream<Item = Result<(Metadata, Wire<T>)>> {
         let op = NodeOp::RecordHistory { pivot, id };
         buffered(async move { versions(self.run(T::STRUCT_HASH, op).await?) })
     }
