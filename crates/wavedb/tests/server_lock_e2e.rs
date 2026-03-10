@@ -103,6 +103,7 @@ pub async fn post_both(db: &Db, a: LocalId, b: LocalId) -> Result<()> {
 pub async fn count_entries(db: &Db, ledger: LocalId) -> Result<u64> {
     let all: Vec<Entry> = Entry::collection(EntryPivotId(ledger))
         .all(db)
+        .map_ok(|w| w.decode().unwrap())
         .try_collect()
         .await?;
     Ok(all.len() as u64)
@@ -136,7 +137,11 @@ pub async fn create_under_lock(db: &Db) -> Result<u32> {
     for n in 0..3 {
         col.insert(db, &Entry { n }).await?;
     }
-    let all: Vec<Entry> = col.all(db).try_collect().await?;
+    let all: Vec<Entry> = col
+        .all(db)
+        .map_ok(|w| w.decode().unwrap())
+        .try_collect()
+        .await?;
     let len = u32::try_from(all.len()).unwrap_or(u32::MAX);
     Tally { n: len }.save(db).await?;
     Ok(len)
