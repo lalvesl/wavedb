@@ -27,9 +27,9 @@
 //! [`Error::Node`]: crate::Error::Node
 
 use futures::{Stream, StreamExt, TryStreamExt};
-use wavedb_core::expose::Command;
+use wavedb_core::expose::{Command, unframed};
 use wavedb_core::index::Pivot;
-use wavedb_core::wire::{Wire, from_wire, to_wire};
+use wavedb_core::wire::{Wire, to_wire};
 use wavedb_core::{
     Collection, DbHandle, Id, LocalHandle, LocalId, NonUniqueStruct, Store,
     UniqueStruct,
@@ -208,14 +208,15 @@ pub async fn record_fallback<T: NonUniqueStruct>(
 }
 
 /// The collection walk with the cache in the loop: stream the node's
-/// `(Id, Metadata, T)` frames, mirroring each living record (chain data
-/// verbatim) as it passes; when the *transport* fails and the local
+/// framed `(Id, Metadata)` + body items, each a [`Wire`] over its own frame,
+/// mirroring each living record (chain data verbatim) as it passes — decoded
+/// only when there is a cache to mirror into; when the *transport* fails and the local
 /// collection copy exists, serve the warm walk instead (same ids, same
 /// order — the mirror adopted the node's).
 pub fn cached_all<T: NonUniqueStruct + 'static>(
     db: &Db,
     pivot: LocalId,
-) -> impl Stream<Item = Result<T>> + '_ {
+) -> impl Stream<Item = Result<Wire<T>>> + '_ {
     futures::stream::once(async move {
         let node = db
             .command_stream(T::STRUCT_HASH, Command::All, to_wire(&pivot))
@@ -223,12 +224,13 @@ pub fn cached_all<T: NonUniqueStruct + 'static>(
         match node {
             Ok(items) => items
                 .and_then(move |bytes| async move {
-                    let (id, meta, value) =
-                        from_wire::<(Id, wavedb_core::Metadata, T)>(&bytes)
-                            .map_err(wavedb_core::Error::from)
-                            .map_err(Error::Core)?;
-                    mirror_record_meta(db, pivot, id, meta, &value).await;
-                    Ok(value)
+                    let ((id, meta), wire) =
+                        unframed::<(Id, wavedb_core::Metadata), T>(bytes)?;
+                    if db.local().is_some() {
+                        let value = wire.decode()?;
+                        mirror_record_meta(db, pivot, id, meta, &value).await;
+                    }
+                    Ok(wire)
                 })
                 .left_stream()
                 .left_stream(),
