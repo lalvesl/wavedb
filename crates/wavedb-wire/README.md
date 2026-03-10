@@ -52,6 +52,10 @@ let owned: Person = p.into();       // back to owned, for a write
 - `Wire<T>` owns one buffer (`Box<[u8]>`, plus where `T` starts in it), is
   `Send + Sync` whatever `T` is, and drops as one deallocation;
   `wire.view()` checks its bytes on each call, so view once and keep the view.
+- `Wire<T>` is itself `WaveWire`, with `T`'s exact bytes: a `Vec<Wire<T>>`
+  encodes as a `Vec<T>` does, so records read from a store can be sent on as
+  they were stored, and received as buffers to view. Decoding one views the
+  `T` (every check) and keeps exactly its bytes.
 - `ListRef::get(i)` is O(1) when no element has heap bytes, O(i) otherwise.
 - A twin is `Copy`. `From<NameRef> for Name` (`.into()`) gives the owned
   value back, and `TryFrom<Wire<Name>> for Name` (`.try_into()?`) the
