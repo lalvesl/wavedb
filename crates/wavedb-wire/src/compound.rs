@@ -18,7 +18,10 @@ impl WaveWire for String {
     fn encode_heap(&self, heap: &mut Vec<u8>) {
         heap.extend_from_slice(self.as_bytes());
     }
-    fn decode(stack: &mut Cursor, heap: &mut Cursor) -> Result<Self> {
+    fn decode<'a>(
+        stack: &mut Cursor<'a>,
+        heap: &mut Cursor<'a>,
+    ) -> Result<Self> {
         let len = stack.u32()? as usize;
         let bytes = heap.take(len)?;
         Self::from_utf8(bytes.to_vec()).map_err(|_| Error::Utf8)
@@ -55,7 +58,10 @@ impl<T: WaveWire> WaveWire for Vec<T> {
     fn encode_heap(&self, heap: &mut Vec<u8>) {
         T::encode_slice(self, heap);
     }
-    fn decode(stack: &mut Cursor, heap: &mut Cursor) -> Result<Self> {
+    fn decode<'a>(
+        stack: &mut Cursor<'a>,
+        heap: &mut Cursor<'a>,
+    ) -> Result<Self> {
         let region_len = stack.u32()? as usize;
         T::decode_slice(heap.take(region_len)?)
     }
@@ -95,7 +101,10 @@ impl<T: WaveWire> WaveWire for Option<T> {
             v.encode_heap(heap);
         }
     }
-    fn decode(stack: &mut Cursor, heap: &mut Cursor) -> Result<Self> {
+    fn decode<'a>(
+        stack: &mut Cursor<'a>,
+        heap: &mut Cursor<'a>,
+    ) -> Result<Self> {
         if stack.u8()? == 0 {
             return Ok(None);
         }
@@ -145,7 +154,10 @@ impl<T: WaveWire, const N: usize> WaveWire for [T; N] {
             e.encode_heap(heap);
         }
     }
-    fn decode(stack: &mut Cursor, heap: &mut Cursor) -> Result<Self> {
+    fn decode<'a>(
+        stack: &mut Cursor<'a>,
+        heap: &mut Cursor<'a>,
+    ) -> Result<Self> {
         let mut v = Vec::with_capacity(N);
         for _ in 0..N {
             v.push(T::decode(stack, heap)?);
@@ -196,7 +208,10 @@ macro_rules! wire_tuple {
             fn heap_size(&self) -> usize { 0 $(+ self.$idx.heap_size())+ }
             fn encode_stack(&self, stack: &mut Vec<u8>) { $(self.$idx.encode_stack(stack);)+ }
             fn encode_heap(&self, heap: &mut Vec<u8>) { $(self.$idx.encode_heap(heap);)+ }
-            fn decode(stack: &mut Cursor, heap: &mut Cursor) -> Result<Self> {
+            fn decode<'a>(
+        stack: &mut Cursor<'a>,
+        heap: &mut Cursor<'a>,
+    ) -> Result<Self> {
                 Ok(( $($name::decode(stack, heap)?,)+ ))
             }
             fn view<'a>(stack: &mut Cursor<'a>, heap: &mut Cursor<'a>) -> Result<Self::Ref<'a>> {
