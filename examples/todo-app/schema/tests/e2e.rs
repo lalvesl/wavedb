@@ -68,7 +68,10 @@ async fn connect(addr: SocketAddr, tenant: U48) -> Db {
 
 /// Collect the streamed walk (each todo arrives as its own frame).
 async fn collect_todos(db: &Db) -> Result<Vec<todo_app_schema::Todo>> {
-    all_todos(db).try_collect().await
+    all_todos(db)
+        .map_ok(|w| w.decode().expect("decode"))
+        .try_collect()
+        .await
 }
 
 /// The titles `search_todos` returns for `query`, best first.
