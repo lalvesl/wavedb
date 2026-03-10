@@ -105,7 +105,7 @@ impl<S: Store> DbHandle for LocalHandle<'_, S> {
 
     fn unique_history<T: UniqueStruct + 'static>(
         &self,
-    ) -> impl Stream<Item = Result<(Metadata, T), Error>> {
+    ) -> impl Stream<Item = Result<(Metadata, Wire<T>), Error>> {
         record::unique_history(self.store, self.tenant)
     }
 
@@ -180,7 +180,7 @@ impl<S: Store> DbHandle for LocalHandle<'_, S> {
     fn all<T: NonUniqueStruct + 'static>(
         &self,
         pivot: LocalId,
-    ) -> impl Stream<Item = Result<T, Error>> {
+    ) -> impl Stream<Item = Result<Wire<T>, Error>> {
         self.col::<T>(pivot)
             .all(self.store)
             .map_ok(|(_, value)| value)
@@ -191,7 +191,7 @@ impl<S: Store> DbHandle for LocalHandle<'_, S> {
         pivot: LocalId,
         index: usize,
         bound: Bound,
-    ) -> impl Stream<Item = Result<T, Error>> {
+    ) -> impl Stream<Item = Result<Wire<T>, Error>> {
         self.col::<T>(pivot)
             .search_by(self.store, index, bound)
             .map_ok(|(_, value)| value)
@@ -202,7 +202,7 @@ impl<S: Store> DbHandle for LocalHandle<'_, S> {
         pivot: LocalId,
         index: usize,
         bound: Bound,
-    ) -> impl Stream<Item = Result<T, Error>> {
+    ) -> impl Stream<Item = Result<Wire<T>, Error>> {
         self.col::<T>(pivot)
             .listed_where(self.store, index, bound)
             .map_ok(|(_, value)| value)
@@ -213,7 +213,7 @@ impl<S: Store> DbHandle for LocalHandle<'_, S> {
         pivot: LocalId,
         index: usize,
         offset: u64,
-    ) -> impl Stream<Item = Result<T, Error>> {
+    ) -> impl Stream<Item = Result<Wire<T>, Error>> {
         self.col::<T>(pivot)
             .listed_at(self.store, index, offset)
             .map_ok(|(_, value)| value)
@@ -225,7 +225,7 @@ impl<S: Store> DbHandle for LocalHandle<'_, S> {
         index: usize,
         offset: u64,
         limit: u32,
-    ) -> impl Stream<Item = Result<T, Error>> {
+    ) -> impl Stream<Item = Result<Wire<T>, Error>> {
         // Engine-local: the bound is just a `take`, since there is no exchange
         // to size. It exists so the same call is one round trip remotely.
         self.listed::<T>(pivot, index, offset).take(limit as usize)
@@ -246,7 +246,7 @@ impl<S: Store> DbHandle for LocalHandle<'_, S> {
         query: &str,
         mode: Fuzzy,
         limit: usize,
-    ) -> Result<Vec<Scored<(Id, T)>>, Error> {
+    ) -> Result<Vec<Scored<(Id, Wire<T>)>>, Error> {
         self.col::<T>(pivot)
             .fuzzy_search(self.store, index, query, mode, limit)
             .await
@@ -256,7 +256,7 @@ impl<S: Store> DbHandle for LocalHandle<'_, S> {
         &self,
         pivot: LocalId,
         id: Id,
-    ) -> impl Stream<Item = Result<(Metadata, T), Error>> {
+    ) -> impl Stream<Item = Result<(Metadata, Wire<T>), Error>> {
         self.col::<T>(pivot).history(self.store, id)
     }
 }
@@ -368,8 +368,12 @@ mod tests {
                 Some(Settings { volume: 7 })
             );
 
-            let versions: Vec<(crate::metadata::Metadata, Settings)> =
-                db.unique_history().try_collect().await.unwrap();
+            let versions: Vec<(crate::metadata::Metadata, Settings)> = db
+                .unique_history()
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(
                 versions.iter().map(|(_, s)| s.volume).collect::<Vec<_>>(),
                 vec![7, 3],
@@ -404,8 +408,12 @@ mod tests {
             let a = db.insert(pivot, &note("red", 1)).await.unwrap();
             let b = db.insert(pivot, &note("blue", 2)).await.unwrap();
 
-            let walked: Vec<Note> =
-                db.all::<Note>(pivot).try_collect().await.unwrap();
+            let walked: Vec<Note> = db
+                .all::<Note>(pivot)
+                .map_ok(|w| w.decode().unwrap())
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(
                 walked.iter().map(|v| v.n).collect::<Vec<_>>(),
                 vec![2, 1],
@@ -428,6 +436,7 @@ mod tests {
                     0,
                     crate::index::Bound::Exact("red".key_bytes()),
                 )
+                .map_ok(|w| w.decode().unwrap())
                 .try_collect()
                 .await
                 .unwrap();
@@ -435,8 +444,12 @@ mod tests {
 
             assert!(db.remove::<Note>(pivot, a).await.unwrap());
             assert!(!db.remove::<Note>(pivot, a).await.unwrap());
-            let after: Vec<Note> =
-                db.all::<Note>(pivot).try_collect().await.unwrap();
+            let after: Vec<Note> = db
+                .all::<Note>(pivot)
+                .map_ok(|w| w.decode().unwrap())
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(after, vec![note("blue", 22)]);
             assert_eq!(
                 db.get_record::<Note>(pivot, a)
