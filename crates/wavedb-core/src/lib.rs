@@ -39,6 +39,7 @@ pub mod durability;
 pub mod error;
 pub mod expose;
 mod expose_changes;
+mod expose_items;
 mod expose_lists;
 mod expose_member;
 mod expose_salt;
