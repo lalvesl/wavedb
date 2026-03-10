@@ -19,6 +19,9 @@ pub mod fold;
 pub mod grams;
 
 pub use distance::{Scored, containment, jaccard, levenshtein_within};
+
+/// A fuzzy search's answer: each hit's id and record, best first.
+pub type Hits<T> = Vec<Scored<(crate::id::Id, crate::wire::Wire<T>)>>;
 pub use fold::{Fold, normalize};
 pub use grams::{DEFAULT_N, GramSet, field_key, gram_prefixes, key_len};
 
