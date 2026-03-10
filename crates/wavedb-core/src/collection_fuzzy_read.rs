@@ -35,9 +35,10 @@ use crate::fuzzy::{
 use crate::id::Id;
 use crate::index::SecKey;
 use crate::local_id::LocalId;
-use crate::record::decode_record;
+use crate::record::wire_record;
 use crate::store::Store;
 use crate::traits::NonUniqueStruct;
+use crate::wire::Wire;
 
 /// What the scans learned about one candidate before it was read.
 struct Candidate {
@@ -61,7 +62,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         query: &str,
         mode: Fuzzy,
         limit: usize,
-    ) -> Result<Vec<Scored<(Id, T)>>> {
+    ) -> Result<Vec<Scored<(Id, Wire<T>)>>> {
         let pivot = self.load_pivot(store).await?;
         let chain = self
             .fuzzy_chains(&pivot)
@@ -120,10 +121,13 @@ impl<T: NonUniqueStruct> Collection<T> {
                 // makes it not happen.
                 continue;
             };
-            let (_, value) = decode_record::<T>(T::STRUCT_HASH, &bytes)?;
+            // Scored on the decoded fields, answered as the record's bytes —
+            // what every read returns (RFC 0076).
+            let (_, wire) = wire_record::<T>(T::STRUCT_HASH, bytes)?;
+            let value = wire.decode()?;
             if let Some(scored) = Self::score(&value, index, &text, mode) {
                 hits.push(Scored {
-                    item: (id, value),
+                    item: (id, wire),
                     score: scored.score,
                     rank: scored.rank,
                 });
