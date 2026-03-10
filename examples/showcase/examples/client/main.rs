@@ -118,7 +118,7 @@ async fn online_tour(db: &Db) {
     // Walk the project collection once: the streamed frames carry each
     // record's node-minted `Id` AND `Metadata`, mirrored into the local
     // cache — what lets the --offline pass re-walk it later.
-    let projects: Vec<showcase::Project> =
+    let projects: Vec<Wire<showcase::Project>> =
         showcase::Project::collection(ws.projects)
             .all(db)
             .try_collect()
@@ -175,11 +175,14 @@ async fn online_tour(db: &Db) {
         .expect("by status");
     println!(
         "in 'doing' via by_status: {:?}",
-        doing.iter().map(|t| t.title.as_str()).collect::<Vec<_>>()
+        doing
+            .iter()
+            .map(|t| t.view().expect("view").title)
+            .collect::<Vec<_>>()
     );
 
     // ---- the walk (streamed frames, mirrored into the cache) ----------
-    let all: Vec<Task> = tasks.all(db).try_collect().await.expect("walk");
+    let all: Vec<Wire<Task>> = tasks.all(db).try_collect().await.expect("walk");
     println!("full walk, newest first: {} living tasks", all.len());
 
     // ---- a Unique upsert (archives the old version) -------------------
