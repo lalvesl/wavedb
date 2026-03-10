@@ -34,13 +34,14 @@ use futures::{StreamExt, TryStreamExt};
 use crate::collection::Collection;
 use crate::error::Result;
 use crate::expose::Reply;
+use crate::expose_items::framed;
 use crate::id::Id;
 use crate::local_id::LocalId;
 use crate::metadata::Metadata;
 use crate::store::Store;
 use crate::traits::NonUniqueStruct;
 use crate::u48::U48;
-use crate::wire::to_wire;
+use crate::wire::Wire;
 
 /// One page of declared list `index`, ascending from `offset`, at most
 /// `limit` records — the shared tail of the generated `Listed` step.
@@ -67,12 +68,16 @@ where
     T: NonUniqueStruct,
     S: Store,
 {
-    let page: Vec<(Id, Metadata, T)> = Collection::<T>::at(pivot, tenant)
+    let page: Vec<(Id, Metadata, Wire<T>)> = Collection::<T>::at(pivot, tenant)
         .listed_meta_at(store, index, offset)
         .take(limit as usize)
         .try_collect()
         .await?;
-    Ok(Reply::Values(page.iter().map(to_wire).collect()))
+    Ok(Reply::Values(
+        page.into_iter()
+            .map(|(id, meta, body)| framed(&(id, meta), body))
+            .collect(),
+    ))
 }
 
 /// How many living records declared list `index` holds — one cold read, since
