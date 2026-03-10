@@ -172,7 +172,7 @@ pub async fn add_todo(db: &Db, title: String) -> Result<Id> {
 /// The order is the record chain's (RFC 0050): a completed todo moves to the
 /// front, because the chain is ordered by when each record was last written.
 #[server]
-pub fn all_todos(db: &Db) -> impl Stream<Item = Result<Todo>> {
+pub fn all_todos(db: &Db) -> impl Stream<Item = Result<Wire<Todo>>> {
     async_profile_todos(db)
 }
 
@@ -181,7 +181,7 @@ pub fn all_todos(db: &Db) -> impl Stream<Item = Result<Todo>> {
 #[cfg(feature = "server-side")]
 fn async_profile_todos<D: DbHandle<Error = Error>>(
     db: &D,
-) -> impl Stream<Item = Result<Todo>> {
+) -> impl Stream<Item = Result<Wire<Todo>>> {
     futures::stream::once(get_profile(db))
         .map(move |profile| match profile {
             Ok(p) => Todo::collection(p.todos).all(db).left_stream(),
@@ -229,14 +229,15 @@ pub async fn search_todos(
     let hits = Todo::collection(profile.todos)
         .fuzzy_title(db, &query, Fuzzy::contains(0.3), limit as usize)
         .await?;
-    Ok(hits
-        .into_iter()
-        .map(|hit| TodoHit {
-            id: hit.item.0,
-            todo: hit.item.1,
-            score: hit.score,
+    hits.into_iter()
+        .map(|hit| {
+            Ok(TodoHit {
+                id: hit.item.0,
+                todo: hit.item.1.try_into()?,
+                score: hit.score,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Mark a todo completed (the old version stays on the history chain).
