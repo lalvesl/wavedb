@@ -589,7 +589,7 @@ mod tests {
 
             let by_name: Vec<String> = people
                 .listed_by_name(&db)
-                .map_ok(|p| p.name)
+                .map_ok(|p| p.view().unwrap().name.to_owned())
                 .try_collect()
                 .await
                 .unwrap();
@@ -599,7 +599,10 @@ mod tests {
             // the porto one however their names sort.
             let by_city: Vec<String> = people
                 .listed_by_city_name(&db)
-                .map_ok(|p| format!("{}/{}", p.city, p.name))
+                .map_ok(|p| {
+                    let p = p.view().unwrap();
+                    format!("{}/{}", p.city, p.name)
+                })
                 .try_collect()
                 .await
                 .unwrap();
@@ -609,7 +612,7 @@ mod tests {
             // most-recently-written first.
             let recent: Vec<String> = people
                 .all(&db)
-                .map_ok(|p| p.name)
+                .map_ok(|p| p.view().unwrap().name.to_owned())
                 .try_collect()
                 .await
                 .unwrap();
@@ -645,8 +648,10 @@ mod tests {
                 };
                 people.insert(&db, &p).await.unwrap();
             }
-            let names = |v: Vec<Person>| {
-                v.into_iter().map(|p| p.name).collect::<Vec<_>>()
+            let names = |v: Vec<wavedb_core::wire::Wire<Person>>| {
+                v.into_iter()
+                    .map(|p| p.view().unwrap().name.to_owned())
+                    .collect::<Vec<_>>()
             };
 
             let bob = people.by_name(&db, "bob").try_collect().await.unwrap();
@@ -702,7 +707,7 @@ mod tests {
             }
             let cities: Vec<String> = members
                 .by_city_range(&db, "b", "m")
-                .map_ok(|m| m.city)
+                .map_ok(|m| m.view().unwrap().city.to_owned())
                 .try_collect()
                 .await
                 .unwrap();
@@ -754,7 +759,7 @@ mod tests {
                 .unwrap();
             let names: Vec<String> = people
                 .listed_by_name(&db)
-                .map_ok(|p| p.name)
+                .map_ok(|p| p.view().unwrap().name.to_owned())
                 .try_collect()
                 .await
                 .unwrap();
@@ -763,7 +768,7 @@ mod tests {
             assert!(people.remove(&db, ids[1]).await.unwrap());
             let names: Vec<String> = people
                 .listed_by_name(&db)
-                .map_ok(|p| p.name)
+                .map_ok(|p| p.view().unwrap().name.to_owned())
                 .try_collect()
                 .await
                 .unwrap();
@@ -803,7 +808,7 @@ mod tests {
 
             let page: Vec<String> = people
                 .listed_by_name_at_page(&db, 2, 4)
-                .map_ok(|p| p.name)
+                .map_ok(|p| p.view().unwrap().name.to_owned())
                 .take(4)
                 .try_collect()
                 .await
@@ -813,7 +818,7 @@ mod tests {
             // Past the end yields nothing rather than failing.
             let none: Vec<String> = people
                 .listed_by_name_at_page(&db, 99, 4)
-                .map_ok(|p| p.name)
+                .map_ok(|p| p.view().unwrap().name.to_owned())
                 .try_collect()
                 .await
                 .unwrap();
@@ -1295,8 +1300,12 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let pinned: Vec<Note> =
-                col.by_pinned(&db, &true).try_collect().await.unwrap();
+            let pinned: Vec<Note> = col
+                .by_pinned(&db, &true)
+                .map_ok(|w| w.decode().unwrap())
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(
                 pinned.iter().map(|n| n.pinned).collect::<Vec<_>>(),
                 vec![true],
@@ -1317,7 +1326,12 @@ mod tests {
                     .unwrap(),
                 Reply::Removed(true)
             );
-            let live: Vec<Note> = col.all(&db).try_collect().await.unwrap();
+            let live: Vec<Note> = col
+                .all(&db)
+                .map_ok(|w| w.decode().unwrap())
+                .try_collect()
+                .await
+                .unwrap();
             assert!(live.is_empty(), "{live:?}");
         });
     }
@@ -1423,10 +1437,20 @@ mod tests {
                 pinned: true,
             };
             col.save(&db, id, &pinned).await.unwrap();
-            let all: Vec<Note> = col.all(&db).try_collect().await.unwrap();
+            let all: Vec<Note> = col
+                .all(&db)
+                .map_ok(|w| w.decode().unwrap())
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(all, vec![pinned]);
             assert!(col.remove(&db, id).await.unwrap());
-            let all: Vec<Note> = col.all(&db).try_collect().await.unwrap();
+            let all: Vec<Note> = col
+                .all(&db)
+                .map_ok(|w| w.decode().unwrap())
+                .try_collect()
+                .await
+                .unwrap();
             assert!(all.is_empty(), "{all:?}");
         });
     }
@@ -1452,7 +1476,11 @@ mod tests {
                 .unwrap();
             }
             let versions: Vec<(wavedb_core::Metadata, AboutUser)> =
-                AboutUser::history(&db).try_collect().await.unwrap();
+                AboutUser::history(&db)
+                    .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                    .try_collect()
+                    .await
+                    .unwrap();
             assert_eq!(
                 versions
                     .iter()
@@ -1514,8 +1542,12 @@ mod tests {
             let by_body = |notes: Vec<Note>| {
                 notes.into_iter().map(|n| n.body).collect::<Vec<_>>()
             };
-            let pinned: Vec<Note> =
-                col.by_pinned(&db, &true).try_collect().await.unwrap();
+            let pinned: Vec<Note> = col
+                .by_pinned(&db, &true)
+                .map_ok(|w| w.decode().unwrap())
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(by_body(pinned), vec!["keep"]);
 
             // save with a changed indexed field re-keys the record.
@@ -1529,14 +1561,22 @@ mod tests {
             )
             .await
             .unwrap();
-            let pinned: Vec<Note> =
-                col.by_pinned(&db, &true).try_collect().await.unwrap();
+            let pinned: Vec<Note> = col
+                .by_pinned(&db, &true)
+                .map_ok(|w| w.decode().unwrap())
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(pinned.len(), 2);
 
             // remove de-indexes from the secondary too.
             assert!(col.remove(&db, a).await.unwrap());
-            let pinned: Vec<Note> =
-                col.by_pinned(&db, &true).try_collect().await.unwrap();
+            let pinned: Vec<Note> = col
+                .by_pinned(&db, &true)
+                .map_ok(|w| w.decode().unwrap())
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(by_body(pinned), vec!["later"]);
         });
     }
@@ -1577,7 +1617,12 @@ mod tests {
             let a = col.insert(&db, &s("dark")).await.unwrap();
             let b = col.insert(&db, &s("light")).await.unwrap();
             assert_eq!(a, b, "one key value = one anchor");
-            let all: Vec<Setting> = col.all(&db).try_collect().await.unwrap();
+            let all: Vec<Setting> = col
+                .all(&db)
+                .map_ok(|w| w.decode().unwrap())
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(all, vec![s("light")]);
 
             // The identity IS the key: a save addressing `a` with another
@@ -1600,8 +1645,12 @@ mod tests {
             assert!(col.remove(&db, a).await.unwrap());
             let back = col.insert(&db, &s("dark again")).await.unwrap();
             assert_eq!(back, a, "same key, same anchor, through death");
-            let versions: Vec<(wavedb_core::Metadata, Setting)> =
-                col.history(&db, a).try_collect().await.unwrap();
+            let versions: Vec<(wavedb_core::Metadata, Setting)> = col
+                .history(&db, a)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(versions.len(), 3, "v1, v2, and the revival chain");
         });
     }
@@ -1657,7 +1706,12 @@ mod tests {
                 .await
                 .unwrap();
 
-            let walked: Vec<Note> = col.all(&db).try_collect().await.unwrap();
+            let walked: Vec<Note> = col
+                .all(&db)
+                .map_ok(|w| w.decode().unwrap())
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(
                 walked.iter().map(|n| n.body.as_str()).collect::<Vec<_>>(),
                 vec!["second", "first"],
@@ -1675,7 +1729,12 @@ mod tests {
 
             // Remove drops it from the walk; bytes stay (history).
             assert!(col.remove(&db, a).await.unwrap());
-            let after: Vec<Note> = col.all(&db).try_collect().await.unwrap();
+            let after: Vec<Note> = col
+                .all(&db)
+                .map_ok(|w| w.decode().unwrap())
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(after.len(), 1);
             assert_eq!(after[0].body, "second");
             assert!(
