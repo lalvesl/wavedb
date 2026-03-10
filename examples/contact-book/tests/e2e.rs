@@ -165,8 +165,7 @@ fn contact_book_flow_over_the_wire() {
         // Remove: out of the living walk; bytes stay (history navigable).
         assert!(contacts.remove(&db, alan).await.expect("remove"));
         assert!(!contacts.remove(&db, alan).await.expect("remove again"));
-        let living: Vec<Contact> =
-            contacts.all(&db).try_collect().await.expect("all");
+        let living = owned(contacts.all(&db)).await;
         assert_eq!(
             living.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
             vec!["Grace"]
@@ -183,4 +182,14 @@ fn contact_book_flow_over_the_wire() {
 
         node.shutdown();
     });
+}
+
+/// A walk, owned — for the comparisons.
+async fn owned<T: WaveWire, E: std::fmt::Debug>(
+    walk: impl Stream<Item = core::result::Result<Wire<T>, E>>,
+) -> Vec<T> {
+    walk.map_ok(|w| w.decode().expect("decode"))
+        .try_collect()
+        .await
+        .expect("walk")
 }
