@@ -35,6 +35,26 @@ use crate::db::Db;
 use crate::error::{Error, Result};
 use crate::reply;
 
+/// Run a walk-shaped command whose items are [`framed`] records: each a head
+/// `H` and a [`Wire`] over its own frame.
+///
+/// [`framed`]: wavedb_core::expose::framed
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn streamed_framed<'a, H, T>(
+    db: &'a Db,
+    struct_hash: u64,
+    command: Command,
+    payload: Vec<u8>,
+) -> impl Stream<Item = Result<(H, Wire<T>)>> + 'a
+where
+    H: WaveWire + 'a,
+    T: WaveWire + 'a,
+{
+    frames(db, struct_hash, command, payload).and_then(|bytes| async move {
+        Ok(wavedb_core::expose::unframed::<H, T>(bytes)?)
+    })
+}
+
 /// Run a walk-shaped command and decode each streamed item frame as a `V`.
 // `Db` is re-exported; `pub(crate)` keeps this seam crate-internal.
 #[allow(clippy::redundant_pub_crate)]
@@ -44,6 +64,19 @@ pub(crate) fn streamed<'a, V: WaveWire + 'a>(
     command: Command,
     payload: Vec<u8>,
 ) -> impl Stream<Item = Result<V>> + 'a {
+    frames(db, struct_hash, command, payload).and_then(|bytes| async move {
+        from_wire::<V>(&bytes)
+            .map_err(|e| Error::Core(wavedb_core::Error::from(e)))
+    })
+}
+
+/// A walk-shaped command's item frames, raw.
+fn frames(
+    db: &Db,
+    struct_hash: u64,
+    command: Command,
+    payload: Vec<u8>,
+) -> impl Stream<Item = Result<Vec<u8>>> + '_ {
     futures::stream::once(db.command_stream(struct_hash, command, payload))
         .map(|res| match res {
             Ok(items) => items.left_stream(),
@@ -52,10 +85,6 @@ pub(crate) fn streamed<'a, V: WaveWire + 'a>(
             }
         })
         .flatten()
-        .and_then(|bytes| async move {
-            from_wire::<V>(&bytes)
-                .map_err(|e| Error::Core(wavedb_core::Error::from(e)))
-        })
 }
 
 /// `create_pivot`'s answer: a collection is bootstrapped node-side, so the
@@ -116,9 +145,9 @@ impl DbHandle for Db {
 
     fn unique_history<T: UniqueStruct + 'static>(
         &self,
-    ) -> impl Stream<Item = Result<(Metadata, T)>> {
-        // Each item frame carries one `(Metadata, T)` version pair.
-        streamed(self, T::STRUCT_HASH, Command::History, Vec::new())
+    ) -> impl Stream<Item = Result<(Metadata, Wire<T>)>> {
+        // Each item frame is one version: its `Metadata`, then its body.
+        streamed_framed(self, T::STRUCT_HASH, Command::History, Vec::new())
     }
 
     fn create_pivot<T: NonUniqueStruct>(
@@ -208,7 +237,7 @@ impl DbHandle for Db {
     fn all<T: NonUniqueStruct + 'static>(
         &self,
         pivot: LocalId,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         // Each `All` frame carries the wire pair `(Id, T)` — the node-minted
         // identity rides along so the walk mirrors into the local cache; the
         // typed surface yields values only. Transport fault + adopted local
@@ -221,7 +250,7 @@ impl DbHandle for Db {
         _pivot: LocalId,
         _index: usize,
         _bound: Bound,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         // No wire command yet — secondary lookups over the transport land
         // with the streaming frames.
         refuse(T::STRUCT_HASH)
@@ -232,7 +261,7 @@ impl DbHandle for Db {
         _pivot: LocalId,
         _index: usize,
         _bound: Bound,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         // A bounded scan has no limit to page by, so it waits on the
         // streaming frames with `search_by`.
         refuse(T::STRUCT_HASH)
@@ -243,7 +272,7 @@ impl DbHandle for Db {
         pivot: LocalId,
         index: usize,
         offset: u64,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         // Unlike `search_by`, this one does not wait on streaming frames: the
         // wire `Listed` is bounded by a limit, so the unbounded reader is a
         // chunk loop over bounded exchanges (see `client_lists`).
@@ -256,7 +285,7 @@ impl DbHandle for Db {
         index: usize,
         offset: u64,
         limit: u32,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         crate::client_lists::cached_listed_page::<T>(
             self, pivot, index, offset, limit,
         )
@@ -278,7 +307,9 @@ impl DbHandle for Db {
         _mode: wavedb_core::fuzzy::Fuzzy,
         _limit: usize,
     ) -> impl Future<
-        Output = Result<Vec<wavedb_core::fuzzy::Scored<(wavedb_core::Id, T)>>>,
+        Output = Result<
+            Vec<wavedb_core::fuzzy::Scored<(wavedb_core::Id, Wire<T>)>>,
+        >,
     > {
         // No wire command yet (RFC 0056 leaves it open). Unlike `listed`,
         // this one has a natural home without one: the todo-app shape —
@@ -294,7 +325,7 @@ impl DbHandle for Db {
         &self,
         _pivot: LocalId,
         _id: Id,
-    ) -> impl Stream<Item = Result<(Metadata, T)>> {
+    ) -> impl Stream<Item = Result<(Metadata, Wire<T>)>> {
         // No wire command yet — the NonUnique timeline walk is node-side
         // only until a `History`-by-id frame exists.
         refuse(T::STRUCT_HASH)
