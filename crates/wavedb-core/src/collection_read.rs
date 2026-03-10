@@ -103,7 +103,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         self,
         store: &'a S,
         id: Id,
-    ) -> impl Stream<Item = Result<(Metadata, T)>> + 'a
+    ) -> impl Stream<Item = Result<(Metadata, Wire<T>)>> + 'a
     where
         T: 'a,
     {
@@ -133,7 +133,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         store: &'a S,
         index: usize,
         bound: Bound,
-    ) -> impl Stream<Item = Result<(Id, T)>> + 'a
+    ) -> impl Stream<Item = Result<(Id, Wire<T>)>> + 'a
     where
         T: 'a,
     {
@@ -161,7 +161,7 @@ impl<T: NonUniqueStruct> Collection<T> {
                 .get_of(T::STRUCT_HASH, id)
                 .await?
                 .ok_or(Error::RecordMissing(id))?;
-            Ok((id, decode_record::<T>(T::STRUCT_HASH, &bytes)?.1))
+            Ok((id, wire_record::<T>(T::STRUCT_HASH, bytes)?.1))
         })
     }
 
@@ -189,7 +189,7 @@ impl<T: NonUniqueStruct> Collection<T> {
     pub fn all<'a, S: Store>(
         self,
         store: &'a S,
-    ) -> impl Stream<Item = Result<(Id, T)>> + 'a
+    ) -> impl Stream<Item = Result<(Id, Wire<T>)>> + 'a
     where
         T: 'a,
     {
@@ -219,7 +219,7 @@ impl<T: NonUniqueStruct> Collection<T> {
                                 .await?
                                 .ok_or(Error::RecordMissing(rec))?;
                             let (_, value) =
-                                decode_record::<T>(T::STRUCT_HASH, &bytes)?;
+                                wire_record::<T>(T::STRUCT_HASH, bytes)?;
                             page.push(Ok((rec, value)));
                         }
                         page.reverse();
