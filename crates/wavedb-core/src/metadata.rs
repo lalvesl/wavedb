@@ -70,9 +70,9 @@ impl WaveWire for Succession {
         stack.extend_from_slice(&instant.to_le_bytes());
     }
     fn encode_heap(&self, _heap: &mut Vec<u8>) {}
-    fn decode(
-        stack: &mut Cursor,
-        _heap: &mut Cursor,
+    fn decode<'a>(
+        stack: &mut Cursor<'a>,
+        _heap: &mut Cursor<'a>,
     ) -> wavedb_wire::Result<Self> {
         let tag = stack.take(1)?[0];
         let bytes: [u8; 8] = stack
