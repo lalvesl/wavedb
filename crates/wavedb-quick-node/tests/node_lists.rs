@@ -22,8 +22,8 @@ use std::thread;
 use futures::TryStreamExt;
 use futures::channel::oneshot;
 use schema_smoke::{AboutUser, REGISTRY, Row};
-use wavedb_core::expose::{Command, Reply};
-use wavedb_core::wire::{from_wire, to_wire};
+use wavedb_core::expose::{Command, Reply, unframed};
+use wavedb_core::wire::to_wire;
 use wavedb_core::{Id, LocalId, Metadata, U48};
 use wavedb_net::NetClient;
 use wavedb_net::auth::{AccessClaims, TokenPurpose, sign};
@@ -209,15 +209,14 @@ async fn listed(
         .await
         .expect("list frames");
     items
-        .iter()
+        .into_iter()
         .map(|bytes| {
-            // Every frame is `(Id, Metadata, T)` — the same triple `All`
-            // ships, so a client mirrors the page under the node's identity
-            // and the node's chain data.
-            from_wire::<(Id, Metadata, Row)>(bytes)
-                .expect("list frame")
-                .2
-                .n
+            // Every frame is a framed `(Id, Metadata)` and the record's body
+            // — what `All` ships too, so a client mirrors the page under the
+            // node's identity and chain data, and reads the record in place.
+            let (_, row) =
+                unframed::<(Id, Metadata), Row>(bytes).expect("list frame");
+            row.view().expect("row").n
         })
         .collect()
 }
