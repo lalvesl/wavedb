@@ -98,6 +98,8 @@ async fn print_todos(db: &Db) -> anyhow::Result<()> {
     let mut todos = std::pin::pin!(all_todos(db));
     while let Some(todo) = todos.next().await {
         let todo = todo?;
+        // Read in place: the title is a `&str` into the frame.
+        let todo = todo.view()?;
         let mark = if todo.completed { "x" } else { " " };
         println!("  [{mark}] {}", todo.title);
     }
