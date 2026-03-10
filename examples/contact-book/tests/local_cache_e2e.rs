@@ -140,8 +140,7 @@ fn client_survives_node_restart_with_warm_local_reads() {
             .save_durable(&db, grace, &contact("Grace", "555-0001", "London"))
             .await
             .expect("update grace");
-        let walked: Vec<Contact> =
-            contacts.all(&db).try_collect().await.expect("walk");
+        let walked = owned(contacts.all(&db)).await;
         assert_eq!(walked.len(), 2);
         assert_eq!(
             contacts_in(&db, "London".into())
@@ -163,8 +162,7 @@ fn client_survives_node_restart_with_warm_local_reads() {
         let warm_grace =
             present(contacts.get(&db, grace).await.expect("warm by-id read"));
         assert_eq!(warm_grace.city, "London", "the mirrored update, not NYC");
-        let warm_walk: Vec<Contact> =
-            contacts.all(&db).try_collect().await.expect("warm walk");
+        let warm_walk = owned(contacts.all(&db)).await;
         assert_eq!(
             warm_walk
                 .iter()
@@ -218,4 +216,14 @@ fn present<T: WaveWire>(got: Option<Wire<T>>) -> T {
 /// A fetched record, owned — for the comparisons.
 fn decoded<T: WaveWire>(w: Wire<T>) -> T {
     wavedb_core::wire::from_wire(&w.into_body()).expect("decode")
+}
+
+/// A walk, owned — for the comparisons.
+async fn owned<T: WaveWire, E: std::fmt::Debug>(
+    walk: impl Stream<Item = core::result::Result<Wire<T>, E>>,
+) -> Vec<T> {
+    walk.map_ok(|w| w.decode().expect("decode"))
+        .try_collect()
+        .await
+        .expect("walk")
 }
