@@ -8,7 +8,7 @@ use std::future::Future;
 use crate::error::{Error, Result};
 use crate::metadata::Metadata;
 use crate::node_op::NodeReply;
-use crate::wire::{WaveWire, Wire, from_wire};
+use crate::wire::{WaveWire, Wire};
 use futures::{Stream, StreamExt};
 
 /// A reply of the wrong kind: the node's own fault, never the caller's.
@@ -16,17 +16,16 @@ pub fn mismatch() -> Error {
     Error::Backend("node operation answered with the wrong reply kind".into())
 }
 
-pub fn decode<T: WaveWire>(bytes: &[u8]) -> Result<T> {
-    Ok(from_wire(bytes)?)
+/// Body bytes as a [`Wire`], checked when viewed.
+pub fn body<T: WaveWire>(bytes: Vec<u8>) -> Wire<T> {
+    Wire::new(bytes.into_boxed_slice(), 0)
 }
 
 /// A `Value` reply as a [`Wire`] over the body bytes it carries: kept as
 /// they came, checked when viewed (RFC 0076).
 pub fn wire<T: WaveWire>(reply: NodeReply) -> Result<Option<Wire<T>>> {
     match reply {
-        NodeReply::Value(bytes) => {
-            Ok(bytes.map(|b| Wire::new(b.into_boxed_slice(), 0)))
-        }
+        NodeReply::Value(bytes) => Ok(bytes.map(body)),
         _ => Err(mismatch()),
     }
 }
@@ -38,19 +37,22 @@ pub fn done(reply: &NodeReply) -> Result<()> {
     }
 }
 
-pub fn values<T: WaveWire>(reply: NodeReply) -> Result<Vec<T>> {
+/// A walk's bodies, each a [`Wire`] over the bytes as they came.
+pub fn values<T: WaveWire>(reply: NodeReply) -> Result<Vec<Wire<T>>> {
     match reply {
-        NodeReply::Values(items) => items.iter().map(|b| decode(b)).collect(),
+        NodeReply::Values(items) => Ok(items.into_iter().map(body).collect()),
         _ => Err(mismatch()),
     }
 }
 
-pub fn versions<T: WaveWire>(reply: NodeReply) -> Result<Vec<(Metadata, T)>> {
+pub fn versions<T: WaveWire>(
+    reply: NodeReply,
+) -> Result<Vec<(Metadata, Wire<T>)>> {
     match reply {
-        NodeReply::Versions(items) => items
+        NodeReply::Versions(items) => Ok(items
             .into_iter()
-            .map(|(meta, body)| Ok((meta, decode(&body)?)))
-            .collect(),
+            .map(|(meta, bytes)| (meta, body(bytes)))
+            .collect()),
         _ => Err(mismatch()),
     }
 }
