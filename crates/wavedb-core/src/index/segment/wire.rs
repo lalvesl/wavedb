@@ -34,9 +34,9 @@ impl<P: WaveWire> WaveWire for Segment<P> {
         self.entries.encode_heap(heap);
     }
 
-    fn decode(
-        stack: &mut Cursor,
-        heap: &mut Cursor,
+    fn decode<'a>(
+        stack: &mut Cursor<'a>,
+        heap: &mut Cursor<'a>,
     ) -> wavedb_wire::Result<Self> {
         Ok(Self {
             prev: Option::decode(stack, heap)?,
