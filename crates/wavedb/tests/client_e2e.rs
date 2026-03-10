@@ -167,8 +167,11 @@ async fn unique_phase(db: &Db) {
 
     // History walks the version chain newest-first (pillar 3) — with each
     // version's metadata riding the wire.
-    let versions: Vec<(Metadata, AboutUser)> =
-        AboutUser::history(db).try_collect().await.expect("history");
+    let versions: Vec<(Metadata, AboutUser)> = AboutUser::history(db)
+        .map_ok(|(a, w)| (a, w.decode().unwrap()))
+        .try_collect()
+        .await
+        .expect("history");
     assert_eq!(
         versions
             .iter()
@@ -243,7 +246,12 @@ async fn nonunique_phase(db: &Db, pivot: NotePivotId) {
         )
         .await
         .expect("insert 2");
-    let all: Vec<Note> = notes.all(db).try_collect().await.expect("all");
+    let all: Vec<Note> = notes
+        .all(db)
+        .map_ok(|w| w.decode().unwrap())
+        .try_collect()
+        .await
+        .expect("all");
     assert_eq!(
         all.iter().map(|n| n.body.as_str()).collect::<Vec<_>>(),
         vec!["write docs", "buy milk"],
@@ -254,8 +262,12 @@ async fn nonunique_phase(db: &Db, pivot: NotePivotId) {
     // Removing again reports it was no longer in the living set.
     assert!(!notes.remove(db, id).await.expect("remove-again"));
     // The walk now yields only the survivor.
-    let all: Vec<Note> =
-        notes.all(db).try_collect().await.expect("all after remove");
+    let all: Vec<Note> = notes
+        .all(db)
+        .map_ok(|w| w.decode().unwrap())
+        .try_collect()
+        .await
+        .expect("all after remove");
     assert_eq!(
         all.iter().map(|n| n.body.as_str()).collect::<Vec<_>>(),
         vec!["write docs"]
@@ -289,7 +301,7 @@ async fn list_phase(db: &Db, pivot: RowPivotId) {
     // The unbounded reader: chunked underneath, whole and ascending on top.
     let all: Vec<u64> = rows
         .listed(db, 0)
-        .map_ok(|r| r.n)
+        .map_ok(|r| r.view().unwrap().n)
         .try_collect()
         .await
         .expect("listed");
@@ -302,7 +314,7 @@ async fn list_phase(db: &Db, pivot: RowPivotId) {
     // The bounded reader: exactly the window a pager renders, one exchange.
     let page: Vec<u64> = rows
         .listed_page(db, 0, 50, 25)
-        .map_ok(|r| r.n)
+        .map_ok(|r| r.view().unwrap().n)
         .try_collect()
         .await
         .expect("listed_page");
@@ -311,7 +323,7 @@ async fn list_phase(db: &Db, pivot: RowPivotId) {
     // A window running off the end comes back short rather than refusing.
     let tail: Vec<u64> = rows
         .listed_page(db, 0, N - 3, 25)
-        .map_ok(|r| r.n)
+        .map_ok(|r| r.view().unwrap().n)
         .try_collect()
         .await
         .expect("listed_page tail");
@@ -321,7 +333,7 @@ async fn list_phase(db: &Db, pivot: RowPivotId) {
     // lie about the collection.
     let err = rows
         .listed(db, 9)
-        .map_ok(|r| r.n)
+        .map_ok(|r| r.view().unwrap().n)
         .try_collect::<Vec<_>>()
         .await
         .expect_err("must refuse");
