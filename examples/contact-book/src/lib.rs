@@ -81,7 +81,7 @@ pub async fn open_book(db: &Db, owner: String) -> Result<()> {
 /// filtered reads are `#[server]` functions (there is no query DSL, and
 /// `search_by` has no wire command yet).
 #[server]
-pub async fn contacts_in(db: &Db, city: String) -> Result<Vec<Contact>> {
+pub async fn contacts_in(db: &Db, city: String) -> Result<Vec<Wire<Contact>>> {
     use futures::TryStreamExt as _;
     let book = ContactBook::get(db)
         .await?
