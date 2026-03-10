@@ -348,8 +348,12 @@ mod tests {
             let b = col.insert(&store, &Doc { n: 2 }).await.unwrap();
             let c = col.insert(&store, &Doc { n: 3 }).await.unwrap();
 
-            let walked: Vec<(crate::id::Id, Doc)> =
-                col.all(&store).try_collect().await.unwrap();
+            let walked: Vec<(crate::id::Id, Doc)> = col
+                .all(&store)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             // The walk comes off the record chain, which is ordered by each
             // record's live version's authoring instant — so it is **most
             // recently written first**, the reverse of insertion order here
@@ -374,8 +378,12 @@ mod tests {
             // Remove drops it from the walk but keeps the bytes (history).
             assert!(col.remove(&store, b).await.unwrap());
             assert!(!col.remove(&store, b).await.unwrap(), "already dead");
-            let after: Vec<(crate::id::Id, Doc)> =
-                col.all(&store).try_collect().await.unwrap();
+            let after: Vec<(crate::id::Id, Doc)> = col
+                .all(&store)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(
                 after.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
                 vec![c, a]
@@ -409,8 +417,12 @@ mod tests {
             // root came from the rewritten Pivot record, not handle state.
             let reopened =
                 Collection::<Doc>::at(pivot, tenant()).with_index_min(4);
-            let walked: Vec<(crate::id::Id, Doc)> =
-                reopened.all(&store).try_collect().await.unwrap();
+            let walked: Vec<(crate::id::Id, Doc)> = reopened
+                .all(&store)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(walked.len(), 64);
             // Newest-first: the chain's order survives its own splits, and the
             // reopened handle reaches it through the rewritten `Pivot`.
@@ -426,8 +438,12 @@ mod tests {
             for id in &ids {
                 assert!(reopened.remove(&store, *id).await.unwrap());
             }
-            let empty: Vec<(crate::id::Id, Doc)> =
-                reopened.all(&store).try_collect().await.unwrap();
+            let empty: Vec<(crate::id::Id, Doc)> = reopened
+                .all(&store)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert!(empty.is_empty(), "{empty:?}");
         });
     }
@@ -447,8 +463,12 @@ mod tests {
             col.save(&store, id, &Doc { n: 2 }).await.unwrap();
             col.save(&store, id, &Doc { n: 3 }).await.unwrap();
 
-            let versions: Vec<(crate::metadata::Metadata, Doc)> =
-                col.history(&store, id).try_collect().await.unwrap();
+            let versions: Vec<(crate::metadata::Metadata, Doc)> = col
+                .history(&store, id)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(
                 versions.iter().map(|(_, d)| d.n).collect::<Vec<_>>(),
                 vec![3, 2, 1],
@@ -503,6 +523,7 @@ mod tests {
             // Never saved: empty history, no error.
             let none: Vec<(crate::metadata::Metadata, Settings)> =
                 unique_history(&store, tenant())
+                    .map_ok(|(a, w)| (a, w.decode().unwrap()))
                     .try_collect()
                     .await
                     .unwrap();
@@ -522,6 +543,7 @@ mod tests {
             );
             let versions: Vec<(crate::metadata::Metadata, Settings)> =
                 unique_history(&store, tenant())
+                    .map_ok(|(a, w)| (a, w.decode().unwrap()))
                     .try_collect()
                     .await
                     .unwrap();
@@ -556,7 +578,7 @@ mod tests {
                 .await
                 .unwrap()
                 .into_iter()
-                .map(|(_, t)| t.n)
+                .map(|(_, t)| t.view().unwrap().n)
                 .collect();
             ns.sort_unstable();
             ns
@@ -691,8 +713,12 @@ mod tests {
                     .map(|w| w.decode().unwrap()),
                 Some(Doc { n: 2 })
             );
-            let versions: Vec<(crate::metadata::Metadata, Doc)> =
-                col.history(&store, id).try_collect().await.unwrap();
+            let versions: Vec<(crate::metadata::Metadata, Doc)> = col
+                .history(&store, id)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(
                 versions.iter().map(|(_, d)| d.n).collect::<Vec<_>>(),
                 vec![2, 1],
@@ -823,8 +849,12 @@ mod tests {
             let (meta, body) = col.load_record(&store, id).await.unwrap();
             assert_eq!(body, Doc { n: 2 }, "the save did not land");
             assert!(!meta.is_live(), "a plain save silently revived a record");
-            let walked: Vec<(crate::id::Id, Doc)> =
-                col.all(&store).try_collect().await.unwrap();
+            let walked: Vec<(crate::id::Id, Doc)> = col
+                .all(&store)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert!(walked.is_empty(), "the walk disagrees with the anchor");
         });
     }
