@@ -240,6 +240,7 @@ mod tests {
         tag: &str,
     ) -> Vec<(Id, Cred)> {
         col.search_by(store, 0, Bound::Exact(tag.key_bytes()))
+            .map_ok(|(a, w)| (a, w.decode().unwrap()))
             .try_collect()
             .await
             .unwrap()
@@ -260,11 +261,19 @@ mod tests {
 
             // One living record at the live state; the superseded version
             // archived and chained, never overwritten.
-            let walked: Vec<(Id, Cred)> =
-                col.all(&store).try_collect().await.unwrap();
+            let walked: Vec<(Id, Cred)> = col
+                .all(&store)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(walked, vec![(a, cred("ada", "new"))]);
-            let versions: Vec<(Metadata, Cred)> =
-                col.history(&store, a).try_collect().await.unwrap();
+            let versions: Vec<(Metadata, Cred)> = col
+                .history(&store, a)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(versions.len(), 2, "the upsert chains");
 
             // The secondary re-keyed with the upsert.
@@ -295,8 +304,12 @@ mod tests {
             // — the "rename" that would silently duplicate the record.
             let err = col.save(&store, a, &cred("bob", "t")).await.unwrap_err();
             assert!(matches!(err, Error::KeyMismatch(id) if id == a));
-            let versions: Vec<(Metadata, Cred)> =
-                col.history(&store, a).try_collect().await.unwrap();
+            let versions: Vec<(Metadata, Cred)> = col
+                .history(&store, a)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(versions.len(), 1, "the refusal must not write");
 
             // Addressing the value's own anchor saves normally.
@@ -341,8 +354,12 @@ mod tests {
                 .adopt_with(&cache, id, v2_meta.clone(), &cred("ada", "v2"))
                 .await
                 .unwrap();
-            let walked: Vec<(Id, Cred)> =
-                cache_col.all(&cache).try_collect().await.unwrap();
+            let walked: Vec<(Id, Cred)> = cache_col
+                .all(&cache)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(walked, vec![(id, cred("ada", "v2"))]);
 
             // The dead copy archived at the NODE's derived slot, and the
@@ -381,8 +398,12 @@ mod tests {
 
             let id = col.insert(&store, &cred("ada", "v1")).await.unwrap();
             assert!(col.remove(&store, id).await.unwrap());
-            let walked: Vec<(Id, Cred)> =
-                col.all(&store).try_collect().await.unwrap();
+            let walked: Vec<(Id, Cred)> = col
+                .all(&store)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert!(walked.is_empty(), "removed = out of the living walk");
             // The anchor says so on its own, without consulting a tree.
             let (dead_meta, _) = col.load_record(&store, id).await.unwrap();
@@ -392,8 +413,12 @@ mod tests {
             // survives the removal.
             let back = col.insert(&store, &cred("ada", "v2")).await.unwrap();
             assert_eq!(back, id, "same key, same anchor, through death");
-            let walked: Vec<(Id, Cred)> =
-                col.all(&store).try_collect().await.unwrap();
+            let walked: Vec<(Id, Cred)> = col
+                .all(&store)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(walked, vec![(id, cred("ada", "v2"))]);
             // Revival is the one write that clears the flag, and it clears it
             // in the same batch that re-indexes the anchor — the two agree.
@@ -401,6 +426,7 @@ mod tests {
             assert!(live_meta.is_live(), "the revived anchor still reads dead");
             let tags: Vec<String> = col
                 .history(&store, id)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
                 .try_collect::<Vec<(Metadata, Cred)>>()
                 .await
                 .unwrap()
