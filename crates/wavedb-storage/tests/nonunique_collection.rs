@@ -50,7 +50,11 @@ async fn walk(
     db: &LocalHandle<'_, PageStore>,
     col: wavedb_core::CollectionHandle<Todo>,
 ) -> Vec<Todo> {
-    col.all(db).try_collect().await.unwrap()
+    col.all(db)
+        .map_ok(|w| w.decode().unwrap())
+        .try_collect()
+        .await
+        .unwrap()
 }
 
 #[test]
@@ -160,7 +164,7 @@ async fn tagged(
         .await
         .unwrap()
         .into_iter()
-        .map(|b| b.url)
+        .map(|b| b.view().unwrap().url.to_owned())
         .collect()
 }
 
@@ -187,8 +191,12 @@ fn version_history_survives_reopen() {
         let store = open(dir.path());
         let db = LocalHandle::new(&store, tenant);
         let col = Todo::collection(pivot);
-        let versions: Vec<(wavedb_core::Metadata, Todo)> =
-            col.history(&db, id).try_collect().await.unwrap();
+        let versions: Vec<(wavedb_core::Metadata, Todo)> = col
+            .history(&db, id)
+            .map_ok(|(a, w)| (a, w.decode().unwrap()))
+            .try_collect()
+            .await
+            .unwrap();
         assert_eq!(
             versions
                 .iter()
