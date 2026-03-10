@@ -65,11 +65,7 @@ async fn typed_flow_against_a_live_node_with_indexeddb_cache() {
 
     // ── `#[server]` call over fetch: bootstrap the tenant's book ──────────
     open_book(&db, "Ada".into()).await.expect("open_book");
-    let book = ContactBook::get(&db)
-        .await
-        .expect("get")
-        .map(|w| w.decode().unwrap())
-        .expect("exists");
+    let book = present(ContactBook::get(&db).await.expect("get"));
     assert_eq!(book.owner, "Ada");
 
     // ── Typed Unique save over the wire (old version chains node-side) ────
@@ -80,11 +76,7 @@ async fn typed_flow_against_a_live_node_with_indexeddb_cache() {
     .save(&db)
     .await
     .expect("save book");
-    let book = ContactBook::get(&db)
-        .await
-        .expect("get")
-        .map(|w| w.decode().unwrap())
-        .expect("exists");
+    let book = present(ContactBook::get(&db).await.expect("get"));
     assert_eq!(book.owner, "Ada Lovelace");
 
     // ── Collection over the wire: insert / update / streamed walk ─────────
@@ -125,7 +117,7 @@ async fn typed_flow_against_a_live_node_with_indexeddb_cache() {
         .expect("update grace");
 
     // The walk streams item frames through fetch's ReadableStream.
-    let all: Vec<Contact> = contacts.all(&db).try_collect().await.expect("all");
+    let all = owned(contacts.all(&db)).await;
     assert_eq!(all.len(), 2);
 
     // A second `#[server]` call: the filtered read via the `city` secondary.
@@ -142,36 +134,37 @@ async fn typed_flow_against_a_live_node_with_indexeddb_cache() {
     let cache = LocalHandle::new(&idb, tenant);
 
     assert!(
-        ContactBook::get(&cache)
-            .await
-            .expect("cold")
-            .map(|w| w.decode().unwrap())
-            .is_none(),
+        ContactBook::get(&cache).await.expect("cold").is_none(),
         "cold cache misses"
     );
-    let fetched = ContactBook::get(&db)
-        .await
-        .expect("get")
-        .map(|w| w.decode().unwrap())
-        .expect("exists");
+    let fetched = present(ContactBook::get(&db).await.expect("get"));
     fetched.save(&cache).await.expect("back-fill");
-    let warm = ContactBook::get(&cache)
-        .await
-        .expect("warm")
-        .map(|w| w.decode().unwrap())
-        .expect("cached");
+    let warm = present(ContactBook::get(&cache).await.expect("warm"));
     assert_eq!(warm.owner, "Ada Lovelace", "read served from IndexedDB");
 
     // Cache the collection read too: one network walk, then the same typed
     // engine (chains over IndexedDB) serves it locally.
     let local_pivot = Contact::create_pivot(&cache).await.expect("local pivot");
     let local = Contact::collection(local_pivot);
-    let fetched: Vec<Contact> =
-        contacts.all(&db).try_collect().await.expect("walk");
+    let fetched = owned(contacts.all(&db)).await;
     for contact in &fetched {
         local.insert(&cache, contact).await.expect("cache insert");
     }
-    let cached: Vec<Contact> =
-        local.all(&cache).try_collect().await.expect("cached walk");
+    let cached = owned(local.all(&cache)).await;
     assert_eq!(cached, fetched, "collection read served from IndexedDB");
+}
+
+/// A fetched record that must be there, owned.
+fn present<T: WaveWire>(got: Option<Wire<T>>) -> T {
+    got.map(|w| w.decode().expect("decode")).expect("present")
+}
+
+/// A walk, owned — for the comparisons.
+async fn owned<T: WaveWire, E: std::fmt::Debug>(
+    walk: impl Stream<Item = core::result::Result<Wire<T>, E>>,
+) -> Vec<T> {
+    walk.map_ok(|w| w.decode().expect("decode"))
+        .try_collect()
+        .await
+        .expect("walk")
 }
