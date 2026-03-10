@@ -276,8 +276,12 @@ mod tests {
                 .adopt_with(&cache, id, v2_meta.clone(), &item("a", 2))
                 .await
                 .unwrap();
-            let versions: Vec<(crate::metadata::Metadata, Item)> =
-                cache_col.history(&cache, id).try_collect().await.unwrap();
+            let versions: Vec<(crate::metadata::Metadata, Item)> = cache_col
+                .history(&cache, id)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(versions.len(), 2, "no phantom version on a re-adopt");
         });
     }
@@ -307,8 +311,12 @@ mod tests {
             col.adopt(&cache, a, &item("red", 1)).await.unwrap();
             col.adopt(&cache, b, &item("blue", 2)).await.unwrap();
 
-            let walked: Vec<(Id, Item)> =
-                col.all(&cache).try_collect().await.unwrap();
+            let walked: Vec<(Id, Item)> = col
+                .all(&cache)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             // Newest-first, and the instants ordering it are the **node's** —
             // `adopt` writes the node's `Metadata` verbatim, so the mirror's
             // walk reproduces the node's own order rather than its local one.
@@ -323,6 +331,7 @@ mod tests {
                     0,
                     crate::index::Bound::Exact("blue".key_bytes()),
                 )
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
                 .try_collect()
                 .await
                 .unwrap();
@@ -343,14 +352,22 @@ mod tests {
             col.adopt(&store, id, &item("red", 1)).await.unwrap();
             // Same bytes again (a read-path mirror): no new version.
             col.adopt(&store, id, &item("red", 1)).await.unwrap();
-            let versions: Vec<(crate::metadata::Metadata, Item)> =
-                col.history(&store, id).try_collect().await.unwrap();
+            let versions: Vec<(crate::metadata::Metadata, Item)> = col
+                .history(&store, id)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(versions.len(), 1, "unchanged adopt must not archive");
 
             // Changed bytes: one archived version, secondary re-keyed.
             col.adopt(&store, id, &item("blue", 1)).await.unwrap();
-            let versions: Vec<(crate::metadata::Metadata, Item)> =
-                col.history(&store, id).try_collect().await.unwrap();
+            let versions: Vec<(crate::metadata::Metadata, Item)> = col
+                .history(&store, id)
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
+                .try_collect()
+                .await
+                .unwrap();
             assert_eq!(versions.len(), 2);
             let reds: Vec<(Id, Item)> = col
                 .search_by(
@@ -358,6 +375,7 @@ mod tests {
                     0,
                     crate::index::Bound::Exact("red".key_bytes()),
                 )
+                .map_ok(|(a, w)| (a, w.decode().unwrap()))
                 .try_collect()
                 .await
                 .unwrap();
