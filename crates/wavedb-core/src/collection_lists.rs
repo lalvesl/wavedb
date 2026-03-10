@@ -36,9 +36,10 @@ use crate::error::{Error, Result};
 use crate::id::Id;
 use crate::index::{Bound, Chain, SecKey};
 use crate::local_id::LocalId;
-use crate::record::{Overlay, decode_record};
+use crate::record::{Overlay, wire_record};
 use crate::store::{Store, Write};
 use crate::traits::NonUniqueStruct;
+use crate::wire::Wire;
 
 impl<T: NonUniqueStruct> Collection<T> {
     /// File a freshly inserted record into every declared list.
@@ -150,7 +151,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         self,
         store: &'a S,
         index: usize,
-    ) -> impl Stream<Item = Result<(Id, T)>> + 'a
+    ) -> impl Stream<Item = Result<(Id, Wire<T>)>> + 'a
     where
         T: 'a,
     {
@@ -168,7 +169,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         store: &'a S,
         index: usize,
         offset: u64,
-    ) -> impl Stream<Item = Result<(Id, T)>> + 'a
+    ) -> impl Stream<Item = Result<(Id, Wire<T>)>> + 'a
     where
         T: 'a,
     {
@@ -190,7 +191,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         store: &'a S,
         index: usize,
         offset: u64,
-    ) -> impl Stream<Item = Result<(Id, crate::metadata::Metadata, T)>> + 'a
+    ) -> impl Stream<Item = Result<(Id, crate::metadata::Metadata, Wire<T>)>> + 'a
     where
         T: 'a,
     {
@@ -209,7 +210,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         store: &'a S,
         index: usize,
         bound: Bound,
-    ) -> impl Stream<Item = Result<(Id, T)>> + 'a
+    ) -> impl Stream<Item = Result<(Id, Wire<T>)>> + 'a
     where
         T: 'a,
     {
@@ -230,7 +231,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         })
         .try_flatten()
         .and_then(move |(key, bytes)| async move {
-            let (_, value) = decode_record::<T>(T::STRUCT_HASH, &bytes)?;
+            let (_, value) = wire_record::<T>(T::STRUCT_HASH, bytes)?;
             Ok((key.rec.to_id(tenant), value))
         })
     }
@@ -261,7 +262,7 @@ impl<T: NonUniqueStruct> Collection<T> {
         store: &'a S,
         index: usize,
         offset: Option<u64>,
-    ) -> impl Stream<Item = Result<(Id, crate::metadata::Metadata, T)>> + 'a
+    ) -> impl Stream<Item = Result<(Id, crate::metadata::Metadata, Wire<T>)>> + 'a
     where
         T: 'a,
     {
@@ -296,8 +297,9 @@ impl<T: NonUniqueStruct> Collection<T> {
                     for (key, bytes) in
                         seg.entries().skip(usize::try_from(skip).unwrap_or(0))
                     {
+                        // The record's own buffer: one copy out of the segment.
                         let (meta, value) =
-                            decode_record::<T>(T::STRUCT_HASH, bytes)?;
+                            wire_record::<T>(T::STRUCT_HASH, bytes.clone())?;
                         page.push(Ok((key.rec.to_id(tenant), meta, value)));
                     }
                     Ok(Some((
