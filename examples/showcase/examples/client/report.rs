@@ -14,7 +14,7 @@ use wavedb_core::Succession;
 pub async fn print_history(db: &Db) {
     println!();
     println!("workspace history (newest first — who/when per version):");
-    let versions: Vec<(Metadata, Workspace)> = Workspace::history(db)
+    let versions: Vec<(Metadata, Wire<Workspace>)> = Workspace::history(db)
         .try_collect()
         .await
         .expect("history over the wire");
@@ -33,7 +33,7 @@ pub async fn print_history(db: &Db) {
         // sub-ms digits, so same-millisecond versions still order.
         println!(
             "  owner {:?} — by user {}, at unix-ms {} (+{}){}",
-            version.owner,
+            version.view().expect("view").owner,
             meta.user.get(),
             authored / 1_000_000,
             authored % 1_000_000,
@@ -69,14 +69,16 @@ pub async fn offline_tour(db: &Db) {
         .expect("decode");
     println!("workspace owner from the cache: {:?}", ws.owner);
 
-    let projects: Vec<showcase::Project> =
+    let projects: Vec<Wire<showcase::Project>> =
         showcase::Project::collection(ws.projects)
             .all(db)
             .try_collect()
             .await
             .expect("warm cache answers the project walk");
     for project in &projects {
-        let tasks: Vec<Task> = Task::collection(project.tasks)
+        // Read in place: the name is a `&str` into the walk's frame.
+        let project = project.view().expect("view");
+        let tasks: Vec<Wire<Task>> = Task::collection(project.tasks)
             .all(db)
             .try_collect()
             .await
