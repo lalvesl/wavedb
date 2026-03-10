@@ -136,7 +136,9 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   Every type also has a **borrowed twin** (RFC 0076): `type Ref<'a>` + `view`
   (`view_wire::<T>(bytes)`, one checked walk, `&str`/`&[u8]`/`ListRef` where
   decode copies), the derive emitting `NameRef<'a>` beside `Name` with
-  `From` back (and `TryFrom<Wire<Name>>`); `Wire<T>` is the one-buffer `Send` owner. Both
+  `From` back (and `TryFrom<Wire<Name>>`); `Wire<T>` is the one-buffer `Send` owner.
+  `Wire<T>` is itself `WaveWire` with `T`'s exact bytes, so a `#[server]` fn
+  returns what it read (`Result<Vec<Wire<T>>>`) and nothing is re-encoded. Both
   derives (this one and `wavedb-macros`') expand through `wavedb-wire-codegen`;
   a hand impl of a heap-free `Copy` type adds `wavedb_wire::own_view!()`, a
   derived one `#[wave_wire(own_view)]` (`Id`, `LocalId`, every `{Name}PivotId`).
@@ -334,8 +336,10 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   engine per process ⇒ a `Db::open` client and a node never share one (tests run
   the node as a child process — see `local_cache_e2e.rs`). Typed calls spell
   `T::get(&db)` / `v.save(&db)` / `T::collection(pivot)` via the `DbHandle` seam —
-  a `get` returns `Option<Wire<T>>`, read by `.view()?`, owned by `.try_into()?`
-  (RFC 0076; `DbHandle::Error` takes wire faults, so `?` works anywhere) —
+  a `get` returns `Option<Wire<T>>` and every walk yields `Wire<T>`, read by
+  `.view()?`, owned by `.try_into()?` (RFC 0076; `DbHandle::Error` takes wire
+  faults, so `?` works anywhere; a walk's item frame is `expose::framed`, its
+  head then the record's body, so the client's `Wire` is the frame itself) —
   every write with a `_durable` twin (`v.save_durable(&db)`,
   `col.insert_durable(&db, v)`, `T::create_pivot_durable(&db)`, …) answered
   once durable on the node — one `durable` bit on the `CommandFrame`;
