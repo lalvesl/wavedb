@@ -307,7 +307,7 @@ pub(crate) fn history_stream<'a, V, S>(
     shape: Shape,
     live_id: Id,
     tenant: U48,
-) -> impl futures::Stream<Item = Result<(Metadata, V)>> + 'a
+) -> impl futures::Stream<Item = Result<(Metadata, Wire<V>)>> + 'a
 where
     V: WaveWire + 'a,
     S: Store,
@@ -319,7 +319,7 @@ where
             Ok(None) => return Some((Err(Error::RecordMissing(id)), None)),
             Err(e) => return Some((Err(e), None)),
         };
-        match decode_record::<V>(hash, &bytes) {
+        match wire_record::<V>(hash, bytes) {
             Ok((meta, value)) => {
                 let older =
                     meta.previous.map(|t| archive_id(hash, shape, t, tenant));
