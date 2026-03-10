@@ -118,12 +118,12 @@ pub async fn add_project(db: &Db, name: String) -> Result<Project> {
         .await?
         .ok_or_else(|| Error::not_found("workspace missing — open it first"))?;
     let ws = ws.view()?;
-    let existing: Vec<Project> = Project::collection(ws.projects)
+    let existing: Vec<Wire<Project>> = Project::collection(ws.projects)
         .by_name(db, &name)
         .try_collect()
         .await?;
     if let Some(found) = existing.into_iter().next() {
-        return Ok(found);
+        return Ok(found.try_into()?);
     }
     let tasks = Task::create_pivot(db).await?;
     let project = Project { name, tasks };
@@ -141,13 +141,13 @@ pub async fn tasks_with_status(
     db: &Db,
     project: String,
     status: String,
-) -> Result<Vec<Task>> {
+) -> Result<Vec<Wire<Task>>> {
     use futures::TryStreamExt as _;
     let ws = Workspace::get(db)
         .await?
         .ok_or_else(|| Error::not_found("workspace missing — open it first"))?;
     let ws = ws.view()?;
-    let found: Vec<Project> = Project::collection(ws.projects)
+    let found: Vec<Wire<Project>> = Project::collection(ws.projects)
         .by_name(db, &project)
         .try_collect()
         .await?;
@@ -155,7 +155,7 @@ pub async fn tasks_with_status(
         .into_iter()
         .next()
         .ok_or_else(|| Error::not_found("no such project"))?;
-    Task::collection(project.tasks)
+    Task::collection(project.view()?.tasks)
         .by_status(db, &status)
         .try_collect()
         .await
