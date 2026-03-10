@@ -187,8 +187,12 @@ fn polling_watcher_sees_mutations_and_keeps_the_cache_warm() {
             .expect("warm unique read")
             .map(|w| w.decode().unwrap());
         assert_eq!(warm, Some(renamed), "the watched save, not the bootstrap");
-        let warm_walk: Vec<Contact> =
-            col.all(&b).try_collect().await.expect("warm walk");
+        let warm_walk: Vec<Contact> = col
+            .all(&b)
+            .map_ok(|w| w.decode().unwrap())
+            .try_collect()
+            .await
+            .expect("warm walk");
         assert_eq!(
             warm_walk,
             vec![grace_ldn],
