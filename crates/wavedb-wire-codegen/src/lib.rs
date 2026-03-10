@@ -142,10 +142,10 @@ pub(crate) fn wire_impl(
 
             fn encode_heap(&self, heap: &mut ::std::vec::Vec<u8>) { #encode_heap }
 
-            fn decode(
-                stack: &mut #k::Cursor,
-                heap: &mut #k::Cursor,
-            ) -> #k::Result<Self> {
+            fn decode<'a>(
+        stack: &mut #k::Cursor<'a>,
+        heap: &mut #k::Cursor<'a>,
+    ) -> #k::Result<Self> {
                 #decode
             }
 
