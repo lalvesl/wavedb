@@ -77,9 +77,9 @@ impl WaveWire for U48 {
     fn encode_heap(&self, _heap: &mut Vec<u8>) {}
     // `Result` in this file is the core workspace alias (for `U48::new`); the WaveWire
     // trait wants the wire crate's, so spell it out here.
-    fn decode(
-        stack: &mut Cursor,
-        _heap: &mut Cursor,
+    fn decode<'a>(
+        stack: &mut Cursor<'a>,
+        _heap: &mut Cursor<'a>,
     ) -> wavedb_wire::Result<Self> {
         let mut bytes = [0u8; 8];
         bytes[..6].copy_from_slice(stack.take(6)?);
