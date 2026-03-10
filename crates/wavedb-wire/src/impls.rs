@@ -55,7 +55,10 @@ macro_rules! wire_le {
                 stack.extend_from_slice(&self.to_le_bytes());
             }
             fn encode_heap(&self, _heap: &mut Vec<u8>) {}
-            fn decode(stack: &mut Cursor, _heap: &mut Cursor) -> Result<Self> {
+            fn decode<'a>(
+        stack: &mut Cursor<'a>,
+        _heap: &mut Cursor<'a>,
+    ) -> Result<Self> {
                 Ok(<$t>::from_le_bytes(stack.take(size_of::<$t>())?.try_into().unwrap()))
             }
             fn view<'a>(stack: &mut Cursor<'a>, heap: &mut Cursor<'a>) -> Result<Self> {
@@ -112,7 +115,10 @@ impl WaveWire for u8 {
         stack.push(*self);
     }
     fn encode_heap(&self, _heap: &mut Vec<u8>) {}
-    fn decode(stack: &mut Cursor, _heap: &mut Cursor) -> Result<Self> {
+    fn decode<'a>(
+        stack: &mut Cursor<'a>,
+        _heap: &mut Cursor<'a>,
+    ) -> Result<Self> {
         stack.u8()
     }
     fn view<'a>(
@@ -150,7 +156,10 @@ impl WaveWire for bool {
         stack.push(u8::from(*self));
     }
     fn encode_heap(&self, _heap: &mut Vec<u8>) {}
-    fn decode(stack: &mut Cursor, _heap: &mut Cursor) -> Result<Self> {
+    fn decode<'a>(
+        stack: &mut Cursor<'a>,
+        _heap: &mut Cursor<'a>,
+    ) -> Result<Self> {
         match stack.u8()? {
             0 => Ok(false),
             1 => Ok(true),
@@ -169,7 +178,10 @@ impl WaveWire for char {
         stack.extend_from_slice(&(*self as u32).to_le_bytes());
     }
     fn encode_heap(&self, _heap: &mut Vec<u8>) {}
-    fn decode(stack: &mut Cursor, _heap: &mut Cursor) -> Result<Self> {
+    fn decode<'a>(
+        stack: &mut Cursor<'a>,
+        _heap: &mut Cursor<'a>,
+    ) -> Result<Self> {
         let scalar = stack.u32()?;
         Self::from_u32(scalar).ok_or(Error::InvalidChar(scalar))
     }
@@ -185,7 +197,10 @@ impl WaveWire for () {
     }
     fn encode_stack(&self, _stack: &mut Vec<u8>) {}
     fn encode_heap(&self, _heap: &mut Vec<u8>) {}
-    fn decode(_stack: &mut Cursor, _heap: &mut Cursor) -> Result<Self> {
+    fn decode<'a>(
+        _stack: &mut Cursor<'a>,
+        _heap: &mut Cursor<'a>,
+    ) -> Result<Self> {
         Ok(())
     }
     own_view!();
