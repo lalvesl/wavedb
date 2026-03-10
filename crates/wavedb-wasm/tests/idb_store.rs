@@ -118,17 +118,31 @@ async fn typed_surface_runs_serverless_over_indexeddb() {
             .body,
         "hello"
     );
-    let all: Vec<Note> = col.all(&db).try_collect().await.unwrap();
+    let all: Vec<Note> = col
+        .all(&db)
+        .map_ok(|w| w.decode().unwrap())
+        .try_collect()
+        .await
+        .unwrap();
     assert_eq!(all.len(), 2);
 
     // Secondary index search, then removal.
-    let pinned: Vec<Note> =
-        col.by_pinned(&db, &true).try_collect().await.unwrap();
+    let pinned: Vec<Note> = col
+        .by_pinned(&db, &true)
+        .map_ok(|w| w.decode().unwrap())
+        .try_collect()
+        .await
+        .unwrap();
     assert_eq!(pinned.len(), 1);
     assert_eq!(pinned[0].body, "hello");
 
     assert!(col.remove(&db, first).await.unwrap());
-    let left: Vec<Note> = col.all(&db).try_collect().await.unwrap();
+    let left: Vec<Note> = col
+        .all(&db)
+        .map_ok(|w| w.decode().unwrap())
+        .try_collect()
+        .await
+        .unwrap();
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].body, "later");
 }
