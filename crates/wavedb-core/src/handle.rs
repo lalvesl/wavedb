@@ -36,7 +36,7 @@ use std::future::Future;
 use futures::Stream;
 
 use crate::error::Error;
-use crate::fuzzy::{Fuzzy, Scored};
+use crate::fuzzy::{Fuzzy, Hits};
 use crate::id::Id;
 use crate::index::Bound;
 use crate::local_id::LocalId;
@@ -111,7 +111,7 @@ pub trait DbHandle: Sized {
     /// `'static` — and it unties the yielded items from the handle borrow.
     fn unique_history<T: UniqueStruct + 'static>(
         &self,
-    ) -> impl Stream<Item = Result<(Metadata, T), Self::Error>>;
+    ) -> impl Stream<Item = Result<(Metadata, Wire<T>), Self::Error>>;
 
     /// Create a new, empty collection of `T` under this tenant — explicit,
     /// never automatic. The caller stores the returned root (via the typed
@@ -218,7 +218,7 @@ pub trait DbHandle: Sized {
     fn all<T: NonUniqueStruct + 'static>(
         &self,
         pivot: LocalId,
-    ) -> impl Stream<Item = Result<T, Self::Error>>;
+    ) -> impl Stream<Item = Result<Wire<T>, Self::Error>>;
 
     /// Stream the living records secondary index `index` selects under
     /// `bound`, ordered by the indexed field. The generated `by_<field>`
@@ -229,7 +229,7 @@ pub trait DbHandle: Sized {
         pivot: LocalId,
         index: usize,
         bound: Bound,
-    ) -> impl Stream<Item = Result<T, Self::Error>>;
+    ) -> impl Stream<Item = Result<Wire<T>, Self::Error>>;
 
     /// Stream the living records declared list `index` holds under `bound`,
     /// in the list's order, records inline (RFC 0075). A list's generated
@@ -239,7 +239,7 @@ pub trait DbHandle: Sized {
         pivot: LocalId,
         index: usize,
         bound: Bound,
-    ) -> impl Stream<Item = Result<T, Self::Error>>;
+    ) -> impl Stream<Item = Result<Wire<T>, Self::Error>>;
 
     /// Stream every living record in declared list `index`'s order, entered at
     /// global `offset` ([RFC 0051]). `offset = 0` is the whole list.
@@ -253,7 +253,7 @@ pub trait DbHandle: Sized {
         pivot: LocalId,
         index: usize,
         offset: u64,
-    ) -> impl Stream<Item = Result<T, Self::Error>>;
+    ) -> impl Stream<Item = Result<Wire<T>, Self::Error>>;
 
     /// One **bounded** page of declared list `index`: at most `limit` records
     /// from global `offset`.
@@ -268,7 +268,7 @@ pub trait DbHandle: Sized {
         index: usize,
         offset: u64,
         limit: u32,
-    ) -> impl Stream<Item = Result<T, Self::Error>>;
+    ) -> impl Stream<Item = Result<Wire<T>, Self::Error>>;
 
     /// How many living records declared list `index` holds — the pager's
     /// "of M", one read cold.
@@ -292,7 +292,7 @@ pub trait DbHandle: Sized {
         query: &str,
         mode: Fuzzy,
         limit: usize,
-    ) -> impl Future<Output = Result<Vec<Scored<(Id, T)>>, Self::Error>>;
+    ) -> impl Future<Output = Result<Hits<T>, Self::Error>>;
 
     /// Stream the record at `id`'s versions **newest-first** along the
     /// modification chain (the live version, then each archive).
@@ -300,5 +300,5 @@ pub trait DbHandle: Sized {
         &self,
         pivot: LocalId,
         id: Id,
-    ) -> impl Stream<Item = Result<(Metadata, T), Self::Error>>;
+    ) -> impl Stream<Item = Result<(Metadata, Wire<T>), Self::Error>>;
 }
