@@ -148,7 +148,7 @@ where
 pub fn unique_history<'a, T, S>(
     store: &'a S,
     tenant: U48,
-) -> impl futures::Stream<Item = Result<(Metadata, T)>> + 'a
+) -> impl futures::Stream<Item = Result<(Metadata, Wire<T>)>> + 'a
 where
     T: crate::traits::WaveDbStruct + 'a,
     S: Store,
