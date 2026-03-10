@@ -191,7 +191,7 @@ fn unique_ops(name: &Ident) -> TokenStream {
                 db: &D,
             ) -> impl ::wavedb_core::Stream<
                 Item = ::core::result::Result<
-                    (::wavedb_core::Metadata, Self),
+                    (::wavedb_core::Metadata, ::wavedb_core::wire::Wire<Self>),
                     D::Error,
                 >,
             > {
