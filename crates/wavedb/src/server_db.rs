@@ -139,7 +139,7 @@ impl<R: Route> DbHandle for ServerDb<'_, R> {
 
     fn unique_history<T: UniqueStruct + 'static>(
         &self,
-    ) -> impl Stream<Item = Result<(Metadata, T)>> {
+    ) -> impl Stream<Item = Result<(Metadata, Wire<T>)>> {
         self.local.unique_history().map_err(Error::from)
     }
 
@@ -214,7 +214,7 @@ impl<R: Route> DbHandle for ServerDb<'_, R> {
     fn all<T: NonUniqueStruct + 'static>(
         &self,
         pivot: LocalId,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         self.local.all(pivot).map_err(Error::from)
     }
 
@@ -223,7 +223,7 @@ impl<R: Route> DbHandle for ServerDb<'_, R> {
         pivot: LocalId,
         index: usize,
         offset: u64,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         self.local.listed(pivot, index, offset).map_err(Error::from)
     }
 
@@ -233,7 +233,7 @@ impl<R: Route> DbHandle for ServerDb<'_, R> {
         index: usize,
         offset: u64,
         limit: u32,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         self.local
             .listed_page(pivot, index, offset, limit)
             .map_err(Error::from)
@@ -257,7 +257,7 @@ impl<R: Route> DbHandle for ServerDb<'_, R> {
         query: &str,
         mode: Fuzzy,
         limit: usize,
-    ) -> Result<Vec<Scored<(Id, T)>>> {
+    ) -> Result<Vec<Scored<(Id, Wire<T>)>>> {
         self.local
             .fuzzy_search::<T>(pivot, index, query, mode, limit)
             .await
@@ -269,7 +269,7 @@ impl<R: Route> DbHandle for ServerDb<'_, R> {
         pivot: LocalId,
         index: usize,
         bound: Bound,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         self.local
             .search_by(pivot, index, bound)
             .map_err(Error::from)
@@ -280,7 +280,7 @@ impl<R: Route> DbHandle for ServerDb<'_, R> {
         pivot: LocalId,
         index: usize,
         bound: Bound,
-    ) -> impl Stream<Item = Result<T>> {
+    ) -> impl Stream<Item = Result<Wire<T>>> {
         self.local
             .listed_where(pivot, index, bound)
             .map_err(Error::from)
@@ -290,7 +290,7 @@ impl<R: Route> DbHandle for ServerDb<'_, R> {
         &self,
         pivot: LocalId,
         id: Id,
-    ) -> impl Stream<Item = Result<(Metadata, T)>> {
+    ) -> impl Stream<Item = Result<(Metadata, Wire<T>)>> {
         self.local.record_history(pivot, id).map_err(Error::from)
     }
 }
