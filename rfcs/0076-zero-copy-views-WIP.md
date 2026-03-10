@@ -230,9 +230,10 @@ needs them pays.
      twin of each (decided 2026-10-24: most reads only look, and the one
      that writes converts, `.try_into()?`).
    - The node answers a `Get` with the stored body, nothing decoded or
-     re-encoded.
+     re-encoded, and a walk with framed bodies the same way.
 4. **`#[server]`.** Arguments and replies cross threads as `Wire<T>`
-   buffers.
+   buffers. (Replies landed with step 3: `Wire<T>` is `WaveWire` with
+   `T`'s bytes.)
 
 ## Progress
 
@@ -319,7 +320,32 @@ needs them pays.
   fetch a row's columns; the shop's order reads take the user's orders
   handle off a view, copying nothing else out.
 
-Next: the walks — `all`, the list readers, `by_*`, history.
+**Step 3, second half (2026-10-24): the walks return `Wire<T>` — and
+step 4 with them.**
+
+- **Every walk** — `all`, the list readers (`listed_by_*`, `_at_page`),
+  `by_*` / `by_*_range`, `history`, `fuzzy_*` — yields `Wire<T>` (with its
+  `Id` or `Metadata` where it did), one buffer per record: the record as
+  the store handed it, or one copy out of a list segment that holds it
+  inline. A page owner shared by a whole segment is open question 3.
+- **A walk's item frame is `(head, body)`** (`expose::framed` /
+  `unframed`): the head — `(Id, Metadata)`, or a version's `Metadata` —
+  then the record's body bytes, last. A tuple `(Id, Metadata, T)`
+  interleaves `T`'s stack with the head's heaps; with the body last it is
+  the frame's tail, and the client's `Wire` is the frame itself, viewed past
+  the head. The node frames bodies as stored, decoding nothing.
+- **The client decodes only to mirror.** A walk mirrors each record into
+  the local cache when there is one, and only then decodes it.
+- **`Wire<T>` is `WaveWire`, with `T`'s exact bytes** (`wire_codec.rs`):
+  `Vec<Wire<T>>` is byte for byte a `Vec<T>`, and its `FnArgTag` is
+  `T`'s. So a `#[server]` function returns what it read —
+  `Result<Vec<Wire<Contact>>>` — and the records go out as stored and come
+  in as buffers to view: step 4, for replies. Decoding one views a `T` to
+  learn where its bytes end, then keeps exactly those.
+- **`decode` takes one lifetime** for both cursors, as `view` does — they
+  always come from one buffer — so a `Wire<T>` can view the `T` it decodes.
+
+Next: measure (the deferred benches), then open question 3 if it asks.
 
 ## Alternatives
 
