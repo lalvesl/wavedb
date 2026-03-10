@@ -244,7 +244,7 @@ fn reader_decls(
     let len = format_ident!("{}_len", listed);
     let stream = quote! {
         impl ::wavedb_core::Stream<
-            Item = ::core::result::Result<#name, D::Error>,
+            Item = ::core::result::Result<::wavedb_core::wire::Wire<#name>, D::Error>,
         >
     };
     let Some(i) = index else {
