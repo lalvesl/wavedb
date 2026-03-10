@@ -210,7 +210,7 @@ fn lookup_decl(
         impl ::core::future::Future<
             Output = ::core::result::Result<
                 ::std::vec::Vec<::wavedb_core::fuzzy::Scored<
-                    (::wavedb_core::Id, #name),
+                    (::wavedb_core::Id, ::wavedb_core::wire::Wire<#name>),
                 >>,
                 D::Error,
             >,
