@@ -205,8 +205,7 @@ fn watcher_sees_remote_mutations_and_keeps_the_cache_warm() {
 
         // The collection: B NEVER walked it online — everything below was put
         // into the local engine by watch events alone.
-        let warm_walk: Vec<Contact> =
-            col.all(&b).try_collect().await.expect("warm walk");
+        let warm_walk = owned(col.all(&b)).await;
         assert_eq!(warm_walk, vec![grace_ldn.clone()], "insert+update−remove");
         let warm_grace =
             present(col.get(&b, grace_id).await.expect("warm by-id read"));
@@ -232,4 +231,14 @@ fn present<T: WaveWire>(got: Option<Wire<T>>) -> T {
 /// A fetched record, owned — for the comparisons.
 fn decoded<T: WaveWire>(w: Wire<T>) -> T {
     wavedb_core::wire::from_wire(&w.into_body()).expect("decode")
+}
+
+/// A walk, owned — for the comparisons.
+async fn owned<T: WaveWire, E: std::fmt::Debug>(
+    walk: impl Stream<Item = core::result::Result<Wire<T>, E>>,
+) -> Vec<T> {
+    walk.map_ok(|w| w.decode().expect("decode"))
+        .try_collect()
+        .await
+        .expect("walk")
 }
