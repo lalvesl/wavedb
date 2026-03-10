@@ -25,9 +25,9 @@
 //! [`Command::ListLen`]: wavedb_core::expose::Command::ListLen
 
 use futures::{Stream, StreamExt, TryStreamExt};
-use wavedb_core::expose::Command;
+use wavedb_core::expose::{Command, unframed};
 use wavedb_core::index::Pivot;
-use wavedb_core::wire::{from_wire, to_wire};
+use wavedb_core::wire::{Wire, to_wire};
 use wavedb_core::{Collection, Id, LocalId, Metadata, NonUniqueStruct, Store};
 
 use crate::client_cache::{is_transport, mirror_record_meta};
@@ -43,8 +43,8 @@ use crate::error::{Error, Result};
 /// [`listed_page`](wavedb_core::DbHandle::listed_page) is for.
 const CHUNK: u32 = 256;
 
-/// Fetch one page of declared list `index` as its raw `(Id, Metadata, T)`
-/// frames — the single wire exchange both readers are built from.
+/// Fetch one page of declared list `index` as its raw framed
+/// `(Id, Metadata)` + body items — the single wire exchange both readers are built from.
 async fn fetch<T: NonUniqueStruct>(
     db: &Db,
     pivot: LocalId,
@@ -75,21 +75,27 @@ async fn absorb<T: NonUniqueStruct>(
     db: &Db,
     pivot: LocalId,
     page: Vec<Vec<u8>>,
-) -> Vec<Result<T>> {
+) -> Vec<Result<Wire<T>>> {
     let mut out = Vec::with_capacity(page.len());
     for bytes in page {
-        match from_wire::<(Id, Metadata, T)>(&bytes)
-            .map_err(wavedb_core::Error::from)
-            .map_err(Error::Core)
-        {
-            Ok((id, meta, value)) => {
-                mirror_record_meta(db, pivot, id, meta, &value).await;
-                out.push(Ok(value));
-            }
-            Err(err) => out.push(Err(err)),
-        }
+        out.push(absorb_one::<T>(db, pivot, bytes).await);
     }
     out
+}
+
+/// One frame: its record a [`Wire`] over the frame, mirrored — decoded only
+/// when there is a cache to mirror into.
+async fn absorb_one<T: NonUniqueStruct>(
+    db: &Db,
+    pivot: LocalId,
+    bytes: Vec<u8>,
+) -> Result<Wire<T>> {
+    let ((id, meta), wire) = unframed::<(Id, Metadata), T>(bytes)?;
+    if db.local().is_some() {
+        let value = wire.decode()?;
+        mirror_record_meta(db, pivot, id, meta, &value).await;
+    }
+    Ok(wire)
 }
 
 /// Stream declared list `index` from `offset` to its end, chunked over the
@@ -100,7 +106,7 @@ pub fn cached_listed<T: NonUniqueStruct + 'static>(
     pivot: LocalId,
     index: usize,
     offset: u64,
-) -> impl Stream<Item = Result<T>> + '_ {
+) -> impl Stream<Item = Result<Wire<T>>> + '_ {
     futures::stream::once(async move {
         match fetch::<T>(db, pivot, index, offset, CHUNK).await {
             Ok(first) => {
@@ -120,7 +126,7 @@ pub fn cached_listed_page<T: NonUniqueStruct + 'static>(
     index: usize,
     offset: u64,
     limit: u32,
-) -> impl Stream<Item = Result<T>> + '_ {
+) -> impl Stream<Item = Result<Wire<T>>> + '_ {
     futures::stream::once(async move {
         match fetch::<T>(db, pivot, index, offset, limit).await {
             Ok(page) => {
@@ -143,7 +149,7 @@ fn pages<T: NonUniqueStruct + 'static>(
     index: usize,
     offset: u64,
     first: Vec<Vec<u8>>,
-) -> impl Stream<Item = Result<T>> + '_ {
+) -> impl Stream<Item = Result<Wire<T>>> + '_ {
     futures::stream::try_unfold(
         Some((offset, first)),
         move |state| async move {
@@ -176,7 +182,7 @@ fn warm<T: NonUniqueStruct + 'static>(
     index: usize,
     offset: u64,
     err: Error,
-) -> impl Stream<Item = Result<T>> + '_ {
+) -> impl Stream<Item = Result<Wire<T>>> + '_ {
     futures::stream::once(async move {
         local_store::<T>(db, pivot, &err).await.map_or_else(
             // A cold cache propagates the fault: an empty list would read as
