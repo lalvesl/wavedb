@@ -84,6 +84,7 @@ pub async fn count_visits(db: &Db, log: LocalId) -> Result<u64> {
     use futures::TryStreamExt as _;
     let all: Vec<Visit> = Visit::collection(VisitPivotId(log))
         .all(db)
+        .map_ok(|w| w.decode().unwrap())
         .try_collect()
         .await?;
     Ok(all.len() as u64)
