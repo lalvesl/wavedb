@@ -142,7 +142,7 @@ fn lookup_items(
     let params = names.iter().zip(&tys).map(|(f, t)| quote!(#f: #t));
     let stream = quote! {
         impl ::wavedb_core::Stream<
-            Item = ::core::result::Result<#name, D::Error>,
+            Item = ::core::result::Result<::wavedb_core::wire::Wire<#name>, D::Error>,
         >
     };
     let Some(source) = source else {
