@@ -19,7 +19,7 @@
 //!
 //! [`Exposure::run_node`]: crate::expose::Exposure::run_node
 
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 
 use crate::collection::Collection;
 use crate::durability::Durability;
@@ -35,7 +35,7 @@ use crate::placement::Owner;
 use crate::store::Store;
 use crate::traits::{NonUniqueStruct, UniqueStruct, WaveDbStruct};
 use crate::u48::U48;
-use crate::wire::{Wire, from_wire, to_wire};
+use crate::wire::{Wire, from_wire};
 
 /// One operation of a [`DbHandle`], as data. Bodies are wire bytes.
 ///
@@ -211,7 +211,7 @@ where
         NodeOp::UniqueHistory => {
             let versions = db
                 .unique_history::<T>()
-                .map_ok(|(meta, value)| (meta, to_wire(&value)))
+                .map_ok(|(meta, value)| (meta, value.into_body()))
                 .try_collect()
                 .await?;
             Ok(NodeReply::Versions(versions))
@@ -236,8 +236,9 @@ where
 {
     let store = &Durability::new(store, op.is_durable());
     let db = LocalHandle::new(store, tenant);
-    let values =
-        |items: Vec<T>| NodeReply::Values(items.iter().map(to_wire).collect());
+    let values = |items: Vec<Wire<T>>| {
+        NodeReply::Values(items.into_iter().map(Wire::into_body).collect())
+    };
     Ok(match op {
         NodeOp::CreatePivot { pivot, .. } => {
             Collection::<T>::create_at(store, tenant, pivot).await?;
@@ -279,7 +280,7 @@ where
             NodeReply::Scored(
                 hits.into_iter()
                     .map(|hit| Scored {
-                        item: (hit.item.0, to_wire(&hit.item.1)),
+                        item: (hit.item.0, hit.item.1.into_body()),
                         score: hit.score,
                         rank: hit.rank,
                     })
@@ -288,7 +289,7 @@ where
         }
         NodeOp::RecordHistory { pivot, id } => NodeReply::Versions(
             db.record_history::<T>(pivot, id)
-                .map(|v| v.map(|(meta, value)| (meta, to_wire(&value))))
+                .map_ok(|(meta, value)| (meta, value.into_body()))
                 .try_collect()
                 .await?,
         ),
@@ -307,8 +308,9 @@ where
     T: NonUniqueStruct + 'static,
     D: DbHandle<Error = Error>,
 {
-    let values =
-        |items: Vec<T>| NodeReply::Values(items.iter().map(to_wire).collect());
+    let values = |items: Vec<Wire<T>>| {
+        NodeReply::Values(items.into_iter().map(Wire::into_body).collect())
+    };
     Ok(match op {
         NodeOp::SearchBy {
             pivot,
