@@ -48,6 +48,7 @@ mod compound;
 mod impls;
 // Borrowed views over the bytes (RFC 0076).
 mod view;
+mod wire_codec;
 
 pub use view::{ListIter, ListRef, Wire, view_wire};
 
@@ -101,6 +102,7 @@ pub type Result<T> = core::result::Result<T, Error>;
 
 /// A forward-only byte cursor over a borrowed buffer, used for both the stack
 /// and heap sections during decode.
+#[derive(Clone)]
 pub struct Cursor<'a> {
     buf: &'a [u8],
     pos: usize,
@@ -167,7 +169,10 @@ pub trait WaveWire: Sized {
 
     /// Reconstruct a value, reading `STACK_SIZE` bytes from `stack` and any
     /// payload from `heap`.
-    fn decode(stack: &mut Cursor, heap: &mut Cursor) -> Result<Self>;
+    fn decode<'a>(
+        stack: &mut Cursor<'a>,
+        heap: &mut Cursor<'a>,
+    ) -> Result<Self>;
 
     /// The borrowed twin (RFC 0076): what [`view`](WaveWire::view) builds
     /// over a value's bytes — `&'a str` for a `String`, `&'a [u8]` for a
