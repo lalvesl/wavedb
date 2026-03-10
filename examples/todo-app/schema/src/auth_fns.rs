@@ -99,6 +99,7 @@ pub async fn login(
         .next()
         .await
         .ok_or_else(|| Error::not_found("user not found"))??;
+    let entry = entry.view()?;
 
     let tenant = U48::try_from(entry.tenant_id)?;
     let user_db = db.as_identity(tenant, tenant);
