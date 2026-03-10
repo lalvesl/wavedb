@@ -274,3 +274,36 @@ fn a_wire_encodes_and_moves_between_threads_whatever_it_holds() {
         .expect("thread");
     assert_eq!(back, Ok(person()));
 }
+
+/// A `Wire<T>` encodes as `T` exactly, so a reply of read records is a reply
+/// of values: what one side writes as `Vec<Wire<T>>` the other reads as
+/// `Vec<T>`, and the other way round.
+#[test]
+fn a_wire_is_its_records_bytes_on_the_wire() {
+    let people = vec![
+        person(),
+        Person {
+            friend: None,
+            ..person()
+        },
+    ];
+    let wires: Vec<Wire<Person>> = people.iter().map(Wire::encode).collect();
+    assert_eq!(to_wire(&wires), to_wire(&people));
+    let back: Vec<Wire<Person>> = from_wire(&to_wire(&people)).expect("decode");
+    assert_eq!(back.len(), 2);
+    assert_eq!(back[1].decode().expect("decode"), people[1]);
+    // Kept as the bytes it took, no more: the body is exactly the record.
+    assert_eq!(back[0].body(), to_wire(&people[0]).as_slice());
+    // A view through the list reads each record in place.
+    let bytes = to_wire(&people);
+    let list = view_wire::<Vec<Wire<Person>>>(&bytes).expect("view");
+    assert_eq!(list.get(0).expect("first").name, "Ada");
+}
+
+/// Decoding a wire checks what it keeps, as decoding the value would.
+#[test]
+fn a_wire_decodes_only_bytes_its_type_would() {
+    both_fail::<Wire<String>>(&[2, 0, 0, 0, 0xFF, 0xFE], &Error::Utf8);
+    both_fail::<Wire<bool>>(&[2], &Error::InvalidBool(2));
+    both_fail::<Wire<Person>>(&[0; 3], &Error::UnexpectedEof);
+}
