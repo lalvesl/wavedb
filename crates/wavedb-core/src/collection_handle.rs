@@ -162,7 +162,7 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
     pub fn all<'d, D: DbHandle>(
         &self,
         db: &'d D,
-    ) -> impl Stream<Item = Result<T, D::Error>> + use<'d, D, T>
+    ) -> impl Stream<Item = Result<Wire<T>, D::Error>> + use<'d, D, T>
     where
         T: 'static,
     {
@@ -177,7 +177,7 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
         db: &'d D,
         index: usize,
         bound: Bound,
-    ) -> impl Stream<Item = Result<T, D::Error>> + use<'d, D, T>
+    ) -> impl Stream<Item = Result<Wire<T>, D::Error>> + use<'d, D, T>
     where
         T: 'static,
     {
@@ -192,7 +192,7 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
         db: &'d D,
         index: usize,
         bound: Bound,
-    ) -> impl Stream<Item = Result<T, D::Error>> + use<'d, D, T>
+    ) -> impl Stream<Item = Result<Wire<T>, D::Error>> + use<'d, D, T>
     where
         T: 'static,
     {
@@ -207,7 +207,7 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
         &self,
         db: &'d D,
         index: usize,
-    ) -> impl Stream<Item = Result<T, D::Error>> + use<'d, D, T>
+    ) -> impl Stream<Item = Result<Wire<T>, D::Error>> + use<'d, D, T>
     where
         T: 'static,
     {
@@ -221,7 +221,7 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
         db: &'d D,
         index: usize,
         offset: u64,
-    ) -> impl Stream<Item = Result<T, D::Error>> + use<'d, D, T>
+    ) -> impl Stream<Item = Result<Wire<T>, D::Error>> + use<'d, D, T>
     where
         T: 'static,
     {
@@ -240,7 +240,7 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
         index: usize,
         offset: u64,
         limit: u32,
-    ) -> impl Stream<Item = Result<T, D::Error>> + use<'d, D, T>
+    ) -> impl Stream<Item = Result<Wire<T>, D::Error>> + use<'d, D, T>
     where
         T: 'static,
     {
@@ -281,7 +281,7 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
         query: &str,
         mode: Fuzzy,
         limit: usize,
-    ) -> Result<Vec<Scored<(Id, T)>>, D::Error>
+    ) -> Result<Vec<Scored<(Id, Wire<T>)>>, D::Error>
     where
         T: 'static,
     {
@@ -294,7 +294,7 @@ impl<T: NonUniqueStruct> CollectionHandle<T> {
         &self,
         db: &'d D,
         id: Id,
-    ) -> impl Stream<Item = Result<(Metadata, T), D::Error>> + use<'d, D, T>
+    ) -> impl Stream<Item = Result<(Metadata, Wire<T>), D::Error>> + use<'d, D, T>
     where
         T: 'static,
     {
