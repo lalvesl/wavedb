@@ -27,6 +27,7 @@ use crate::wire::{WaveWire, from_wire};
 // The 15-bit salt guard is part of this module's surface — the `expose_*`
 // macros emit `::wavedb_core::expose::SaltGuard` — but lives in its own file
 // for the budget, mirroring the macro side's `expose_collision`.
+pub use crate::expose_items::{framed, unframed};
 pub use crate::expose_salt::{SaltGuard, salts_distinct, salts_self_distinct};
 
 // The catch-up navigation (the `Changes` command's engine) lives in its own
