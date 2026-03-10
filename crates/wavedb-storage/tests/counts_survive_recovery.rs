@@ -92,6 +92,7 @@ async fn observe(
     use wavedb_core::CollectionHandle;
     let total = CollectionHandle::list_len(&col, db, 0).await.unwrap();
     let rows: Vec<Entry> = CollectionHandle::listed(&col, db, 0)
+        .map_ok(|w| w.decode().unwrap())
         .try_collect()
         .await
         .unwrap();
@@ -200,6 +201,7 @@ fn a_crash_cannot_leave_the_counts_disagreeing_with_the_segments() {
         // consumer, so a drift that both other assertions missed shows up here.
         let page: Vec<Entry> =
             wavedb_core::CollectionHandle::listed_at(&col, &db, 0, 20)
+                .map_ok(|w| w.decode().unwrap())
                 .try_collect()
                 .await
                 .unwrap();
