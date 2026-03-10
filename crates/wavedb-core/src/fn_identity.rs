@@ -128,6 +128,12 @@ impl<T: FnArgTag> FnArgTag for Vec<T> {
     const TAG: u64 = container(VEC_KIND, T::TAG);
 }
 
+/// A [`Wire<T>`](crate::wire::Wire) is `T`'s bytes exactly, so it is `T`'s
+/// signature: a reply of read records is the same contract as one of values.
+impl<T: FnArgTag> FnArgTag for crate::wire::Wire<T> {
+    const TAG: u64 = T::TAG;
+}
+
 impl<T: FnArgTag> FnArgTag for Option<T> {
     const TAG: u64 = container(OPTION_KIND, T::TAG);
 }
