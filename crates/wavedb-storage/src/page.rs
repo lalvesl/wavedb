@@ -47,7 +47,7 @@ use crate::error::StorageResult;
 
 mod codec;
 
-use codec::Columns;
+use codec::{Columns, Cuts};
 
 /// Per-page prefix: `payload_len (u32)`.
 const LEN_PREFIX: usize = 4;
@@ -63,6 +63,8 @@ pub struct SlotPage {
     /// The encoded body the page was read as (or last sealed into); empty
     /// for a page never encoded. Its records are ranges of it.
     body: Box<[u8]>,
+    /// Where the body's columns sit in it.
+    cuts: Cuts,
     /// The writes since: `Some` a record put, `None` one of the body's
     /// removed. Ordered by `Id.raw()`.
     changes: BTreeMap<u128, Option<Vec<u8>>>,
@@ -77,16 +79,23 @@ impl SlotPage {
         Self {
             struct_hash,
             body: Box::default(),
+            cuts: Cuts::default(),
             changes: BTreeMap::new(),
             len: 0,
         }
     }
 
     /// A page over a checked `body` of `len` records.
-    const fn opened(struct_hash: u64, body: Box<[u8]>, len: usize) -> Self {
+    const fn opened(
+        struct_hash: u64,
+        body: Box<[u8]>,
+        cuts: Cuts,
+        len: usize,
+    ) -> Self {
         Self {
             struct_hash,
             body,
+            cuts,
             changes: BTreeMap::new(),
             len,
         }
@@ -166,15 +175,14 @@ impl SlotPage {
             body: Body {
                 cols: self.columns(),
                 at: 0,
-            }
-            .peekable(),
+            },
             changes: self.changes.iter().peekable(),
         }
     }
 
     /// The body's columns; `None` while the page has none.
     fn columns(&self) -> Option<Columns<'_>> {
-        Columns::of(&self.body)
+        Columns::at(&self.body, self.cuts)
     }
 
     /// Fold the changes into a new body, which the page keeps.
@@ -189,6 +197,7 @@ impl SlotPage {
             self.len,
             bytes,
         )?;
+        self.cuts = codec::cuts_of(&body)?;
         self.body = body.into_boxed_slice();
         self.changes.clear();
         Ok(())
@@ -212,6 +221,7 @@ impl core::fmt::Debug for SlotPage {
             .field("struct_hash", &self.struct_hash)
             .field("len", &self.len)
             .field("body", &self.body.len())
+            .field("cuts", &self.cuts)
             .field("changes", &self.changes.len())
             .finish()
     }
@@ -223,11 +233,18 @@ struct Body<'p> {
     at: usize,
 }
 
+impl Body<'_> {
+    /// The next record's id, the record left where it is.
+    fn peek_id(&self) -> Option<u128> {
+        self.cols.as_ref()?.id(self.at)
+    }
+}
+
 impl<'p> Iterator for Body<'p> {
     type Item = (u128, &'p [u8]);
     fn next(&mut self) -> Option<Self::Item> {
         let cols = self.cols.as_ref()?;
-        let id = cols.ids.get(self.at)?;
+        let id = cols.id(self.at)?;
         let record = cols.record(self.at)?;
         self.at += 1;
         Some((id, record))
@@ -236,8 +253,11 @@ impl<'p> Iterator for Body<'p> {
 
 /// The body's records and the changes, merged in id order: a change wins
 /// over the body's record at its id, and a removal drops it.
+///
+/// The body is peeked by id alone: a `Peekable` over it carried each record
+/// ahead of its turn, which cost the merge five times the walk.
 struct Entries<'p> {
-    body: Peekable<Body<'p>>,
+    body: Body<'p>,
     changes: Peekable<btree_map::Iter<'p, u128, Option<Vec<u8>>>>,
 }
 
@@ -245,27 +265,25 @@ impl<'p> Iterator for Entries<'p> {
     type Item = (Id, &'p [u8]);
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let body = self.body.peek().map(|&(raw, _)| raw);
+            // No change left (a page as read has none): the body alone.
             let change = self.changes.peek().map(|&(&raw, _)| raw);
-            let raw = match (body, change) {
-                (None, None) => return None,
-                (Some(b), Some(c)) if c <= b => {
-                    if c == b {
-                        self.body.next();
+            let body = change.and_then(|_| self.body.peek_id());
+            match change {
+                Some(c) if body.is_none_or(|b| c <= b) => {
+                    if body == Some(c) {
+                        self.body.at += 1;
                     }
-                    c
+                    // A change at `c`: its record, or a removal to skip.
+                    if let Some((_, Some(record))) = self.changes.next() {
+                        return Some((Id::from_raw(c), record.as_slice()));
+                    }
                 }
-                (Some(_), _) => {
+                _ => {
                     return self
                         .body
                         .next()
                         .map(|(raw, record)| (Id::from_raw(raw), record));
                 }
-                (None, Some(c)) => c,
-            };
-            // A change at `raw`: its record, or a removal to skip.
-            if let Some((_, Some(record))) = self.changes.next() {
-                return Some((Id::from_raw(raw), record.as_slice()));
             }
         }
     }
