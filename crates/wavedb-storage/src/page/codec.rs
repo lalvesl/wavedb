@@ -15,7 +15,7 @@
 //! walked), and a record is found by a binary search over the ids' bytes.
 
 use wavedb_core::wire::{
-    ListRef, WaveWire, to_wire, to_wire_checked, view_wire, view_wire_checked,
+    WaveWire, to_wire, to_wire_checked, view_wire, view_wire_checked,
 };
 
 use super::{LEN_PREFIX, LEVEL, SlotPage};
@@ -61,48 +61,87 @@ pub(super) struct PageBody {
     data: Vec<u8>,
 }
 
-/// An opened body: its columns over the page's buffer.
+/// The width of one id, and of one end.
+const ID: usize = size_of::<u128>();
+const END: usize = size_of::<u32>();
+
+/// Where a body's three columns sit in it, `(start, end)` each, found by
+/// viewing the body once when the page takes it: a read then slices the
+/// page's buffer and views nothing (a view of the body per read cost more
+/// than the binary search it served).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Cuts {
+    ids: (usize, usize),
+    ends: (usize, usize),
+    data: (usize, usize),
+}
+
+impl Cuts {
+    /// Where `body`'s columns are; `None` unless it views as a body.
+    pub fn of(body: &[u8]) -> Option<Self> {
+        let r = view_wire::<PageBody>(body).ok()?;
+        let at = |column: &[u8]| {
+            let start = column.as_ptr().addr() - body.as_ptr().addr();
+            (start, start + column.len())
+        };
+        Some(Self {
+            ids: at(r.ids.bytes()),
+            ends: at(r.ends.bytes()),
+            data: at(r.data),
+        })
+    }
+}
+
+/// An opened body: its columns over the page's buffer, the numbers read in
+/// place.
 #[derive(Clone, Copy)]
 pub(super) struct Columns<'p> {
-    pub ids: ListRef<'p, u128>,
-    ends: ListRef<'p, u32>,
+    ids: &'p [[u8; ID]],
+    ends: &'p [[u8; END]],
     data: &'p [u8],
 }
 
 impl<'p> Columns<'p> {
-    /// View `body`, a body [`open`] has checked (or an empty one).
-    pub fn of(body: &'p [u8]) -> Option<Self> {
-        let r = view_wire::<PageBody>(body).ok()?;
+    /// The columns of `body` at `cuts` — the body's own cuts, or the default
+    /// ones of an empty page. `None` when they do not fit it.
+    pub fn at(body: &'p [u8], cuts: Cuts) -> Option<Self> {
+        let column = |(start, end)| body.get(start..end);
+        let (ids, []) = column(cuts.ids)?.as_chunks::<ID>() else {
+            return None;
+        };
+        let (ends, []) = column(cuts.ends)?.as_chunks::<END>() else {
+            return None;
+        };
         Some(Self {
-            ids: r.ids,
-            ends: r.ends,
-            data: r.data,
+            ids,
+            ends,
+            data: column(cuts.data)?,
         })
+    }
+
+    /// Record `i`'s id.
+    pub fn id(&self, i: usize) -> Option<u128> {
+        self.ids.get(i).map(|b| u128::from_le_bytes(*b))
+    }
+
+    fn end(&self, i: usize) -> Option<usize> {
+        self.ends.get(i).map(|b| u32::from_le_bytes(*b) as usize)
     }
 
     /// Record `i`'s bytes.
     pub fn record(&self, i: usize) -> Option<&'p [u8]> {
         let start = match i {
             0 => 0,
-            _ => self.ends.get(i - 1)? as usize,
+            _ => self.end(i - 1)?,
         };
-        self.data.get(start..self.ends.get(i)? as usize)
+        self.data.get(start..self.end(i)?)
     }
 
     /// Where `raw` is among the ids: `Ok(i)` at record `i`, `Err(i)` where
     /// it would go.
     pub fn find(&self, raw: u128) -> Result<usize, usize> {
-        let (mut lo, mut hi) = (0, self.ids.len());
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            match self.ids.get(mid).map(|id| id.cmp(&raw)) {
-                Some(core::cmp::Ordering::Less) => lo = mid + 1,
-                Some(core::cmp::Ordering::Greater) => hi = mid,
-                Some(core::cmp::Ordering::Equal) => return Ok(mid),
-                None => return Err(lo),
-            }
-        }
-        Err(lo)
+        self.ids
+            .binary_search_by(|b| u128::from_le_bytes(*b).cmp(&raw))
     }
 }
 
@@ -133,26 +172,31 @@ pub(super) fn body_of<'e>(
 
 /// Check a body's columns agree — as many ends as ids, the ids strictly
 /// ascending, the ends never going back nor past the data — so reading it
-/// afterwards cannot go wrong. Returns its record count.
-fn check(body: &[u8]) -> StorageResult<usize> {
+/// afterwards cannot go wrong. Returns its cuts and its record count.
+fn check(body: &[u8]) -> StorageResult<(Cuts, usize)> {
     let bad = || StorageError::Corrupt("page body");
-    let cols = Columns::of(body).ok_or_else(bad)?;
-    let (ids, ends) = (cols.ids, cols.ends);
-    let ascending = ids.iter().zip(ids.iter().skip(1)).all(|(a, b)| a < b);
-    let mut at = 0u32;
-    let ordered = ends.iter().all(|end| {
-        let ok = end >= at;
-        at = end;
-        ok
-    });
-    if ids.len() != ends.len()
+    let cuts = Cuts::of(body).ok_or_else(bad)?;
+    let cols = Columns::at(body, cuts).ok_or_else(bad)?;
+    let len = cols.ids.len();
+    let ascending = (1..len).all(|i| cols.id(i - 1) < cols.id(i));
+    let ordered = (1..len).all(|i| cols.end(i - 1) <= cols.end(i));
+    let last = len.checked_sub(1).and_then(|i| cols.end(i)).unwrap_or(0);
+    if cols.ends.len() != len
         || !ascending
         || !ordered
-        || at as usize != cols.data.len()
+        || last != cols.data.len()
     {
         return Err(bad());
     }
-    Ok(ids.len())
+    Ok((cuts, len))
+}
+
+/// The cuts of a body this crate just encoded.
+///
+/// # Errors
+/// [`StorageError::Corrupt`] should it not view as one — it always does.
+pub(super) fn cuts_of(body: &[u8]) -> StorageResult<Cuts> {
+    Cuts::of(body).ok_or(StorageError::Corrupt("page body"))
 }
 
 impl SlotPage {
@@ -246,10 +290,10 @@ impl SlotPage {
         };
         #[cfg(feature = "probe")]
         lap.split(2);
-        let len = check(&body)?;
+        let (cuts, len) = check(&body)?;
         #[cfg(feature = "probe")]
         lap.split(3);
-        let page = Self::opened(envelope.struct_hash, body.into(), len);
+        let page = Self::opened(envelope.struct_hash, body.into(), cuts, len);
         #[cfg(feature = "probe")]
         {
             lap.split(4);
