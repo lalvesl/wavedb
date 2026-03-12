@@ -345,7 +345,46 @@ step 4 with them.**
 - **`decode` takes one lifetime** for both cursors, as `view` does — they
   always come from one buffer — so a `Wire<T>` can view the `T` it decodes.
 
-Next: measure (the deferred benches), then open question 3 if it asks.
+**Measured (2026-10-24, criterion, 2.3 GHz pinned).** Two benches:
+`crates/wavedb-wire/benches/views.rs` (decode against view) and
+`crates/wavedb-storage/benches/page.rs` (a micro page — 391 `Thing`
+records — read from its bytes, the file running unchanged at the commit
+before step 2 to compare).
+
+| wire | decode | view |
+|---|---:|---:|
+| micro `Thing` (~260 B) | 152 ns | 79 ns |
+| `Doc` (string, 1 KiB bytes, 16 strings) | 1.02 µs | 347 ns |
+| `Vec<u8>` 4 KiB / 64 KiB | 153 ns / 2.68 µs | 2.7 ns / 2.7 ns |
+| `Vec<u32>` ×1000 (view, then summed) | 128 ns | 4 ns (896 ns) |
+| `Vec<String>` ×100 (view, then each read) | 10.0 µs | 1.5 µs (3.3 µs) |
+| a reply of 100 `Thing`s: `Vec<T>` / `Vec<Wire<T>>` (each then viewed) | 34.3 µs | 20.9 µs (29.1 µs) |
+
+| page (391 records) | before step 2 | now |
+|---|---:|---:|
+| `from_bytes`, zstd | 215 µs | 152 µs |
+| `from_bytes`, raw | 67 µs | 17 µs |
+| `get` of every record | 16.0 µs | 18.5 µs |
+| `iter` | 1.1 µs | 2.3 µs |
+
+- **The bench found a regression step 2 had made, now fixed:** a page's
+  `get` viewed its whole body each call (22 ns) and probed the id column
+  through `ListRef::get` (~6 ns a probe for a `u128`), 57.8 µs for the
+  page's gets; and `iter` merged through a `Peekable` that carried each
+  record ahead of its turn, 6.0 µs. The page now keeps where its columns
+  sit (`Cuts`, found by the one view `from_bytes` makes) and reads ids and
+  ends in place (`as_chunks`, `from_le_bytes`, `binary_search_by`), and
+  the merge peeks the body by id alone. What is left against the old
+  `BTreeMap` — ~6 ns a `get`, ~3 ns a record walked — is noise beside the
+  50–60 µs a page's open saves.
+- **Iterating a list of numbers is slower than decoding it** (896 ns
+  against 128 ns for 1000 `u32`s): decode is one `memcpy`, a `ListRef`
+  walk views each element through cursors. A view still wins when a read
+  touches few of them. Reading every string of a `Vec<String>` view checks
+  each one's UTF-8 a second time (the walk the view made, then the read) —
+  safe code cannot skip it, and it still beats the decode 3×.
+
+Next: the deferred system benches, then open question 3 if they ask.
 
 ## Alternatives
 
