@@ -24,3 +24,11 @@ crc32fast = { workspace = true, optional = true }
 # CRC32-framed encoding: `to_wire_checked` prefixes the payload with a 4-byte
 # CRC32; `from_wire_checked` verifies it before decoding.
 validation = ["dep:crc32fast"]
+
+[dev-dependencies]
+# The decode-against-view benches (`benches/views.rs`, RFC 0076).
+criterion = "0.8.2"
+
+[[bench]]
+name = "views"
+harness = false
