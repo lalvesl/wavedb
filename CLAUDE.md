@@ -59,6 +59,10 @@ WAVEDB_PROBE=/tmp/probe.log cargo test -p wavedb-storage --features probe --test
 (cd benches && cargo build --release --features probe --bins && \
   WAVEDB_PROBE=/tmp/probe.log target/release/bench --only wavedb --workload micro --tier smoke --force)
 scripts/probe_summary.sh /tmp/probe.log 1000 4250545245450001=bptree   # KiB per round by component
+# micro benches (criterion, one thread; clock pinned): decode against view,
+# and a micro page read from its bytes (RFC 0076)
+cargo bench -p wavedb-wire --bench views
+cargo bench -p wavedb-storage --bench page
 ```
 
 Toolchain is pinned by `rust-toolchain.toml` (1.99.0, edition 2024, includes
