@@ -41,3 +41,9 @@ wavedb-platform = { workspace = true, features = ["test-server"] }
 tempfile.workspace = true
 # The NonUnique end-to-end test drives the real derived collection API.
 wavedb-macros = { path = "../wavedb-macros" }
+# The page-read bench (`benches/page.rs`, RFC 0076).
+criterion = "0.8.2"
+
+[[bench]]
+name = "page"
+harness = false
