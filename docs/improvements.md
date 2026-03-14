@@ -211,26 +211,6 @@ order of cost:
   column fits in L1 (6 KiB for a micro page).
 - **Decided** 2026-10-24, measuring RFC 0076: not now.
 
-### The runtime hash is SeaHash, ~7× a mixer on a 16-byte key
-
-- **Now.** The hashes taken per operation are SeaHash, the vendored safe
-  `const fn` one: the extendible directory's `hash_of(id, seed)` (every
-  page lookup) and the shard placement (`placement.rs`, every routed
-  operation). On a `u128` it costs ~36 ns; wyhash's 16-byte path ~4.7 ns,
-  murmur3's `fmix64` per half ~5.7 ns (criterion, 2.3 GHz) — SeaHash runs
-  its four-lane stream machinery even for 16 bytes.
-- **Instead.** wyhash for these two, its seed premixed once when the store
-  opens: as fast as a mixer, and it mixes both halves non-linearly before
-  joining them (a mixer over `lo ^ rot(hi)` is a linear fold, and a
-  structured `Id` makes its collisions easy to build). It moves where
-  records land, a layout change, which needs no migration pre-release.
-  `STRUCT_HASH`, `fn_identity` and the lane hashes stay SeaHash 4.1.0 bit
-  for bit: they are identities, computed at build time or once.
-  `natural_key_hash` is an identity too (it is the anchor's `KEY`), so it
-  stays. Or, keeping SeaHash everywhere: a fixed-width path in the vendored
-  crate, its output pinned by `tests/golden.rs`.
-- **Decided** 2026-10-24: not now.
-
 ## Benchmarks
 
 ### Shop rows do not fit the 500 MB cage
