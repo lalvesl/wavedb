@@ -656,7 +656,6 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0074](0074-extendible-hashing.md) | Extendible hashing for the page directories (a page over target splits at once; ℓ and a 10-bit size code in the descriptor) | Implemented |
 | [0075](0075-secondary-indexes-as-chains.md) | Secondary indexes as chains (`#[wavedb::pivot]` and fuzzy postings over `Chain<()>`; the B+tree deleted; a list also answers `by_f`) | Implemented |
 | [0076](0076-zero-copy-views-WIP.md) | Zero-copy views over the wire (a derived `NameRef<'a>` built in one pass, `Wire<T>` one `Send` buffer, `to_owned()` back; the format unchanged — steps 1–2, the codec and both derives, then `SlotPage` as one buffer, landed) | In progress |
-| [0077](0077-xxh3-for-the-runtime-hash-PLANNED.md) | XXH3 for the runtime hash (the record index, the page directories and placement — ~4.8 ns on a `u128` against SeaHash's ~36; the identities stay SeaHash) | Planned |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
@@ -665,6 +664,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0040](0040-schema-migration-and-version-skew-DEPRECATED.md) | Schema migration & node/client version skew | *dropped* — migration is the developer's ([0004](0004-struct-hash-and-schema-evolution.md)) |
 | [0027](0027-doubly-linked-modification-chain-DEPRECATED.md) | Doubly-linked modification chain | [0009](0009-anchors-succession-and-history.md) |
 | [0028](0028-journal-commit-cursor-sync-DEPRECATED.md) | Journal commit-cursor sync | [0022](0022-live-sync-navigation-catchup.md) |
+| [0077](0077-xxh3-for-the-runtime-hash-DEPRECATED.md) | XXH3 for the runtime hash | *dropped* — the runtime hash stays SeaHash (the cost measured was a no-LTO artifact) |
 | [0029](0029-bloom-filter-screen-sync-DEPRECATED.md) | Bloom-filter screen-sync | [0022](0022-live-sync-navigation-catchup.md) |
 | [0030](0030-superblock-pointer-checkpoint-DEPRECATED.md) | Superblock-pointer checkpoint | [0019](0019-journal-rooted-recovery-DEPRECATED.md) |
 | [0031](0031-node-per-page-bptree-DEPRECATED.md) | One-node-per-page B+tree format | [0011](0011-bptree-index-and-collections.md) |
