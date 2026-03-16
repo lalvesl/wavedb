@@ -59,6 +59,8 @@ WAVEDB_PROBE=/tmp/probe.log cargo test -p wavedb-storage --features probe --test
 (cd benches && cargo build --release --features probe --bins && \
   WAVEDB_PROBE=/tmp/probe.log target/release/bench --only wavedb --workload micro --tier smoke --force)
 scripts/probe_summary.sh /tmp/probe.log 1000 4250545245450001=bptree   # KiB per round by component
+# `wavedb/multi` on micro runs on a node's workers (`Router::start`,
+# `benches/src/systems/node.rs`), one consumer per worker
 # micro benches (criterion, one thread; clock pinned): decode against view,
 # and a micro page read from its bytes (RFC 0076)
 cargo bench -p wavedb-wire --bench views
@@ -305,8 +307,11 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   (the storage shards' threads start with the database, `.storage_shards(n)`,
   4 by default — RFC 0073),
   and a BG task beside the jobs opens a settle cycle per 200 ms tick and steps
-  it when they leave room — first when a durable write waits on it
-  (RFC 0067 step 4; one executor per thread, no `unsafe`). A frame with its
+  it when they leave room — first when a durable write waits on it, whose
+  batch it opens at once rather than on the tick (woken by every job;
+  RFC 0067 step 4, RFC 0072 §12; one executor per thread, no `unsafe`).
+  `Router::maintain` asks every worker to settle or evict now, as a job
+  (a benchmark's phase boundary). A frame with its
   `durable` bit set (and a durable `NodeOp`) runs its step over
   `Durability::new(store, true)`, the owner held until the shard's batch is
   durable (RFC 0072 §12). Each worker also
