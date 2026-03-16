@@ -22,6 +22,8 @@
 //!
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
+use std::time::Duration;
+
 use crate::barrier::{Durable, Syncs, Waiter};
 use crate::error::{StorageError, StorageResult};
 use crate::header::NO_FILE;
@@ -58,6 +60,13 @@ impl PageStore {
     pub fn is_awaited(&self) -> bool {
         let cycle = self.cycle.borrow();
         cycle.open && !cycle.current.is_empty()
+    }
+
+    /// Whether a durable write waits for a batch not opened yet — one a
+    /// cycle opened now would carry.
+    #[must_use]
+    pub fn is_wanted(&self) -> bool {
+        !self.cycle.borrow().next.is_empty()
     }
 
     /// Open a batch, if there is anything to settle and the previous one is
@@ -267,6 +276,40 @@ impl PageStore {
             while self.cycle_step(usize::MAX)? == Progress::Settled {}
             self.cycle.borrow_mut().syncs.wait();
             self.settle_durable();
+            if !self.begin_cycle()? {
+                return self.check_failed();
+            }
+        }
+    }
+
+    /// [`drain`](Self::drain) without blocking the thread: every step
+    /// awaited, and each barrier's answer awaited by looking again every
+    /// millisecond — what a worker runs as a job beside its others (a
+    /// benchmark's phase boundary, an operator's "settle now"). A batch the
+    /// worker's own maintenance opened meanwhile is stepped to its end here
+    /// too, so it returns once nothing committed before it is owed.
+    ///
+    /// Object mode has no barrier to wait for: it settles as `drain` does.
+    ///
+    /// # Errors
+    /// A page write or barrier fault.
+    pub async fn settle_all(&self) -> StorageResult<()> {
+        if !self.has_disk() {
+            return self.drain();
+        }
+        loop {
+            self.hurry();
+            while self.settle_step(usize::MAX).await? == Progress::Settled {}
+            self.settle_durable();
+            let durable = {
+                let mut cycle = self.cycle.borrow_mut();
+                cycle.syncs.check()?;
+                cycle.syncs.settled()
+            };
+            if !durable {
+                wavedb_platform::time::sleep(Duration::from_millis(1)).await;
+                continue;
+            }
             if !self.begin_cycle()? {
                 return self.check_failed();
             }
