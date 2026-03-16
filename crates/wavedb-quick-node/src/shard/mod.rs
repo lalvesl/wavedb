@@ -32,6 +32,7 @@
 mod background;
 mod lease;
 mod lock;
+mod maintain;
 mod object_policy;
 mod owned;
 pub mod priority;
@@ -42,9 +43,10 @@ mod spawn;
 mod waiters;
 mod worker;
 
-pub use background::{Background, UPKEEP_PERIOD, background};
+pub use background::{Background, Nudge, UPKEEP_PERIOD, background};
 pub use lease::{Lease, Leased};
 pub use lock::{Acquire, Held, OwnerKey, OwnerLocks};
+pub use maintain::Maintain;
 pub use owned::{Owned, SETTLE_BUDGET_IDS};
 pub use priority::Priority;
 pub use route::{Owner, shard_of};
