@@ -42,10 +42,11 @@ use wavedb_core::{NodeOp, NodeReply, U48};
 use wavedb_net::frame::{CommandFrame, NodeError, Response};
 use wavedb_net::ws::Topic;
 use wavedb_platform::carrier::Here;
-use wavedb_storage::PageStore;
+use wavedb_storage::{PageStore, StorageResult};
 
-use super::background::{Background, background};
+use super::background::{Background, Nudge, background};
 use super::lease::{self, Lease};
+use super::maintain::Maintain;
 use super::owned::{Busy, Owned};
 use super::spawn::ShardCtx;
 use super::{Owner, OwnerKey, OwnerLocks};
@@ -91,6 +92,11 @@ pub enum Job {
         tenant: U48,
         owner: Owner,
         answer: oneshot::Sender<Lease>,
+    },
+    /// Do `what` to every store of the worker (`super::maintain`).
+    Maintain {
+        what: Maintain,
+        done: oneshot::Sender<StorageResult<()>>,
     },
 }
 
@@ -181,6 +187,7 @@ pub async fn shard<E: NodeTasks>(ctx: ShardCtx<E>, here: Here) {
     // BG ends when this closes; refused (its pool is full), the worker serves
     // without background maintenance and still closes its stores cleanly.
     let (halt, halted) = async_channel::bounded::<()>(1);
+    let nudge = Rc::new(Nudge::new());
     let _ = here.spawn(background(
         Background {
             owned: Rc::clone(&owned),
@@ -188,6 +195,7 @@ pub async fn shard<E: NodeTasks>(ctx: ShardCtx<E>, here: Here) {
             policy,
             partitions: shards,
             halt: halted,
+            nudge: Rc::clone(&nudge),
         },
         here.clone(),
     ));
@@ -199,6 +207,7 @@ pub async fn shard<E: NodeTasks>(ctx: ShardCtx<E>, here: Here) {
         locks: OwnerLocks::new(),
     });
     while let Ok(job) = jobs.recv().await {
+        nudge.signal(());
         let Some(job) = worker.subscription(job) else {
             continue;
         };
@@ -300,6 +309,9 @@ async fn serve<E: NodeTasks>(worker: &Worker<E>, job: Job) {
             owner,
             answer,
         } => lease::hold(worker, tenant, owner, answer).await,
+        Job::Maintain { what, done } => {
+            let _ = done.send(worker.owned.maintain(what).await);
+        }
         // Applied in the receive loop; a refused spawn never carries one.
         job @ (Job::Watch { .. } | Job::Unwatch { .. }) => {
             let _ = worker.subscription(job);
