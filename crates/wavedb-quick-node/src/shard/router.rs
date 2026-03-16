@@ -47,6 +47,7 @@ use wavedb_storage::PageStore;
 
 use super::Owner;
 use super::lease::Lease;
+use super::maintain::Maintain;
 use super::spawn::{self, Closing};
 use super::worker::Job;
 use crate::__rt::NodeTasks;
@@ -158,6 +159,39 @@ impl<E: Exposure> Router<E> {
             outbox,
         };
         let _ = self.post(topic_owner(tenant, topic), job).await;
+    }
+
+    /// Have every worker do `what` to each of its stores, and return once
+    /// all of them have (`super::maintain`): a job on each, so it runs on
+    /// the worker beside the others and the stores never leave it.
+    ///
+    /// # Errors
+    /// [`ServerError::Storage`](crate::ServerError::Storage) with the first
+    /// store's fault — every worker still runs it —, or
+    /// [`ServerError::Io`](crate::ServerError::Io) for a worker that has
+    /// stopped.
+    pub async fn maintain(&self, what: Maintain) -> crate::Result<()> {
+        let gone = || {
+            crate::ServerError::Io(std::io::Error::other(
+                "a shard worker has stopped",
+            ))
+        };
+        let mut answers = Vec::with_capacity(self.workers.len());
+        for worker in &self.workers {
+            let (done, answer) = oneshot::channel();
+            worker
+                .send(Job::Maintain { what, done })
+                .await
+                .map_err(|_| gone())?;
+            answers.push(answer);
+        }
+        let mut first = None;
+        for answer in answers {
+            if let Err(e) = answer.await.map_err(|_| gone())? {
+                first.get_or_insert(crate::ServerError::Storage(e));
+            }
+        }
+        first.map_or(Ok(()), Err)
     }
 
     /// Queue `job` on the worker serving `owner`'s data shard.
