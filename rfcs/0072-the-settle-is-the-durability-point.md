@@ -332,6 +332,18 @@ transaction's commit: untouched by this RFC.
   four more commands; a read and a function call ignore it. The node runs
   the frame's step over `Durability::new(store, frame.durable)`, the owner
   held until the batch is durable.
+- **On a node the durable write opens its batch** (amendment, 2026-10-24).
+  Its waiter lands among the next batch's (`PageStore::is_wanted`), and the
+  worker's BG opens that batch at once (`Owned::open_wanted`) instead of
+  leaving it for the 200 ms upkeep tick; the worker wakes BG on every job
+  it receives (`Nudge`), since BG idling through a whole period would miss
+  it. A store whose previous batch is still syncing refuses
+  (`begin_cycle`), and the durable writes that commit meanwhile all go into
+  the batch that opens once it answers — the group commit, bounded by the
+  `fsync` and no longer by the tick. Before, every durable write on a node
+  paid up to a tick on top of its `fsync`: thirty one after another took
+  6.1 s (`quick-node/tests/durable_latency.rs`), the bench's multi row's
+  durable insert had a p50 of 98 ms; now it is the `fsync`.
 
 ## Gone
 
