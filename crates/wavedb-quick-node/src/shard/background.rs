@@ -26,8 +26,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use async_channel::Receiver;
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either3, select3};
 use embassy_futures::yield_now;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::signal::Signal;
 use wavedb_platform::carrier::Here;
 use wavedb_platform::time::sleep;
 
@@ -42,6 +44,11 @@ pub const UPKEEP_PERIOD: Duration = Duration::from_millis(200);
 /// How long BG waits before looking again while jobs have the thread.
 const BUSY_RECHECK: Duration = Duration::from_millis(1);
 
+/// Raised by the worker on every job it receives: BG idling through a
+/// whole [`UPKEEP_PERIOD`] would leave a durable write that just arrived
+/// waiting for the tick to open its batch. One thread, so no lock.
+pub type Nudge = Signal<NoopRawMutex, ()>;
+
 /// What a worker's BG task is started with.
 pub struct Background {
     pub owned: Rc<Owned>,
@@ -52,6 +59,8 @@ pub struct Background {
     pub partitions: usize,
     /// Closed by the worker's root when its queue has closed.
     pub halt: Receiver<()>,
+    /// Wakes BG out of an idle wait ([`Nudge`]).
+    pub nudge: Rc<Nudge>,
 }
 
 /// BG's task. One per worker, from a static pool sized to the workers a
@@ -79,7 +88,9 @@ async fn run(bg: &Background) {
             reads: busy,
             maintenance: bg.owned.owes(),
         };
-        // A durable write waits on the open batch: it goes first.
+        // A durable write opens its batch without waiting for the tick,
+        // and one waiting on the open batch goes first.
+        bg.owned.open_wanted();
         if bg.owned.urgent()
             || valve.next(avail, bg.owned.unsettled_bytes())
                 == Some(Class::Maintenance)
@@ -89,7 +100,8 @@ async fn run(bg: &Background) {
             continue;
         }
         let wait = if busy { BUSY_RECHECK } else { UPKEEP_PERIOD };
-        if let Either::Second(_) = select(sleep(wait), bg.halt.recv()).await {
+        let woke = select3(sleep(wait), bg.halt.recv(), bg.nudge.wait()).await;
+        if let Either3::Second(_) = woke {
             return;
         }
         // Due regardless of load: the policy is what opens a settle cycle,
