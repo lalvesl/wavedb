@@ -88,6 +88,11 @@ impl Owned {
             })
     }
 
+    /// The range's stores, in shard order.
+    pub(super) fn stores(&self) -> &[PageStore] {
+        &self.stores
+    }
+
     /// Count a job as executing until the returned guard drops.
     pub fn busy(&self) -> Busy<'_> {
         self.inflight.set(self.inflight.get() + 1);
@@ -99,6 +104,23 @@ impl Owned {
     #[must_use]
     pub fn urgent(&self) -> bool {
         self.stores.iter().any(PageStore::is_awaited)
+    }
+
+    /// Open a batch on every store a durable write waits on, instead of
+    /// leaving it for the next tick: its job is parked until the batch is
+    /// durable, so the tick would be its latency. A store whose previous
+    /// batch is still syncing refuses (`begin_cycle`), and the writes that
+    /// pile up meanwhile go into one batch once it answers — the group
+    /// commit.
+    pub fn open_wanted(&self) {
+        for store in &self.stores {
+            if store.is_wanted()
+                && !store.is_cycling()
+                && let Err(e) = store.begin_cycle()
+            {
+                eprintln!("worker: settle failed: {e}");
+            }
+        }
     }
 
     /// Whether any job is executing.
