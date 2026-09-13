@@ -32,10 +32,10 @@
 use std::path::PathBuf;
 
 /// Set by `nix run .#bench` to the measurement budget, in bytes.
-const BUDGET_ENV: &str = "BENCH_MEM_MAX";
+pub(super) const BUDGET_ENV: &str = "BENCH_MEM_MAX";
 
 /// Set by `nix run .#bench` to the number of CPUs `taskset` pins the run to.
-const CPUS_ENV: &str = "BENCH_CPU_BUDGET";
+pub(super) const CPUS_ENV: &str = "BENCH_CPU_BUDGET";
 
 /// Hold the cgroup at the declared budget.
 ///
