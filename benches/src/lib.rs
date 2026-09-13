@@ -50,15 +50,18 @@ pub const RELAXED_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(1);
 
 pub mod cage;
-pub mod cli;
+pub mod corpus;
 pub mod footprint;
+pub mod guard;
+pub mod harness;
 pub mod host;
-pub mod index;
 pub mod json;
 pub mod metrics;
+pub mod plan;
 pub mod report;
+pub mod row;
 pub mod schema;
 pub mod seed;
 pub mod shop;
+pub mod supervise;
 pub mod systems;
-pub mod tables;
