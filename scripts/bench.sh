@@ -12,7 +12,7 @@
 #
 # Usage: scripts/bench.sh [args passed to the benchmark]
 #   scripts/bench.sh --only wavedb --workload micro
-#   scripts/bench.sh --quick            # smoke; records nothing
+#   scripts/bench.sh --dry-run          # print the plan; measures nothing
 #
 # Env:
 #   BENCH_LOAD_MAX   launch below this 1-minute load average (default 1.0)
@@ -28,11 +28,11 @@ wait_secs=${BENCH_WAIT_SECS:-900}
 load1() { cut -d' ' -f1 /proc/loadavg; }
 
 # 1. Build inside the same environment the run will use, so the measured
-#    invocation compiles nothing. `--quick` with a trivial size is the cheapest
-#    thing that exercises the real build; its output is discarded.
+#    invocation compiles nothing. `--dry-run` resolves the plan and stops, so
+#    it exercises the real build and measures nothing; its output is
+#    discarded.
 echo "── building (so the measured run does not) ─────────────────────────────"
-nix run .#bench -- --quick --rows 1 --reads 1 --updates 1 \
-  --workload micro --only wavedb >/dev/null 2>&1 ||
+nix run .#bench -- --dry-run >/dev/null 2>&1 ||
   echo "warm-up run failed — continuing; the real run will report why"
 
 # 2. Wait out the build's own load before the guard samples it.
