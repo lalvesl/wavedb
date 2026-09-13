@@ -48,12 +48,34 @@ impl Host {
     /// specifically — the disk under the benchmark is the one that matters,
     /// not the one under `/`.
     pub fn probe(data_dir: &Path) -> Self {
+        let cores = num_cpus();
+        let mem_bytes = mem_total();
+        Self::probe_with_budget(
+            data_dir,
+            cgroup_memory_max().unwrap_or(mem_bytes).min(mem_bytes),
+            allowed_cpus().unwrap_or(cores),
+        )
+    }
+
+    /// Fingerprint the machine **as it will be seen at these budgets**.
+    ///
+    /// The supervisor needs this and [`probe`](Self::probe) would give it the
+    /// wrong answer: it runs uncaged, so it observes the whole machine, while
+    /// every row it schedules runs at the cage's budgets. Keying the lane
+    /// from the supervisor's own view would file 4-cpu / 500 MB measurements
+    /// under an `8c-15835m` name — a lane that names a machine none of its
+    /// numbers ran on.
+    ///
+    /// A caged process passing what it observes gets the same answer, so the
+    /// two sides agree by construction rather than by coincidence.
+    pub fn probe_with_budget(
+        data_dir: &Path,
+        mem_budget: u64,
+        cpu_budget: u64,
+    ) -> Self {
         let cpu = cpu_model();
         let cores = num_cpus();
-        let cpu_budget = allowed_cpus().unwrap_or(cores);
         let mem_bytes = mem_total();
-        let mem_budget =
-            cgroup_memory_max().unwrap_or(mem_bytes).min(mem_bytes);
         let kernel = read_trim("/proc/sys/kernel/osrelease");
         let filesystem = fs_type(data_dir);
         let rotational = rotational(data_dir);
