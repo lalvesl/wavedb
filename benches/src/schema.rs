@@ -69,8 +69,22 @@ pub fn thing(n: u64, seed: u64) -> Thing {
 /// rewrite and not a resize in disguise.
 #[must_use]
 pub fn thing_v2(n: u64, seed: u64) -> Thing {
-    let mut t = thing(n, seed ^ 0xA5A5_A5A5_A5A5_A5A5);
-    t.name = format!("name-{n:010}");
+    thing_v2_at(n, seed, 0)
+}
+
+/// The `revision`-th update of row `n`.
+///
+/// The revision is not decoration. `thing_v2(n, seed)` is a pure function of
+/// its arguments, so updating one row **twice** wrote byte-identical values —
+/// and InnoDB turns an all-columns-unchanged `UPDATE` into a no-op. The update
+/// phase draws uniformly with replacement, so at 50 000 updates over 100 000
+/// rows roughly **21%** of MySQL's update phase was free work its peers
+/// actually did. Salting by the draw ordinal makes every update a real write
+/// on every system, which is the only way the column compares anything.
+#[must_use]
+pub fn thing_v2_at(n: u64, seed: u64, revision: u64) -> Thing {
+    let mut t = thing(n, seed ^ 0xA5A5_A5A5_A5A5_A5A5 ^ revision);
+    t.name = format!("name-{n:010}-{revision}");
     t.tag = format!("tag-{:04}", n % 1024);
     t
 }
