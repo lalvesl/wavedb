@@ -1,7 +1,7 @@
 # RFC 0061 — Relaxed durability: a group-commit window
 
 - **Status:** Implemented (landed 2026-08-21) — opened 2026-08-14, prompted by
-  the measurement in [0060](0060-comparative-benchmark-suite.md).
+  the measurement in [0060](0060-comparative-benchmark-suite-DEPRECATED.md).
 - **Crates:** `wavedb-storage` (the write path), `wavedb-quick-node` (the
   node-side setting). No schema-crate or macro change; nothing folds into
   `STRUCT_HASH`.
@@ -14,7 +14,7 @@
   `append_deferred`, and whose "ride the next barrier" trick this generalises),
   [0047](0047-generational-journal-retirement.md) (the retirement that already
   depends on barrier counting),
-  [0060](0060-comparative-benchmark-suite.md) (the measurement below).
+  [0060](0060-comparative-benchmark-suite-DEPRECATED.md) (the measurement below).
 
 ## Summary
 
