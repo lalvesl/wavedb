@@ -2,7 +2,7 @@
 
 Insert / read / update against the systems a developer would otherwise reach
 for. Design, methodology and the reasoning behind every choice live in
-[RFC 0060](../rfcs/0060-comparative-benchmark-suite.md); this file is
+[RFC 0060](../rfcs/0060-comparative-benchmark-suite-DEPRECATED.md); this file is
 how to run it.
 
 **Both brackets are implemented**: the WaveDB engine in-process against SQLite
