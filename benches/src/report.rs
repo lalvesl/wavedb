@@ -1,15 +1,17 @@
-//! Writing the results record, and appending to the corpus index.
+//! Provenance — who and when, for a row.
 //!
-//! The corpus is **append-only** (RFC 0060 §7): a past run is never edited to
-//! look better. JSON is the stored form because it diffs and machines read it;
-//! `index.md` gets one human line per run so `git log` on that file reads as a
-//! history.
+//! What is left of RFC 0060.s results writer. The record itself moved to
+//! [`crate::corpus`], where it is one file per **row** rather than one per
+//! run ([RFC 0065] §1); the per-run JSON, its `index.md` line and the tables
+//! that rendered them went with it. This kept the part that is still true of
+//! any measurement whenever it happens: the commit it was taken at, whether
+//! the tree was dirty, and the stamp it is filed under.
+//!
+//! [RFC 0065]: ../../rfcs/0065-benchmark-suite-ii-the-row-as-the-unit.md
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::host::Host;
-use crate::json::{Json, fnv1a};
-use crate::systems::{Cfg, SystemReport};
+use crate::json::fnv1a;
 
 /// A system that did not produce its row.
 ///
@@ -63,214 +65,6 @@ impl Provenance {
         }
     }
 }
-
-/// Write one run's record and index line. Returns the record's path.
-pub fn write(
-    results_dir: &Path,
-    cfg: &Cfg,
-    shop: &crate::systems::shop::ShopCfg,
-    host: &Host,
-    prov: &Provenance,
-    reports: &[SystemReport],
-    skipped: &[Skipped],
-) -> Result<PathBuf, String> {
-    let lane = results_dir.join(&host.key);
-    std::fs::create_dir_all(&lane).map_err(|e| format!("mkdir: {e}"))?;
-    let name = format!("{}-{}.json", prov.timestamp, prov.git_sha);
-    let path = lane.join(&name);
-
-    std::fs::write(&path, record(cfg, shop, host, prov, reports, skipped))
-        .map_err(|e| format!("write record: {e}"))?;
-    append_index(results_dir, host, prov, reports, skipped)?;
-    Ok(path)
-}
-
-fn record(
-    cfg: &Cfg,
-    shop: &crate::systems::shop::ShopCfg,
-    host: &Host,
-    prov: &Provenance,
-    reports: &[SystemReport],
-    skipped: &[Skipped],
-) -> String {
-    let mut j = Json::new();
-    j.obj(None, |j| {
-        j.str("schema", "wavedb-bench/1");
-        j.str("timestamp", &prov.timestamp);
-        j.obj(Some("provenance"), |j| {
-            j.str("git_sha", &prov.git_sha);
-            j.boolean("dirty", prov.dirty);
-            j.str("flake_lock_fnv1a", &prov.flake_lock);
-            j.ratio("load_average_at_start", prov.load_average);
-            j.boolean("caged", prov.caged);
-            j.boolean("forced", prov.forced);
-        });
-        j.obj(Some("host"), |j| {
-            j.str("key", &host.key);
-            j.str("cpu", &host.cpu);
-            j.num("cores", host.cores);
-            j.num("cpu_budget", host.cpu_budget);
-            j.num("mem_bytes", host.mem_bytes);
-            j.num("mem_budget_bytes", host.mem_budget);
-            j.str("kernel", &host.kernel);
-            j.str("filesystem", &host.filesystem);
-            match host.rotational {
-                Some(r) => j.boolean("rotational", r),
-                None => j.str("rotational", "unknown"),
-            }
-            j.boolean("virtualised", host.virtualised);
-            // Recorded, never keyed: it moves between runs on one machine.
-            // A row that looks slow is readable only beside this.
-            match (host.btrfs, host.filesystem.as_str()) {
-                (Some(s), _) => {
-                    // Both, always: the pair is what is interpretable. A high
-                    // fill beside plenty of unallocated space is a balanced
-                    // disk, not a stressed one.
-                    j.ratio("btrfs_unallocated", s.unallocated);
-                    j.ratio("btrfs_data_block_group_fill", s.data_fill);
-                }
-                // Never record "n/a" for a btrfs run: that would claim the
-                // guard had nothing to check, when it was blind.
-                (None, "btrfs") => {
-                    j.str("btrfs_space", "unreadable (probe failed)");
-                }
-                (None, _) => j.str("btrfs_space", "n/a (not btrfs)"),
-            }
-        });
-        j.obj(Some("workload"), |j| {
-            j.num("rows", cfg.rows);
-            j.num("reads", cfg.reads);
-            j.num("updates", cfg.updates);
-            j.num("seed", cfg.seed);
-            j.str("access", "uniform random over the key space");
-            j.str("os_page_cache_on_cold_read", "warm");
-        });
-        // The shop sizes, recorded for the same reason `rows` is: a row that
-        // does not say how much data it ran against is a number nobody can
-        // reproduce or compare. Without this a `--users 8000` calibration and
-        // a full `--users 200000` pass land in the corpus indistinguishable.
-        j.obj(Some("shop_workload"), |j| {
-            j.num("users", shop.users);
-            j.num("orders_max", shop.orders_max);
-            j.num("items_max", shop.items_max);
-            j.num("live_records", shop.live_records());
-            j.num("signups", shop.signups);
-            j.num("checkouts", shop.checkouts);
-            j.num("profile_reads", shop.profile_reads);
-            j.num("page_reads", shop.page_reads);
-            j.num("detail_reads", shop.detail_reads);
-        });
-        j.arr(Some("systems"), |j| {
-            for r in reports {
-                j.obj(None, |j| system(j, r));
-            }
-        });
-        // A row this pass tried to produce and could not. Recorded so a reader
-        // can tell "this system was not measured" from "this system was not
-        // asked for" — the two look identical in `systems` alone.
-        j.arr(Some("skipped"), |j| {
-            for s in skipped {
-                j.obj(None, |j| {
-                    j.str("system", &s.name);
-                    j.str("reason", &s.reason);
-                });
-            }
-        });
-        j.arr(Some("out_of_scope"), |j| {
-            j.elem("joins and ad-hoc predicates (WaveDB has none)");
-            j.elem("history comparison — RFC 0060 phase 4");
-            j.elem("server bracket: MongoDB, PostgreSQL, MySQL — phases 2-3");
-            j.elem("concurrency sweep — phase 5");
-        });
-    });
-    j.finish()
-}
-
-fn system(j: &mut Json, r: &SystemReport) {
-    j.str("system", r.system);
-    j.str("bracket", r.bracket);
-    j.str("durability_row", r.durability.name());
-    j.str("version", &r.version);
-    j.str("compression", r.compression);
-    j.boolean("retains_history", r.retains_history);
-    j.obj(Some("settings"), |j| {
-        for (k, v) in &r.settings {
-            j.str(k, v);
-        }
-    });
-    j.arr(Some("phases"), |j| {
-        for p in &r.phases {
-            j.obj(None, |j| {
-                j.str("name", p.name);
-                j.num("count", p.dist.count);
-                j.ratio("ops_per_sec", p.dist.ops_per_sec());
-                j.num("p50_ns", p.dist.p50_ns);
-                j.num("p95_ns", p.dist.p95_ns);
-                j.num("p99_ns", p.dist.p99_ns);
-                j.num("max_ns", p.dist.max_ns);
-                j.num("disk_write_bytes", p.bytes_written);
-            });
-        }
-    });
-    j.arr(Some("footprint"), |j| {
-        for (point, f) in &r.footprints {
-            j.obj(None, |j| {
-                j.str("point", point.name());
-                j.num("apparent_bytes", f.apparent_bytes);
-                j.num("allocated_bytes", f.allocated_bytes);
-                j.num("files", f.files);
-                j.ratio("bytes_per_record", f.bytes_per_record(r.live_records));
-                j.ratio("amplification", f.amplification(r.logical_bytes));
-            });
-        }
-    });
-    j.num("live_records", r.live_records);
-    j.num("logical_bytes", r.logical_bytes);
-    match &r.seed_path {
-        Some(p) => {
-            j.str("seed", p);
-            j.num("materialise_ms", r.materialise_ms);
-        }
-        None => j.str("seed", "none (filled by this run)"),
-    }
-    j.arr(Some("notes"), |j| {
-        for n in &r.notes {
-            j.elem(n);
-        }
-    });
-}
-
-fn append_index(
-    results_dir: &Path,
-    host: &Host,
-    prov: &Provenance,
-    reports: &[SystemReport],
-    skipped: &[Skipped],
-) -> Result<(), String> {
-    let index = results_dir.join("index.md");
-    if !index.exists() {
-        std::fs::write(&index, INDEX_HEADER)
-            .map_err(|e| format!("index: {e}"))?;
-    }
-    let mut text =
-        std::fs::read_to_string(&index).map_err(|e| format!("index: {e}"))?;
-    text.push_str(&crate::index::section(host, prov, reports, skipped));
-    std::fs::write(&index, text).map_err(|e| format!("index: {e}"))
-}
-
-const INDEX_HEADER: &str = "\
-# Benchmark results
-
-Append-only (RFC 0060 §7). One section per recorded run — the table it printed,
-under the machine it ran on; the JSON record beside it carries the full
-configuration. **Rows are comparable only within one host key**: a different
-machine is a different lane, never a trend line, and every heading names its
-lane for that reason.
-
-`update` columns: WaveDB retains every superseded version and the others retain
-none, so read them beside `payload` and `amp`.
-
-";
 
 fn git(repo: &Path, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("git")
