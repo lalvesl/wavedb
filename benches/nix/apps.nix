@@ -1,8 +1,13 @@
-# The two run entry points.
+# The run entry points.
 #
 # `benches/` is outside the cargo workspace on purpose (the drivers must not
-# reach the shipped dependency graph), so both build it in place against the
+# reach the shipped dependency graph), so these build it in place against the
 # checkout rather than from the store.
+#
+# The app runs the **supervisor** (`bench`), uncaged. It resolves which rows
+# this pass needs, then execs one `bench-row` per row inside its own cage
+# (RFC 0065 §2) — so the wrapper's job is now to declare the budgets and put
+# the peers on `PATH`, not to wrap the work.
 {
   pkgs,
   cage,
@@ -11,14 +16,6 @@
   rows,
 }:
 let
-  # Everything the two share: locate the checkout, point `pkg-config` at the
-  # pinned SQLite, build the runner, then exec it caged.
-  #
-  #   exports  extra environment a variant needs, as `NAME=value` pairs;
-  #   args     extra runner flags, as tokens.
-  #
-  # Both are lists rather than strings so an empty one contributes nothing at
-  # all — no stray blank line, no doubled separator in the command.
   runner =
     {
       name,
@@ -34,13 +31,20 @@ let
             set -euo pipefail
             repo="$(git rev-parse --show-toplevel)"
             export PKG_CONFIG_PATH="${pkgs.sqlite.dev}/lib/pkgconfig"
+            ${cage.exports}
             ${
               pkgs.lib.concatMapStrings (s: s + "\n") (
                 pkgs.lib.mapAttrsToList (k: v: ''export ${k}="${v}"'') exports
               )
-            }cargo build --release --manifest-path "$repo/benches/Cargo.toml"
-            ${cage.wrap} "$repo/benches/target/release/wavedb-bench" \
-              ${toString ([ ''--repo "$repo"'' ] ++ args ++ [ ''"$@"'' ])}
+            }# Both binaries: the supervisor locates `bench-row` beside itself,
+            # so they must be built from the same tree in the same place.
+            cargo build --release --manifest-path "$repo/benches/Cargo.toml" \
+              --bin bench --bin bench-row
+            exec "$repo/benches/target/release/bench" \
+              --repo "$repo" \
+              --results "$repo/benches/results" \
+              --cage-revision ${cage.revision} \
+              ${toString (args ++ [ ''"$@"'' ])}
           '';
         }
       }/bin/${name}";
