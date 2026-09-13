@@ -176,7 +176,7 @@ where
     Ok((phases, footprints))
 }
 
-fn notes(seeded: bool, engine: Engine) -> Vec<String> {
+pub fn notes(seeded: bool, engine: Engine) -> Vec<String> {
     let mut notes = vec![
         "Every collection op is one apply batch. The durable row takes one \
          fsync per batch; the relaxed row takes one per elapsed window \
@@ -406,7 +406,7 @@ fn read_phase<S: wavedb_core::Store>(
 /// Opened at the row's own durability (RFC 0061). Unlike the shop workload
 /// there is no untimed preload to exempt here — the fill **is** the `insert`
 /// phase — so every open in this adapter takes the row's window.
-fn open(dir: &Path, d: Durability) -> Result<PageStore, String> {
+pub fn open(dir: &Path, d: Durability) -> Result<PageStore, String> {
     PageStore::open_with(
         dir,
         &Thing::storage_entries(),
