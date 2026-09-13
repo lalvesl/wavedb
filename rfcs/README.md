@@ -415,77 +415,56 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   and 0033's three charges (a migration path, hot/cold routing, cross-tier
   consistency) are respectively already built, a compile-time bit test, and
   vacuous for immutable single-reader data.
-- **Measuring it, opened 2026-08-12; phases 1–3 landed 2026-08-13/14 —
-  [0060](0060-comparative-benchmark-suite.md) *(Partial)*:** until this, nothing
-  in the repository was measured (`crates/wavedb-net/benches/` empty, `criterion`
-  unused in the workspace table), so every performance claim above was an argument
-  about the code rather than a number. 0060 is a reproducible **insert / read /
-  update** comparison against **MongoDB**, PostgreSQL, MySQL and SQLite. Mongo is
-  the reference peer, being the closest model — a document *is* a record (one
-  self-describing value, no join to reassemble), `_id` *is* an anchor, both encode
-  client-side, and the oplog is structurally the recency chain
-  ([0022](0022-live-sync-navigation-catchup.md)). It runs through
-  `nix run .#bench`, so `flake.lock` pins the *competitor* versions alongside the
-  toolchain, and the **filled datasets are themselves derivations** — the fill is a
-  pure function of (system, version, size, seed), so the Nix store caches it and a
-  bump correctly invalidates it, where a `~/.cache` dir would hand a PG 18 datadir
-  to PG 19. **Every run is committed** to `benches/results/`, keyed by a host
-  fingerprint (rows compare only within one machine lane), the WaveDB SHA and the
-  seed store paths, making a regression bisectable. The rest is what makes the
-  numbers mean anything: **durability** is a row dimension, not a setting (WaveDB
-  `fsync`s once per op by default; the relaxed row the first pass had no way to
-  offer is now a `StoreOptions` argument —
-  [0061](0061-relaxed-durability-window.md) — and still to be wired into the
-  adapters), and **transport** is two brackets never merged
-  (engine vs SQLite in-process; `quick-node` vs Mongo/PG/MySQL over sockets). This
-  pass compares **without history on the other side** by decision: WaveDB retains
-  every version ([0009](0009-anchors-succession-and-history.md)) and they retain
-  none, so the update row carries that annotation and a mandatory footprint
-  column rather than laundering the difference into a speed claim — the `+history`
-  control and the version-walk read are designed but deferred to phase 4.
-  **Storage is a headline metric**, measured at three points (hot / settled /
-  compacted, since each system defers different work) and reported *decomposed* —
-  live bytes vs retained history vs page slack, plus an amplification ratio
-  against the identical logical dataset. WaveDB is expected to lose it outright;
-  the useful output is which share of the gap is the price of a feature and which
-  share is untuned overhead. Page slack comes almost free from the
-  `BlockDescriptor` occupation gauge (`block.rs:73`), and compression defaults are
-  recorded per system (WiredTiger snappy-by-default vs uncompressed InnoDB/heap vs
-  WaveDB's zstd dictionaries), with Mongo measured both ways.
-  Predictions are written *before* the first run, including where WaveDB should
-  lose: bulk insert badly, and concurrent writes against Mongo hardest of all,
-  since one op is one batch is one barrier and there is no group commit to
-  amortise it — sizing that gap is half the point.
-  **Both brackets are built** (phases 1–3, the last on 2026-08-14): `benches/`
-  outside the workspace, `nix run .#bench`, all five seed derivations, the
-  corpus, the guards, and nine rows — each server adapter starting its own
-  server in the run's scratch directory and taking its write bytes from that
-  server's `/proc/<pid>/io`. **A second workload** landed the same day (§3.1):
-  an e-commerce schema — users, orders, line items, `#[wavedb::list]` paged at
-  ten, and **one tenant per user** — whose phases are what a customer waits on
-  (signup, checkout, profile, order page, order detail) and which reports
-  **milliseconds p50/p99 rather than a rate**, because a rate hides the tail a
-  page render lives on. Its `checkout` is the measurement no micro benchmark can
-  make: the other four commit an order and its line items in one transaction for
-  one barrier, and WaveDB, having no multi-record transaction, pays one barrier
-  per record. The history control (phase 4) and the concurrency
-  sweep (phase 5) are not built. What the measurements have said so far, none of
-  it recorded (the load guard refused): a **harness bug the method caught before
-  the corpus did** — journal retirement is generational
-  ([0047](0047-generational-journal-retirement.md)), so quiescing with one
-  checkpoint counts a whole retained journal as stored data and reported a 1.4 MB
-  database as 34 MB; the **storage prediction is wrong**, WaveDB settling at
-  0.93× amplification against SQLite's 1.20× *while retaining every version*
-  (the zstd dictionaries pay for the history and then some); and the real
-  outlier is the **cold read** — hot reads 14× SQLite, cold reads ~950× slower
-  and degrading with scale, on an NVMe with the whole database in page cache, so
-  the miss path is CPU, not IO, and it is the same defect as the update row
-  (an update reads before it writes). Two measurement rules came out of building
-  the server bracket, both in §4.1: **preallocated log capacity is reported
-  apart from payload** (MongoDB's journal is 200 MB beside a 22 MB collection,
-  MySQL's redo+binlog 150 MB — configuration, not data), and the **empty-system
-  baseline** is recorded as a correction term (an empty PostgreSQL is ~24 MB of
-  catalogs, an empty MySQL ~55 MB).
+- **Measuring it, opened 2026-08-12; built 2026-08-13/24, then restructured —
+  [0060](0060-comparative-benchmark-suite-DEPRECATED.md) *(Deprecated)* →
+  [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) *(Planned)*:** until
+  0060, nothing in the repository was measured (`crates/wavedb-net/benches/`
+  empty, `criterion` unused), so every performance claim above was an argument
+  about the code rather than a number. 0060 built a reproducible **insert /
+  read / update** comparison against **MongoDB**, PostgreSQL, MySQL and SQLite,
+  plus a second **e-commerce** workload reporting p50/p99 milliseconds rather
+  than a rate. Mongo is the reference peer, being the closest model — a document
+  *is* a record, `_id` *is* an anchor, both encode client-side, and the oplog is
+  structurally the recency chain
+  ([0022](0022-live-sync-navigation-catchup.md)). Its methodology stands and is
+  carried forward whole: the **cage** (`systemd-run` bounds memory *and page
+  cache*, `taskset` the CPUs, `bwrap` only the PID namespace) with every
+  server's cache pinned to the same 256 MB, because each otherwise sizes itself
+  from the machine's RAM rather than the cgroup's; **footprint at four points**
+  with preallocated log capacity split from payload (MongoDB's journal is
+  200 MB beside a 22 MB collection — configuration, not data) and an empty-system
+  baseline as a correction term; **seeds as Nix derivations**, so a
+  `flake.lock` bump invalidates a datadir that a `~/.cache` dir would hand to
+  the wrong major version; and predictions written *before* the first run.
+  What it measured already moved the design: the **storage prediction was
+  wrong** — WaveDB settles at 0.93× amplification against SQLite's 1.20× *while
+  retaining every version*, the zstd dictionaries paying for the history and
+  then some — while the real outlier is the **cold read**, ~950× slower than hot
+  on an NVMe with the database in page cache, so the miss path is CPU and not
+  IO, and it is the same defect as the update row (an update reads before it
+  writes). It also showed the write cost is the **barrier, not the bytes**,
+  which is what [0061](0061-relaxed-durability-window.md) answers.
+  **0065 supersedes the shape, not the method.** 0060 made *the run* the unit —
+  one process, every system in sequence, one JSON — and that bound in three
+  places: peers were remeasured on every ~50-minute pass although the WaveDB
+  commit is not among their inputs; there was no multi-threaded WaveDB row and
+  could not be, since a harness driving `Store` directly has no requests to
+  route (`engine.rs:184` is `Shards::start(store, 1)`, and its comment is right
+  about why); and generation ran *serially with* the operation it fed while the
+  servers' background threads ran *concurrently with* the timed window. 0065
+  makes **the row** the unit — one `(system, variant, durability, workload,
+  tier)` measurement with its own identity, cage, process and stored file — and
+  all three resolve as consequences: a peer row's digest omits the WaveDB SHA so
+  it is reused rather than remeasured, a generator thread feeding **N = 3**
+  key-partitioned consumers is finally a source of requests (so
+  [0064](0064-pivot-owned-concurrency-PLANNED.md)'s shape becomes measurable),
+  and everything competes inside one budget. Two consequences worth naming:
+  throughput must become wall-clock while latency stays per-operation (summing
+  overlapping windows over-reports by ~N), and `StoreOptions` gains
+  `page_cache_bytes` + `record_cache_bytes` — neither reaches disk, so neither
+  folds into the `STRUCT_HASH` — so a **fill** can run uncaged with both
+  in-memory layers turned up, which is what makes the multi-million-row tiers
+  affordable to build.
 - **The relaxed row exists now, landed 2026-08-21 —
   [0061](0061-relaxed-durability-window.md) *(Implemented)*:** the measurement
   above showed the write cost is the **barrier, not the bytes** (SQLite pays
@@ -606,11 +585,11 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0056](0056-fuzzy-string-search-WIP.md) | Fuzzy string search | In progress |
 | [0057](0057-page-arena-and-checkpoint-staging.md) | The page arena and checkpoint staging | Planned |
 | [0059](0059-object-storage-capacity-tier-PLANNED.md) | Object storage as the capacity tier | Planned |
-| [0060](0060-comparative-benchmark-suite.md) | Comparative benchmark suite (vs MongoDB/PostgreSQL/MySQL/SQLite) | Partial |
 | [0061](0061-relaxed-durability-window.md) | Relaxed durability: a group-commit window | Implemented |
 | [0062](0062-relaxed-mode-refinements-PLANNED.md) | Relaxed mode refinements | Planned |
 | [0063](0063-engine-yield-map-and-interruptible-engine-PLANNED.md) | The yield map, and an interruptible engine | Planned |
 | [0064](0064-pivot-owned-concurrency-PLANNED.md) | Pivot-owned concurrency | Planned (first slice built) |
+| [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) | Benchmark suite II: the row as the unit | Planned |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
@@ -625,6 +604,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0032](0032-node-side-poll-buffer-DEPRECATED.md) | Node-side stateful poll buffer | [0022](0022-live-sync-navigation-catchup.md) |
 | [0033](0033-cold-history-slow-node-tier-DEPRECATED.md) | Cold/history slow-node tier | removed |
 | [0058](0058-per-type-actors-DEPRECATED.md) | Per-type actors, and a `Send` engine | [0064](0064-pivot-owned-concurrency-PLANNED.md) (the unit) + [0063](0063-engine-yield-map-and-interruptible-engine-PLANNED.md) (the motivation) |
+| [0060](0060-comparative-benchmark-suite-DEPRECATED.md) | Comparative benchmark suite (vs MongoDB/PostgreSQL/MySQL/SQLite) | [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) (the row, not the run) |
 
 ## Status vocabulary
 
