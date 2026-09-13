@@ -112,7 +112,9 @@ pub enum Writer {
 }
 
 impl Writer {
-    fn bytes(self) -> u64 {
+    /// This writer's cumulative disk-write counter, right now.
+    #[must_use]
+    pub fn bytes(self) -> u64 {
         match self {
             Self::Current => disk_write_bytes(),
             Self::Pid(pid) => crate::systems::server::write_bytes(pid),
