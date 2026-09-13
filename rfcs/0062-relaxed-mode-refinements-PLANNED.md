@@ -45,7 +45,7 @@ Not decided, listed in the order they are probably worth doing:
 ## Open questions
 
 1. Which of the four are worth it at all, and in what order — the measurement
-   that answers this is [RFC 0060](0060-comparative-benchmark-suite.md)'s
+   that answers this is [RFC 0060](0060-comparative-benchmark-suite-DEPRECATED.md)'s
    `wavedb/relaxed` row, which does not exist yet.
 2. Whether bounded loss can be had without a background task (a deadline
    checked by the settle drain, which already runs, is the cheap candidate).
