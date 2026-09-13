@@ -1,9 +1,4 @@
-//! A minimal JSON writer.
-//!
-//! Hand-rolled rather than `serde`: the project's stance is that byte layouts
-//! are written, not derived, and a results record is a fixed shape that needs
-//! no reflection. It also keeps the bench crate's dependency set to the
-//! competitor drivers alone.
+//! Writing JSON — the emitter every results file goes through.
 
 use std::fmt::Write as _;
 
