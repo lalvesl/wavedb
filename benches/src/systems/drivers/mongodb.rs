@@ -294,3 +294,45 @@ pub fn compact(port: u16) -> Result<(), String> {
         .map(|_| ())
         .map_err(drv)
 }
+
+/// Connect to an already-running server on `port`, with the write concern the
+/// row was configured for.
+///
+/// # Errors
+/// The connection options were rejected.
+pub fn connect_at(port: u16, journal: bool) -> Result<Client, String> {
+    let mut opts = ClientOptions::parse(format!("mongodb://127.0.0.1:{port}"))
+        .run()
+        .map_err(drv)?;
+    opts.write_concern = Some(
+        WriteConcern::builder()
+            .w(Acknowledgment::Nodes(1))
+            .journal(journal)
+            .build(),
+    );
+    // One connection, like every other row: a pool would quietly measure
+    // concurrency the other adapters do not have.
+    opts.max_pool_size = Some(1);
+    Client::with_options(opts).map_err(drv)
+}
+
+/// Stop whatever is in `held` and start a replacement, which is how this
+/// system empties the WiredTiger cache.
+///
+/// # Errors
+/// The slot was empty or poisoned, or the server would not come back.
+pub fn restart_server(
+    held: &Shared,
+    dir: &Path,
+    port: u16,
+) -> Result<(), String> {
+    let mut slot = held
+        .lock()
+        .map_err(|_| "the server mutex was poisoned".to_string())?;
+    let old = slot
+        .take()
+        .ok_or_else(|| "the server is already gone".to_string())?;
+    stop(old, dir)?;
+    *slot = Some(start(dir, port)?);
+    Ok(())
+}
