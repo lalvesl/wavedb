@@ -19,17 +19,10 @@
 #[cfg(feature = "servers")]
 pub mod mongodb;
 #[cfg(feature = "servers")]
-mod mongodb_phases;
-#[cfg(feature = "servers")]
 pub mod mysql;
 #[cfg(feature = "servers")]
-mod mysql_phases;
-#[cfg(feature = "servers")]
 pub mod postgres;
-#[cfg(feature = "servers")]
-mod postgres_phases;
 pub mod sqlite;
-mod sqlite_phases;
 pub mod wavedb;
 
 use std::path::PathBuf;
@@ -89,3 +82,37 @@ pub const PHASES: [&str; 5] = [
     "order_page",
     "order_detail",
 ];
+
+impl ShopCfg {
+    /// Orders the preload creates. The generator needs it to mint checkout
+    /// ids: the preload numbers orders `1..=preloaded_orders`, so a measured
+    /// checkout starts one past that.
+    ///
+    /// Computed rather than queried, and that is the point of the split: a
+    /// generator that asked the database for `MAX(id)` would be doing database
+    /// work on the thread whose whole job is *not* to.
+    #[must_use]
+    pub fn preloaded_orders(&self) -> u64 {
+        (0..self.users)
+            .map(|u| crate::shop::shopping_count(u, self.seed, self.orders_max))
+            .sum()
+    }
+
+    /// Line items the preload creates, numbered the same way.
+    #[must_use]
+    pub fn preloaded_items(&self) -> u64 {
+        (0..self.users)
+            .flat_map(|u| {
+                (0..crate::shop::shopping_count(u, self.seed, self.orders_max))
+                    .map(move |s| {
+                        crate::shop::product_count(
+                            u,
+                            s,
+                            self.seed,
+                            self.items_max,
+                        )
+                    })
+            })
+            .sum()
+    }
+}
