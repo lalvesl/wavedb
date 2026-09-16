@@ -11,6 +11,7 @@ pub mod consumer;
 pub mod driver;
 pub mod micro;
 pub mod run;
+pub mod shop;
 pub mod workload;
 
 pub use driver::{Driver, DriverFactory};
