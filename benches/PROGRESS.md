@@ -13,14 +13,16 @@ RFC's own status header can carry the answer.
 
 ## Where this stands
 
-**Phase 1 complete** (the row as the unit, caged per row, corpus, reuse).
-**Phase 2 in progress**: **every `micro` row on all five systems now runs
-through the harness end to end** — real wall clock, pooled percentiles,
-per-phase `bytes_written` attributed to the right process, and all four
-footprint points. Proven by running one row of each system against live
-servers and reading the stored JSON back. The RFC 0060 bridge
-(`src/row/bridge.rs`) now serves the `shop` workload only, and retires when
-step 2.6 ports it.
+**Phases 1 and 2 complete.** Every row of both workloads on all five systems
+runs through the harness end to end — real wall clock, pooled percentiles,
+per-phase `bytes_written` attributed to the right process, and the footprint
+points. Proven by running one row of each system and workload against live
+servers and reading the stored JSON back.
+
+**The RFC 0060 bridge is gone.** `src/row/bridge.rs` is deleted, and so are
+the ten `run` functions that each owned their own loop, timing and phase
+boundaries. What survives of `systems/` is the part that was never a
+measurement: the preloads, the DDL and the open helpers.
 
 Run it: `nix run .#bench -- --dry-run` (the plan), then without `--dry-run`.
 Live-server tests need the pinned peers on `PATH` — see
@@ -75,9 +77,9 @@ pass costs the pass.
 | 2.5c | wavedb driver (Direct + Sharded) | `src/systems/drivers/wavedb.rs` | ✅ |
 | 2.5d | postgres / mysql / mongodb drivers + lifecycle | `src/systems/drivers/` | ✅ |
 | 2.5e | Live-server integration tests | `tests/server_drivers.rs` | ✅ |
-| 2.6 | `shop` workload generator + 5 shop drivers | — | ⬜ |
-| 2.7 | `Shards::start(store, N)` for the sharded shop row | — | ⬜ |
-| 2.8 | Debug assertion: a consumer only ever sees its own partition | — | ⬜ |
+| 2.6 | `shop` workload generator + 5 shop drivers | `harness/shop.rs`, `drivers/shop/` | ✅ |
+| 2.7 | `Shards::start(store, N)` for the sharded shop row | `drivers/shop/engine.rs` | ✅ |
+| 2.8 | Debug assertion: a consumer only ever sees its own partition | `drivers/shop/wavedb.rs` | ✅ |
 | 2.9 | Wall-clock throughput vs per-op percentiles | `src/harness/run.rs` | ✅ |
 | 2.10 | `Phase` carries `wall_ns` + `consumers`; `ops_per_sec` removed | `src/corpus/record.rs` | ✅ |
 | 2.11 | `consumers` in the identity digest | `src/corpus/record.rs` | ✅ |
@@ -158,6 +160,17 @@ The reason this file matters more than the checklist above.
   throughput and per-operation percentiles (RFC 0065 §4).
 
 ### Method findings
+
+- **The sharded shop row is the first measurement of actual parallelism in
+  this project, and it is ~2.3×.** Three consumers over one disk actor, 300
+  users (a smoke shape, uncaged): `profile` 6 951/s against `single`'s 3 021,
+  `order_page` 2 047 against 818, `order_detail` 619 against 286. `checkout`
+  is 443 against 323 — writes serialise at the actor, reads do not.
+  **Read it with the same caveat as the micro row**: the sharded consumers
+  each hold a `ShardStore` read cache the direct row has no equivalent of, so
+  part of that gap is RFC 0044's missing read cache rather than concurrency.
+  Separating the two needs a direct row with a read cache, which does not
+  exist to be measured.
 
 - **A collection is indivisible, so `micro` cannot be sharded.** Its B+tree
   nodes and chain segments carry ids of their own and belong to the *Pivot's*
@@ -243,6 +256,34 @@ The reason this file matters more than the checklist above.
 
 Kept because they are the shape of mistake this design invites.
 
+- **A failed row leaked its server, and the leak corrupted the next run.**
+  `stop` only runs on the success path, so a row that failed mid-way unwound
+  past it and left `mongod` holding the data directory. The scratch is named
+  by the row's **digest**, so the next attempt at that row cleared a directory
+  another process was still writing to: the second `mongod` died on
+  `failed to read 4096 bytes at offset 77824` in `WiredTiger.wt`. `Server`
+  now has a `Drop` that kills an unstopped child — a kill rather than the
+  system's own shutdown, because that path only has to guarantee the process
+  is gone.
+- **`direct()` was not a direct connection.** The shop MongoDB row starts a
+  `mongod` with `--replSet` and initiates it, and the client used to do that
+  had no `directConnection=true`. An uninitiated replica-set member is a
+  server an ordinary client will not select, so the readiness ping never got
+  an answer and the row died on a 300-second timeout beside a perfectly
+  healthy server. The connection that *initiates* a set cannot require the
+  set to exist.
+- **A swallowed error became a timeout with no cause.** `replSetInitiate`'s
+  result was discarded as "idempotent on a restart", so the failure above
+  reported `not ready after 300s` and nothing else. It is now kept and folded
+  into the wait's error; only `already initialized` is ignored.
+- **`compact` refuses on a replica set primary.** It needs `force: true`,
+  which is right here: the objection is that it slows down other running
+  operations, and there are none — the row is between its phases and its
+  footprint.
+- **A row could file a consumer count it did not use.** `wavedb/single` on
+  shop was asked for three consumers, ran on one, and stored `consumers: 3`
+  in its identity beside `consumers: "1"` in its settings. The count is a
+  row-identity field, so the row now refuses rather than measuring.
 - **The lane key named a machine no number ran on.** The supervisor runs
   uncaged, so `Host::probe` fingerprinted 8 CPUs and 15 835 MB while every row
   it scheduled measured at 4 CPUs and 500 MB. Fixed with
