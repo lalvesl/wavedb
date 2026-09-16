@@ -8,107 +8,20 @@
 
 use std::path::Path;
 
-use futures::TryStreamExt as _;
 use futures::executor::block_on;
 use wavedb_core::{LocalHandle, U48};
 use wavedb_storage::{PageStore, StoreOptions};
 
 use super::ShopCfg;
-use crate::footprint::{Footprint, Point};
-use crate::metrics::{self, Phase};
-use crate::schema::Rng;
 use crate::shop::{
-    PAGE, Product, ProductLists, Shopping, ShoppingLists, User, logical_bytes,
-    product_count, product_row, shopping_count, shopping_row, user_row,
+    Product, Shopping, User, product_count, product_row, shopping_count,
+    shopping_row, user_row,
 };
-use crate::systems::{Durability, SystemReport};
-
-pub fn run(cfg: &ShopCfg, d: Durability) -> Result<SystemReport, String> {
-    let dir = cfg.work_dir.join(match d {
-        Durability::Durable => "shop-wavedb-durable",
-        Durability::Relaxed => "shop-wavedb-relaxed",
-    });
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
-
-    preload(cfg, &dir)?;
-
-    // Reopened: the per-type cache is a *write* cache, so everything the
-    // preload just wrote would otherwise still be warm and the read phases
-    // would measure RAM. Every other adapter restarts its server here for the
-    // same reason. The reopen is also where the measured durability is chosen
-    // — the fill's window never survives it.
-    let store = open_measured(&dir, d)?;
-    let mut phases = vec![
-        signup_phase(cfg, &store),
-        checkout_phase(cfg, &store),
-        profile_phase(cfg, &store),
-        page_phase(cfg, &store),
-        detail_phase(cfg, &store),
-    ];
-    phases.retain(|p| p.dist.count > 0);
-
-    let footprints = vec![
-        (Point::Hot, measure(&dir)?),
-        (Point::Settled, quiesce(&store, &dir)?),
-    ];
-    drop(store);
-
-    Ok(SystemReport {
-        system: "wavedb",
-        bracket: "embedded",
-        workload: "shop",
-        durability: d,
-        version: env!("CARGO_PKG_VERSION").into(),
-        settings: vec![
-            ("tenancy".into(), "one tenant per user".into()),
-            (
-                "list".into(),
-                format!("Shopping by bought_at, page = {PAGE}"),
-            ),
-            ("transaction".into(), "none: one op is one batch".into()),
-            // The measured window, named so a reader can discount the row
-            // against the competitors' own relaxed knobs (RFC 0061).
-            (
-                "relax_window".into(),
-                match d {
-                    Durability::Durable => {
-                        "0 — one barrier per batch".to_string()
-                    }
-                    Durability::Relaxed => format!("{RELAXED_WINDOW:?}"),
-                },
-            ),
-            // Recorded separately: the untimed fill runs its own window
-            // whichever row this is, so it is never what the row reports.
-            (
-                "preload".into(),
-                format!("relax_window {PRELOAD_WINDOW:?}, untimed"),
-            ),
-        ],
-        compression: "per-type zstd dictionaries",
-        retains_history: true,
-        phases,
-        footprints,
-        live_records: cfg.live_records(),
-        logical_bytes: logical_bytes(
-            cfg.users,
-            cfg.seed,
-            cfg.orders_max,
-            cfg.items_max,
-        ),
-        notes: vec![
-            "A checkout is one order plus its line items, and WaveDB has no \
-             multi-record transaction: it costs one batch — one barrier — per \
-             record, where the other four commit the whole checkout once."
-                .into(),
-        ],
-        seed_path: None,
-        materialise_ms: 0,
-    })
-}
+use crate::systems::Durability;
 
 /// Fill: every user is a tenant, holding an order collection, each order
 /// holding a line-item collection. Not timed.
-fn preload(cfg: &ShopCfg, dir: &Path) -> Result<(), String> {
+pub fn preload(cfg: &ShopCfg, dir: &Path) -> Result<(), String> {
     let store = open_relaxed(dir)?;
     for u in 0..cfg.users {
         block_on(create_user(&store, cfg, u))?;
@@ -210,131 +123,13 @@ async fn create_order(
     Ok(())
 }
 
-fn signup_phase(cfg: &ShopCfg, store: &PageStore) -> Phase {
-    metrics::phase(
-        "signup",
-        |lat| {
-            for i in 0..cfg.signups {
-                let u = cfg.users + i;
-                lat.time(|| {
-                    block_on(create_user(store, cfg, u)).expect("signup");
-                });
-            }
-        },
-        cfg.signups as usize,
-    )
-}
-
-fn checkout_phase(cfg: &ShopCfg, store: &PageStore) -> Phase {
-    let mut rng = Rng::new(cfg.seed ^ 0xC0FF_EE00_C0FF_EE00);
-    metrics::phase(
-        "checkout",
-        |lat| {
-            for i in 0..cfg.checkouts {
-                let u = rng.below(cfg.users.max(1));
-                // Past the preloaded orders, so a checkout always appends.
-                let s = shopping_count(u, cfg.seed, cfg.orders_max) + i;
-                lat.time(|| {
-                    block_on(create_order(store, cfg, u, s)).expect("checkout");
-                });
-            }
-        },
-        cfg.checkouts as usize,
-    )
-}
-
-fn profile_phase(cfg: &ShopCfg, store: &PageStore) -> Phase {
-    let mut rng = Rng::new(cfg.seed ^ 0x0000_0001);
-    metrics::phase(
-        "profile",
-        |lat| {
-            for _ in 0..cfg.profile_reads {
-                let u = rng.below(cfg.users.max(1));
-                let db = tenant(store, u);
-                let got = lat.time(|| block_on(User::get(&db)).expect("get"));
-                assert!(got.is_some(), "profile: user {u} is missing");
-            }
-        },
-        cfg.profile_reads as usize,
-    )
-}
-
-/// The order-history page: the user, then one page of ten orders straight off
-/// the declared list — one descent to the page boundary, not a walk.
-fn page_phase(cfg: &ShopCfg, store: &PageStore) -> Phase {
-    let mut rng = Rng::new(cfg.seed ^ 0x0000_0002);
-    metrics::phase(
-        "order_page",
-        |lat| {
-            for _ in 0..cfg.page_reads {
-                let u = rng.below(cfg.users.max(1));
-                let page = rng.below(2) as usize;
-                let db = tenant(store, u);
-                let n = lat.time(|| {
-                    block_on(async {
-                        let user = User::get(&db).await?.expect("user");
-                        let orders: Vec<Shopping> =
-                            Shopping::collection(user.shoppings)
-                                .listed_by_bought_at_at_page(&db, page, PAGE)
-                                .try_collect()
-                                .await?;
-                        Ok::<usize, wavedb_core::Error>(orders.len())
-                    })
-                    .expect("order page")
-                });
-                assert!(n > 0 || page > 0, "order_page: empty first page");
-            }
-        },
-        cfg.page_reads as usize,
-    )
-}
-
-/// One order's line items: resolve the order from its page, then read its own
-/// collection's first page.
-fn detail_phase(cfg: &ShopCfg, store: &PageStore) -> Phase {
-    let mut rng = Rng::new(cfg.seed ^ 0x0000_0003);
-    metrics::phase(
-        "order_detail",
-        |lat| {
-            for _ in 0..cfg.detail_reads {
-                let u = rng.below(cfg.users.max(1));
-                let db = tenant(store, u);
-                let n = lat.time(|| {
-                    block_on(async {
-                        let user = User::get(&db).await?.expect("user");
-                        let orders: Vec<Shopping> =
-                            Shopping::collection(user.shoppings)
-                                .listed_by_bought_at_at_page(&db, 0, PAGE)
-                                .try_collect()
-                                .await?;
-                        let order = orders.first().expect("order");
-                        let items: Vec<Product> =
-                            Product::collection(order.items)
-                                .listed_by_name_at_page(&db, 0, PAGE)
-                                .try_collect()
-                                .await?;
-                        Ok::<usize, wavedb_core::Error>(items.len())
-                    })
-                    .expect("order detail")
-                });
-                assert!(n > 0, "order_detail: order with no items");
-            }
-        },
-        cfg.detail_reads as usize,
-    )
-}
-
-fn tenant(store: &PageStore, u: u64) -> LocalHandle<'_, PageStore> {
-    LocalHandle::new(store, U48::from(u32::try_from(u + 1).unwrap_or(1)))
-}
-
 /// The **measured** store, opened at the row's own durability: the default
 /// (one barrier per batch) or [`RELAXED_WINDOW`](crate::RELAXED_WINDOW).
 ///
 /// Each type contributes a different number of `StructStorage` slots — a
 /// Unique one, a NonUnique with a declared list six — so they are collected
 /// rather than concatenated as arrays.
-fn open_measured(dir: &Path, d: Durability) -> Result<PageStore, String> {
+pub fn open_measured(dir: &Path, d: Durability) -> Result<PageStore, String> {
     open_with(
         dir,
         StoreOptions {
@@ -397,30 +192,10 @@ fn open_with(dir: &Path, options: StoreOptions) -> Result<PageStore, String> {
         .map_err(|e| format!("open: {e}"))
 }
 
-/// Checkpoint until the footprint stops moving — journal retirement is
-/// generational (RFC 0047), so one round proves nothing.
-fn quiesce(store: &PageStore, dir: &Path) -> Result<Footprint, String> {
-    const MAX_ROUNDS: usize = 6;
-    let mut last = u64::MAX;
-    for _ in 0..MAX_ROUNDS {
-        store.drain().map_err(|e| format!("drain: {e}"))?;
-        store
-            .commit_journal()
-            .map_err(|e| format!("checkpoint: {e}"))?;
-        let now = measure(dir)?;
-        if now.allocated_bytes == last && !store.has_pending() {
-            return Ok(now);
-        }
-        last = now.allocated_bytes;
-    }
-    measure(dir)
-}
-
-fn measure(dir: &Path) -> Result<Footprint, String> {
-    Footprint::split(dir, is_log).map_err(|e| format!("footprint: {e}"))
-}
-
-fn is_log(path: &Path) -> bool {
-    path.file_name()
-        .is_some_and(|n| n.to_string_lossy().starts_with("journal_"))
+/// The tenant a user's records live under. `u + 1` because tenant 0 is not a
+/// tenant, and the row's user numbering starts at zero — the same mapping
+/// `drivers::shop::wavedb` uses, so a preloaded record and a measured one
+/// address the same place.
+fn tenant(store: &PageStore, u: u64) -> LocalHandle<'_, PageStore> {
+    LocalHandle::new(store, U48::from(u32::try_from(u + 1).unwrap_or(1)))
 }
