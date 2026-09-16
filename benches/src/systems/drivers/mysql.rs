@@ -15,8 +15,11 @@ use mysql::prelude::Queryable;
 use mysql::{Conn, OptsBuilder, Statement, params};
 
 use crate::harness::{Driver, DriverFactory};
+
+use super::mysql_server::{sock, start, stop};
+
 use crate::plan::op::MicroOp;
-use crate::systems::server::{self, Server};
+use crate::systems::server::Server;
 
 pub const DDL: &str = "
 CREATE TABLE thing (
@@ -194,87 +197,8 @@ impl Driver for MysqlDriver {
     }
 }
 
-fn sql(e: mysql::Error) -> String {
+pub(super) fn sql(e: mysql::Error) -> String {
     format!("mysql: {e}")
-}
-
-/// The socket path, kept short on purpose: a unix socket is capped at ~107
-/// bytes, which a nested temp directory can reach on its own.
-#[must_use]
-pub fn sock(dir: &Path) -> PathBuf {
-    dir.join("s")
-}
-
-/// Create an empty datadir.
-///
-/// # Errors
-/// `mysqld --initialize-insecure` refusing.
-pub fn init(dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {e}"))?;
-    server::run(
-        "mysqld",
-        &[
-            "--initialize-insecure",
-            &format!("--datadir={}", dir.join("data").display()),
-            &format!("--log-error={}", dir.join("init.log").display()),
-        ],
-    )
-    .map(|_| ())
-}
-
-/// Start a server in `dir` and wait until it answers.
-///
-/// `flush` is `innodb_flush_log_at_trx_commit`, passed at startup rather than
-/// `SET GLOBAL` so the value is what the server ran under from its first
-/// write.
-///
-/// # Errors
-/// The process failing to spawn, or never becoming connectable.
-pub fn start(dir: &Path, flush: &'static str) -> Result<Server, String> {
-    let log = dir.join("mysqld.log");
-    let my = Server::spawn(
-        "mysqld",
-        &[
-            &format!("--datadir={}", dir.join("data").display()),
-            &format!("--socket={}", sock(dir).display()),
-            &format!("--pid-file={}", dir.join("mysqld.pid").display()),
-            &format!("--log-error={}", log.display()),
-            &format!("--innodb-flush-log-at-trx-commit={flush}"),
-            &format!("--innodb-buffer-pool-size={}", server::CACHE_MYSQL),
-            // No TCP: the socket is in the run's own directory, so two rows
-            // cannot reach each other's server even by accident.
-            "--skip-networking",
-        ],
-        &dir.join("mysqld.out"),
-    )?;
-    server::wait_for("mysqld", server::STARTUP_SECS, || {
-        Conn::new(
-            OptsBuilder::new()
-                .socket(Some(sock(dir).display().to_string()))
-                .user(Some("root")),
-        )
-        .is_ok()
-    })
-    .map_err(|e| format!("{e}\n{}", server::log_tail(&log, 10)))?;
-    Ok(my)
-}
-
-/// Stop with `mysqladmin shutdown`, not a signal: InnoDB's quiescence *is* a
-/// clean shutdown — it flushes the buffer pool and completes purge.
-///
-/// # Errors
-/// `mysqladmin` refusing, or the process failing to reap.
-pub fn stop(my: Server, dir: &Path) -> Result<(), String> {
-    my.stop(
-        "mysqladmin",
-        &[
-            "--socket",
-            &sock(dir).display().to_string(),
-            "-u",
-            "root",
-            "shutdown",
-        ],
-    )
 }
 
 impl MysqlDriver {
