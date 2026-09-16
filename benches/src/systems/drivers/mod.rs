@@ -19,6 +19,9 @@ pub mod mongodb;
 #[cfg(feature = "servers")]
 pub mod mysql;
 #[cfg(feature = "servers")]
+pub mod mysql_server;
+#[cfg(feature = "servers")]
 pub mod postgres;
+pub mod shop;
 pub mod sqlite;
 pub mod wavedb;
