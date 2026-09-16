@@ -107,7 +107,8 @@ pub fn postgres(run: &RowRun, d: Durability) -> Result<RowRecord, String> {
 /// The datadir would not initialise, the server would not start, or an
 /// operation was refused.
 pub fn mysql(run: &RowRun, d: Durability) -> Result<RowRecord, String> {
-    use drivers::mysql as my;
+    use drivers::mysql as mydrv;
+    use drivers::mysql_server as my;
 
     let cfg = &run.cfg;
     let dir = cfg.work_dir.join(format!("mysql-{}", d.name()));
@@ -128,7 +129,7 @@ pub fn mysql(run: &RowRun, d: Durability) -> Result<RowRecord, String> {
     if !seeded {
         points.take(Point::Baseline)?;
     }
-    let factory = my::Factory {
+    let factory = mydrv::Factory {
         dir: dir.clone(),
         database: "bench".into(),
         create: !seeded,
@@ -141,7 +142,7 @@ pub fn mysql(run: &RowRun, d: Durability) -> Result<RowRecord, String> {
     points.take(Point::Settled)?;
 
     let running = share(my::start(&dir, flush)?);
-    my::compact(&dir, "bench")?;
+    mydrv::compact(&dir, "bench")?;
     stop(&running, |s| my::stop(s, &dir))?;
     points.take(Point::Compacted)?;
 
