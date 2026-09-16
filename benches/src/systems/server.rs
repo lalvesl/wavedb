@@ -214,3 +214,28 @@ pub fn log_tail(log: &Path, lines: usize) -> String {
 pub const CACHE_GB: &str = "0.25";
 pub const CACHE_MYSQL: &str = "256M";
 pub const CACHE_POSTGRES: &str = "256MB";
+
+/// Kill a server that was never stopped.
+///
+/// Not tidiness. A row that fails mid-way — a refused operation, a preload
+/// that would not load — unwinds past its `stop`, and the child keeps running
+/// with the data directory open. The next run of that row then **clears a
+/// directory another process is still writing to**, because the scratch is
+/// named by the row's digest and is therefore the same path every time. That
+/// is not a hypothetical: it truncated a `WiredTiger.wt` and the second
+/// `mongod` died on `failed to read 4096 bytes at offset 77824`.
+///
+/// A kill rather than the system's own shutdown command, and that is the right
+/// asymmetry: [`Server::stop`] means "flush and close" and belongs on the path
+/// where the measurement succeeded. This one only has to guarantee the process
+/// is not there any more.
+impl Drop for Server {
+    fn drop(&mut self) {
+        // `stop` reaps the child, so this sees `Some(status)` and does
+        // nothing. Only an unstopped server is still running here.
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
