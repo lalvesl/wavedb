@@ -103,7 +103,8 @@ fn a_mysql_micro_row_runs_against_a_live_server() {
         eprintln!("SKIP: mysqld is not on PATH (peers come from flake.lock)");
         return;
     }
-    use wavedb_bench::systems::drivers::mysql::{Factory, init, start, stop};
+    use wavedb_bench::systems::drivers::mysql::Factory;
+    use wavedb_bench::systems::drivers::mysql_server::{init, start, stop};
 
     let scratch = Scratch::new("my");
     init(&scratch.0).expect("initialize");
