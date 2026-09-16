@@ -303,3 +303,37 @@ pub fn compact(dir: &Path) -> Result<(), String> {
     let mut client = connect(dir)?;
     client.batch_execute("VACUUM FULL").map_err(sql)
 }
+
+/// Connect to an already-running cluster in `dir`. The shop driver's entry
+/// point into the same connection settings the micro driver uses.
+///
+/// # Errors
+/// The server refused the connection.
+pub fn connect_at(dir: &Path) -> Result<Client, String> {
+    connect(dir)
+}
+
+/// Stop whatever is in `held` and start a replacement under the same
+/// durability, leaving it in the slot.
+///
+/// The restart is what empties `shared_buffers`, which is how this system
+/// makes a read cold. Shared because `Server::stop` consumes the value: a
+/// restart has to take it out and put a new one back.
+///
+/// # Errors
+/// The slot was empty or poisoned, or the server would not come back.
+pub fn restart_server(
+    held: &Shared,
+    dir: &Path,
+    sync: &'static str,
+) -> Result<(), String> {
+    let mut slot = held
+        .lock()
+        .map_err(|_| "the server mutex was poisoned".to_string())?;
+    let old = slot
+        .take()
+        .ok_or_else(|| "the server is already gone".to_string())?;
+    stop(old, dir)?;
+    *slot = Some(start(dir, sync)?);
+    Ok(())
+}
