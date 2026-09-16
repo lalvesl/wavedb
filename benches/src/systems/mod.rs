@@ -9,17 +9,10 @@ pub mod drivers;
 pub mod engine;
 pub mod server;
 pub mod shop;
-pub mod sqlite;
 pub mod wavedb;
 
 // The server bracket. Behind a feature so `bench-gen` — a build input of every
 // seed derivation — does not compile three database clients to write a TSV.
-#[cfg(feature = "servers")]
-pub mod mongodb;
-#[cfg(feature = "servers")]
-pub mod mysql;
-#[cfg(feature = "servers")]
-pub mod postgres;
 
 use std::path::PathBuf;
 
