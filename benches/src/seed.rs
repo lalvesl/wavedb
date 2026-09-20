@@ -71,6 +71,7 @@ pub fn fill_wavedb(dir: &Path, rows: u64, seed: u64) -> Result<(), String> {
         &Thing::storage_entries(),
         wavedb_storage::StoreOptions {
             relax_window: crate::FILL_WINDOW,
+            ..Default::default()
         },
     )
     .map_err(|e| format!("open: {e}"))?;
