@@ -147,6 +147,13 @@ impl PageCache {
         }
     }
 
+    /// The ceiling this cache was built with — what
+    /// [`bytes`](Self::bytes) is kept under.
+    #[must_use]
+    pub const fn budget(&self) -> usize {
+        self.budget
+    }
+
     /// Bytes of images held.
     #[must_use]
     pub fn bytes(&self) -> usize {
