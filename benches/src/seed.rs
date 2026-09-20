@@ -51,13 +51,52 @@ pub fn emit_tsv(out: &Path, rows: u64, seed: u64) -> Result<(), String> {
     w.flush().map_err(|e| format!("flush tsv: {e}"))
 }
 
+/// How much RAM a fill may spend (RFC 0065 §6).
+///
+/// A fill is a build, not a measurement: it runs outside the cage, nothing is
+/// timed, and the constraints that make a measurement honest do not apply. So
+/// it gets both of WaveDB's in-memory layers turned up — the numbers come from
+/// `benches/nix/params.nix`, which is also where their sum is declared.
+///
+/// [`Default`] is the engine's own, so a fill run by hand behaves like every
+/// other caller rather than quietly claiming gigabytes.
+#[derive(Debug, Clone, Copy)]
+pub struct FillProfile {
+    pub page_cache_bytes: usize,
+    pub record_cache_bytes: usize,
+    /// Journal bytes that trigger a checkpoint. The third number of the same
+    /// decision, not a tuning knob beside it: it is what turns the two cache
+    /// budgets into ceilings, since nothing may be evicted until a checkpoint
+    /// has settled it. See [`crate::FILL_CHECKPOINT_BYTES`] for why it is
+    /// large.
+    pub checkpoint_after_bytes: u64,
+}
+
+impl Default for FillProfile {
+    /// The engine's own cache budgets, so a fill run by hand behaves like
+    /// every other caller rather than quietly claiming gigabytes.
+    fn default() -> Self {
+        let o = wavedb_storage::StoreOptions::default();
+        Self {
+            page_cache_bytes: o.page_cache_bytes,
+            record_cache_bytes: o.record_cache_bytes,
+            checkpoint_after_bytes: crate::FILL_CHECKPOINT_BYTES,
+        }
+    }
+}
+
 /// Fill a WaveDB store at `dir`, then write the sidecar the benchmark needs to
 /// address it.
 ///
 /// The sidecar is not optional: a NonUnique anchor id is minted from the clock
 /// at insert (`key_nanos`), so it cannot be recomputed from the seed the way a
 /// SQL primary key can. Without the minted ids a seeded store is unreadable.
-pub fn fill_wavedb(dir: &Path, rows: u64, seed: u64) -> Result<(), String> {
+pub fn fill_wavedb(
+    dir: &Path,
+    rows: u64,
+    seed: u64,
+    profile: FillProfile,
+) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {e}"))?;
     let data = dir.join("data");
     std::fs::create_dir_all(&data).map_err(|e| format!("mkdir: {e}"))?;
@@ -71,7 +110,8 @@ pub fn fill_wavedb(dir: &Path, rows: u64, seed: u64) -> Result<(), String> {
         &Thing::storage_entries(),
         wavedb_storage::StoreOptions {
             relax_window: crate::FILL_WINDOW,
-            ..Default::default()
+            page_cache_bytes: profile.page_cache_bytes,
+            record_cache_bytes: profile.record_cache_bytes,
         },
     )
     .map_err(|e| format!("open: {e}"))?;
@@ -87,6 +127,27 @@ pub fn fill_wavedb(dir: &Path, rows: u64, seed: u64) -> Result<(), String> {
             block_on(col.insert(&db, &t))
                 .map_err(|e| format!("insert {n}: {e}"))?,
         );
+        // A bare `PageStore` has no background maintenance, so without this
+        // both the journal and the record cache grow for the whole fill —
+        // fine at 200 000 rows, fatal at 50 million.
+        //
+        // This is a **safety valve, not a schedule**. The threshold is sized
+        // so it fires rarely (see `FILL_CHECKPOINT_BYTES`): every settle
+        // rewrites pages a later settle rewrites again, so checkpointing
+        // often makes a fill slower *and* the store bigger. The one settle
+        // after the loop is what a fill actually wants.
+        //
+        // Evicting is only possible *after* the checkpoint: `evict_settled`
+        // refuses while anything is pending, and `commit_journal` drains.
+        // Nor is evicting to zero an option — it drops the hot B+tree
+        // interior nodes with everything else, and the shop preload measured
+        // that as 11 s becoming 164 s.
+        if store.journal_len() > profile.checkpoint_after_bytes {
+            store
+                .commit_journal()
+                .map_err(|e| format!("checkpoint: {e}"))?;
+            store.evict_to_budget();
+        }
     }
     // Leave the store quiesced so the first measured operation does not pay
     // for a settle round the fill postponed.
