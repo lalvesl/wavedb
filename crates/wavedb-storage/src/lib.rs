@@ -47,7 +47,7 @@ pub use directory::{Directory, bucket_index, hash_of};
 pub use error::{StorageError, StorageResult};
 pub use journal::{CommitFrame, Journal, JournalFrame};
 pub use page::SlotPage;
-pub use page_store::{PageStore, StoreOptions};
+pub use page_store::{DEFAULT_RECORD_CACHE_BYTES, PageStore, StoreOptions};
 pub use settle::Progress;
 pub use struct_storage::{
     BPTREE_NODE_STORAGE, StorageRegistry, StructDictionary, StructDirectory,
