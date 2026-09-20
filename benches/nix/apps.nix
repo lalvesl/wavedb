@@ -13,7 +13,7 @@
   cage,
   runtimeInputs,
   benchSeeds,
-  rows,
+  tier,
 }:
 let
   runner =
@@ -40,10 +40,18 @@ let
             # so they must be built from the same tree in the same place.
             cargo build --release --manifest-path "$repo/benches/Cargo.toml" \
               --bin bench --bin bench-row
+            # The tier, its row count and its revision come from ONE place
+            # (`params.nix`), and every app passes all three. Passing the name
+            # without the count is how a 100 000-row run once filed itself as
+            # `small`: the name is what the corpus keys on, the count is what
+            # was actually measured, and nothing but this line ties them.
             exec "$repo/benches/target/release/bench" \
               --repo "$repo" \
               --results "$repo/benches/results" \
               --cage-revision ${cage.revision} \
+              --tier ${tier.name} \
+              --rows ${tier.rows} \
+              --dataset-revision ${tier.rev} \
               ${toString (args ++ [ ''"$@"'' ])}
           '';
         }
@@ -51,9 +59,9 @@ let
     };
 in
 {
-  # Fill from empty, in-run. The seeds are not inputs here, so this builds
-  # nothing but the runner — the shape to reach for when what you are changing
-  # is the fill itself.
+  # Fill from empty, in-run, at the selected tier. The seeds are not inputs
+  # here, so this builds nothing but the runner — the shape to reach for when
+  # what you are changing is the fill itself.
   bench = runner { name = "bench"; };
 
   # Materialise every seed and run against them, so a repeat run skips the
@@ -68,6 +76,5 @@ in
       BENCH_SEED_MYSQL = "${benchSeeds.mysql}";
       BENCH_SEED_MONGODB = "${benchSeeds.mongodb}";
     };
-    args = [ "--rows ${rows}" ];
   };
 }
