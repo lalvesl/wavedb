@@ -82,6 +82,45 @@ rec {
 
   selected = forTier defaultTier;
 
+  # ── the fill profile (RFC 0065 §6) ─────────────────────────────────────────
+  #
+  # A fill is a **build**, not a measurement, so none of the constraints that
+  # make a measurement honest apply to it: it runs outside the cage, at the
+  # relax window, and with both of WaveDB's in-memory layers turned up. No
+  # timing is ever taken from it.
+  #
+  # Both numbers live here, and their sum is declared, because ~10 GiB on a
+  # 16.6 GiB machine with a desktop running is tight enough that changing it
+  # should be one edit rather than a hunt through builders. Raise them and
+  # `huge` fills faster; raise them too far and the builder is OOM-killed
+  # after hours of work, which is the failure this arithmetic exists to keep
+  # visible.
+  fill = {
+    # Whole block runs, still compressed (RFC 0044). The layer that pays off
+    # once the dataset stops fitting — which is what `large` and `huge` are.
+    pageCacheBytes = 6 * 1024 * 1024 * 1024;
+    # Decoded records. Not only speed: a fill that never evicts is not using
+    # memory well, it is unbounded, and at 50 million rows the difference
+    # between this number and OOM is nothing but the row count.
+    recordCacheBytes = 4 * 1024 * 1024 * 1024;
+    # Journal bytes that trigger a checkpoint — a **safety valve, not a
+    # schedule**, and the reason it is 4 GiB rather than the 64 MiB a running
+    # node uses. Page writes are copy-on-write, so every intermediate settle
+    # rewrites pages the next one rewrites again: at 200 000 rows a 64 MiB
+    # trigger cost 4:25 and a 303 MB store, against 2:17 and 20 MB for the
+    # single settle at the end. It exists to stop the journal and the record
+    # cache running away before that final settle, not to pace the fill.
+    #
+    # Disk, not RAM — so it does not enter the sum below.
+    checkpointAfterBytes = 4 * 1024 * 1024 * 1024;
+  };
+
+  # What the fill may hold at peak, for the one arithmetic that matters.
+  fillTotalGiB = (fill.pageCacheBytes + fill.recordCacheBytes) / 1024 / 1024 / 1024;
+
+  # The string forms the seed builder interpolates.
+  fillArgs = "--page-cache-bytes ${toString fill.pageCacheBytes} --record-cache-bytes ${toString fill.recordCacheBytes} --checkpoint-after-bytes ${toString fill.checkpointAfterBytes}";
+
   # The pre-tier spelling, kept so every existing caller reads the table
   # instead of a loose number.
   rows = selected.rows;
