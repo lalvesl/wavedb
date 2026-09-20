@@ -5,7 +5,7 @@
 #
 # This is the wiring only — every part lives in a sibling module:
 #
-#   params.nix    the two size knobs (rows, seed)
+#   params.nix    the tier table (rows + revision) and the seed
 #   cage.nix      the cgroup/affinity/namespace every measured run executes in
 #   gen.nix       `bench-gen`, the fill/emit tool
 #   dataset.nix   the portable TSV every bulk loader reads
@@ -21,7 +21,12 @@
   repoSrc,
 }:
 let
-  inherit (import ./params.nix) rows sd;
+  params = import ./params.nix;
+  inherit (params) sd;
+  # One tier for the whole file: the seeds, the dataset and both apps must
+  # describe the same dataset or a row is filed under a name it was not
+  # measured against.
+  tier = params.selected;
 
   cage = import ./cage.nix;
 
@@ -31,7 +36,7 @@ let
     inherit
       pkgs
       benchGen
-      rows
+      tier
       sd
       ;
   };
@@ -41,7 +46,7 @@ let
       pkgs
       benchGen
       benchDataset
-      rows
+      tier
       sd
       ;
   };
@@ -67,7 +72,7 @@ in
       cage
       runtimeInputs
       benchSeeds
-      rows
+      tier
       ;
   };
 }
