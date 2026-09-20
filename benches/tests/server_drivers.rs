@@ -10,6 +10,11 @@
 //! bare `cargo test` outside the shell has no `initdb` — and turning that into
 //! a red suite would teach everyone to ignore it. The skip prints, so a run
 //! that proved nothing says so.
+//!
+//! The whole file needs the `servers` feature: without it the drivers it
+//! imports are not compiled. A file-level `cfg` rather than one per import,
+//! because there is nothing here that is not about a server.
+#![cfg(feature = "servers")]
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
