@@ -8,12 +8,20 @@
 # this pass needs, then execs one `bench-row` per row inside its own cage
 # (RFC 0065 §2) — so the wrapper's job is now to declare the budgets and put
 # the peers on `PATH`, not to wrap the work.
+#
+# One pair of apps **per tier** (`bench-large`, `bench-seeded-large`, …), plus
+# the unsuffixed pair for the default. The suffix is not decoration: the tier
+# decides what is measured *and* what the row is filed as, so an app that took
+# it as a flag would be an app you can point at the wrong dataset.
 {
   pkgs,
   cage,
   runtimeInputs,
   benchSeeds,
   tier,
+  # Appended to both app names. Empty for the default tier, so
+  # `nix run .#bench` keeps working.
+  suffix ? "",
 }:
 let
   runner =
@@ -62,13 +70,13 @@ in
   # Fill from empty, in-run, at the selected tier. The seeds are not inputs
   # here, so this builds nothing but the runner — the shape to reach for when
   # what you are changing is the fill itself.
-  bench = runner { name = "bench"; };
+  "bench${suffix}" = runner { name = "bench${suffix}"; };
 
   # Materialise every seed and run against them, so a repeat run skips the
   # fill entirely. Building this app builds all five seeds, which is the
   # point: they are inputs, not a side effect.
-  bench-seeded = runner {
-    name = "bench-seeded";
+  "bench-seeded${suffix}" = runner {
+    name = "bench-seeded${suffix}";
     exports = {
       BENCH_SEED_WAVEDB = "${benchSeeds.wavedb}";
       BENCH_SEED_SQLITE = "${benchSeeds.sqlite}";
