@@ -15,17 +15,18 @@
   pkgs,
   benchGen,
   benchDataset,
-  rows,
+  tier,
   sd,
 }:
 let
+  inherit (tier) rows;
   # Every seed is a data directory a server can be pointed at directly. Two
   # rules hold in all of them: the server is shut down **cleanly** inside the
   # builder (otherwise the first measured operation pays for crash recovery),
   # and nothing is timed.
   mkSeed =
     name: deps: script:
-    pkgs.runCommand "bench-seed-${name}-${rows}"
+    pkgs.runCommand "bench-seed-${name}-${tier.tag}"
       {
         nativeBuildInputs = deps;
         dataset = benchDataset;
