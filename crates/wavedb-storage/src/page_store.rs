@@ -93,12 +93,19 @@ const DEFAULT_TARGET_BLOCKS_PER_BUCKET: u64 = 8; // 32 KiB
 /// Ids one batch touched, grouped by registry slot — what the settle consumes.
 pub(crate) type Touched = Vec<(usize, Vec<Id>)>;
 
-/// How a store answers the durability question, chosen once at
-/// [`open_with`](PageStore::open_with) (RFC 0061).
+/// How a store answers the durability question and how much RAM it may spend
+/// answering reads — chosen once at [`open_with`](PageStore::open_with)
+/// (RFCs 0061, 0044, 0065 §6).
 ///
 /// Opened, never inferred: a durability mode that changes by itself is a
-/// guarantee nobody can reason about.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// guarantee nobody can reason about, and a cache budget that drifts is a
+/// memory ceiling nobody can hold a process to.
+///
+/// **None of these fields reaches stored bytes**, so none folds into a
+/// `STRUCT_HASH`: a window and two cache budgets change when work happens and
+/// what is held in RAM while it does, never what is written. Two stores opened
+/// with different options hold byte-identical files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreOptions {
     /// Longest a `Batch` may sit unsynced. **Zero (the default) is one
     /// barrier per batch** — the promise the engine was built around, and
@@ -113,6 +120,45 @@ pub struct StoreOptions {
     /// one). [`flush`](PageStore::flush) forces the barrier when a particular
     /// write does need the stronger answer.
     pub relax_window: Duration,
+
+    /// Bytes of **page images** the block file may hold (RFC 0044) — whole
+    /// runs, still compressed, exactly as they sit on disk.
+    ///
+    /// Zero disables the cache. Read once at open: a budget that changed
+    /// under a running store would make "how much RAM does this hold" a
+    /// question with no answer.
+    pub page_cache_bytes: usize,
+
+    /// Bytes of **decoded records** the caches should be evicted down to —
+    /// the budget [`evict_to_budget`](PageStore::evict_to_budget) targets.
+    ///
+    /// **The store never applies it on its own.** Eviction stays where it
+    /// already is, in the caller's hands (the node's upkeep loop, a
+    /// benchmark's phase boundary), because a `PageStore` that dropped cache
+    /// entries on a timer of its own would be doing work no caller asked for
+    /// inside a window someone is timing. What this field changes is only
+    /// *where the number lives*: opened with the store, instead of a constant
+    /// remembered separately at every call site.
+    pub record_cache_bytes: usize,
+}
+
+/// Bytes of decoded records [`StoreOptions::record_cache_bytes`] defaults to.
+///
+/// The number callers were already passing by hand, so the default changes
+/// nothing; it is advisory in the strict sense, since nothing evicts until a
+/// caller asks.
+pub const DEFAULT_RECORD_CACHE_BYTES: usize = 96 << 20;
+
+impl Default for StoreOptions {
+    /// Exactly today's engine: one barrier per batch, a 64 MiB page cache,
+    /// and a record-cache budget nothing applies unless asked.
+    fn default() -> Self {
+        Self {
+            relax_window: Duration::ZERO,
+            page_cache_bytes: crate::page_cache::DEFAULT_BUDGET_BYTES,
+            record_cache_bytes: DEFAULT_RECORD_CACHE_BYTES,
+        }
+    }
 }
 
 /// The native, page-backed [`Store`](wavedb_core::Store).
@@ -145,6 +191,9 @@ pub struct PageStore {
     /// The durability window this store was opened with (RFC 0061); zero is
     /// one barrier per batch.
     pub(crate) relax_window: Duration,
+    /// The record-cache budget this store was opened with — carried, not
+    /// applied (see [`StoreOptions::record_cache_bytes`]).
+    pub(crate) record_cache_bytes: usize,
     _claim: EngineClaim,
 }
 
@@ -183,7 +232,10 @@ impl PageStore {
         std::fs::create_dir_all(dir)?;
 
         let data_bin_existed = dir.join("data.bin").exists();
-        let file = BlockFile::open(dir.join("data.bin"))?;
+        let file = BlockFile::open_with(
+            dir.join("data.bin"),
+            options.page_cache_bytes,
+        )?;
         let seed = file.seed();
 
         // Generated Pivot types of identical shape may share a STRUCT_HASH;
@@ -214,6 +266,7 @@ impl PageStore {
             target_blocks_per_bucket: DEFAULT_TARGET_BLOCKS_PER_BUCKET,
             pending: Mutex::new(Vec::new()),
             relax_window: options.relax_window,
+            record_cache_bytes: options.record_cache_bytes,
             _claim: claim,
         };
         for batch in &recovered.replay {
@@ -304,6 +357,129 @@ mod tests {
 
     fn nonunique(key: u64) -> Id {
         Id::new(key, U48::from(1u32), false, (key & 0x7FFF) as u16)
+    }
+
+    /// `Default` is today's engine, spelled out.
+    ///
+    /// A canary rather than a tautology: these three numbers are what every
+    /// caller that never asked already runs on, so changing one is changing
+    /// every deployment's engine — which should cost a failing test.
+    #[test]
+    fn default_options_are_todays_engine() {
+        let o = StoreOptions::default();
+        assert_eq!(o.relax_window, Duration::ZERO, "one barrier per batch");
+        assert_eq!(o.page_cache_bytes, 64 << 20);
+        assert_eq!(o.record_cache_bytes, 96 << 20);
+    }
+
+    /// Each budget reaches the layer that spends it, and `open` still means
+    /// the default — a knob is only a knob where it lands.
+    #[test]
+    fn the_budgets_reach_the_layers_that_spend_them() {
+        let _g = engine_gate();
+        let d = tempfile::tempdir().unwrap();
+        {
+            let s = PageStore::open_with(
+                d.path(),
+                &[&TEST_SLOT],
+                StoreOptions {
+                    page_cache_bytes: 128 << 10,
+                    record_cache_bytes: 4 << 10,
+                    ..StoreOptions::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(s.file.page_cache().budget(), 128 << 10);
+            assert_eq!(s.record_cache_bytes(), 4 << 10);
+        }
+        let s = open(d.path());
+        assert_eq!(s.file.page_cache().budget(), 64 << 20);
+        assert_eq!(s.record_cache_bytes(), 96 << 20);
+    }
+
+    /// The record-cache budget is **carried, not applied** (RFC 0065 §6): a
+    /// store opened with a one-byte budget still holds every settled record
+    /// until a caller asks it not to.
+    ///
+    /// Asserted rather than assumed, because eviction takes the journal lock.
+    /// A store that evicted on a schedule of its own would be quiescing
+    /// writers at a moment nobody chose — inside a timed window, for the
+    /// callers this budget exists for.
+    #[test]
+    fn the_store_never_evicts_records_until_asked() {
+        let _g = engine_gate();
+        let d = tempfile::tempdir().unwrap();
+        let s = PageStore::open_with(
+            d.path(),
+            &[&TEST_SLOT],
+            StoreOptions {
+                record_cache_bytes: 1, // anything held is over budget
+                ..StoreOptions::default()
+            },
+        )
+        .unwrap();
+        block_on(async {
+            for k in 0..64u64 {
+                s.apply(&[Write::Put(nonunique(k), rec(SH, b"payload"))])
+                    .await
+                    .unwrap();
+            }
+        });
+        s.drain().unwrap();
+        let cached = |s: &PageStore| -> usize {
+            s.types.iter().map(|t| t.cached_bytes()).sum()
+        };
+        assert!(
+            cached(&s) > 1,
+            "settling 64 records must not evict them: the budget is the \
+             caller's to apply"
+        );
+        s.evict_to_budget();
+        assert!(
+            cached(&s) <= 1,
+            "asked, the store must evict to the budget it was opened with, \
+             not to one remembered at the call site"
+        );
+    }
+
+    /// Cache budgets are RAM, never bytes on disk. A store opened with **no**
+    /// caches at all writes a file the default store reads back unchanged —
+    /// which is why neither field folds into a `STRUCT_HASH`.
+    #[test]
+    fn a_store_opened_without_caches_writes_the_same_file() {
+        let _g = engine_gate();
+        let d = tempfile::tempdir().unwrap();
+        {
+            let s = PageStore::open_with(
+                d.path(),
+                &[&TEST_SLOT],
+                StoreOptions {
+                    page_cache_bytes: 0,
+                    record_cache_bytes: 0,
+                    ..StoreOptions::default()
+                },
+            )
+            .unwrap();
+            block_on(async {
+                for k in 0..32u64 {
+                    s.apply(&[Write::Put(nonunique(k), rec(SH, b"nocache"))])
+                        .await
+                        .unwrap();
+                }
+            });
+            s.drain().unwrap();
+            s.commit_journal().unwrap();
+        }
+        let s = open(d.path()); // default budgets, same bytes
+        block_on(async {
+            for k in 0..32u64 {
+                assert_eq!(
+                    s.get(nonunique(k)).await.unwrap(),
+                    Some(rec(SH, b"nocache")),
+                    "record {k} must survive a store that cached nothing"
+                );
+            }
+        });
     }
 
     /// RFC 0041's accounting: whatever a round touched, settling it is **one**
@@ -1525,6 +1701,7 @@ mod tests {
                 // Long enough that nothing elapses during the test — the
                 // window's *timing* is the clock's business, not this test's.
                 relax_window: Duration::from_hours(1),
+                ..StoreOptions::default()
             },
         )
         .unwrap();
@@ -1558,6 +1735,7 @@ mod tests {
                 // Elapsed before the first append finishes writing.
                 StoreOptions {
                     relax_window: Duration::from_nanos(1),
+                    ..StoreOptions::default()
                 },
             )
             .unwrap();
