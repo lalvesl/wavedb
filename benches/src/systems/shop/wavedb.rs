@@ -40,6 +40,12 @@ pub fn preload(cfg: &ShopCfg, dir: &Path) -> Result<(), String> {
         // `quick-node`'s own policy is: per-operation log size depends on the
         // data. In the micro adapter a 5 000-op trigger never fired once while
         // 649 MB accumulated.
+        //
+        // NOT shared with the seed fill, which wants a threshold three orders
+        // of magnitude larger: this preload runs inside the cage and against
+        // a nesting shape, that one runs in a builder against a flat one. The
+        // number that is right here is measurably wrong there (see
+        // `PROGRESS.md`, "checkpointing often makes a fill worse").
         if store.journal_len() > CHECKPOINT_AFTER_BYTES {
             store
                 .commit_journal()
@@ -164,13 +170,6 @@ fn open_relaxed(dir: &Path) -> Result<PageStore, String> {
 
 use crate::{FILL_WINDOW as PRELOAD_WINDOW, RELAXED_WINDOW};
 
-/// Users between settle rounds during the fill — ~2 000 records a round at
-/// the default order/item spread, which keeps the write cache bounded well
-/// inside the cage without making the fill a checkpoint benchmark.
-/// Journal bytes that trigger a checkpoint during the fill —
-/// `quick-node`'s own default (`Maintenance::checkpoint_after_bytes`).
-const CHECKPOINT_AFTER_BYTES: u64 = 64 << 20;
-
 /// What the fill's write cache is evicted **down to** — not to zero.
 ///
 /// Evicting to zero costs far more than it saves: it drops the hot B+tree
@@ -184,6 +183,12 @@ const CHECKPOINT_AFTER_BYTES: u64 = 64 << 20;
 /// exception to it), and still a bound, since an unbounded write cache would
 /// simply move the failure to whatever ceiling is in force.
 const FILL_CACHE_BYTES: usize = 192 << 20;
+
+/// Journal bytes that trigger a checkpoint during **this** preload — the same
+/// number `quick-node`'s own policy uses
+/// (`Maintenance::checkpoint_after_bytes`), and small because the preload
+/// shares a 500 MB cage with the row that follows it.
+const CHECKPOINT_AFTER_BYTES: u64 = 64 << 20;
 
 fn open_with(dir: &Path, options: StoreOptions) -> Result<PageStore, String> {
     let mut entries = Vec::new();
