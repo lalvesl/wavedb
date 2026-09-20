@@ -97,9 +97,9 @@ pass costs the pass.
 | 3.4 | Storage tests: budget honoured, `Default` unchanged, durability | ✅ |
 | 3.5 | `params.nix`: four tiers, each with its own `rev` | ✅ |
 | 3.6 | `gen.nix`: filtered source, so an unrelated edit stops invalidating seeds | ✅ |
-| 3.7 | `dataset.nix` / `seeds.nix` parameterised by tier | ⬜ |
-| 3.8 | Fill profile (uncaged, big caches, max relax) | ⬜ |
-| 3.9 | Build the `large` tier and time the fill — **gates phase 5** | ⬜ |
+| 3.7 | `dataset.nix` / `seeds.nix` parameterised by tier | ✅ |
+| 3.8 | Fill profile (uncaged, big caches, max relax) | ✅ |
+| 3.9 | Build the `large` tier and time the fill — **gates phase 5** | 🔧 |
 | 3.10 | `.bench-seeds/` GC roots | ⬜ |
 
 3.1 and 3.2 landed as one step, deliberately: a `page_cache_bytes` the
@@ -131,6 +131,29 @@ from. Measured in both directions: an RFC, a README, `PROGRESS.md` and a
 corpus row now leave the store path alone, while `benches/src/schema.rs`, a
 crate `.rs`, either `Cargo.toml` and the workspace root still change it. The
 `bench-seed-sqlite` seed builds from the filtered binary.
+
+3.7 instantiates **every** tier, not just the selected one: the dataset and
+the five seeds become `bench-dataset-<tier>` / `bench-seed-<system>-<tier>`,
+and each tier gets its own app pair (`bench-large`, `bench-seeded-large`).
+The unsuffixed names are the default tier and resolve to the identical store
+path, so nothing that already worked changed. Instantiating four costs
+nothing — evaluation is lazy, so `huge` is an expression until something asks
+for it. Proven by building `bench-dataset-smoke` (1 000 rows) and
+`bench-seed-wavedb-smoke` (`ids.bin` = 16 000 bytes = 1 000 anchors), and by
+reading the generated `bench-seeded-smoke` script: it exports the smoke seed
+paths and passes `--tier smoke --rows 1000`.
+
+The tier is a **suffix, not a flag**, deliberately: it decides both what is
+measured and what the row is filed as, so an app that took it as an argument
+would be an app you can point at the wrong dataset — which is the bug 3.5
+just fixed, reintroduced one level up.
+
+3.8 gives the fill three declared numbers (`params.nix`'s `fill`): a 6 GiB
+page cache, a 4 GiB record cache, and a 4 GiB journal threshold. It also
+fixes a defect the profile exposed — `fill_wavedb` had **no maintenance at
+all**, so both the journal and the record cache grew for the entire fill. See
+the method finding below for why the threshold is 4 GiB and not the 64 MiB a
+running node uses.
 
 ### Phase 4 — read counters
 
@@ -260,7 +283,67 @@ The reason this file matters more than the checklist above.
   `evict(0)`. Five mechanisms, one `Driver::between_phases`, so `read_cold`
   means the same thing on all five.
 
+- **Checkpointing often makes a fill worse, and the fill had no checkpoint at
+  all.** `seed::fill_wavedb` inserted every row and settled once at the end,
+  so the journal grew for the whole fill — **4.8 GB at 200 000 rows**, which
+  extrapolates to ~120 GB at `large` and ~1.2 TB at `huge`, with the record
+  cache growing beside it. Adding a checkpoint fixed that and made everything
+  else worse; the interesting part is by how much. All three at 200 000 rows,
+  same machine, uncaged:
+
+  | fill | wall | peak RSS | store |
+  |---|--:|--:|--:|
+  | no maintenance (the old code) | 2:16.9 | 351 MB | 20 MB |
+  | checkpoint every 64 MiB (~75 rounds) | 4:25.8 | 561 MB | 303 MB |
+  | checkpoint every 4 GiB (1 round) | 2:22.4 | 269 MB | 46 MB |
+
+  Page writes are copy-on-write (RFC 0041), so every intermediate settle
+  rewrites pages that a later settle rewrites again: 75 rounds nearly doubled
+  the wall clock and left a store **15× larger**. The end-of-fill settle
+  writes each page once, and that is what a bulk fill actually wants.
+
+  So the threshold is a **safety valve, not a schedule** — sized so it fires
+  rarely and only exists to stop the journal and the cache running away
+  before the final settle. At 4 GiB the fill is within 4% of the unbounded
+  one's time, uses *less* RAM than it (the one checkpoint evicts), and pays
+  26 MB of store bloat that is mostly freed-but-unreturned blocks a
+  `defragment` reclaims.
+
+  The node's own 64 MiB (`quick-node`'s `checkpoint_after_bytes`, which the
+  shop preload also uses) is right for a *running* node and wrong here by
+  three orders of magnitude. The two are now separate constants with the
+  reason written at both.
+
+- **The fill needs more RAM than the cage allows, which is why it is
+  uncaged.** Peak RSS 561 MB against a 500 MB cage, at the smallest of the
+  four tiers. Not a new decision — RFC 0065 §6 already says a fill is a build
+  — but this is the number that makes it not a preference.
+
+- **The safety valve works at scale, and the `large` fill is a multi-hour
+  build.** A first `nix build .#bench-seed-wavedb-large` ran **2h47m without
+  finishing** the 5 million inserts before its session was torn down. Two
+  things are already established from it, and neither needs the run to
+  complete:
+
+  - **Memory is bounded, by the mechanism 3.8 added.** Peak RSS **3.28 GB**
+    against the 10 GiB declared ceiling, and the checkpoint-plus-evict fired
+    **ten times**, each dropping the process from 2–3 GB back to 0.3–0.5 GB
+    (at 1992 s, 3193 s, 3254 s, 3676 s, 4521 s, 5183 s, 5670 s, 5912 s,
+    6393 s, 8136 s). Without it the fill has no ceiling at all — that is what
+    `fill_wavedb` did before this phase.
+  - **The insert rate degrades with the tree.** 200 000 rows measured
+    1 408 rows/s; 5 000 000 rows did **not** complete in 10 004 s, so the
+    average there is under 500 rows/s — a fall of at least 2.8×. Extrapolating
+    the *small* number to `huge` was therefore optimistic by nearly 3×: at
+    under 500 rows/s, 50 million rows is **28 hours or more**.
+
+  That last number is the answer RFC 0065 open question 1 was waiting for: at
+  this rate `huge` is not a build you run, it is a build you import. Phase 5
+  should assume the build-outside-and-import path rather than a derivation.
+
 ### Declared concessions
+
+
 
 - **`--work-dir` cannot be deeper than ~57 characters.** PostgreSQL caps a
   Unix-domain socket path at 107 bytes, and the row appends
