@@ -162,6 +162,25 @@ impl PageStore {
             total -= slot.evict_up_to(total - budget_bytes);
         }
     }
+
+    /// The record-cache budget this store was opened with
+    /// ([`StoreOptions::record_cache_bytes`](crate::StoreOptions::record_cache_bytes)).
+    #[must_use]
+    pub const fn record_cache_bytes(&self) -> usize {
+        self.record_cache_bytes
+    }
+
+    /// [`evict_settled`](Self::evict_settled) down to the budget the store was
+    /// opened with.
+    ///
+    /// The engine never calls this itself — eviction stays the caller's
+    /// decision, because dropping cache entries takes the journal lock and a
+    /// store that did it on a schedule of its own would be stalling writers
+    /// inside a window someone else is timing. What the store supplies is the
+    /// number, so a caller stops having to remember one.
+    pub fn evict_to_budget(&self) {
+        self.evict_settled(self.record_cache_bytes);
+    }
 }
 
 /// Merge a failed round back into the pending queue (slot-grouped; ids may
