@@ -17,6 +17,9 @@
   benchDataset,
   tier,
   sd,
+  # The fill profile's flags (RFC 0065 §6) — the WaveDB seed's only user, since
+  # it is the one seed filled through an engine rather than by a bulk loader.
+  fillArgs,
 }:
 let
   inherit (tier) rows;
@@ -61,7 +64,8 @@ in
   # (`ids.bin`, `pivot.bin`) is not optional: a NonUnique anchor id is minted
   # from the clock and cannot be recomputed from the seed.
   wavedb = mkSeed "wavedb" [ benchGen ] ''
-    bench-gen fill-wavedb --rows ${rows} --seed ${sd} --out "$out"
+    bench-gen fill-wavedb --rows ${rows} --seed ${sd} --out "$out" \
+      ${fillArgs}
     # 16 bytes per minted anchor id — the sidecar's length is the record
     # count, and without it the seed is unreadable.
     expectRows "$(( $(stat -c %s "$out/ids.bin") / 16 ))"
