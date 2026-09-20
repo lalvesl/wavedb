@@ -28,6 +28,7 @@ pub mod engine;
 pub mod mongo_server;
 #[cfg(feature = "servers")]
 pub mod mongodb;
+#[cfg(feature = "servers")]
 pub mod mysql;
 #[cfg(feature = "servers")]
 pub mod postgres;
