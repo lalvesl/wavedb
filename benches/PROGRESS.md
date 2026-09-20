@@ -100,7 +100,7 @@ pass costs the pass.
 | 3.7 | `dataset.nix` / `seeds.nix` parameterised by tier | ✅ |
 | 3.8 | Fill profile (uncaged, big caches, max relax) | ✅ |
 | 3.9 | Build the `large` tier and time the fill — **gates phase 5** | 🔧 |
-| 3.10 | `.bench-seeds/` GC roots | ⬜ |
+| 3.10 | `.bench-seeds/` GC roots | ✅ |
 
 3.1 and 3.2 landed as one step, deliberately: a `page_cache_bytes` the
 `BlockFile` does not read is not a budget, it is a field that reports a
@@ -132,6 +132,14 @@ corpus row now leave the store path alone, while `benches/src/schema.rs`, a
 crate `.rs`, either `Cargo.toml` and the workspace root still change it. The
 `bench-seed-sqlite` seed builds from the filtered binary.
 
+Its blast radius is smaller, not zero: `bench-gen` is one binary, so editing
+the **fill** (`seed.rs`) still invalidates the **dataset** (the TSV, which
+`emit_tsv` produces and the fill never touches) and therefore the four
+bulk-loaded seeds built from it. Measured: appending a comment to `seed.rs`
+moves `bench-dataset-smoke` and `bench-seed-postgres-smoke` to new paths.
+Splitting `bench-gen` into two binaries with separate filesets would fix it;
+until then, a fill change costs a dataset rebuild.
+
 3.7 instantiates **every** tier, not just the selected one: the dataset and
 the five seeds become `bench-dataset-<tier>` / `bench-seed-<system>-<tier>`,
 and each tier gets its own app pair (`bench-large`, `bench-seeded-large`).
@@ -142,6 +150,14 @@ for it. Proven by building `bench-dataset-smoke` (1 000 rows) and
 `bench-seed-wavedb-smoke` (`ids.bin` = 16 000 bytes = 1 000 anchors), and by
 reading the generated `bench-seeded-smoke` script: it exports the smoke seed
 paths and passes `--tier smoke --rows 1000`.
+
+3.10 is `scripts/bench_seeds.sh`, which pins a tier's six outputs as GC
+roots under a gitignored `.bench-seeds/<tier>/`. Verified end to end:
+`nix-store --gc --print-roots` lists the link, `--list` reports it with its
+size, and `--unpin` removes both. It **pins what is already built** and only
+reports what is missing — building is opt-in (`--build`), because at `large`
+that is hours and a script that starts them by accident is a script nobody
+runs twice.
 
 The tier is a **suffix, not a flag**, deliberately: it decides both what is
 measured and what the row is filed as, so an app that took it as an argument
