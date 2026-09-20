@@ -5,16 +5,23 @@
 {
   pkgs,
   benchGen,
-  rows,
+  tier,
   sd,
 }:
-pkgs.runCommand "bench-dataset-${rows}" { nativeBuildInputs = [ benchGen ]; } ''
+let
+  inherit (tier) rows;
+in
+# Named by the tier's tag, so the revision is part of the store path: bumping
+# it in `params.nix` builds a different dataset rather than reusing this one.
+pkgs.runCommand "bench-dataset-${tier.tag}" { nativeBuildInputs = [ benchGen ]; } ''
   mkdir -p "$out"
   bench-gen emit-tsv --rows ${rows} --seed ${sd} \
     --out "$out/dataset.tsv"
   cat > "$out/manifest.txt" <<EOF
+  tier=${tier.name}
   rows=${rows}
   seed=${sd}
+  dataset_revision=${tier.rev}
   columns=id,kind,score,name,tag,body
   EOF
 ''
