@@ -120,11 +120,28 @@ impl BlockFile {
     /// loaded. Either way the returned handle's [`seed`](Self::seed) is the one
     /// records must be routed with.
     ///
+    /// The page cache gets [`page_cache::DEFAULT_BUDGET_BYTES`];
+    /// [`open_with`](Self::open_with) chooses it.
+    ///
     /// # Errors
     /// [`StorageError::Io`] on a filesystem failure, [`StorageError::BadMagic`] /
     /// [`StorageError::BadVersion`] if an existing file is not a compatible
     /// `data.bin`.
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
+        Self::open_with(path, page_cache::DEFAULT_BUDGET_BYTES)
+    }
+
+    /// [`open`](Self::open), with the page cache's budget named by the caller
+    /// (RFC 0065 §6). `0` disables the cache; a fill wants gigabytes and a
+    /// measured row wants the default, and neither number belongs hardcoded
+    /// where the file is opened.
+    ///
+    /// # Errors
+    /// The same faults as [`open`](Self::open).
+    pub fn open_with(
+        path: impl AsRef<Path>,
+        page_cache_bytes: usize,
+    ) -> StorageResult<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -139,7 +156,7 @@ impl BlockFile {
                 file,
                 seed,
                 io: IoCounts::default(),
-                cache: PageCache::new(page_cache::DEFAULT_BUDGET_BYTES),
+                cache: PageCache::new(page_cache_bytes),
             };
             bf.write_superblock()?;
             bf.file.sync_all()?;
@@ -150,7 +167,7 @@ impl BlockFile {
                 file,
                 seed: body.seed,
                 io: IoCounts::default(),
-                cache: PageCache::new(page_cache::DEFAULT_BUDGET_BYTES),
+                cache: PageCache::new(page_cache_bytes),
             })
         }
     }
@@ -331,7 +348,9 @@ fn random_seed() -> [u64; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockFile, FORMAT_VERSION, MAGIC, OFF_BODY, SuperblockBody};
+    use super::{
+        BlockFile, FORMAT_VERSION, MAGIC, OFF_BODY, SuperblockBody, page_cache,
+    };
     use crate::block::{BLOCK_SIZE, Run};
     use crate::error::StorageError;
     use std::os::unix::fs::FileExt;
@@ -341,6 +360,64 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("data.bin");
         (dir, path)
+    }
+
+    /// A run written then read through the cached path, so the entry exists.
+    fn cache_one(bf: &BlockFile, start: u64) {
+        let run = Run::new(start, 1);
+        let byte = u8::try_from(start % 251).unwrap();
+        bf.write_run(run, &vec![byte; run.byte_len() as usize])
+            .unwrap();
+        bf.read_run_shared(run).unwrap();
+    }
+
+    /// The caller's budget is kept by **evicting**, not by refusing to cache:
+    /// a ninth page arrives and the oldest leaves, so the newest read is
+    /// always the one still held.
+    #[test]
+    fn the_page_cache_holds_only_what_the_caller_budgeted() {
+        let (_d, path) = temp_path();
+        let budget = 2 * BLOCK_SIZE;
+        let bf = BlockFile::open_with(&path, budget).unwrap();
+        for start in 1..=8u64 {
+            cache_one(&bf, start);
+        }
+        assert_eq!(bf.page_cache().budget(), budget);
+        assert!(
+            bf.page_cache().bytes() <= budget,
+            "held {} bytes against a {budget}-byte budget",
+            bf.page_cache().bytes()
+        );
+        assert!(
+            bf.page_cache().get(Run::new(8, 1)).is_some(),
+            "the newest read must be the one kept"
+        );
+        assert!(
+            bf.page_cache().get(Run::new(1, 1)).is_none(),
+            "the oldest must have been evicted"
+        );
+    }
+
+    /// Zero disables it, and a disabled cache must still serve correct bytes
+    /// — `read_run_shared` is the read path, not an optimisation beside it.
+    #[test]
+    fn a_zero_budget_disables_the_cache_without_changing_reads() {
+        let (_d, path) = temp_path();
+        let bf = BlockFile::open_with(&path, 0).unwrap();
+        let run = Run::new(1, 2);
+        let payload = vec![0xA5; run.byte_len() as usize];
+        bf.write_run(run, &payload).unwrap();
+        assert_eq!(&*bf.read_run_shared(run).unwrap(), &payload[..]);
+        assert!(bf.page_cache().is_empty(), "zero must hold nothing");
+    }
+
+    /// [`BlockFile::open`] is [`open_with`] at the documented default, so the
+    /// callers that never asked keep the cache they have always had.
+    #[test]
+    fn open_is_open_with_at_the_default_budget() {
+        let (_d, path) = temp_path();
+        let bf = BlockFile::open(&path).unwrap();
+        assert_eq!(bf.page_cache().budget(), page_cache::DEFAULT_BUDGET_BYTES);
     }
 
     #[test]
