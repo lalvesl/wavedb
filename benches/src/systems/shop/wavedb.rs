@@ -137,6 +137,7 @@ pub fn open_measured(dir: &Path, d: Durability) -> Result<PageStore, String> {
                 Durability::Durable => std::time::Duration::ZERO,
                 Durability::Relaxed => RELAXED_WINDOW,
             },
+            ..Default::default()
         },
     )
 }
@@ -156,6 +157,7 @@ fn open_relaxed(dir: &Path) -> Result<PageStore, String> {
         dir,
         StoreOptions {
             relax_window: PRELOAD_WINDOW,
+            ..Default::default()
         },
     )
 }
