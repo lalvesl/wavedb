@@ -49,6 +49,27 @@ pub const FILL_WINDOW: std::time::Duration =
 pub const RELAXED_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(1);
 
+/// Journal bytes that trigger a checkpoint during a **seed fill** — and it is
+/// deliberately enormous.
+///
+/// A bare `PageStore` has no background maintenance, so a fill that never
+/// checkpoints grows its journal for the whole fill (4.8 GB at 200 000 rows)
+/// and its record cache with it. Both have to be bounded somewhere.
+///
+/// But bounding them *tightly* is worse than not bounding them at all. Page
+/// writes are copy-on-write (RFC 0041): every intermediate settle rewrites
+/// pages that the next settle rewrites again, so a frequent checkpoint is a
+/// write amplifier. Measured at 200 000 rows: a 64 MiB trigger (~75 rounds)
+/// took **4:25 and left a 303 MB store**; no trigger at all took **2:17 and
+/// left 20 MB**. The end-of-fill settle writes each page once, and that is
+/// the fill's optimum — the threshold exists only to stop the journal and the
+/// cache from running away before it.
+///
+/// So: as rare as the disk allows. In **bytes**, never in operations —
+/// per-operation log size depends on the data, and an earlier 5 000-op
+/// trigger never fired once while 649 MB accumulated.
+pub const FILL_CHECKPOINT_BYTES: u64 = 4 << 30;
+
 pub mod cage;
 pub mod corpus;
 pub mod footprint;
