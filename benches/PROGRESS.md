@@ -91,16 +91,46 @@ pass costs the pass.
 
 | # | step | |
 |---|---|---|
-| 3.1 | `StoreOptions.{page_cache_bytes, record_cache_bytes}` | ⬜ |
-| 3.2 | `BlockFile` takes the budget instead of `DEFAULT_BUDGET_BYTES` | ⬜ |
-| 3.3 | How `record_cache_bytes` applies (auto-evict vs caller default) | ⏸ |
-| 3.4 | Storage tests: budget honoured, `Default` unchanged, durability | ⬜ |
-| 3.5 | `params.nix`: four tiers, each with its own `rev` | ⬜ |
-| 3.6 | `gen.nix`: filtered source, so an unrelated edit stops invalidating seeds | ⬜ |
+| 3.1 | `StoreOptions.{page_cache_bytes, record_cache_bytes}` | ✅ |
+| 3.2 | `BlockFile` takes the budget instead of `DEFAULT_BUDGET_BYTES` | ✅ |
+| 3.3 | How `record_cache_bytes` applies (auto-evict vs caller default) | ✅ |
+| 3.4 | Storage tests: budget honoured, `Default` unchanged, durability | ✅ |
+| 3.5 | `params.nix`: four tiers, each with its own `rev` | ✅ |
+| 3.6 | `gen.nix`: filtered source, so an unrelated edit stops invalidating seeds | ✅ |
 | 3.7 | `dataset.nix` / `seeds.nix` parameterised by tier | ⬜ |
 | 3.8 | Fill profile (uncaged, big caches, max relax) | ⬜ |
 | 3.9 | Build the `large` tier and time the fill — **gates phase 5** | ⬜ |
 | 3.10 | `.bench-seeds/` GC roots | ⬜ |
+
+3.1 and 3.2 landed as one step, deliberately: a `page_cache_bytes` the
+`BlockFile` does not read is not a budget, it is a field that reports a
+ceiling nobody enforces. A step boundary in the middle of that is a knob that
+lies for the length of one iteration.
+
+3.3 is answered the conservative way — `record_cache_bytes` is **carried, not
+applied**. The store hands out the number (`record_cache_bytes()`,
+`evict_to_budget()`) and evicts only when a caller asks, exactly as today.
+Eviction takes the journal lock, so a `PageStore` that dropped entries on a
+schedule of its own would be stalling writers inside a window someone else is
+timing — the one thing this suite cannot have. Reversible in one commit if the
+node ever wants a self-managing ceiling.
+
+3.4 is seven tests, each one **falsified before being believed**: hardcoding
+the record budget back to 96 MiB fails `the_store_never_evicts_records_until_asked`,
+and ignoring `open_with`'s argument fails all three page-cache tests. A green
+test over a knob is worth exactly what it costs to make it red.
+
+3.5 makes the tier the single source of the row count. Both apps now pass
+`--tier`, `--rows` and `--dataset-revision` from one attribute, derivations are
+named by the tier's tag (`bench-seed-sqlite-small-200000-r1`), and a `rev` bump
+is proven to change that name. Verified by building `bench-dataset`: the
+manifest names the tier and revision and the TSV holds exactly 200 000 rows.
+
+3.6 narrows `bench-gen`'s source to the Rust and manifests it compiles
+from. Measured in both directions: an RFC, a README, `PROGRESS.md` and a
+corpus row now leave the store path alone, while `benches/src/schema.rs`, a
+crate `.rs`, either `Cargo.toml` and the workspace root still change it. The
+`bench-seed-sqlite` seed builds from the filtered binary.
 
 ### Phase 4 — read counters
 
@@ -252,10 +282,45 @@ The reason this file matters more than the checklist above.
   to what RFC 0060 recorded, and every such row carries `row::PHASE1_NOTE`
   saying so in its own `notes`.
 
+### Bugs the restructure found in the suite it replaced
+
+Not introduced here — they were live in the RFC 0060 suite and only became
+visible because phase 3 started building the datasets instead of assuming
+them.
+
+- **Recording a measurement invalidated the datasets the next measurement
+  needs.** `bench-gen` was built with `src = repoSrc` — the whole checkout —
+  and it is a build input of *every* seed. `benches/results/` is tracked, so
+  storing a row changed the flake source and rebuilt all five seeds; so did
+  editing an RFC. Measured, not inferred: touching one corpus JSON moved
+  `bench-seed-mongodb` from `d477s7…` to `2c3lcn…`. At `small` that is
+  minutes of rebuild for a file the fill never reads; at `large` it is the
+  afternoon, which is what makes it a phase-3 blocker rather than a wart.
+
+- **The two apps disagreed about what `small` means.** `nix run .#bench`
+  passed no `--rows` at all, so every unseeded run measured `bench-row`'s own
+  default while `nix run .#bench-seeded` measured `params.nix`'s 200 000 —
+  and both filed under `tier: small`. Under RFC 0065 the tier **name** is the
+  identity and the row count is not, so the two are indistinguishable in the
+  corpus: same digest, different dataset. It is not hypothetical, it is what
+  `results/` holds — three rows at 100 000 and one at 10, none at the declared
+  200 000. Fixed by making the tier the only source of the count and having
+  every app pass name, count and revision together.
+
 ### Bugs introduced during this restructure, and fixed
 
 Kept because they are the shape of mistake this design invites.
 
+- **`bench-gen` had not built since phase 2, and nothing said so.**
+  `drivers/shop/mod.rs` declared `pub mod mysql;` without the
+  `#[cfg(feature = "servers")]` its four siblings carry, so the crate compiled
+  under default features and failed under `--no-default-features` — which is
+  exactly how `bench-gen` is built, and `bench-gen` is a build input of
+  **every seed**. `cargo clippy --all-targets` never sees it because the
+  default feature set turns `servers` on. One missing attribute; the whole
+  seed tree unbuildable. `tests/server_drivers.rs` needed the same gate at
+  file level. `cargo clippy --no-default-features --all-targets` is now part
+  of the bar below.
 - **A failed row leaked its server, and the leak corrupted the next run.**
   `stop` only runs on the success path, so a row that failed mid-way unwound
   past it and left `mongod` holding the data directory. The scratch is named
@@ -320,10 +385,9 @@ Kept because they are the shape of mistake this design invites.
    before `cage_revision` existed. Transcribe into the row format, or keep as
    archaeology? Recommendation: **keep**, since the lane name changes with the
    cage revision anyway.
-2. **3.3 — how `record_cache_bytes` applies.** An automatic ceiling means the
-   `PageStore` evicts on its own, which is a behaviour change in the engine. As
-   a default for callers to pass, it is trivial. Recommendation: the
-   conservative one.
+2. ~~**3.3 — how `record_cache_bytes` applies.**~~ **Taken**: the conservative
+   one (carried, not applied — see phase 3's note). Recorded here because it
+   was a decision, not a derivation, and reversing it is one commit.
 3. **The off-standard `8c-15835m` lane** — uncaged, `--force`, irreproducible,
    and holding no peer numbers. Keep or drop?
 4. **Whether one sharded workload is enough** (RFC 0065 open question 5).
@@ -337,4 +401,8 @@ Kept because they are the shape of mistake this design invites.
   cover `benches/`, so this is a choice rather than a gate.
 - `cargo fmt --all` + `cargo clippy --all-targets` at zero warnings + the full
   unit suite green, every step.
+- **And `cargo clippy --no-default-features --all-targets`**, because that is
+  the feature set `bench-gen` — and therefore every seed derivation — is built
+  with. The default set hides a missing `#[cfg(feature = "servers")]`
+  completely.
 - No `dyn`, no serde — the workspace's rules apply here too.
