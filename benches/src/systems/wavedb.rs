@@ -92,6 +92,7 @@ pub fn open(dir: &Path, d: Durability) -> Result<PageStore, String> {
                 Durability::Durable => std::time::Duration::ZERO,
                 Durability::Relaxed => crate::RELAXED_WINDOW,
             },
+            ..Default::default()
         },
     )
     .map_err(|e| format!("open: {e}"))
