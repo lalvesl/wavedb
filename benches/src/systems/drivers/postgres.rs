@@ -232,7 +232,7 @@ impl PostgresDriver {
 /// The process failing to spawn, or never becoming connectable.
 pub fn start(dir: &Path, sync: &'static str) -> Result<Server, String> {
     let log = dir.join("postgres.log");
-    let pg = Server::spawn(
+    let mut pg = Server::spawn(
         "postgres",
         &[
             "-D",
@@ -250,7 +250,7 @@ pub fn start(dir: &Path, sync: &'static str) -> Result<Server, String> {
         ],
         &log,
     )?;
-    server::wait_for("postgres", server::STARTUP_SECS, || connect(dir).is_ok())
+    pg.wait_ready("postgres", server::STARTUP_SECS, || connect(dir).is_ok())
         .map_err(|e| format!("{e}\n{}", server::log_tail(&log, 10)))?;
     Ok(pg)
 }
