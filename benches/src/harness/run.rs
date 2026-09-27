@@ -46,11 +46,11 @@ pub struct PhaseResult {
     pub samples: Vec<u64>,
     /// The phase, end to end, on the orchestrating thread.
     pub wall_ns: u64,
-    /// Disk bytes the row's writer emitted while the phase ran, from
-    /// [`DriverFactory::writer`]. It spans the whole phase rather than the
-    /// timed windows, which is right: bytes written by an untimed hook are
-    /// still bytes written.
-    pub bytes_written: u64,
+    /// What the phase cost the disk in both directions, from
+    /// [`DriverFactory::meter`]. It spans the whole phase rather than the
+    /// timed windows, which is right: bytes an untimed hook moved are still
+    /// bytes moved.
+    pub io: crate::io_counters::Io,
 }
 
 /// Run every phase of `workload` against `factory`.
@@ -155,8 +155,8 @@ where
     F: DriverFactory,
     W: Workload<Op = <F::Driver as Driver>::Op>,
 {
-    let writer = factory.writer();
-    let bytes_before = writer.bytes();
+    let meter = factory.meter();
+    let io_before = meter.io();
     let start = Instant::now();
     // Generation runs here rather than on a fourth thread: the orchestrator is
     // otherwise blocked for the whole phase, so it *is* the generator thread,
@@ -198,7 +198,7 @@ where
         name: phase.to_string(),
         samples,
         wall_ns,
-        bytes_written: writer.bytes().saturating_sub(bytes_before),
+        io: meter.io().since(io_before),
     })
 }
 
