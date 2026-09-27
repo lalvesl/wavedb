@@ -9,9 +9,9 @@
 //! process. What they share is here — how a stored row is assembled from the
 //! harness's phases, and what a phase record keeps.
 //!
-//! ## What this path still does not carry
-//!
-//! **Read counters.** `read_bytes`/`rchar` arrive in phase 4, and their
+//! **Read counters** arrive here too (phase 4): `read_bytes` and `rchar` come
+//! from the same [`Io`](crate::io_counters::Io) snapshot as `write_bytes`, so
+//! a row's three counters describe one instant rather than three. Their
 //! absence is why a `mongod` observed reading ~1 TB against a 27.5 MB dataset
 //! could not be classified from the corpus.
 //!
@@ -156,9 +156,9 @@ fn phase_record(mut p: PhaseResult) -> PhaseRecord {
         p95_ns,
         p99_ns,
         max_ns,
-        bytes_written: p.bytes_written,
-        read_bytes: 0,
-        rchar: 0,
+        bytes_written: p.io.write_bytes,
+        read_bytes: p.io.read_bytes,
+        rchar: p.io.rchar,
     }
 }
 
@@ -166,6 +166,7 @@ fn phase_record(mut p: PhaseResult) -> PhaseRecord {
 mod tests {
     use super::{HARNESS_NOTE, phase_record, workload};
     use crate::harness::{PhaseResult, Workload};
+    use crate::io_counters::Io;
     use crate::systems::Cfg;
 
     fn cfg() -> Cfg {
@@ -192,12 +193,22 @@ mod tests {
             name: "insert".into(),
             samples: vec![10, 20, 30, 40],
             wall_ns: 1_000,
-            bytes_written: 4096,
+            io: Io {
+                read_bytes: 8192,
+                rchar: 2048,
+                write_bytes: 4096,
+            },
         });
         assert_eq!(rec.wall_ns, 1_000);
         assert_eq!(rec.total_ns, 100);
         assert_eq!(rec.count, 4);
         assert_eq!(rec.bytes_written, 4096);
+        assert_eq!(rec.read_bytes, 8192);
+        assert_eq!(rec.rchar, 2048);
+        assert!(
+            (rec.read_amplification() - 4.0).abs() < f64::EPSILON,
+            "8192 served for 2048 asked is 4x, not a swapped pair of fields"
+        );
     }
 
     /// Percentiles come from the pooled samples, sorted here rather than by
@@ -209,7 +220,7 @@ mod tests {
             name: "read_hot".into(),
             samples: vec![90, 10, 50, 99, 1],
             wall_ns: 500,
-            bytes_written: 0,
+            io: Io::default(),
         });
         assert!(rec.p50_ns <= rec.p95_ns);
         assert!(rec.p95_ns <= rec.p99_ns);
@@ -223,7 +234,7 @@ mod tests {
             name: "update".into(),
             samples: Vec::new(),
             wall_ns: 0,
-            bytes_written: 0,
+            io: Io::default(),
         });
         assert_eq!((rec.count, rec.total_ns, rec.max_ns), (0, 0, 0));
         assert!((rec.throughput() - 0.0).abs() < f64::EPSILON);
