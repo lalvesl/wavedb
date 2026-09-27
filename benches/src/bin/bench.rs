@@ -14,7 +14,7 @@ use wavedb_bench::cage::{CageSpec, sibling_binary};
 use wavedb_bench::corpus::Corpus;
 use wavedb_bench::plan::resolve::{Refresh, Request, resolve};
 use wavedb_bench::supervise::{Probe, probe_versions, run_rows};
-use wavedb_bench::{guard, host, report};
+use wavedb_bench::{absolute, guard, host, report};
 
 fn main() {
     if let Err(e) = run() {
@@ -210,7 +210,7 @@ impl Opts {
                 }
                 "--repo" => o.repo = PathBuf::from(text()?),
                 "--results" => o.results = PathBuf::from(text()?),
-                "--work-dir" => o.work_dir = PathBuf::from(text()?),
+                "--work-dir" => o.work_dir = absolute(&text()?)?,
                 "--dry-run" => o.dry_run = true,
                 "--force" => o.force = true,
                 // Workload sizes are passed straight through to every row
