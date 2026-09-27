@@ -147,15 +147,15 @@ pub trait DriverFactory: Send {
     /// [RFC 0064]: ../../../rfcs/0064-pivot-owned-concurrency-PLANNED.md
     fn route(&self, op: &<Self::Driver as Driver>::Op) -> usize;
 
-    /// Whose disk writes this row's phases should be attributed to.
+    /// Whose IO this row's phases should be attributed to.
     ///
-    /// The embedded bracket writes in this process; the server bracket writes
-    /// in the server's, and reading `self` for a server row would report a
-    /// flat zero for every phase — a wrong number rather than a missing one.
-    /// The default is the embedded answer, which is also the one every
-    /// single-process driver wants.
-    fn writer(&self) -> crate::metrics::Writer {
-        crate::metrics::Writer::Current
+    /// The embedded bracket reads and writes in this process; the server
+    /// bracket does it in the server's, and reading `self` for a server row
+    /// would report a flat zero for every phase — a wrong number rather than a
+    /// missing one. The default is the embedded answer, which is also the one
+    /// every single-process driver wants.
+    fn meter(&self) -> crate::io_counters::Meter {
+        crate::io_counters::Meter::Current
     }
 }
 
