@@ -52,17 +52,17 @@ pub const SETTLE_AFTER: &str = "checkout";
 /// start of each phase rather than being remembered from the first.
 #[cfg(feature = "servers")]
 #[must_use]
-pub fn server_writer(
+pub fn server_meter(
     held: &std::sync::Arc<
         std::sync::Mutex<Option<crate::systems::server::Server>>,
     >,
-) -> crate::metrics::Writer {
+) -> crate::io_counters::Meter {
     match held.lock() {
-        Ok(g) => g.as_ref().map_or(crate::metrics::Writer::Current, |s| {
-            crate::metrics::Writer::Pid(s.pid)
+        Ok(g) => g.as_ref().map_or(crate::io_counters::Meter::Current, |s| {
+            crate::io_counters::Meter::Pid(s.pid)
         }),
         // A poisoned mutex means a consumer panicked mid-restart; the row is
         // already failing, and a wrong pid would not make it clearer.
-        Err(_) => crate::metrics::Writer::Current,
+        Err(_) => crate::io_counters::Meter::Current,
     }
 }
