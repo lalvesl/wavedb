@@ -50,7 +50,7 @@ pub fn init(dir: &Path) -> Result<(), String> {
 /// The process failing to spawn, or never becoming connectable.
 pub fn start(dir: &Path, flush: &'static str) -> Result<Server, String> {
     let log = dir.join("mysqld.log");
-    let my = Server::spawn(
+    let mut my = Server::spawn(
         "mysqld",
         &[
             &format!("--datadir={}", dir.join("data").display()),
@@ -65,7 +65,7 @@ pub fn start(dir: &Path, flush: &'static str) -> Result<Server, String> {
         ],
         &dir.join("mysqld.out"),
     )?;
-    server::wait_for("mysqld", server::STARTUP_SECS, || {
+    my.wait_ready("mysqld", server::STARTUP_SECS, || {
         Conn::new(
             OptsBuilder::new()
                 .socket(Some(sock(dir).display().to_string()))
