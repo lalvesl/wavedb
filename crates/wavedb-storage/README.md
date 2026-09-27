@@ -10,26 +10,26 @@ write pipeline. This is where most of WaveDB's engineering energy lives.
 
 ## Module map
 
-| Module            | Responsibility                                                                                              |
-| ----------------- | ------------------------------------------------------------------------------------------------------------ |
-| `block`           | `BlockDescriptor` (u40·u20·u4) + `Run` + `BlockAllocator` — alloc/free/coalesce runs of 4 KiB blocks.       |
-| `block_file`      | `data.bin` as a block-addressed file: superblock (block 0), positioned run I/O, grow/truncate, fsync.       |
+| Module            | Responsibility                                                                                                                                       |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `block`           | `BlockDescriptor` (u40·u20·u4) + `Run` + `BlockAllocator` — alloc/free/coalesce runs of 4 KiB blocks.                                                |
+| `block_file`      | `data.bin` as a block-addressed file: superblock (block 0), positioned run I/O, grow/truncate, fsync.                                                |
 | `dictionary`      | Per-`STRUCT_HASH` raw-content zstd dictionary (`Dictionary` + `DictState`): capped append-only buffer, version = prefix length, own run persistence. |
-| `directory`       | The per-`STRUCT_HASH` page directory container + the linear-hashing addressing math (pure addressing).      |
-| `directory_pages` | The directory's page **reads**: resolving a bucket to its `SlotPage`, decompressing against the passed-in `DictState`. |
-| `plan`            | A checkpoint's phase 1: touched ids → page images grouped per bucket, splits decided, nothing written.       |
-| `checkpoint`      | Phases 2–4: one best-fit window for every image, one positioned write, then the descriptor swap.            |
-| `edit`            | The addressing delta riding each window (`EditChunk`, chained by `prev`), its recovery fold (`Replay`), and the chain walk (`walk`).      |
-| `meta_log`        | Which chunks are live, the `Commit` frame's `head`, and when a round should compact the chain into a fresh snapshot.                  |
-| `retire`          | A checkpoint's deferred half: the retired journal + protection roll, held for the *next* checkpoint to dispose of.  |
-| `settle`          | The drain queue: what a round is, when it retries, and the cache-eviction budget.                           |
-| `chain`           | Directory chain blocks — the persisted address vector, copy-on-write, placed in the checkpoint's window.    |
-| `defrag`          | Relocates live pages stranded between holes to fresh tail blocks so free extents coalesce.                  |
-| `page`            | `SlotPage` — the homogeneous record page: `[len][to_wire_checked(PageEnvelope)]`, body raw or zstd.         |
-| `journal`         | Append-only WAL of `Write` batches (checked wire frames); fsync = durability; torn-tail-tolerant replay.    |
-| `struct_storage`  | `StructStorage` — one type's own cache + directory slot (`#[wavedb]` emits one `static` per type).          |
-| `page_store`      | `PageStore` — the node's authoritative `Store`: journal-first → per-type caches → settle into pages.        |
-| `error`           | `StorageError` / `StorageResult`; flattens to `wavedb_core::Error::Backend` at the `Store` seam.            |
+| `directory`       | The per-`STRUCT_HASH` page directory container + the linear-hashing addressing math (pure addressing).                                               |
+| `directory_pages` | The directory's page **reads**: resolving a bucket to its `SlotPage`, decompressing against the passed-in `DictState`.                               |
+| `plan`            | A checkpoint's phase 1: touched ids → page images grouped per bucket, splits decided, nothing written.                                               |
+| `checkpoint`      | Phases 2–4: one best-fit window for every image, one positioned write, then the descriptor swap.                                                     |
+| `edit`            | The addressing delta riding each window (`EditChunk`, chained by `prev`), its recovery fold (`Replay`), and the chain walk (`walk`).                 |
+| `meta_log`        | Which chunks are live, the `Commit` frame's `head`, and when a round should compact the chain into a fresh snapshot.                                 |
+| `retire`          | A checkpoint's deferred half: the retired journal + protection roll, held for the _next_ checkpoint to dispose of.                                   |
+| `settle`          | The drain queue: what a round is, when it retries, and the cache-eviction budget.                                                                    |
+| `chain`           | Directory chain blocks — the persisted address vector, copy-on-write, placed in the checkpoint's window.                                             |
+| `defrag`          | Relocates live pages stranded between holes to fresh tail blocks so free extents coalesce.                                                           |
+| `page`            | `SlotPage` — the homogeneous record page: `[len][to_wire_checked(PageEnvelope)]`, body raw or zstd.                                                  |
+| `journal`         | Append-only WAL of `Write` batches (checked wire frames); fsync = durability; torn-tail-tolerant replay.                                             |
+| `struct_storage`  | `StructStorage` — one type's own cache + directory slot (`#[wavedb]` emits one `static` per type).                                                   |
+| `page_store`      | `PageStore` — the node's authoritative `Store`: journal-first → per-type caches → settle into pages.                                                 |
+| `error`           | `StorageError` / `StorageResult`; flattens to `wavedb_core::Error::Backend` at the `Store` seam.                                                     |
 
 Settle and rebalance are **off the mutation path**: `apply` only journals,
 commits to the caches, and queues the touched ids; the node's maintenance loop
@@ -81,10 +81,10 @@ metadata — the allocator never hands them out. Block 0 is the **superblock**:
 it stamps the file as a WaveDB data file and carries the per-database facts.
 Layout (little-endian, zero-padded to the block):
 
-| Offset | Field                                | Size    | Meaning                                                                              |
-| ------ | ------------------------------------ | ------- | ------------------------------------------------------------------------------------ |
-| 0      | magic                                | 8 B     | `WAVEDBIN` — "this is a WaveDB data file". Mismatch ⇒ `StorageError::BadMagic`.      |
-| 8      | `to_wire_checked(SuperblockBody)`    | 40 B    | `[crc32 (u32 LE)][wire]` of `{ version: u32, seed: [u64; 4] }`.                      |
+| Offset | Field                             | Size | Meaning                                                                         |
+| ------ | --------------------------------- | ---- | ------------------------------------------------------------------------------- |
+| 0      | magic                             | 8 B  | `WAVEDBIN` — "this is a WaveDB data file". Mismatch ⇒ `StorageError::BadMagic`. |
+| 8      | `to_wire_checked(SuperblockBody)` | 40 B | `[crc32 (u32 LE)][wire]` of `{ version: u32, seed: [u64; 4] }`.                 |
 
 The body is the **checked wire encoding** of `SuperblockBody` — the format
 version (`BadVersion` if it mismatches; pinned at 1 pre-release, see the
@@ -103,7 +103,7 @@ Engine metadata is described with **the `WaveWire` codec only** — the same
 layout language records use. No structure gets its own bespoke byte format:
 
 - **superblock body** (version + seed) — a plain `WaveWire` struct behind the
-  magic. The 8-byte magic itself stays a raw prefix *outside* the wire payload:
+  magic. The 8-byte magic itself stays a raw prefix _outside_ the wire payload:
   it must be checkable before any decode is attempted;
 - **block descriptor** (`start u40 · count u20 · occupation u4`, exact-packed
   into one `u64` — see the table below) — wire-encodes as that `u64`;
@@ -287,7 +287,7 @@ changing the framing):
 
 > Status: the dedicated **32 KiB, one-node-per-page** format was **dropped
 > (2026-07-07)** — see [RFC 0031](../../rfcs/0031-node-per-page-bptree-DEPRECATED.md).
-> A `BpTree` exists per tenant, so a B2C node hosts millions of *small* trees and
+> A `BpTree` exists per tenant, so a B2C node hosts millions of _small_ trees and
 > a page per node wastes exactly the dominant case.
 
 Nodes ride the shared linear-hash `SlotPage` directory instead: a node is an
@@ -376,7 +376,7 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
    instead and the superseded runs are freed.
 
 6. **Background defragmentation.** Copy-on-write leaves holes, and what a
-   checkpoint needs is one *contiguous* window. When the largest free extent
+   checkpoint needs is one _contiguous_ window. When the largest free extent
    falls below the policy's threshold, a pass relocates live pages stranded
    between holes — verbatim, to fresh tail blocks — so the space they vacate
    merges into the extent the next checkpoint lands in
@@ -451,7 +451,7 @@ A store opened with a **durability window** (`StoreOptions { relax_window }`,
 [RFC 0061](../../rfcs/0061-relaxed-durability-window.md)) keeps the one write
 and drops the per-batch barrier: `apply` appends without `fsync` and syncs once
 per elapsed window, so a burst amortises to a single barrier. `Ok` then means
-*journalled, ordered, and durable within the window* — a crash loses a suffix
+_journalled, ordered, and durable within the window_ — a crash loses a suffix
 of acknowledged writes and never corrupts. `PageStore::flush` forces the
 barrier. **Default zero**: one barrier per batch, unchanged.
 
@@ -468,7 +468,7 @@ the buckets that round moved, in the same write, for no extra IOp
 
 **Per checkpoint: one write, ONE barrier.** The window additionally carries a
 grown dictionary; then `data.bin` is synced — and that is the only barrier. The
-`Commit` frame is a *pointer* into state that sync already made durable, so it
+`Commit` frame is a _pointer_ into state that sync already made durable, so it
 is appended **unsynced** and the next ordinary write's fsync carries it. Each
 chunk names the one before it, so the frame names only the head
 ([RFC 0048](../../rfcs/0048-chained-addressing-log.md)): a fixed 16 bytes
@@ -486,13 +486,13 @@ for shutdown, where there is no next checkpoint. `BlockFile::io()` and
 `Journal::barriers()` count all of this, and the accounting is asserted in
 `page_store`'s tests.
 
-What still scales with the work rather than with the batch is the *logical* index
+What still scales with the work rather than with the batch is the _logical_ index
 maintenance above the store, which decides how many values a batch contains:
 
-| Operation                         | Values in the batch                                                                              |
-| --------------------------------- | ------------------------------------------------------------------------------------------------ |
-| **Unique `save`**                 | the live record + the archived predecessor                                                       |
-| **NonUnique `save`** (update)     | record + archive + the recency log's re-key + each of `N` secondaries **whose fields changed**   |
+| Operation                         | Values in the batch                                                                               |
+| --------------------------------- | ------------------------------------------------------------------------------------------------- |
+| **Unique `save`**                 | the live record + the archived predecessor                                                        |
+| **NonUnique `save`** (update)     | record + archive + the recency log's re-key + each of `N` secondaries **whose fields changed**    |
 | **NonUnique `insert` / `remove`** | record + `current` + recency (or `dead`) + every one of `N` secondaries · `Pivot` if a root moved |
 
 A NonUnique **`save`** never re-keys the `current` tree — its key is the record's
