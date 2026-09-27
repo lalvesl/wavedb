@@ -70,6 +70,21 @@ pub const RELAXED_WINDOW: std::time::Duration =
 /// trigger never fired once while 649 MB accumulated.
 pub const FILL_CHECKPOINT_BYTES: u64 = 4 << 30;
 
+/// A path argument made absolute where it is read.
+///
+/// The work directory reaches servers that resolve it after changing into
+/// their own data directory: PostgreSQL given a relative `-k` fails with
+/// `could not create lock file … No such file or directory`, and the row
+/// then dies on a 300-second readiness timeout that names neither. Made
+/// absolute once, at the command line, rather than per server.
+///
+/// # Errors
+/// When the current directory cannot be read, the only way a relative
+/// path has no absolute form.
+pub fn absolute(path: &str) -> Result<std::path::PathBuf, String> {
+    std::path::absolute(path).map_err(|e| format!("{path}: {e}"))
+}
+
 pub mod cage;
 pub mod corpus;
 pub mod footprint;
@@ -86,3 +101,21 @@ pub mod seed;
 pub mod shop;
 pub mod supervise;
 pub mod systems;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_relative_work_dir_is_anchored_at_the_current_directory() {
+        let got = absolute("target/probe").expect("cwd is readable");
+        assert!(got.is_absolute(), "{got:?}");
+        assert!(got.ends_with("target/probe"), "{got:?}");
+    }
+
+    #[test]
+    fn an_absolute_work_dir_is_kept_as_given() {
+        let got = absolute("/var/tmp/x").expect("absolute");
+        assert_eq!(got, std::path::PathBuf::from("/var/tmp/x"));
+    }
+}
