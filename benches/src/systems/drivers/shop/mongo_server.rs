@@ -70,7 +70,7 @@ fn direct(port: u16) -> Result<Client, String> {
 /// The process would not start, or would not become primary.
 pub fn start(dir: &Path, port: u16) -> Result<Server, String> {
     let log = dir.join("mongod.log");
-    let mongo = Server::spawn(
+    let mut mongo = Server::spawn(
         "mongod",
         &[
             "--dbpath",
@@ -91,15 +91,16 @@ pub fn start(dir: &Path, port: u16) -> Result<Server, String> {
         ],
         &dir.join("mongod.out"),
     )?;
-    server::wait_for("mongod", server::STARTUP_SECS, || {
-        direct(port).is_ok_and(|c| {
-            c.database("admin")
-                .run_command(doc! { "ping": 1 })
-                .run()
-                .is_ok()
+    mongo
+        .wait_ready("mongod", server::STARTUP_SECS, || {
+            direct(port).is_ok_and(|c| {
+                c.database("admin")
+                    .run_command(doc! { "ping": 1 })
+                    .run()
+                    .is_ok()
+            })
         })
-    })
-    .map_err(|e| format!("{e}\n{}", server::log_tail(&log, 10)))?;
+        .map_err(|e| format!("{e}\n{}", server::log_tail(&log, 10)))?;
 
     // Idempotent across a restart, where the node is already initiated and
     // answers `AlreadyInitialized`. Every *other* refusal is kept and folded
@@ -127,21 +128,23 @@ pub fn start(dir: &Path, port: u16) -> Result<Server, String> {
             })
     });
     // Wait for primary, or the first write refuses.
-    server::wait_for("mongod primary", server::STARTUP_SECS, || {
-        direct(port).is_ok_and(|c| {
-            c.database("admin")
-                .run_command(doc! { "hello": 1 })
-                .run()
-                .is_ok_and(|d| d.get_bool("isWritablePrimary").unwrap_or(false))
+    mongo
+        .wait_ready("mongod primary", server::STARTUP_SECS, || {
+            direct(port).is_ok_and(|c| {
+                c.database("admin")
+                    .run_command(doc! { "hello": 1 })
+                    .run()
+                    .is_ok_and(|d| {
+                        d.get_bool("isWritablePrimary").unwrap_or(false)
+                    })
+            })
         })
-    })
-    .map_err(|e| {
-        let why = initiate
-            .as_ref()
-            .err()
-            .map_or_else(String::new, |i| format!("\nreplSetInitiate: {i}"));
-        format!("{e}{why}\n{}", server::log_tail(&log, 10))
-    })?;
+        .map_err(|e| {
+            let why = initiate.as_ref().err().map_or_else(String::new, |i| {
+                format!("\nreplSetInitiate: {i}")
+            });
+            format!("{e}{why}\n{}", server::log_tail(&log, 10))
+        })?;
     Ok(mongo)
 }
 
