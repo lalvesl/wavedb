@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use wavedb_bench::corpus::{Corpus, RowKey};
 use wavedb_bench::row::{RowRun, measure};
-use wavedb_bench::{cage, host, systems};
+use wavedb_bench::{absolute, cage, host, systems};
 
 fn main() {
     if let Err(e) = run() {
@@ -191,7 +191,7 @@ impl Opts {
                 "--orders-max" => o.orders_max = num(&mut it, &arg)?,
                 "--items-max" => o.items_max = num(&mut it, &arg)?,
                 "--results" => o.results = PathBuf::from(text()?),
-                "--work-dir" => o.work_dir = PathBuf::from(text()?),
+                "--work-dir" => o.work_dir = absolute(&text()?)?,
                 "--seed-wavedb" => o.seed_wavedb = Some(text()?.into()),
                 "--seed-sqlite" => o.seed_sqlite = Some(text()?.into()),
                 "--seed-postgres" => o.seed_postgres = Some(text()?.into()),
