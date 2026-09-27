@@ -74,8 +74,8 @@ impl DriverFactory for Factory {
         0
     }
 
-    fn writer(&self) -> crate::metrics::Writer {
-        super::server_writer(&self.server)
+    fn meter(&self) -> crate::io_counters::Meter {
+        super::server_meter(&self.server)
     }
 }
 
