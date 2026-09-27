@@ -13,7 +13,11 @@ RFC's own status header can carry the answer.
 
 ## Where this stands
 
-**Phases 1 and 2 complete.** Every row of both workloads on all five systems
+**Phases 1–3 complete; phase 4 landed, awaiting one live server row.**
+Every phase now records reads (`read_bytes`, `rchar`) beside writes. The
+`large` fill was timed at 3h53m; `huge` is therefore an import (phase 5).
+
+Every row of both workloads on all five systems
 runs through the harness end to end — real wall clock, pooled percentiles,
 per-phase `bytes_written` attributed to the right process, and the footprint
 points. Proven by running one row of each system and workload against live
@@ -99,7 +103,7 @@ pass costs the pass.
 | 3.6 | `gen.nix`: filtered source, so an unrelated edit stops invalidating seeds | ✅ |
 | 3.7 | `dataset.nix` / `seeds.nix` parameterised by tier | ✅ |
 | 3.8 | Fill profile (uncaged, big caches, max relax) | ✅ |
-| 3.9 | Build the `large` tier and time the fill — **gates phase 5** | 🔧 |
+| 3.9 | Build the `large` tier and time the fill — **gates phase 5** | ✅ |
 | 3.10 | `.bench-seeds/` GC roots | ✅ |
 
 3.1 and 3.2 landed as one step, deliberately: a `page_cache_bytes` the
@@ -175,14 +179,36 @@ running node uses.
 
 | # | step | |
 |---|---|---|
-| 4.1 | `read_bytes` + `rchar` from `/proc/self/io` | ⬜ |
-| 4.2 | Same for the server process tree | ⬜ |
-| 4.3 | `PhaseRecord` fields (already in the format, still written as 0) | 🔧 |
-| 4.4 | `read amp` column and the `read_bytes / rchar` ratio | ⬜ |
+| 4.1 | `read_bytes` + `rchar` from `/proc/self/io` | ✅ |
+| 4.2 | Same for the server process tree | 🔧 |
+| 4.3 | `PhaseRecord` fields (already in the format, still written as 0) | ✅ |
+| 4.4 | `read amp` column and the `read_bytes / rchar` ratio | ✅ |
+
+All four landed as one commit, because they are one file read once:
+`io_counters::Io` takes `read_bytes`, `rchar` and `write_bytes` from a
+**single** pass over `/proc/<pid>/io`. Three reads of a live file give three
+answers that never coexisted, and a ratio of mismatched samples is worse than
+no ratio. The harness brackets each phase with `Meter::io()` — `self` for an
+embedded row, the server's whole process tree for a server row — and the
+record carries all three.
+
+4.2 is 🔧 only for its proof: the tree walk is the one that already measured
+`write_bytes` live in phase 2, and the read counters come out of the same
+parse, but no server row has run since. The first one closes it.
+
+4.4's *ratio* is `PhaseRecord::read_amplification()`; the *column* has no
+table to sit in until phase 6 renders one.
+
+The step deleted more than it added, and that is the part worth reviewing:
+`metrics.rs` (`Latencies`, `Distribution`, `Phase`, `phase_of`) and
+`SystemReport` had had no caller since the RFC 0060 bridge went — `pub` is
+why clippy never said so — and `server.rs` held a second parser of the same
+`/proc` file. `Writer` became `Meter`, since it now reports reads.
 
 ### Phase 5 — the `huge` tier
 
-Blocked on 3.9.
+Unblocked by 3.9: at the measured rate `huge` is an import, not a
+derivation (see the `large` finding below).
 
 ### Phase 6 — the three tables
 
@@ -256,7 +282,7 @@ The reason this file matters more than the checklist above.
   driver now fails the row instead.
 - **Nothing measures reads.** `bytes_written` is recorded and no read counter
   is, which is why a `mongod` observed reading ~1 TB against a 27.5 MB dataset
-  could not be classified from the corpus. Phase 4.
+  could not be classified from the corpus. Fixed in phase 4.
 - **Generation ran serially with the operation it fed**, on the same CPU, while
   the servers' WAL writers, page cleaners and eviction threads run
   *concurrently with* a timed window. That asymmetry is the whole motivation
@@ -356,6 +382,31 @@ The reason this file matters more than the checklist above.
   That last number is the answer RFC 0065 open question 1 was waiting for: at
   this rate `huge` is not a build you run, it is a build you import. Phase 5
   should assume the build-outside-and-import path rather than a derivation.
+
+  **The second attempt completed**: started 2026-09-05 10:48:45, its log
+  closed at 14:41:57 with `filled 5000000 records` and `seed wavedb:
+  verified 5000000 rows` — **3h53m (13 992 s), 357 rows/s on average**,
+  4× slower than the 200 000-row tier. Peak RSS was **at least 7.56 GB**
+  (the last sample, at 10 037 s; the sampler's log did not survive a
+  reboot), so memory stayed under the 10 GiB declared ceiling but used most
+  of it. With the rate still falling, `huge` at 50 million rows is **39 hours
+  or more** — the import conclusion above only gets firmer.
+
+- **The `large` seed was built and then lost to the garbage collector.** It
+  was launched by a one-off script with no `--out-link`, finished
+  unattended, and nothing pinned it; a month later the output is gone and
+  only the build log remains. `scripts/bench_seeds.sh large --build` would
+  have created the root the moment the build finished — that is what 3.10 is
+  for, and an hours-long build should never be started any other way. (Phase
+  4 changed the bench source, so the seed had to be rebuilt regardless; the
+  timing above is what 3.9 asked for, and it survived.)
+
+- **Observing the counters is a read.** Each snapshot of `/proc/self/io`
+  adds that file's size (~100 bytes) to `rchar`, so two consecutive
+  snapshots are never equal and every phase's `rchar` carries one snapshot
+  of measurement. Noise against any phase that reads at all — but it made
+  the first test of the tree walk, which compared two live snapshots for
+  equality, fail on the first run. The walk is now tested on vanished pids.
 
 ### Declared concessions
 
