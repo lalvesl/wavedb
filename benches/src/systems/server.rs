@@ -4,11 +4,10 @@
 //! durability knob, compaction command — but share four mechanics, and those
 //! are here so each adapter reads as its own database rather than as plumbing.
 //!
-//! One of them is load-bearing for the measurement: **write bytes come from the
-//! server's `/proc/<pid>/io`, not ours**. In the embedded bracket the engine
-//! writes in the benchmark's own process, so `/proc/self/io` is exactly right;
-//! in the server bracket our process writes nothing but socket traffic, and
-//! reading `self` would report a flat zero for every phase.
+//! The measurement's side of a server — its IO is read from the server's
+//! process tree, never ours — lives with the counters, in
+//! [`crate::io_counters::Meter`]; what is here only starts, waits for and
+//! stops the process.
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -75,28 +74,50 @@ impl Server {
 /// are far too tight inside the cage: `mysqld` 8.4 building its data dictionary
 /// and redo logs on **4 CPUs against a contended disk** was still initialising
 /// InnoDB when its 90 s expired, and that one timeout discarded a 50-minute
-/// pass. Waiting costs nothing when the server is healthy — [`wait_for`] polls
+/// pass. Waiting costs nothing when the server is healthy — [`Server::wait_ready`] polls
 /// and returns the moment it connects.
 pub const STARTUP_SECS: u64 = 300;
 
-/// Poll `ready` until it answers true or `secs` elapse.
-///
-/// Every server here takes seconds to become connectable, and every one of them
-/// reports "started" long before it accepts a connection. Polling the thing the
-/// benchmark actually needs — a working connection — is the only honest probe.
-pub fn wait_for(
-    what: &str,
-    secs: u64,
-    mut ready: impl FnMut() -> bool,
-) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(secs);
-    while Instant::now() < deadline {
-        if ready() {
-            return Ok(());
+impl Server {
+    /// Poll `ready` until it answers true, the server exits, or `secs` elapse.
+    ///
+    /// Every server here takes seconds to become connectable, and every one
+    /// of them reports "started" long before it accepts a connection. Polling
+    /// the thing the benchmark actually needs — a working connection — is the
+    /// only honest probe.
+    ///
+    /// The exit check is what keeps a dead server from looking like a slow
+    /// one. Without it a PostgreSQL that refused its socket path and exited in
+    /// 2 ms was waited on for the full 300 s and reported as `not ready` —
+    /// the cause was in its log, and the error arrived five minutes late
+    /// without it.
+    ///
+    /// # Errors
+    /// The server exiting first, or `secs` passing without a connection.
+    pub fn wait_ready(
+        &mut self,
+        what: &str,
+        secs: u64,
+        mut ready: impl FnMut() -> bool,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < deadline {
+            if ready() {
+                return Ok(());
+            }
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(format!(
+                        "{what}: exited ({status}) before accepting a connection"
+                    ));
+                }
+                Ok(None) => {}
+                Err(e) => return Err(format!("{what}: wait: {e}")),
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
-        std::thread::sleep(Duration::from_millis(100));
+        Err(format!("{what}: not ready after {secs}s"))
     }
-    Err(format!("{what}: not ready after {secs}s"))
 }
 
 /// Run a setup command to completion, failing loudly. Nothing here is timed:
@@ -166,5 +187,41 @@ impl Drop for Server {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A server that dies is reported as dead, at once — not as one that
+    /// never became ready, five minutes later.
+    #[test]
+    fn a_server_that_exits_fails_the_wait_immediately() {
+        let dir = std::env::temp_dir()
+            .join(format!("wavedb-bench-server-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let mut server =
+            Server::spawn("false", &[], &dir.join("false.log")).expect("spawn");
+        let started = Instant::now();
+        let err = server
+            .wait_ready("false", STARTUP_SECS, || false)
+            .expect_err("a dead server is never ready");
+        assert!(err.contains("exited"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_ready_server_returns_without_waiting() {
+        let dir = std::env::temp_dir()
+            .join(format!("wavedb-bench-server-ok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let mut server = Server::spawn("sleep", &["5"], &dir.join("sleep.log"))
+            .expect("spawn");
+        assert_eq!(server.wait_ready("sleep", 1, || true), Ok(()));
+        let _ = server.child.kill();
+        let _ = server.child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
