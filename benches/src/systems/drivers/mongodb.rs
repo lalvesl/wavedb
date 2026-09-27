@@ -198,7 +198,7 @@ pub fn start(dir: &Path, port: u16) -> Result<Server, String> {
     // No `--fork`: the forked daemon would leave us holding the pid of a
     // process that exits immediately, and the write-bytes column would read
     // zero for every phase.
-    let mongo = Server::spawn(
+    let mut mongo = Server::spawn(
         "mongod",
         &[
             "--dbpath",
@@ -218,19 +218,20 @@ pub fn start(dir: &Path, port: u16) -> Result<Server, String> {
         ],
         &dir.join("mongod.out"),
     )?;
-    server::wait_for("mongod", server::STARTUP_SECS, || {
-        ClientOptions::parse(format!("mongodb://127.0.0.1:{port}"))
-            .run()
-            .ok()
-            .and_then(|o| Client::with_options(o).ok())
-            .is_some_and(|c| {
-                c.database("admin")
-                    .run_command(doc! { "ping": 1 })
-                    .run()
-                    .is_ok()
-            })
-    })
-    .map_err(|e| format!("{e}\n{}", server::log_tail(&log, 10)))?;
+    mongo
+        .wait_ready("mongod", server::STARTUP_SECS, || {
+            ClientOptions::parse(format!("mongodb://127.0.0.1:{port}"))
+                .run()
+                .ok()
+                .and_then(|o| Client::with_options(o).ok())
+                .is_some_and(|c| {
+                    c.database("admin")
+                        .run_command(doc! { "ping": 1 })
+                        .run()
+                        .is_ok()
+                })
+        })
+        .map_err(|e| format!("{e}\n{}", server::log_tail(&log, 10)))?;
     Ok(mongo)
 }
 
