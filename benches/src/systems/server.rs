@@ -43,14 +43,6 @@ impl Server {
         Ok(Self { child, pid })
     }
 
-    /// Bytes this server sent to the block layer so far, from its own
-    /// `/proc/<pid>/io`. Zero if the process is gone — a stopped server's
-    /// counter is not recoverable, so phases must be measured while it runs.
-    #[must_use]
-    pub fn write_bytes(&self) -> u64 {
-        write_bytes(self.pid)
-    }
-
     /// Ask the server to stop with its own shutdown command, then reap it.
     ///
     /// The command is the system's own (`pg_ctl stop`, `mysqladmin shutdown`,
@@ -74,69 +66,6 @@ impl Server {
             .map_err(|e| format!("{cmd}: wait: {e}"))
             .map(|_| ())
     }
-}
-
-/// `write_bytes` for `pid` **and every descendant of it**.
-///
-/// The tree walk is not defensive programming, it is required: PostgreSQL is
-/// process-per-connection, so the postmaster we spawn writes essentially
-/// nothing and every byte comes from a backend, the WAL writer or the
-/// checkpointer. Reading the postmaster alone reported a flat `0.0 kB/insert` —
-/// a wrong number rather than a missing one, which is the failure mode this
-/// suite is built against. MySQL and MongoDB are threaded and would have been
-/// fine either way.
-#[must_use]
-pub fn write_bytes(pid: u32) -> u64 {
-    let mut total = own_write_bytes(pid);
-    let mut frontier = vec![pid];
-    let children = child_map();
-    while let Some(p) = frontier.pop() {
-        for child in children.get(&p).into_iter().flatten() {
-            total += own_write_bytes(*child);
-            frontier.push(*child);
-        }
-    }
-    total
-}
-
-fn own_write_bytes(pid: u32) -> u64 {
-    let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/io")) else {
-        return 0;
-    };
-    for line in text.lines() {
-        if let Some(v) = line.strip_prefix("write_bytes:") {
-            return v.trim().parse().unwrap_or(0);
-        }
-    }
-    0
-}
-
-/// Parent → children, from `/proc/<pid>/status`'s `PPid`. Cheap enough to
-/// rebuild per sample (twice per phase), and the run's PID namespace keeps the
-/// table to this run's own processes.
-fn child_map() -> std::collections::HashMap<u32, Vec<u32>> {
-    let mut map: std::collections::HashMap<u32, Vec<u32>> =
-        std::collections::HashMap::new();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return map;
-    };
-    for entry in entries.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue; // not a process directory
-        };
-        let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status"))
-        else {
-            continue; // exited between the readdir and here
-        };
-        if let Some(ppid) = status
-            .lines()
-            .find_map(|l| l.strip_prefix("PPid:"))
-            .and_then(|v| v.trim().parse::<u32>().ok())
-        {
-            map.entry(ppid).or_default().push(pid);
-        }
-    }
-    map
 }
 
 /// How long a server may take to become connectable.
