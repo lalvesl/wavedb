@@ -116,6 +116,24 @@ pub struct PhaseRecord {
 }
 
 impl PhaseRecord {
+    /// Bytes the disk served per byte the phase asked for — the `read amp`
+    /// column (RFC 0065 §8).
+    ///
+    /// This is the number the corpus could not answer before: a `mongod`
+    /// observed reading ~1 TB against a 27.5 MB dataset could not be
+    /// classified, because nothing recorded what it read. Above 1 the engine
+    /// fetched more than it used; below 1 a cache served the difference.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn read_amplification(&self) -> f64 {
+        if self.rchar == 0 {
+            return 0.0;
+        }
+        self.read_bytes as f64 / self.rchar as f64
+    }
+}
+
+impl PhaseRecord {
     /// Operations per second, by wall clock.
     #[must_use]
     pub fn throughput(&self) -> f64 {
