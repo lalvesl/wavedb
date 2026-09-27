@@ -98,14 +98,16 @@ impl DriverFactory for Factory {
     /// The **server's** disk writes, not this process's. Read from the shared
     /// handle at the start of each phase, so a restart at a phase boundary
     /// hands the next phase the pid that is actually running.
-    fn writer(&self) -> crate::metrics::Writer {
+    fn meter(&self) -> crate::io_counters::Meter {
         match self.server.lock() {
-            Ok(g) => g.as_ref().map_or(crate::metrics::Writer::Current, |s| {
-                crate::metrics::Writer::Pid(s.pid)
-            }),
+            Ok(g) => {
+                g.as_ref().map_or(crate::io_counters::Meter::Current, |s| {
+                    crate::io_counters::Meter::Pid(s.pid)
+                })
+            }
             // A poisoned mutex means a consumer panicked mid-restart; the row
             // is already failing, and a wrong pid would not make it clearer.
-            Err(_) => crate::metrics::Writer::Current,
+            Err(_) => crate::io_counters::Meter::Current,
         }
     }
 }
