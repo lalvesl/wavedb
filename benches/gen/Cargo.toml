@@ -1,0 +1,32 @@
+[package]
+name = "wavedb-bench-gen"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+# Its own workspace, and its own lock, for the same reason it is its own crate:
+# `benches/nix/gen.nix` builds `bench-gen` from this directory and the engine
+# crates alone, so nothing in the measuring crate — not even its manifest or
+# lock — can reach a seed's store path. See `src/lib.rs`.
+[workspace]
+
+[lib]
+name = "wavedb_bench_gen"
+path = "src/lib.rs"
+
+# The seed filler (RFC 0060 §6): runs inside a Nix builder, where nothing is
+# timed and nothing is recorded.
+[[bin]]
+name = "bench-gen"
+path = "src/bin/bench-gen.rs"
+
+[dependencies]
+wavedb-core = { path = "../../crates/wavedb-core" }
+wavedb-macros = { path = "../../crates/wavedb-macros" }
+wavedb-storage = { path = "../../crates/wavedb-storage" }
+# block_on for the engine's non-Send futures (current-thread model).
+futures = "0.3"
+
+[profile.release]
+debug = true
