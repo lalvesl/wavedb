@@ -13,7 +13,7 @@ RFC's own status header can carry the answer.
 
 ## Where this stands
 
-**Phases 1–3 complete; phase 4 landed, awaiting one live server row.**
+**Phases 1–4 complete.**
 Every phase now records reads (`read_bytes`, `rchar`) beside writes. The
 `large` fill was timed at 3h53m; `huge` is therefore an import (phase 5).
 
@@ -180,7 +180,7 @@ running node uses.
 | # | step | |
 |---|---|---|
 | 4.1 | `read_bytes` + `rchar` from `/proc/self/io` | ✅ |
-| 4.2 | Same for the server process tree | 🔧 |
+| 4.2 | Same for the server process tree | ✅ |
 | 4.3 | `PhaseRecord` fields (already in the format, still written as 0) | ✅ |
 | 4.4 | `read amp` column and the `read_bytes / rchar` ratio | ✅ |
 
@@ -192,9 +192,34 @@ no ratio. The harness brackets each phase with `Meter::io()` — `self` for an
 embedded row, the server's whole process tree for a server row — and the
 record carries all three.
 
-4.2 is 🔧 only for its proof: the tree walk is the one that already measured
-`write_bytes` live in phase 2, and the read counters come out of the same
-parse, but no server row has run since. The first one closes it.
+4.2 is proven live: both PostgreSQL `micro` rows at `smoke`, run uncaged
+with `--force` into a scratch corpus (not `results/`), stored and read back:
+
+| phase | ops | written | `read_bytes` | `rchar` |
+|---|---|---|---|---|
+| insert (durable) | 1 000 | 75.5 MB | 0 | 1.10 MB |
+| read_hot | 50 000 | 0.44 MB | 0 | 57 KB |
+| read_cold | 50 000 | 0.14 MB | 0 | 483 KB |
+| update (durable) | 50 000 | 4.2 GB | 1.05 MB | 3.37 MB |
+| update (relaxed) | 50 000 | 40.5 MB | 0 | 76 KB |
+
+`rchar` is non-zero only because the walk reaches the backends — the
+postmaster alone reads nothing. Two things to read into it, and one not to:
+
+- **`read_bytes` is zero almost everywhere, and that is correct.** It counts
+  what the *disk* served; a 1 000-row dataset is entirely in the page cache,
+  so nothing reaches the device. Read amplification is a `large`-tier
+  number — at `smoke` it is 0/0 and says nothing.
+- **`rchar` counts file reads, not socket reads.** The backend receives
+  50 000 queries over its socket and `rchar` is 57 KB — 14 pages of
+  `pread` on shared-buffer misses. Socket `recv` does not pass through
+  `vfs_read`, so the counter is the database's own reading and not the
+  benchmark's traffic.
+- *Not* a finding yet: durable update writes **84 KB per update** (full-page
+  writes plus a WAL flush per commit). Uncaged `smoke` under `--force` is a
+  proof of plumbing, not a measurement.
+
+Getting that row to run found two bugs in the server bracket, below.
 
 4.4's *ratio* is `PhaseRecord::read_amplification()`; the *column* has no
 table to sit in until phase 6 renders one.
@@ -437,6 +462,19 @@ The reason this file matters more than the checklist above.
 Not introduced here — they were live in the RFC 0060 suite and only became
 visible because phase 3 started building the datasets instead of assuming
 them.
+
+- **A dead server was waited on as a slow one.** The startup wait polled a
+  connection and never asked whether the process was alive, so a PostgreSQL
+  that exited in 2 ms was waited on for the full 300 s and reported as
+  `not ready` — the cause was in its log, and arrived five minutes late.
+  `Server::wait_ready` now checks `try_wait` on every poll and fails at once
+  with the log tail. (Found in phase 4.)
+- **A relative `--work-dir` broke PostgreSQL**, which resolves `-k` after
+  changing into its data directory (`could not create lock file … No such
+  file or directory`). Made absolute at the command line. The next limit is
+  real and stays: a Unix socket path is at most **107 bytes**, and the
+  scratch adds ~50 to the work directory, so a deep work directory fails —
+  now in seconds, naming the limit. (Found in phase 4.)
 
 - **Recording a measurement invalidated the datasets the next measurement
   needs.** `bench-gen` was built with `src = repoSrc` — the whole checkout —
