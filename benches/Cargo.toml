@@ -9,27 +9,27 @@ publish = false
 # `Cargo.toml`): the competitor drivers must never enter the shipped dependency
 # graph or `cargo deny check`'s audit surface. See RFC 0060 §5.
 [workspace]
+# `gen/` sits inside this directory but is its own workspace: its source and
+# lock must not include this crate's (see `gen/Cargo.toml`).
+exclude = ["gen"]
 
 [lib]
 name = "wavedb_bench"
 path = "src/lib.rs"
 
-# The measuring binary, and the filler that builds seed derivations inside a
-# Nix builder (RFC 0060 §6). They share the library; only the filler runs where
-# nothing may be timed.
-[[bin]]
-name = "bench-gen"
-path = "src/bin/bench-gen.rs"
-
 [features]
 default = ["servers"]
-# The server bracket (RFC 0060 §2). Optional because `bench-gen` needs none of
-# it, and `bench-gen` is a build input of *every* seed derivation: without this
-# gate, each seed rebuild would compile three database clients before writing a
-# TSV. `nix build .#bench-gen` passes `--no-default-features`.
+# The server bracket (RFC 0060 §2). Optional so the embedded bracket builds
+# without three database clients. It was introduced for `bench-gen`, which has
+# since moved to its own crate (`gen/`) and needs no gate at all; the
+# `--no-default-features` build stays in the bar because the gates it checks
+# are still here.
 servers = ["dep:mongodb", "dep:postgres", "dep:mysql"]
 
 [dependencies]
+# The schema and the seed fill, in a crate of their own so that `bench-gen`'s
+# source is only what it compiles (see `gen/src/lib.rs`).
+wavedb-bench-gen = { path = "gen" }
 wavedb-core = { path = "../crates/wavedb-core" }
 wavedb-macros = { path = "../crates/wavedb-macros" }
 wavedb-storage = { path = "../crates/wavedb-storage" }
