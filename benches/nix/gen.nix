@@ -1,19 +1,20 @@
 # `bench-gen` — the fill/emit tool every seed is built with.
 #
-# ## Why the source is filtered
+# ## Why the source is filtered, and why that needed a crate
 #
 # `bench-gen` is a build input of **every seed**, so whatever invalidates it
-# invalidates the whole dataset tree. Built from `repoSrc` — the flake's own
-# source, the entire checkout — that meant an RFC edit, a README fix, or
-# **recording a benchmark row** rebuilt all five seeds. The last one is the
-# sharp edge: `benches/results/` is tracked, so storing a measurement
-# invalidated the datasets the next measurement needs. At the `small` tier
-# that is minutes; at `large` it is the afternoon.
+# invalidates the whole dataset tree. A derivation hashes every file in its
+# source, compiled or not, so the only source that keeps a seed stable is one
+# that holds *exactly* what the binary compiles from.
 #
-# So the source is narrowed to what this binary actually compiles from: the
-# bench crate's Rust and manifests, the WaveDB crates it links, and the
-# workspace root manifest those crates inherit from. Nothing else can reach a
-# `.rs` file, so nothing else should be able to change a store path.
+# That is why `bench-gen` lives in its own crate (`benches/gen`). Built from
+# the whole checkout, an RFC edit or **recording a benchmark row** rebuilt all
+# five seeds. Narrowed to the measuring crate's sources it was better and still
+# wrong: `bench-gen` linked that crate's library, so editing a driver, the
+# harness or a comment in it changed every seed's store path — measured, and at
+# `large` that is a four-hour rebuild of data that did not change. Now the
+# source is the gen crate, the engine crates it links, and the workspace root
+# manifest they inherit from. Nothing in the measuring crate can reach it.
 #
 # The pairing with `params.nix`'s per-tier `rev` is deliberate: filtering
 # stops unrelated edits from invalidating anything, and `rev` is how a human
@@ -37,11 +38,10 @@ rustPlatform.buildRustPackage {
   src = toSource {
     root = repoSrc;
     fileset = unions [
-      # The bench crate: its sources, its manifest, and the lock that makes
-      # this build hermetic.
-      (rust (repoSrc + "/benches/src"))
-      (repoSrc + "/benches/Cargo.toml")
-      (repoSrc + "/benches/Cargo.lock")
+      # The gen crate: its sources, its manifest, and its own lock.
+      (rust (repoSrc + "/benches/gen/src"))
+      (repoSrc + "/benches/gen/Cargo.toml")
+      (repoSrc + "/benches/gen/Cargo.lock")
       # The engine, by path dependency.
       (rust (repoSrc + "/crates"))
       (manifests (repoSrc + "/crates"))
@@ -51,24 +51,13 @@ rustPlatform.buildRustPackage {
     ];
   };
 
-  # The bench crate is outside the workspace, so it carries its own lock —
-  # which is what makes this build hermetic.
-  cargoLock.lockFile = ../Cargo.lock;
+  # The gen crate is its own workspace, so it carries its own lock — which is
+  # what makes this build hermetic without reading the measuring crate's.
+  cargoLock.lockFile = ../gen/Cargo.lock;
   # Both are needed: `cargoRoot` says where the lock to vendor from lives (the
   # root one is the workspace's, a different dependency set),
   # `buildAndTestSubdir` says what to build.
-  cargoRoot = "benches";
-  buildAndTestSubdir = "benches";
-  cargoBuildFlags = [
-    "--bin"
-    "bench-gen"
-  ];
-  # Without the `servers` feature. `bench-gen` fills WaveDB and writes a TSV;
-  # it needs no database client, and it is a build input of every seed, so
-  # compiling three drivers here would be paid on every seed rebuild.
-  buildNoDefaultFeatures = true;
+  cargoRoot = "benches/gen";
+  buildAndTestSubdir = "benches/gen";
   doCheck = false;
-  nativeBuildInputs = [ pkgs.pkg-config ];
-  # rusqlite links the pinned system SQLite, never its bundled copy.
-  buildInputs = [ pkgs.sqlite ];
 }
