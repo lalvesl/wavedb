@@ -2292,9 +2292,20 @@ dependencies = [
  "postgres",
  "rusqlite",
  "tokio",
+ "wavedb-bench-gen",
  "wavedb-core",
  "wavedb-macros",
  "wavedb-quick-node",
+ "wavedb-storage",
+]
+
+[[package]]
+name = "wavedb-bench-gen"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "wavedb-core",
+ "wavedb-macros",
  "wavedb-storage",
 ]
 
