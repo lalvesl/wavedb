@@ -64,6 +64,7 @@ fn run() -> Result<(), String> {
         generator_seed: opts.seed,
         wavedb_git_sha: prov.git_sha.clone(),
         versions,
+        seeded_systems: seeded_systems(&opts.seeds),
     };
     // Both guards, before any row is spawned: a refusal here costs nothing,
     // where the same refusal at the end of a pass costs the pass.
@@ -90,6 +91,7 @@ fn run() -> Result<(), String> {
         plan.measure.len(),
         plan.reused()
     );
+    eprintln!("{}", seed_line(&opts.seeds));
     if opts.dry_run {
         for key in &plan.measure {
             println!(
@@ -159,6 +161,8 @@ struct Opts {
     dry_run: bool,
     force: bool,
     sizes: Vec<String>,
+    /// `--seed-<system> PATH` pairs for every row; see [`seed_args`].
+    seeds: Vec<String>,
 }
 
 impl Opts {
@@ -178,6 +182,7 @@ impl Opts {
             dry_run: false,
             force: false,
             sizes: Vec::new(),
+            seeds: seed_args(|name| std::env::var(name).ok()),
         };
         let mut it = args.peekable();
         while let Some(arg) = it.next() {
@@ -251,7 +256,50 @@ impl Opts {
             args.push("--force".into());
         }
         args.extend(self.sizes.iter().cloned());
+        args.extend(self.seeds.iter().cloned());
         args
+    }
+}
+
+/// Systems whose rows can start from a prebuilt seed.
+const SEEDED: [&str; 5] = ["wavedb", "sqlite", "postgres", "mysql", "mongodb"];
+
+/// The seeds the `bench-seeded` app exports (`BENCH_SEED_<SYSTEM>`), as the
+/// `--seed-<system>` flags every row is given.
+///
+/// Read here because the supervisor is what the app runs. Until this existed
+/// the app built all five seeds, exported their paths, and nothing read them:
+/// every row filled from empty inside its own run and recorded
+/// `seed_path: ""`, which is the only place the loss was visible. Each row
+/// uses the one seed for its own system and ignores the rest.
+fn seed_args(env: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    SEEDED
+        .iter()
+        .filter_map(|system| {
+            let path = env(&format!("BENCH_SEED_{}", system.to_uppercase()))?;
+            (!path.is_empty()).then(|| [format!("--seed-{system}"), path])
+        })
+        .flatten()
+        .collect()
+}
+
+/// The systems named by `--seed-<system>` flags.
+fn seeded_systems(seeds: &[String]) -> Vec<String> {
+    seeds
+        .iter()
+        .filter_map(|a| a.strip_prefix("--seed-"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Which systems' rows start from a seed, said out loud: a row that fills
+/// in-run is a valid row, so nothing else would show that the seeds were lost.
+fn seed_line(seeds: &[String]) -> String {
+    let named = seeded_systems(seeds);
+    if named.is_empty() {
+        "seeds: none — every row fills from empty in-run".into()
+    } else {
+        format!("seeds: {}", named.join(", "))
     }
 }
 
@@ -277,3 +325,41 @@ bench — run the comparative benchmark, one caged row at a time (RFC 0065)
   --results DIR          corpus root (default: benches/results)
   --repo DIR             repository root, for provenance
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        move |name| map.get(name).cloned()
+    }
+
+    #[test]
+    fn exported_seeds_become_row_flags() {
+        let args = seed_args(env(&[
+            ("BENCH_SEED_WAVEDB", "/nix/store/w"),
+            ("BENCH_SEED_POSTGRES", "/nix/store/p"),
+        ]));
+        assert_eq!(
+            args,
+            [
+                "--seed-wavedb",
+                "/nix/store/w",
+                "--seed-postgres",
+                "/nix/store/p"
+            ]
+        );
+        assert_eq!(seed_line(&args), "seeds: wavedb, postgres");
+    }
+
+    #[test]
+    fn no_seeds_is_said_rather_than_silent() {
+        let args = seed_args(env(&[("BENCH_SEED_SQLITE", "")]));
+        assert!(args.is_empty(), "an empty export is no seed: {args:?}");
+        assert!(seed_line(&args).starts_with("seeds: none"));
+    }
+}
