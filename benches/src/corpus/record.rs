@@ -43,6 +43,14 @@ pub struct RowKey {
     pub cage_revision: u32,
     /// Present **only** for WaveDB rows.
     pub wavedb_git_sha: Option<String>,
+    /// The row started from a prebuilt seed rather than filling in-run.
+    ///
+    /// Identity, not provenance: a seeded row runs a different phase list —
+    /// no `insert`, no `read_hot` (`harness::micro::SEEDED_PHASES`) — so a
+    /// seeded and an in-run row at the same coordinates measured different
+    /// things. Under one digest the first one stored would be served for both.
+    /// Decided by [`crate::plan::resolve::seeded`] on both sides of the seam.
+    pub seeded: bool,
 }
 
 impl RowKey {
@@ -74,6 +82,7 @@ impl RowKey {
             // `None` folds as an empty field rather than being skipped: a peer
             // row and a WaveDB row built at the empty SHA must still differ.
             self.wavedb_git_sha.as_deref().unwrap_or(""),
+            if self.seeded { "seeded" } else { "filled" },
         ] {
             text.push_str(part);
             text.push('\u{1f}');
@@ -262,6 +271,7 @@ impl RowRecord {
                 "wavedb_git_sha",
                 self.key.wavedb_git_sha.as_deref().unwrap_or(""),
             );
+            j.boolean("seeded", self.key.seeded);
         });
     }
 }
