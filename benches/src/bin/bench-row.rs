@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use wavedb_bench::corpus::{Corpus, RowKey};
+use wavedb_bench::plan::resolve::seeded;
 use wavedb_bench::row::{RowRun, measure};
 use wavedb_bench::{absolute, cage, host, systems};
 
@@ -237,6 +238,19 @@ impl Opts {
             cage_revision: self.cage_revision,
             wavedb_git_sha: (self.system == "wavedb")
                 .then(|| self.wavedb_git_sha.clone()),
+            seeded: seeded(&self.workload, self.has_seed()),
+        }
+    }
+
+    /// Whether a seed for this row's own system was given.
+    fn has_seed(&self) -> bool {
+        match self.system.as_str() {
+            "wavedb" => self.seed_wavedb.is_some(),
+            "sqlite" => self.seed_sqlite.is_some(),
+            "postgres" => self.seed_postgres.is_some(),
+            "mysql" => self.seed_mysql.is_some(),
+            "mongodb" => self.seed_mongodb.is_some(),
+            _ => false,
         }
     }
 
