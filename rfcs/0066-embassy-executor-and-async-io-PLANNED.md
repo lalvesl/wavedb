@@ -15,9 +15,11 @@
 
 ## Summary
 
-Replace tokio with three narrower pieces: **`embassy-executor`** (its `raw`
-API) to run tasks, **`async-io`** as the reactor for OS sockets, and
-**`embassy-sync` / `embassy-time`** for channels and timers. The protocol code
+Replace tokio with narrower pieces: **`embassy-executor`** (its `raw` API)
+to run tasks, **`async-io`** as the reactor for OS sockets,
+**`embassy-time`** for timers, and bounded channels — `embassy-sync` within a
+thread, lock-free `async-channel` across threads, so the shards stay
+genuinely parallel: one OS thread, one executor each. The protocol code
 (HTTP tunnel, WebSocket codec) becomes generic over **`embedded-io-async`**,
 so the same code can one day sit on `embassy-net`'s `TcpSocket` on a
 microcontroller. The browser side does not change.
@@ -90,14 +92,32 @@ generic over `embedded_io_async::{Read, Write}` instead of tokio's traits.
 - **Tests:** `tokio::io::duplex` becomes an in-memory pipe implementing the
   same traits, in a test-support module of `platform`.
 
-### 2. Channels: `embassy-sync`, every queue bounded
+### 2. Channels: every queue bounded, none shared by two shards
 
-`tokio::sync::{mpsc, oneshot}` → `embassy_sync::{channel::Channel,
-signal::Signal}`. Single-thread queues use `NoopRawMutex`; queues that cross
-threads (jobs into a shard, mutations out of one, the disk actor) use
-`CriticalSectionRawMutex` with the `critical-section` crate's `std`
-implementation. Capacities are `const`s named next to the queue, like the
-shard depths already are.
+Queues split by the boundary they cross, because the two kinds have
+opposite requirements:
+
+- **Within one thread** — a connection's reader and loop, the tasks of one
+  shard: `embassy_sync::{channel::Channel, signal::Signal}` with
+  `NoopRawMutex`. No lock at all; these never leave their executor.
+- **Across threads** — jobs into a shard, answers and mutations out of one,
+  requests into a disk actor: **`async-channel`**, bounded. It is lock-free
+  (`concurrent-queue`), MPMC, and wakes through the standard `Waker`, so a
+  push on one shard's thread wakes a task on another's executor with no
+  shared lock in between.
+
+The obvious alternative for the second kind, `embassy-sync` with
+`CriticalSectionRawMutex`, is **rejected**: the `critical-section` crate's
+`std` implementation is one process-wide lock, so every shard would
+serialise on it at every queue operation — exactly the contention the shards
+exist to remove (see §4, "Threads"). A per-queue `RawMutex` over
+`std::sync::Mutex` would fix that, but `RawMutex` is an `unsafe trait`, and
+no crate in this workspace contains `unsafe` today; this RFC does not make
+the first. On a single-core microcontroller there are no cross-thread queues
+to begin with, so nothing there depends on this choice.
+
+Capacities are `const`s named next to the queue, like the shard depths
+already are.
 
 The four unbounded channels each need a **full policy**, which is design, not
 mechanics. Proposed defaults:
@@ -164,6 +184,28 @@ concrete `#[task]` functions in the application crate — consistent with the
 Pool sizes become declared numbers: `MAX_CONNECTIONS` for the accept loop,
 `JOB_DEPTH` (already 512) for a shard's in-flight jobs.
 
+**Threads: the shards stay genuinely parallel.** The rule this RFC must not
+break is **one OS thread, one executor**. Today every shard worker
+(`shard/worker.rs`) and every disk actor (`shard/disk.rs`) is its own thread
+via `platform::task::spawn_detached`, each with its own current-thread
+runtime; after this RFC each owns its own `raw::Executor`, its own task
+pool, and its own loop, and nothing schedules across them. What crosses a
+thread is data on a lock-free queue (§2) and a `Waker` that unparks the
+receiving thread — never a lock held by more than one shard, never a task
+moving between executors. The shared [`OwnerLocks`] table is the one
+deliberate exception and is unchanged by this RFC.
+
+Process-wide pieces that remain, and why each is acceptable:
+
+- **`async-io`'s reactor** is one epoll thread. Only the accept thread does
+  socket I/O; the shards receive jobs, not sockets, so it is not on their
+  path.
+- **`embassy-time`'s std driver** keeps one timer queue. The shards' hot
+  path has no timers; if a profile ever shows otherwise, per-thread timers
+  are an open question below.
+
+[`OwnerLocks`]: ../crates/wavedb-quick-node/src/shard/lock.rs
+
 ### 5. The browser
 
 Stays on `wasm_bindgen_futures::spawn_local` and JS timers. What is unified
@@ -180,7 +222,8 @@ working. tokio and the new stack coexist until step 5.
 1. **I/O seam** — protocol over `embedded-io-async`; sockets via `async-io` +
    adapter inside `platform`; the in-memory pipe for tests. tokio still runs
    the executor.
-2. **Bounded channels** — `embassy-sync` everywhere, the three full policies
+2. **Bounded channels** — `embassy-sync` within a thread, `async-channel`
+   across threads, the three full policies
    above, a test per policy (a slow WS client is disconnected; a write never
    blocks on a lagging publisher).
 3. **Timers** — `embassy-time` behind `platform::time`.
@@ -195,7 +238,11 @@ working. tokio and the new stack coexist until step 5.
 offline queue), the browser demo, and the RFC 0065 `wavedb/multi` and
 `wavedb/single` rows at `small` measured before step 1 and after step 5 —
 latency percentiles, throughput, RSS. A regression there is a finding to
-explain before this RFC is marked Implemented.
+explain before this RFC is marked Implemented. The **sharded speedup** is
+the specific number to hold: RFC 0065 measured `wavedb/multi` at **~2.3×**
+`wavedb/single` on reads (`profile` 6 951/s against 3 021) — the project's
+first measurement of real parallelism. A ratio that falls means something
+started serialising the shards.
 
 ## Alternatives
 
@@ -224,9 +271,9 @@ explain before this RFC is marked Implemented.
 3. **The bench crate** uses tokio only for `sync` (to `block_on` the disk
    actor's replies). It follows once the node does; until then it keeps its
    own dependency, outside the workspace.
-4. **`critical-section` std implementation** as the cross-thread mutex: it is
-   a global lock. Fine at shard-queue rates; worth a look if a profile ever
-   shows it.
+4. **Timers per thread.** `embassy-time`'s std driver is one queue for the
+   process. Not on the shards' hot path today; if it ever is, each carrier
+   thread could keep its own timer wheel driven from its own loop.
 5. **TLS is out of scope, and absent today.** The node speaks plain HTTP —
    no `rustls`, `native-tls` or `openssl` in any manifest — so transport
    security is a reverse proxy's job for now. When the node terminates TLS
