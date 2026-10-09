@@ -93,15 +93,15 @@ impl FrameReader {
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use embedded_io_async::{Read, Write};
+    use wavedb_platform::io::Listener;
 
     use super::{Error, FrameReader, MAX_BODY};
 
     /// Serve one canned frame-sequence body behind a real `200` head and
     /// hand back the reader over it — the client path end to end.
     async fn reader_over(response_body: Vec<u8>) -> FrameReader {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = Listener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
