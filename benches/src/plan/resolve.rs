@@ -56,6 +56,20 @@ pub struct Request {
     pub wavedb_git_sha: String,
     /// `system → version`, probed by the supervisor before planning.
     pub versions: BTreeMap<String, String>,
+    /// Systems this run has a prebuilt seed for.
+    pub seeded_systems: Vec<String>,
+}
+
+/// Whether a row starts from a prebuilt seed, which is part of its identity
+/// ([`RowKey::seeded`]).
+///
+/// One predicate for both sides of the seam — the supervisor, which plans a
+/// digest, and `bench-row`, which files under one. If they disagreed, a
+/// planned row would never find its stored self and every run would
+/// remeasure it. Only `micro` takes a seed: `shop` builds its own world.
+#[must_use]
+pub fn seeded(workload: &str, seed_available: bool) -> bool {
+    seed_available && workload == "micro"
 }
 
 /// How much of the corpus a run is willing to ignore.
@@ -226,6 +240,10 @@ impl Request {
             // everyone else.
             wavedb_git_sha: (system == "wavedb")
                 .then(|| self.wavedb_git_sha.clone()),
+            seeded: seeded(
+                workload,
+                self.seeded_systems.iter().any(|s| s == system),
+            ),
         }
     }
 }
@@ -236,7 +254,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use super::{Plan, Refresh, Request, consumers_for, resolve};
+    use super::{Plan, Refresh, Request, consumers_for, resolve, seeded};
     use crate::corpus::{Corpus, RowKey, RowRecord};
 
     struct Scratch(PathBuf);
@@ -283,6 +301,7 @@ mod tests {
             generator_seed: 42,
             wavedb_git_sha: "04085ec".into(),
             versions,
+            seeded_systems: Vec::new(),
         }
     }
 
@@ -496,5 +515,30 @@ mod tests {
         assert_eq!(consumers_for("wavedb", "multi", "micro", 3), 1);
         assert_eq!(consumers_for("wavedb", "single", "shop", 3), 1);
         assert_eq!(consumers_for("postgres", "-", "shop", 3), 1);
+    }
+
+    #[test]
+    fn only_a_micro_row_with_a_seed_is_seeded() {
+        assert!(seeded("micro", true));
+        assert!(!seeded("micro", false));
+        assert!(!seeded("shop", true), "shop builds its own world");
+    }
+
+    /// The two phase lists cannot share a file: a seeded run must neither
+    /// serve nor overwrite the in-run row at the same coordinates.
+    #[test]
+    fn a_seed_is_a_different_row_only_where_it_is_used() {
+        let filled = request();
+        let mut with_seed = request();
+        with_seed.seeded_systems = vec!["wavedb".into()];
+
+        let micro = |r: &Request| r.key("wavedb", "single", "micro", "durable");
+        assert!(micro(&with_seed).seeded);
+        assert_ne!(micro(&filled).digest(), micro(&with_seed).digest());
+
+        let shop = |r: &Request| r.key("wavedb", "single", "shop", "durable");
+        assert_eq!(shop(&filled).digest(), shop(&with_seed).digest());
+        let peer = |r: &Request| r.key("postgres", "-", "micro", "durable");
+        assert_eq!(peer(&filled).digest(), peer(&with_seed).digest());
     }
 }
