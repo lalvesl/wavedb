@@ -229,6 +229,7 @@ mod tests {
             host_key: "lane".into(),
             cage_revision: 1,
             wavedb_git_sha: Some("04085ec".into()),
+            seeded: false,
         }
     }
 
