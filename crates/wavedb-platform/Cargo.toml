@@ -21,6 +21,12 @@ thiserror.workspace = true
 # runtime + LocalSet behind `task::spawn_detached`); `time` its poll timer.
 tokio = { workspace = true, features = ["net", "io-util", "rt", "time"] }
 sha1.workspace = true
+# RFC 0066: the socket (`async-io`) and the I/O traits every protocol layer
+# above is generic over (`embedded-io-async`), bridged by the adapter.
+async-io.workspace = true
+embedded-io-async.workspace = true
+embedded-io-adapters.workspace = true
+futures.workspace = true
 
 # Browser: the same seams over the web APIs — `Date.now()`, `fetch` +
 # `Request` with a streamed response body, `crypto.getRandomValues`, and
@@ -47,4 +53,4 @@ web-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "net", "io-util"] }
+tokio = { workspace = true, features = ["macros", "rt"] }

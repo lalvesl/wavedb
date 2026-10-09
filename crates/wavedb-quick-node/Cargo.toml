@@ -18,10 +18,14 @@ path = "src/lib.rs"
 wavedb-core = { path = "../wavedb-core" }
 wavedb-storage = { path = "../wavedb-storage" }
 wavedb-net = { path = "../wavedb-net" }
-# Entropy for the default per-boot signing secret.
+# Entropy for the default per-boot signing secret, and the sockets
+# (`wavedb_platform::io`, RFC 0066).
 wavedb-platform.workspace = true
-# `sync` for the WebSocket session's per-connection event channel (M7 push).
-tokio = { workspace = true, features = ["net", "io-util", "rt", "macros", "time", "sync"] }
+# The I/O traits the serve loop is generic over (RFC 0066).
+embedded-io-async.workspace = true
+# The executor, timers and channels until RFC 0066 steps 2–4 replace them;
+# sockets no longer come from here.
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 thiserror.workspace = true
 
 [dev-dependencies]
