@@ -1,9 +1,10 @@
-//! Native `post`: hand-rolled HTTP/1.1 over a fresh `TcpStream`.
+//! Native `post`: hand-rolled HTTP/1.1 over a fresh
+//! [`io::Stream`](crate::io::Stream).
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use embedded_io_async::{Read, Write};
 
 use crate::error::{Error, Result};
+use crate::io::{self, Stream};
 
 /// Cap on the response head (status line + headers).
 const MAX_HEAD: usize = 8 * 1024;
@@ -15,7 +16,7 @@ const MAX_HEAD: usize = 8 * 1024;
 /// [`Error::Status`] on a non-200 answer; otherwise socket faults or a
 /// head that was not minimal HTTP/1.1.
 pub async fn post(addr: &str, body: &[u8]) -> Result<Body> {
-    let mut stream = TcpStream::connect(addr).await?;
+    let mut stream = io::connect(addr).await?;
     let head = format!(
         "POST / HTTP/1.1\r\nhost: {addr}\r\n\
          content-type: application/octet-stream\r\n\
@@ -30,7 +31,7 @@ pub async fn post(addr: &str, body: &[u8]) -> Result<Body> {
 
 /// Read the response head up to its blank line, require a `200`, and wrap
 /// any body bytes already pulled off the socket.
-async fn read_ok_head(mut stream: TcpStream) -> Result<Body> {
+async fn read_ok_head(mut stream: Stream) -> Result<Body> {
     let mut buf = Vec::with_capacity(512);
     let mut chunk = [0u8; 1024];
     loop {
@@ -83,7 +84,7 @@ fn require_200(head: &[u8]) -> Result<()> {
 /// tunnel's `connection: close`) delimits it.
 #[derive(Debug)]
 pub struct Body {
-    stream: TcpStream,
+    stream: Stream,
     /// Bytes read past the head before the body was handed over.
     leftover: Option<Vec<u8>>,
 }
@@ -112,14 +113,14 @@ impl Body {
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use embedded_io_async::{Read, Write};
 
     use super::{Error, post};
+    use crate::io::Listener;
 
     /// Serve one canned response on a fresh port, consuming the request.
-    async fn one_shot(response: &'static [u8]) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    fn one_shot(response: &'static [u8]) -> String {
+        let listener = Listener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
@@ -134,8 +135,7 @@ mod tests {
     async fn post_streams_the_body_across_chunks() {
         let addr = one_shot(
             b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\nhello world",
-        )
-        .await;
+        );
         let mut body = post(&addr, b"req").await.unwrap();
         let mut got = Vec::new();
         while let Some(chunk) = body.chunk().await.unwrap() {
@@ -147,15 +147,14 @@ mod tests {
     #[tokio::test]
     async fn non_200_is_a_status_error() {
         let addr =
-            one_shot(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")
-                .await;
+            one_shot(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n");
         let err = post(&addr, b"req").await.unwrap_err();
         assert!(matches!(err, Error::Status(404)));
     }
 
     #[tokio::test]
     async fn close_before_any_response_is_a_fault() {
-        let addr = one_shot(b"").await;
+        let addr = one_shot(b"");
         let err = post(&addr, b"req").await.unwrap_err();
         assert!(matches!(
             err,
