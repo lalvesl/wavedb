@@ -13,7 +13,8 @@
 //! Identity, commands, and refusals never touch this layer — they live in
 //! the [`frame`](crate::frame) envelopes.
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use embedded_io_async::{Read, Write};
+use wavedb_platform::io::IoError;
 
 use crate::error::{Error, Result};
 use crate::frames::MAX_BODY;
@@ -82,7 +83,7 @@ fn head_end(buf: &[u8]) -> Option<usize> {
 /// peer closed before sending anything (a clean end of connection).
 async fn read_head<R>(r: &mut R) -> Result<Option<(Head, Vec<u8>)>>
 where
-    R: AsyncRead + Unpin,
+    R: Read<Error = IoError>,
 {
     let mut buf = Vec::with_capacity(512);
     let mut chunk = [0u8; 1024];
@@ -113,7 +114,7 @@ async fn read_body<R>(
     mut leftover: Vec<u8>,
 ) -> Result<Vec<u8>>
 where
-    R: AsyncRead + Unpin,
+    R: Read<Error = IoError>,
 {
     if declared > MAX_BODY {
         return Err(Error::BodyTooLarge {
@@ -128,7 +129,9 @@ where
     if missing > 0 {
         let start = leftover.len();
         leftover.resize(declared, 0);
-        r.read_exact(&mut leftover[start..]).await?;
+        r.read_exact(&mut leftover[start..])
+            .await
+            .map_err(IoError::from)?;
     }
     Ok(leftover)
 }
@@ -137,7 +140,7 @@ where
 /// offer. `None` = the peer closed the connection instead of sending one.
 pub async fn read_request<R>(r: &mut R) -> Result<Option<Incoming>>
 where
-    R: AsyncRead + Unpin,
+    R: Read<Error = IoError>,
 {
     let Some((head, leftover)) = read_head(r).await? else {
         return Ok(None);
@@ -173,7 +176,7 @@ where
 /// client — enforcement stays in the WaveDB gates.
 pub async fn write_ok_head<W>(w: &mut W) -> Result<()>
 where
-    W: AsyncWrite + Unpin,
+    W: Write<Error = IoError>,
 {
     w.write_all(
         b"HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\n\
@@ -188,7 +191,7 @@ where
 /// sees it before the next one is produced.
 pub async fn write_frame<W>(w: &mut W, bytes: &[u8]) -> Result<()>
 where
-    W: AsyncWrite + Unpin,
+    W: Write<Error = IoError>,
 {
     let len = u32::try_from(bytes.len())
         .map_err(|_| Error::Http("frame too large"))?;
@@ -207,7 +210,7 @@ where
 /// A socket fault.
 pub async fn write_switching_head<W>(w: &mut W, accept: &str) -> Result<()>
 where
-    W: AsyncWrite + Unpin,
+    W: Write<Error = IoError>,
 {
     let head = format!(
         "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\n\
@@ -222,7 +225,7 @@ where
 /// the only non-200 the node sends — it means the *transport* broke.
 pub async fn write_bad_request<W>(w: &mut W) -> Result<()>
 where
-    W: AsyncWrite + Unpin,
+    W: Write<Error = IoError>,
 {
     w.write_all(
         b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\
@@ -236,7 +239,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use embedded_io_async::{Read, Write};
+    use wavedb_platform::io::{IoError, pair};
 
     use super::{
         Error, Incoming, head_end, parse_head, read_request, write_frame,
@@ -246,7 +250,7 @@ mod tests {
     /// Unwrap a read request into its POST body.
     async fn read_post<R>(r: &mut R) -> super::Result<Option<Vec<u8>>>
     where
-        R: tokio::io::AsyncRead + Unpin,
+        R: Read<Error = IoError>,
     {
         match read_request(r).await? {
             Some(Incoming::Post(body)) => Ok(Some(body)),
@@ -279,8 +283,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_body_and_frame_bytes_roundtrip_over_a_duplex_pipe() {
-        let (mut client, mut server) = tokio::io::duplex(4096);
+    async fn post_body_and_frame_bytes_roundtrip_over_a_socket_pair() {
+        let (mut client, mut server) = pair().await.unwrap();
 
         // Client writes a request by hand; the server side reads it.
         client
@@ -299,7 +303,14 @@ mod tests {
         drop(server);
 
         let mut raw = Vec::new();
-        client.read_to_end(&mut raw).await.unwrap();
+        let mut chunk = [0u8; 256];
+        loop {
+            let n = client.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..n]);
+        }
         let mut expected = b"HTTP/1.1 200 OK\r\n\
               content-type: application/octet-stream\r\n\
               access-control-allow-origin: *\r\n\
@@ -314,14 +325,14 @@ mod tests {
 
     #[tokio::test]
     async fn clean_close_reads_as_none() {
-        let (client, mut server) = tokio::io::duplex(64);
+        let (client, mut server) = pair().await.unwrap();
         drop(client);
         assert!(read_post(&mut server).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn plain_get_is_refused() {
-        let (mut client, mut server) = tokio::io::duplex(256);
+        let (mut client, mut server) = pair().await.unwrap();
         client
             .write_all(b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n")
             .await
@@ -332,7 +343,7 @@ mod tests {
 
     #[tokio::test]
     async fn websocket_upgrade_surfaces_its_key() {
-        let (mut client, mut server) = tokio::io::duplex(256);
+        let (mut client, mut server) = pair().await.unwrap();
         client
             .write_all(
                 b"GET / HTTP/1.1\r\nupgrade: websocket\r\n\
@@ -352,7 +363,7 @@ mod tests {
 
     #[tokio::test]
     async fn frames_pipelined_before_the_101_are_refused() {
-        let (mut client, mut server) = tokio::io::duplex(256);
+        let (mut client, mut server) = pair().await.unwrap();
         client
             .write_all(
                 b"GET / HTTP/1.1\r\nsec-websocket-key: abc\r\n\r\n\x82\x00",
@@ -368,7 +379,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_body_is_capped_before_reading() {
-        let (mut client, mut server) = tokio::io::duplex(256);
+        let (mut client, mut server) = pair().await.unwrap();
         let head = format!(
             "POST / HTTP/1.1\r\ncontent-length: {}\r\n\r\n",
             super::MAX_BODY + 1
