@@ -143,9 +143,8 @@ impl WsSession {
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
-    use tokio::net::TcpListener;
-    use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
     use wavedb_core::{Id, U48};
+    use wavedb_platform::io::{Listener, ReadHalf, WriteHalf};
     use wavedb_platform::ws::codec::{
         self, Messages, Msg, OP_BINARY, OP_CLOSE,
     };
@@ -173,11 +172,9 @@ mod tests {
 
     /// Accept one connection and run the RFC 6455 upgrade — the node's
     /// server half, miniaturised for the loopback.
-    async fn upgraded(
-        listener: TcpListener,
-    ) -> (Messages<OwnedReadHalf>, OwnedWriteHalf) {
+    async fn upgraded(listener: Listener) -> (Messages<ReadHalf>, WriteHalf) {
         let (sock, _) = listener.accept().await.expect("accept");
-        let (mut r, mut w) = sock.into_split();
+        let (mut r, mut w) = sock.split();
         let Some(http::Incoming::Upgrade { key }) =
             http::read_request(&mut r).await.expect("read upgrade")
         else {
@@ -189,16 +186,14 @@ mod tests {
         (Messages::new(r), w)
     }
 
-    async fn expect_client_msg(
-        msgs: &mut Messages<OwnedReadHalf>,
-    ) -> ClientMsg {
+    async fn expect_client_msg(msgs: &mut Messages<ReadHalf>) -> ClientMsg {
         let Ok(Some(Msg::Binary(bytes))) = msgs.next(true).await else {
             panic!("expected a client message");
         };
         from_wire::<ClientMsg>(&bytes).expect("decode client msg")
     }
 
-    async fn send_server(w: &mut OwnedWriteHalf, msg: &ServerMsg) {
+    async fn send_server(w: &mut WriteHalf, msg: &ServerMsg) {
         codec::write_message(w, OP_BINARY, &to_wire(msg), false)
             .await
             .expect("server send");
@@ -206,7 +201,7 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_acks_and_buffers_events_arriving_early() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = Listener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
         let server = tokio::spawn(async move {
             let (mut msgs, mut w) = upgraded(listener).await;
@@ -246,7 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn refused_hello_is_an_error_not_a_hang() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = Listener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
         let server = tokio::spawn(async move {
             let (mut msgs, mut w) = upgraded(listener).await;
