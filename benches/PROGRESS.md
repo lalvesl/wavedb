@@ -144,6 +144,20 @@ moves `bench-dataset-smoke` and `bench-seed-postgres-smoke` to new paths.
 Splitting `bench-gen` into two binaries with separate filesets would fix it;
 until then, a fill change costs a dataset rebuild.
 
+**Corrected after phase 4.** "The Rust it compiles from" was all of
+`benches/src`, because `bench-gen` linked the measuring crate's whole
+library — so editing a driver, the harness or a comment there moved every
+seed too, which is the larger hole of the two and the one that cost phase 4
+its `large` seed. `bench-gen` is now a crate of its own (`benches/gen`: the
+schema, the fill, the two fill constants and the binary, with its own
+workspace and a lock pruned offline from the bench lock — no version
+changed), re-exported by the measuring crate under the old paths so the
+harness reads the very schema the seeds were filled from. `gen.nix` builds
+from it and the engine crates only, and no longer pulls SQLite. Measured by
+evaluation: appending to `harness/run.rs` and `systems/server.rs` leaves the
+`large` seeds' drv paths unchanged; appending to `gen/src/seed.rs` moves
+them. The dataset/fill coupling above remains.
+
 3.7 instantiates **every** tier, not just the selected one: the dataset and
 the five seeds become `bench-dataset-<tier>` / `bench-seed-<system>-<tier>`,
 and each tier gets its own app pair (`bench-large`, `bench-seeded-large`).
@@ -498,6 +512,29 @@ them.
 ### Bugs introduced during this restructure, and fixed
 
 Kept because they are the shape of mistake this design invites.
+
+- **No row has ever started from a seed.** `bench-seeded` built all five
+  seeds and exported `BENCH_SEED_<SYSTEM>`; the reader of those variables
+  went with the RFC 0060 runner in phase 1, and the supervisor that replaced
+  it never forwarded them, so every row filled from empty in-run. `bench-row`
+  consumed seeds correctly the whole time — only the link between them was
+  missing. Nothing failed: an in-run row is a valid row, and the only trace
+  was `seed_path: ""` in each record. Found in phase 4 by reading that field
+  after a seeded run. The supervisor now forwards `--seed-<system>` and says
+  `seeds: …` or `seeds: none — every row fills from empty in-run` in its
+  header, because silence is what let this live. It mattered most for what
+  it would have cost: 3.9's four-hour `large` seed would never have been
+  read.
+- **Fixing that exposed an identity hole: seeding was not in the key.** A
+  seeded row runs a different phase list (no `insert`, no `read_hot`), so a
+  seeded and an in-run row at the same coordinates measured different things
+  under one digest — whichever was stored first would have been served for
+  both. `RowKey.seeded` is now identity, decided by one predicate
+  (`plan::resolve::seeded`) on both sides of the supervisor/row seam.
+  Proven live into a scratch corpus: a seeded pass, then an in-run pass
+  (2 measured, 0 reused — it no longer takes the seeded rows), then a seeded
+  pass again (0 measured, 2 reused). The corpus had no 0065 rows yet, so no
+  stored digest moved.
 
 - **`bench-gen` had not built since phase 2, and nothing said so.**
   `drivers/shop/mod.rs` declared `pub mod mysql;` without the
