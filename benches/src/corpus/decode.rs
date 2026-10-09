@@ -101,6 +101,7 @@ fn key_from(v: &Value) -> Result<RowKey, String> {
         // same way — so this round-trips rather than turning a peer row into a
         // WaveDB row with a blank SHA.
         wavedb_git_sha: if sha.is_empty() { None } else { Some(sha) },
+        seeded: bool_at(Some(v), "seeded"),
     })
 }
 
@@ -180,6 +181,7 @@ mod tests {
             host_key: "i5-8300h-4c-500m-btrfs-e636".into(),
             cage_revision: 1,
             wavedb_git_sha: Some("04085ec".into()),
+            seeded: true,
         }
     }
 
@@ -189,6 +191,7 @@ mod tests {
             system_version: "18.1".into(),
             variant: "-".into(),
             wavedb_git_sha: None,
+            seeded: false,
             ..wavedb_key()
         }
     }
