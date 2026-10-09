@@ -228,6 +228,7 @@ mod tests {
             host_key: "i5-8300h-4c-500m-btrfs-e636".into(),
             cage_revision: 1,
             wavedb_git_sha: sha.map(Into::into),
+            seeded: false,
         }
     }
 
