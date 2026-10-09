@@ -215,10 +215,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use tokio::net::TcpListener;
-    use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
     use wavedb_core::expose::{Command, Reply};
     use wavedb_core::{Id, Metadata, Succession, U48};
+    use wavedb_platform::io::{Listener, ReadHalf, WriteHalf};
     use wavedb_platform::ws::codec::{self, Messages, Msg, OP_BINARY};
     use wavedb_wire::{from_wire, to_wire};
 
@@ -255,7 +254,7 @@ mod tests {
         }
     }
 
-    async fn send(w: &mut OwnedWriteHalf, msg: &ServerMsg) {
+    async fn send(w: &mut WriteHalf, msg: &ServerMsg) {
         codec::write_message(w, OP_BINARY, &to_wire(msg), false)
             .await
             .expect("server send");
@@ -263,10 +262,7 @@ mod tests {
 
     /// A watch-shaped mini node: upgrade, `Hello`→`HelloOk`, ack every
     /// subscription, push the canned events on the trigger. Counts accepts.
-    async fn serve_conn(
-        mut msgs: Messages<OwnedReadHalf>,
-        mut w: OwnedWriteHalf,
-    ) {
+    async fn serve_conn(mut msgs: Messages<ReadHalf>, mut w: WriteHalf) {
         while let Ok(Some(msg)) = msgs.next(true).await {
             let Msg::Binary(bytes) = msg else { continue };
             match from_wire::<ClientMsg>(&bytes).expect("decode") {
@@ -286,10 +282,10 @@ mod tests {
         }
     }
 
-    async fn mini_node() -> (String, Arc<AtomicUsize>) {
+    fn mini_node() -> (String, Arc<AtomicUsize>) {
         // Bind before spawning: on the test's current-thread runtime a
         // blocking wait for the spawned task would deadlock.
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = Listener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
         let conns = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&conns);
@@ -298,7 +294,7 @@ mod tests {
                 let (sock, _) = listener.accept().await.expect("accept");
                 counted.fetch_add(1, Ordering::SeqCst);
                 tokio::spawn(async move {
-                    let (mut r, mut w) = sock.into_split();
+                    let (mut r, mut w) = sock.split();
                     let Ok(Some(http::Incoming::Upgrade { key })) =
                         http::read_request(&mut r).await
                     else {
@@ -319,7 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn watches_of_one_identity_share_one_connection() {
-        let (addr, conns) = mini_node().await;
+        let (addr, conns) = mini_node();
         let auth = Auth::Anonymous {
             tenant: U48::from(7u32),
         };
@@ -382,7 +378,7 @@ mod tests {
 
     /// The catch-up POST answer: a `SyncReply` carrying the "downtime" event
     /// (instant 20) the client missed while its socket was down.
-    async fn answer_catch_up(w: &mut OwnedWriteHalf, topic: Topic) {
+    async fn answer_catch_up(w: &mut WriteHalf, topic: Topic) {
         let reply = SyncReply {
             events: vec![saved_event(topic, 20)],
             cursors: vec![(topic, 20)],
@@ -397,8 +393,8 @@ mod tests {
     /// and — on the **first** connection only — push a live event (instant 10)
     /// then drop the socket, forcing the client to reconnect.
     async fn reconnect_ws(
-        mut msgs: Messages<OwnedReadHalf>,
-        mut w: OwnedWriteHalf,
+        mut msgs: Messages<ReadHalf>,
+        mut w: WriteHalf,
         first: bool,
     ) {
         while let Ok(Some(Msg::Binary(bytes))) = msgs.next(true).await {
@@ -422,7 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_watch_survives_a_dropped_socket_and_catches_up() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = Listener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
         let ws_conns = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&ws_conns);
@@ -431,7 +427,7 @@ mod tests {
                 let (sock, _) = listener.accept().await.expect("accept");
                 let counted = Arc::clone(&counted);
                 tokio::spawn(async move {
-                    let (mut r, mut w) = sock.into_split();
+                    let (mut r, mut w) = sock.split();
                     match http::read_request(&mut r).await {
                         Ok(Some(http::Incoming::Upgrade { key })) => {
                             http::write_switching_head(
@@ -497,14 +493,14 @@ mod tests {
     /// (SYNC hash, `since: None`) with the tail cursor and no events, and any
     /// other command by leading its reply with a `Sync` delta carrying one
     /// event — after asserting the command actually declared the poll cursor.
-    async fn piggyback_node() -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    fn piggyback_node() -> String {
+        let listener = Listener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
         tokio::spawn(async move {
             loop {
                 let (sock, _) = listener.accept().await.expect("accept");
                 tokio::spawn(async move {
-                    let (mut r, mut w) = sock.into_split();
+                    let (mut r, mut w) = sock.split();
                     let Ok(Some(http::Incoming::Post(body))) =
                         http::read_request(&mut r).await
                     else {
@@ -566,7 +562,7 @@ mod tests {
             };
         }
 
-        let addr = piggyback_node().await;
+        let addr = piggyback_node();
         let auth = Auth::Anonymous {
             tenant: U48::from(5u32),
         };
