@@ -13,10 +13,11 @@
 //! frames are masked and server→client frames are not; the server side
 //! passes `require_masked = true` and refuses bare frames.
 
+use embedded_io_async::{Read, Write};
 use sha1::{Digest, Sha1};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{Error, Result};
+use crate::io::IoError;
 
 /// Cap on one reassembled message — mirrors the tunnel's body cap.
 pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
@@ -101,7 +102,7 @@ pub async fn write_message<W>(
     masked: bool,
 ) -> Result<()>
 where
-    W: AsyncWrite + Unpin,
+    W: Write<Error = IoError>,
 {
     let mut head = Vec::with_capacity(14);
     head.push(0x80 | opcode); // FIN — outgoing messages never fragment.
@@ -148,7 +149,7 @@ pub struct Messages<R> {
 
 impl<R> Messages<R>
 where
-    R: AsyncRead + Unpin,
+    R: Read<Error = IoError>,
 {
     /// Wrap a read half positioned at the frame stream (past the
     /// handshake).
@@ -173,7 +174,7 @@ where
             return Err(Error::Http("ws reserved bits set"));
         }
         let mut b1 = [0u8; 1];
-        self.r.read_exact(&mut b1).await?;
+        self.r.read_exact(&mut b1).await.map_err(IoError::from)?;
         let masked = b1[0] & 0x80 != 0;
         if require_masked && !masked {
             return Err(Error::Http("unmasked client frame"));
@@ -181,12 +182,12 @@ where
         let len = match b1[0] & 0x7F {
             LEN_16 => {
                 let mut n = [0u8; 2];
-                self.r.read_exact(&mut n).await?;
+                self.r.read_exact(&mut n).await.map_err(IoError::from)?;
                 usize::from(u16::from_be_bytes(n))
             }
             LEN_64 => {
                 let mut n = [0u8; 8];
-                self.r.read_exact(&mut n).await?;
+                self.r.read_exact(&mut n).await.map_err(IoError::from)?;
                 usize::try_from(u64::from_be_bytes(n))
                     .map_err(|_| Error::Http("ws frame too large"))?
             }
@@ -197,13 +198,16 @@ where
         }
         let key = if masked {
             let mut k = [0u8; 4];
-            self.r.read_exact(&mut k).await?;
+            self.r.read_exact(&mut k).await.map_err(IoError::from)?;
             Some(k)
         } else {
             None
         };
         let mut payload = vec![0u8; len];
-        self.r.read_exact(&mut payload).await?;
+        self.r
+            .read_exact(&mut payload)
+            .await
+            .map_err(IoError::from)?;
         if let Some(key) = key {
             for (i, b) in payload.iter_mut().enumerate() {
                 *b ^= key[i % 4];
@@ -267,6 +271,7 @@ mod tests {
         write_message,
     };
     use crate::error::Error;
+    use crate::io::pair;
 
     #[test]
     fn base64_alignment_vectors() {
@@ -290,8 +295,8 @@ mod tests {
     async fn masked_roundtrip_across_every_length_form() {
         // Sizes straddling the 7-bit / 16-bit / 64-bit length encodings.
         const SIZES: [usize; 6] = [0, 5, 125, 126, 65_535, 65_536];
-        let (mut client, server) = tokio::io::duplex(1 << 16);
-        // Write from a task: the larger payloads exceed the pipe buffer, so
+        let (mut client, server) = pair().await.unwrap();
+        // Write from a task: the larger payloads exceed the socket buffers, so
         // the writer must make progress against a concurrent reader.
         let writer = tokio::spawn(async move {
             for len in SIZES {
@@ -310,7 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn unmasked_frame_refused_when_masking_is_required() {
-        let (mut client, server) = tokio::io::duplex(1024);
+        let (mut client, server) = pair().await.unwrap();
         write_message(&mut client, OP_BINARY, b"bare", false)
             .await
             .unwrap();
@@ -321,8 +326,8 @@ mod tests {
 
     #[tokio::test]
     async fn fragmented_message_reassembles_across_a_ping() {
-        use tokio::io::AsyncWriteExt;
-        let (mut client, server) = tokio::io::duplex(1024);
+        use embedded_io_async::Write;
+        let (mut client, server) = pair().await.unwrap();
         // Hand-built fragments: binary "he" (no FIN), a ping, then the
         // final continuation "llo" (FIN) — unmasked for byte clarity.
         client.write_all(&[0x02, 2, b'h', b'e']).await.unwrap();
@@ -344,8 +349,8 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_frame_is_capped_before_reading() {
-        use tokio::io::AsyncWriteExt;
-        let (mut client, server) = tokio::io::duplex(1024);
+        use embedded_io_async::Write;
+        let (mut client, server) = pair().await.unwrap();
         let mut head = vec![0x82u8, 127];
         let too_big = u64::try_from(MAX_MESSAGE).unwrap() + 1;
         head.extend_from_slice(&too_big.to_be_bytes());
@@ -357,7 +362,7 @@ mod tests {
 
     #[tokio::test]
     async fn clean_close_between_frames_reads_as_none() {
-        let (client, server) = tokio::io::duplex(64);
+        let (client, server) = pair().await.unwrap();
         drop(client);
         let mut msgs = Messages::new(server);
         assert!(msgs.next(false).await.unwrap().is_none());
@@ -365,7 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn ping_payload_surfaces_for_the_caller_to_answer() {
-        let (mut client, server) = tokio::io::duplex(1024);
+        let (mut client, server) = pair().await.unwrap();
         write_message(&mut client, OP_PING, b"beat", true)
             .await
             .unwrap();
