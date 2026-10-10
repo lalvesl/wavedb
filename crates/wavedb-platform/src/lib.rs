@@ -17,6 +17,8 @@
 //! - [`task`] — background tasks: the never-ending world the connection
 //!   manager runs on (dedicated thread + current-thread runtime /
 //!   `wasm_bindgen_futures::spawn_local` — no tokio in wasm);
+//! - [`io`] — sockets, native only (RFC 0066): the one place a TCP socket is
+//!   named; every protocol above is generic over `embedded-io-async`;
 //! - [`cpu`] — usable parallelism (the affinity mask and container quota this
 //!   process actually has / a constant 1, the browser having no threads).
 //!
@@ -32,6 +34,8 @@
 pub mod cpu;
 pub mod error;
 pub mod http;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod io;
 pub mod rand;
 pub mod task;
 pub mod time;
