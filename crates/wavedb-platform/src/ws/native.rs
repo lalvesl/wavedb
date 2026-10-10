@@ -1,21 +1,20 @@
 //! Native `connect`: hand-rolled RFC 6455 client handshake over a fresh
-//! `TcpStream`, then the [`codec`](super::codec) frames.
+//! [`io::Stream`](crate::io::Stream), then the [`codec`](super::codec) frames.
 
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use embedded_io_async::{Read, Write};
 
 use super::codec::{
     self, MAX_MESSAGE, Messages, Msg, OP_BINARY, OP_CLOSE, OP_PONG,
 };
 use crate::error::{Error, Result};
+use crate::io::{self, Prefixed, ReadHalf, Stream, WriteHalf};
 
 /// Cap on the handshake response head.
 const MAX_HEAD: usize = 8 * 1024;
 
 /// The read side past the handshake: bytes the head read pulled early,
 /// then the socket.
-type ReadSide = tokio::io::Chain<std::io::Cursor<Vec<u8>>, OwnedReadHalf>;
+type ReadSide = Prefixed<ReadHalf>;
 
 /// An open WebSocket connection — binary messages in both directions.
 /// `recv` answers pings internally; the identity handshake above this
@@ -23,7 +22,7 @@ type ReadSide = tokio::io::Chain<std::io::Cursor<Vec<u8>>, OwnedReadHalf>;
 #[derive(Debug)]
 pub struct Conn {
     msgs: Messages<ReadSide>,
-    w: OwnedWriteHalf,
+    w: WriteHalf,
 }
 
 /// Open a WebSocket to `addr` (`host:port`): TCP connect, upgrade
@@ -33,7 +32,7 @@ pub struct Conn {
 /// # Errors
 /// A socket fault, a non-101 answer, or a wrong `Sec-WebSocket-Accept`.
 pub async fn connect(addr: &str) -> Result<Conn> {
-    let mut stream = TcpStream::connect(addr).await?;
+    let mut stream = io::connect(addr).await?;
     let mut nonce = [0u8; 16];
     crate::rand::fill(&mut nonce)?;
     let key = codec::base64(&nonce);
@@ -46,18 +45,14 @@ pub async fn connect(addr: &str) -> Result<Conn> {
     stream.flush().await?;
     let (head, leftover) = read_head(&mut stream).await?;
     require_upgrade(&head, &codec::accept_key(&key))?;
-    let (r, w) = stream.into_split();
-    let msgs = Messages::new(tokio::io::AsyncReadExt::chain(
-        std::io::Cursor::new(leftover),
-        r,
-    ));
+    let (r, w) = stream.split();
+    let msgs = Messages::new(Prefixed::new(leftover, r));
     Ok(Conn { msgs, w })
 }
 
 /// Read the response head up to its blank line; return it with any frame
 /// bytes already pulled off the socket.
-async fn read_head(stream: &mut TcpStream) -> Result<(String, Vec<u8>)> {
-    use tokio::io::AsyncReadExt;
+async fn read_head(stream: &mut Stream) -> Result<(String, Vec<u8>)> {
     let mut buf = Vec::with_capacity(512);
     let mut chunk = [0u8; 1024];
     loop {
@@ -173,7 +168,7 @@ pub struct RecvHalf {
 /// The sending half of a split [`Conn`].
 #[derive(Debug)]
 pub struct SendHalf {
-    w: OwnedWriteHalf,
+    w: WriteHalf,
 }
 
 impl RecvHalf {
@@ -229,8 +224,9 @@ impl SendHalf {
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use embedded_io_async::{Read, Write};
+
+    use crate::io::Listener;
 
     use super::super::codec::{self, Messages, Msg, OP_BINARY, OP_PING};
     use super::{Error, connect};
@@ -238,8 +234,8 @@ mod tests {
     /// A minimal RFC 6455 server: accept one socket, answer the upgrade
     /// with the real accept key, then echo binary messages (and once,
     /// first, ping the client) until close.
-    async fn echo_server() -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    fn echo_server() -> String {
+        let listener = Listener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
@@ -290,7 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn handshake_echo_and_close_roundtrip() {
-        let addr = echo_server().await;
+        let addr = echo_server();
         let mut conn = connect(&addr).await.unwrap();
         conn.send(b"one").await.unwrap();
         // The server's ping rides ahead of the echo; recv answers it
@@ -304,7 +300,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_upgrade_answer_is_a_status_error() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = Listener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
@@ -320,7 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_accept_key_is_refused() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = Listener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
