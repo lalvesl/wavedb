@@ -48,8 +48,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::TcpListener;
 use wavedb_core::expose::Exposure;
+use wavedb_platform::io::Listener;
 use wavedb_storage::{PageStore, StorageRegistry, StoreOptions};
 
 pub use error::{Result, ServerError};
@@ -78,7 +78,7 @@ pub struct Server<E> {
 /// [`local_addr`](Bound::local_addr) first (tests bind port 0).
 pub struct Bound<E> {
     registry: E,
-    listener: TcpListener,
+    listener: Listener,
     /// The engine, behind its disk actor (RFC 0064). Nothing here can touch
     /// the `PageStore` except by message; requests are routed across
     /// [`Server::shards`] workers, one by default.
@@ -182,13 +182,18 @@ where
     /// # Errors
     /// [`ServerError::Storage`] if the engine can't open (busy, corruption),
     /// [`ServerError::Io`] if the socket can't bind.
+    // Nothing awaits here since the socket moved to `async-io`, whose bind is
+    // synchronous. It stays `async` because bringing a network up is not
+    // synchronous everywhere — on `embassy-net` it waits for the link — and
+    // callers should not change signature twice (RFC 0066).
+    #[allow(clippy::unused_async)]
     pub async fn bind(self, addr: &str) -> Result<Bound<E>> {
         let store = PageStore::open_with(
             &self.data_dir,
             &self.registry.storage_entries(),
             self.store,
         )?;
-        let listener = TcpListener::bind(addr).await?;
+        let listener = Listener::bind(addr)?;
         // Publish for the token-minting helpers (`wavedb::auth`) — one node
         // per process, like the engine's storage slots. The secret is
         // whatever the *first* open installed: an in-process reopen keeps
