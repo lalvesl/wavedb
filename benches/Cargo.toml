@@ -37,10 +37,8 @@ wavedb-storage = { path = "../crates/wavedb-storage" }
 # instead of the `PageStore` directly, which is what makes single-thread and
 # multi-thread two measured rows rather than one claim.
 wavedb-quick-node = { path = "../crates/wavedb-quick-node" }
-# Only to `block_on` the disk actor's request/reply from the benchmark thread;
-# the actor builds its own current-thread runtime on its own thread.
-tokio = { version = "1", features = ["sync"] }
-# block_on for the engine's non-Send futures (current-thread model).
+# block_on for the engine's non-Send futures (current-thread model), and the
+# one-shot reply the disk actor answers on.
 futures = "0.3"
 # System SQLite, NOT `bundled` — the version must come from `flake.lock` like
 # every other competitor, which is the whole point of RFC 0060 §7.
