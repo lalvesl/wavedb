@@ -24,6 +24,7 @@ use wavedb_platform::ws::{Received, SendHalf};
 use wavedb_wire::{from_wire, to_wire};
 
 use super::ConnKey;
+use super::tasks::{self, Here};
 use super::ws_dial::{self, MsgRx};
 use crate::error::{Error, Result};
 use crate::ws::{ClientMsg, RecordEvent, ServerMsg, Topic};
@@ -63,16 +64,21 @@ pub(super) struct TopicState {
 
 /// Spawn the actor for `key`; the returned sender is the manager's route to
 /// it (its closing is how a dead actor is detected).
-pub(super) fn spawn(key: &ConnKey) -> mpsc::UnboundedSender<ConnCmd> {
+pub(super) fn spawn(
+    key: &ConnKey,
+    here: &Here,
+) -> Option<mpsc::UnboundedSender<ConnCmd>> {
     let (tx, rx) = mpsc::unbounded();
-    let key = key.clone();
-    wavedb_platform::task::spawn_local(run(key, rx));
-    tx
+    tasks::spawn_ws(here, key.clone(), rx).then_some(tx)
 }
 
-async fn run(key: ConnKey, mut cmds: mpsc::UnboundedReceiver<ConnCmd>) {
+pub(super) async fn run(
+    key: ConnKey,
+    mut cmds: mpsc::UnboundedReceiver<ConnCmd>,
+    here: Here,
+) {
     // The first connect fails fast: the initial watch() gets the error.
-    let (mut send, mut msgs) = match ws_dial::open(&key).await {
+    let (mut send, mut msgs) = match ws_dial::open(&key, &here).await {
         Ok(halves) => halves,
         Err(error) => {
             fail_queued(&mut cmds, error);
@@ -86,7 +92,7 @@ async fn run(key: ConnKey, mut cmds: mpsc::UnboundedReceiver<ConnCmd>) {
         match exit {
             Exit::Teardown => break,
             Exit::Reconnect => {
-                match reconnect(&key, &mut topics, &mut cmds).await {
+                match reconnect(&key, &mut topics, &mut cmds, &here).await {
                     Some((s, m)) => (send, msgs) = (s, m),
                     None => break,
                 }
@@ -253,11 +259,12 @@ async fn reconnect(
     key: &ConnKey,
     topics: &mut HashMap<Topic, TopicState>,
     cmds: &mut mpsc::UnboundedReceiver<ConnCmd>,
+    here: &Here,
 ) -> Option<(SendHalf, MsgRx)> {
     let mut backoff = MIN_BACKOFF;
     loop {
         drain_offline(cmds, topics);
-        match ws_dial::open(key).await {
+        match ws_dial::open(key, here).await {
             Ok((mut send, mut msgs)) => {
                 match ws_dial::resubscribe(key, &mut send, &mut msgs, topics)
                     .await
