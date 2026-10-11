@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use futures::channel::{mpsc, oneshot};
 use futures::{FutureExt, StreamExt, select};
 
+use super::tasks::{self, Here};
 use super::{ConnKey, sync_call};
 use crate::error::{Error, Result};
 use crate::sync::{SyncReply, TopicCursor};
@@ -66,11 +67,10 @@ pub(super) enum PollCmd {
 pub(super) fn spawn(
     key: &ConnKey,
     every: Duration,
-) -> mpsc::UnboundedSender<PollCmd> {
+    here: &Here,
+) -> Option<mpsc::UnboundedSender<PollCmd>> {
     let (tx, rx) = mpsc::unbounded();
-    let key = key.clone();
-    wavedb_platform::task::spawn_local(run(key, every, rx));
-    tx
+    tasks::spawn_poll(here, key.clone(), every, rx).then_some(tx)
 }
 
 /// The watchers per topic, each topic's sync cursor, plus the acks a next
@@ -94,7 +94,7 @@ enum Wake {
     Tick,
 }
 
-async fn run(
+pub(super) async fn run(
     key: ConnKey,
     every: Duration,
     mut cmds: mpsc::UnboundedReceiver<PollCmd>,
