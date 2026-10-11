@@ -200,7 +200,12 @@ is a `std::sync::Mutex` map of per-owner **`tokio::sync::Mutex`**es, taken
 with owned guards so a lock can be held across an operation's awaits. Its
 runtime-independent equivalent is `async-lock`'s `Mutex::lock_arc()`
 (owned guard, wakes through the standard `Waker`, same ecosystem as
-`async-channel`); it moves in step 2 with the channels.
+`async-channel`). **Superseded by
+[RFC 0067](0067-thread-per-core-shards-PLANNED.md) §5:** once each shard's
+engine lives on its own thread, the table becomes thread-local
+(`embassy-sync`, `NoopRawMutex`) and a task on another thread holds an owner
+through a lease. `OwnerLocks` therefore stays on tokio until 0067 replaces
+it, rather than moving to `async-lock` in step 2.
 
 Process-wide pieces that remain, and why each is acceptable:
 
@@ -229,15 +234,18 @@ working. tokio and the new stack coexist until step 5.
 1. **I/O seam** — protocol over `embedded-io-async`; sockets via `async-io` +
    adapter inside `platform`; the in-memory pipe for tests. tokio still runs
    the executor.
-2. **Bounded channels and the owner locks** — `embassy-sync` within a
-   thread, `async-channel` across threads, `async-lock` for `OwnerLocks`;
-   the three full policies above, a test per policy (a slow WS client is
-   disconnected; a write never blocks on a lagging publisher).
+2. **Bounded channels** — `embassy-sync` within a thread, `async-channel`
+   across threads; the three full policies above, a test per policy (a slow
+   WS client is disconnected; a write never blocks on a lagging publisher).
+   `OwnerLocks` is left to [RFC 0067](0067-thread-per-core-shards-PLANNED.md).
 3. **Timers** — `embassy-time` behind `platform::time`.
 4. **Executor spike, then the switch** — prove `TaskPool` inference on
    `serve_connection<E, S>`; then `platform::task`, the serve loop, the shard
    workers and the disk actor move to `raw::Executor`; `block_on` replaces
-   the test macros.
+   the test macros. RFC 0067 reshapes the carrier loop to poll **three**
+   executors per thread (data, edge, background) in priority order; this
+   step can build the single-executor loop first, as long as nothing assumes
+   one executor per thread.
 5. **tokio removed** from every manifest; `cargo tree -i tokio` empty for the
    workspace (the bench crate keeps its own until it is ported).
 

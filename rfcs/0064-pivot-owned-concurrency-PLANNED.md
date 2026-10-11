@@ -11,6 +11,9 @@
   (the yield map, and the A2 fix that came out of it),
   [0011](0011-bptree-index-and-collections.md) (the Pivot, whose real
   cardinality this RFC turns out to depend on)
+- **Amended by:** [0067](0067-thread-per-core-shards-PLANNED.md) — the
+  single disk actor becomes one engine per shard, owned by the shard's
+  thread; `shard_of` becomes a frozen on-disk placement.
 - **Crates:** `wavedb-storage` (cache ownership), `wavedb-quick-node` (the
   shards and the disk actors), `wavedb-core` (routing metadata)
 - **Code:** `crates/wavedb-core/src/collection.rs`,

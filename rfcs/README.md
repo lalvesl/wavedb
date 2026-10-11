@@ -591,6 +591,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0064](0064-pivot-owned-concurrency-PLANNED.md) | Pivot-owned concurrency | Planned (first slice built) |
 | [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) | Benchmark suite II: the row as the unit | Planned |
 | [0066](0066-embassy-executor-and-async-io-WIP.md) | Embassy executor and async-io: tokio out of the node | In progress (step 1 of 5 landed) |
+| [0067](0067-thread-per-core-shards-PLANNED.md) | Thread per core: the shard as a database, the thread as placement | Planned |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
