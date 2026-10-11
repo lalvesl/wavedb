@@ -16,7 +16,7 @@
 //! [RFC 0064]: ../../../../rfcs/0064-pivot-owned-concurrency-PLANNED.md
 //! [RFC 0058]: ../../../../rfcs/0058-per-type-actors-DEPRECATED.md
 
-use tokio::sync::oneshot;
+use futures::channel::oneshot;
 use wavedb_core::store::Write;
 use wavedb_core::{Id, Result};
 
