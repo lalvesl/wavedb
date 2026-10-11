@@ -26,7 +26,6 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
 use tokio::task::spawn_local;
 use wavedb_core::Store;
@@ -34,6 +33,7 @@ use wavedb_core::expose::{Caller, Exposure, Reply};
 use wavedb_core::wire::{from_wire, to_wire};
 use wavedb_net::frame::Response;
 use wavedb_net::ws::{ClientMsg, ServerMsg, Topic};
+use wavedb_platform::io::{ReadHalf, WriteHalf};
 use wavedb_platform::ws::codec::{
     self, Messages, Msg, OP_BINARY, OP_CLOSE, OP_PONG,
 };
@@ -56,8 +56,8 @@ enum FromClient {
 /// A socket write fault while answering (the connection is being torn down
 /// regardless).
 pub async fn serve<E, S>(
-    read: OwnedReadHalf,
-    mut write: OwnedWriteHalf,
+    read: ReadHalf,
+    mut write: WriteHalf,
     registry: &E,
     store: &S,
     locks: &crate::shard::OwnerLocks,
@@ -130,7 +130,7 @@ where
 /// fault only — a *command* refusal is a `Response::Err` sent over the wire.
 #[allow(clippy::too_many_arguments)]
 async fn handle_client<E, S>(
-    write: &mut OwnedWriteHalf,
+    write: &mut WriteHalf,
     registry: &E,
     store: &S,
     locks: &crate::shard::OwnerLocks,
@@ -238,7 +238,7 @@ where
 /// The reader half: decode masked binary frames into [`ClientMsg`]s (and
 /// pings) and forward them; any close, decode fault, or socket error ends
 /// the task, which drops the sender and so ends the session.
-async fn read_loop(read: OwnedReadHalf, tx: mpsc::UnboundedSender<FromClient>) {
+async fn read_loop(read: ReadHalf, tx: mpsc::UnboundedSender<FromClient>) {
     let mut msgs = Messages::new(read);
     loop {
         let forward = match msgs.next(true).await {
@@ -263,7 +263,7 @@ async fn read_loop(read: OwnedReadHalf, tx: mpsc::UnboundedSender<FromClient>) {
 /// into one [`ServerMsg::Item`] per record, then an [`ServerMsg::End`];
 /// everything else is a bare `End`. Mirrors the HTTP frame shape.
 async fn write_reply(
-    write: &mut OwnedWriteHalf,
+    write: &mut WriteHalf,
     response: Response,
 ) -> wavedb_net::Result<()> {
     let end = match response {
@@ -280,7 +280,7 @@ async fn write_reply(
 
 /// Write one server message as a bare (unmasked) binary frame.
 async fn send(
-    write: &mut OwnedWriteHalf,
+    write: &mut WriteHalf,
     msg: &ServerMsg,
 ) -> wavedb_net::Result<()> {
     codec::write_message(write, OP_BINARY, &to_wire(msg), false).await?;
@@ -288,6 +288,6 @@ async fn send(
 }
 
 /// Best-effort close frame — the socket is going away either way.
-async fn close(write: &mut OwnedWriteHalf) {
+async fn close(write: &mut WriteHalf) {
     let _ = codec::write_message(write, OP_CLOSE, &[], false).await;
 }

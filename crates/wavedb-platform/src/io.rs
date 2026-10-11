@@ -10,7 +10,7 @@
 //! tasks through the standard `Waker`, so it works under whichever executor
 //! polls them — tokio today, the Embassy executor after RFC 0066's step 4.
 //!
-//! [RFC 0066]: ../../../rfcs/0066-embassy-executor-and-async-io-PLANNED.md
+//! [RFC 0066]: ../../../rfcs/0066-embassy-executor-and-async-io-WIP.md
 
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::pin::Pin;

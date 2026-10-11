@@ -1,6 +1,7 @@
 # RFC 0066 — Embassy executor and async-io: tokio out of the node
 
-- **Status:** Planned — opened 2026-10-08, draft for review. Nothing built.
+- **Status:** In progress — opened 2026-10-08. **Step 1 landed 2026-10-08**
+  (see "Progress").
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the shard
   workers and disk actors this changes the carrier of),
   [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) (the `wavedb/multi`
@@ -193,7 +194,13 @@ pool, and its own loop, and nothing schedules across them. What crosses a
 thread is data on a lock-free queue (§2) and a `Waker` that unparks the
 receiving thread — never a lock held by more than one shard, never a task
 moving between executors. The shared [`OwnerLocks`] table is the one
-deliberate exception and is unchanged by this RFC.
+deliberate exception, and its *semantics* are unchanged by this RFC — but
+not its implementation, which an earlier draft of this paragraph missed: it
+is a `std::sync::Mutex` map of per-owner **`tokio::sync::Mutex`**es, taken
+with owned guards so a lock can be held across an operation's awaits. Its
+runtime-independent equivalent is `async-lock`'s `Mutex::lock_arc()`
+(owned guard, wakes through the standard `Waker`, same ecosystem as
+`async-channel`); it moves in step 2 with the channels.
 
 Process-wide pieces that remain, and why each is acceptable:
 
@@ -222,10 +229,10 @@ working. tokio and the new stack coexist until step 5.
 1. **I/O seam** — protocol over `embedded-io-async`; sockets via `async-io` +
    adapter inside `platform`; the in-memory pipe for tests. tokio still runs
    the executor.
-2. **Bounded channels** — `embassy-sync` within a thread, `async-channel`
-   across threads, the three full policies
-   above, a test per policy (a slow WS client is disconnected; a write never
-   blocks on a lagging publisher).
+2. **Bounded channels and the owner locks** — `embassy-sync` within a
+   thread, `async-channel` across threads, `async-lock` for `OwnerLocks`;
+   the three full policies above, a test per policy (a slow WS client is
+   disconnected; a write never blocks on a lagging publisher).
 3. **Timers** — `embassy-time` behind `platform::time`.
 4. **Executor spike, then the switch** — prove `TaskPool` inference on
    `serve_connection<E, S>`; then `platform::task`, the serve loop, the shard
@@ -243,6 +250,33 @@ the specific number to hold: RFC 0065 measured `wavedb/multi` at **~2.3×**
 `wavedb/single` on reads (`profile` 6 951/s against 3 021) — the project's
 first measurement of real parallelism. A ratio that falls means something
 started serialising the shards.
+
+## Progress
+
+**Step 1 — landed 2026-10-08.** `wavedb_platform::io` is the one place a
+socket is named (`connect`, `Listener`, `Stream` with owned halves, a
+`Prefixed` reader for bytes a handshake pulled early, a loopback `pair` for
+tests). The WebSocket codec, both native clients, the tunnel's server half
+(`net::http`) and the node's serve loops are generic over
+`embedded_io_async::{Read, Write}` with `Error = IoError`. tokio still runs
+the executor; it no longer provides a socket anywhere in the workspace.
+Three behaviours were kept deliberately, each with a test or a comment
+saying why: dropping a write half shuts the socket's write side (tokio's
+`OwnedWriteHalf` did, and a tunnel response ends on it); a hostname
+resolves on a short-lived thread rather than blocking the executor in
+`getaddrinfo`; `Server::bind` stays `async` with nothing to await, because
+bringing a network up is asynchronous on `embassy-net`. Workspace bar green
+(491 tests), bench crates and the wasm target build.
+
+**Every step invalidates the benchmark seeds.** `bench-gen` links
+`wavedb-storage`, which links `wavedb-platform`, and `benches/nix/gen.nix`
+hashes every `.rs` under `crates/` plus the root manifest. Step 1 moved the
+`large` WaveDB seed from `fh8mmn…` to `y5pqmg…` with no change to a single
+stored byte. The `large` seed already building at that moment finishes as
+the **pre-0066 baseline**; the seed for this RFC's code is rebuilt once,
+after step 5. Narrowing `gen.nix` to the crates `bench-gen` actually links
+would stop `net`, `quick-node` and `wavedb` edits from doing the same, but
+not `platform`'s.
 
 ## Alternatives
 

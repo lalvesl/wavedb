@@ -590,7 +590,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0063](0063-engine-yield-map-and-interruptible-engine-PLANNED.md) | The yield map, and an interruptible engine | Planned |
 | [0064](0064-pivot-owned-concurrency-PLANNED.md) | Pivot-owned concurrency | Planned (first slice built) |
 | [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) | Benchmark suite II: the row as the unit | Planned |
-| [0066](0066-embassy-executor-and-async-io-PLANNED.md) | Embassy executor and async-io: tokio out of the node | Planned (draft for review) |
+| [0066](0066-embassy-executor-and-async-io-WIP.md) | Embassy executor and async-io: tokio out of the node | In progress (step 1 of 5 landed) |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
