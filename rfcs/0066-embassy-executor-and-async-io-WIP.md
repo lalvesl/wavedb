@@ -1,7 +1,7 @@
 # RFC 0066 — Embassy executor and async-io: tokio out of the node
 
-- **Status:** In progress — opened 2026-10-08. **Steps 1–3 and the node
-  half of step 4 landed 2026-10-08** (see "Progress").
+- **Status:** In progress — opened 2026-10-08. **Steps 1–3 and both halves
+  of step 4 (node, client) landed 2026-10-08** (see "Progress").
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the shard
   workers and disk actors this changes the carrier of),
   [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) (the `wavedb/multi`
@@ -435,6 +435,44 @@ Workspace bar green (502 tests: 2 new carrier tests), bench crates green,
 wasm32 build clean, docs warning-free against the baseline. The WebSocket
 reader and the disk actor's maintenance work moved to `ws_read.rs` and
 `shard/disk_work.rs` for the file budget.
+
+**Step 4, client half — landed 2026-10-08.** The connection manager runs on a
+carrier of its own, and its subtasks come from static pools
+(`net::manager::tasks`):
+
+| task | pool |
+|---|--:|
+| POST exchange | `MAX_POSTS`: 1024, set at build time with `WAVEDB_CLIENT_MAX_POSTS` (an `option_env!` parsed by a `const fn`; a malformed value fails the build) |
+| WebSocket watch actor | 64 |
+| HTTP poll watch actor | 64 |
+| WebSocket reader | 128 (a reconnect's new reader may overlap the old one) |
+
+**When a pool is full the manager refuses** — user decision, simple first —
+with a new `wavedb_net::Error::Saturated(what)`:
+- **POSTs** are counted in the manager loop rather than left to the pool.
+  The count is how a refusal answers its caller with a cause, because a
+  refused spawn drops its arguments, the answer channel among them. On one
+  thread the count cannot disagree with the pool: a task's slot is freed
+  before anything else polls.
+- **A watch** refused for a full actor pool hears `Saturated` on its ack.
+- **A reader** refused for a full pool is a dial fault, so the actor's
+  reconnect loop backs off and retries.
+
+The improvement — a simple client-side retry with no attempt limit and
+growing pauses, an automatic balancer of overload — is recorded in the new
+`docs/improvements.md`, alongside the other deliberate deferrals.
+
+The browser keeps `spawn_local` behind the same spawn functions, so the
+manager's code does not branch on target. `platform::task` is now
+**browser-only**: natively nothing used it any more, and a generic `spawn`
+cannot exist over static pools. With it went the platform's last runtime
+dependency on tokio. Workspace bar green (504 tests: 2 new), wasm32 clean.
+
+What remains for step 5:
+- `#[tokio::test]` and tokio in dev-dependencies (a `block_on`, step 4's
+  last item);
+- the node's `OwnerLocks` (`tokio::sync`), which RFC 0067 replaces. An
+  interim `async-lock` would let step 5 close first.
 
 **Every step invalidates the benchmark seeds.** `bench-gen` links
 `wavedb-storage`, which links `wavedb-platform`, and `benches/nix/gen.nix`
