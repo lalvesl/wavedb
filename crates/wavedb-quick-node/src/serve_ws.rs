@@ -15,10 +15,10 @@
 //! - the **event channel** — mutations the [`NotifyStore`] pushed for this
 //!   connection's subscriptions, forwarded verbatim.
 //!
-//! Frame reads are not cancel-safe, so a dedicated reader task owns the
-//! read half and forwards decoded messages over a channel; the loop selects
-//! on that channel (cancel-safe) and the event channel. On disconnect every
-//! subscription the connection held is dropped.
+//! Frame reads are not cancel-safe, so a dedicated reader task
+//! ([`crate::ws_read`]) owns the read half and forwards decoded messages over
+//! a channel; the loop selects on that channel (cancel-safe) and the event
+//! channel. On disconnect every subscription the connection held is dropped.
 //!
 //! [`NotifyStore`]: crate::subscribe::NotifyStore
 
@@ -28,28 +28,19 @@ use std::rc::Rc;
 
 use async_channel::Sender;
 use embassy_futures::select::{Either, select};
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::channel::Channel;
-use tokio::task::spawn_local;
 use wavedb_core::Store;
 use wavedb_core::expose::{Caller, Exposure, Reply};
 use wavedb_core::wire::{from_wire, to_wire};
 use wavedb_net::frame::Response;
 use wavedb_net::ws::{ClientMsg, ServerMsg, Topic};
+use wavedb_platform::carrier::Here;
 use wavedb_platform::io::{ReadHalf, WriteHalf};
-use wavedb_platform::ws::codec::{
-    self, Messages, Msg, OP_BINARY, OP_CLOSE, OP_PONG,
-};
+use wavedb_platform::ws::codec::{self, OP_BINARY, OP_CLOSE, OP_PONG};
 
 use crate::dispatch;
+use crate::serve::Node;
 use crate::subscribe::SubTable;
-
-/// Client messages decoded and waiting for the session loop.
-///
-/// Small: when it is full the reader stops reading, which leaves the bytes in
-/// the socket and pushes back onto the client's own send window. A client
-/// can only make the node buffer this many of its messages, not more.
-pub const WS_INBOUND_DEPTH: usize = 16;
+use crate::ws_read::{FromClient, Halt, Inbound, StopReader, reader};
 
 /// Events queued for one connection before it is disconnected.
 ///
@@ -58,19 +49,6 @@ pub const WS_INBOUND_DEPTH: usize = 16;
 /// that falls this far behind is cut off and catches up by cursor
 /// (`SubTable::publish`).
 pub const WS_OUTBOUND_DEPTH: usize = 256;
-
-/// What the reader task forwards to the session loop — a decoded client
-/// message, a ping to answer (the loop owns the write half), or the end of
-/// the stream.
-enum FromClient {
-    Msg(ClientMsg),
-    Ping(Vec<u8>),
-    End,
-}
-
-/// The reader-to-loop queue. Both ends run on the connection's thread, so
-/// it needs no lock at all.
-type Inbound = Channel<NoopRawMutex, FromClient, WS_INBOUND_DEPTH>;
 
 /// Run one upgraded connection to its end. Returns `Ok` on any clean or
 /// faulted disconnect — a per-connection fault never propagates (the caller
@@ -83,29 +61,35 @@ pub async fn serve<E, S>(
     read: ReadHalf,
     mut write: WriteHalf,
     registry: &E,
-    store: &S,
-    locks: &crate::shard::OwnerLocks,
-    secret: &[u8; 32],
-    subs: &Rc<RefCell<SubTable>>,
+    node: &Node<S>,
+    here: &Here,
 ) -> wavedb_net::Result<()>
 where
     E: Exposure,
     S: Store,
 {
+    let (store, locks, secret, subs) =
+        (&*node.store, &*node.locks, &node.secret, &node.subs);
     let inbound = Rc::new(Inbound::new());
-    let reader = spawn_local(read_loop(read, Rc::clone(&inbound)));
+    let halt = Rc::new(Halt::new());
+    // However the session ends — returning, or dropped mid-await when the
+    // node halts — the reader is told to stop with it.
+    let _stop_reader = StopReader(Rc::clone(&halt));
+    let reader = reader(read, Rc::clone(&inbound), halt, here.clone());
+    if here.spawn(reader).is_err() {
+        close(&mut write).await; // no reader slot: refuse the session
+        return Ok(());
+    }
 
     // Gate 1, once: the first message must be a `Hello` whose identity
     // verifies — otherwise the connection is refused and closed.
     let FromClient::Msg(ClientMsg::Hello(auth)) = inbound.receive().await
     else {
         close(&mut write).await;
-        reader.abort();
         return Ok(());
     };
     let Ok(caller) = dispatch::identify(&auth, secret) else {
         close(&mut write).await;
-        reader.abort();
         return Ok(());
     };
     send(&mut write, &ServerMsg::HelloOk).await?;
@@ -155,13 +139,13 @@ where
         }
     };
 
-    // Teardown: unregister every subscription, then stop the reader.
+    // Teardown: unregister every subscription; the reader stops as
+    // `_stop_reader` drops.
     let mut table = subs.borrow_mut();
     for topic in &topics {
         table.unsubscribe(caller.tenant, *topic, conn);
     }
     drop(table);
-    reader.abort();
     result
 }
 
@@ -276,35 +260,6 @@ where
     }
 }
 
-/// The reader half: decode masked binary frames into [`ClientMsg`]s (and
-/// pings) and forward them. Any close, decode fault, or socket error ends the
-/// stream, and the session hears [`FromClient::End`].
-async fn read_loop(read: ReadHalf, inbound: Rc<Inbound>) {
-    forward(read, &inbound).await;
-    inbound.send(FromClient::End).await;
-}
-
-/// Forward until the stream ends. A full queue suspends the send, and with it
-/// the reading: that is the inbound backpressure.
-async fn forward(read: ReadHalf, inbound: &Inbound) {
-    let mut msgs = Messages::new(read);
-    loop {
-        let forward = match msgs.next(true).await {
-            Ok(Some(Msg::Binary(bytes))) => {
-                match from_wire::<ClientMsg>(&bytes) {
-                    Ok(msg) => FromClient::Msg(msg),
-                    Err(_) => return, // an undecodable envelope ends the session
-                }
-            }
-            Ok(Some(Msg::Ping(payload))) => FromClient::Ping(payload),
-            Ok(Some(Msg::Pong(_))) => continue,
-            // Close, clean end, or any fault: stop reading.
-            _ => return,
-        };
-        inbound.send(forward).await;
-    }
-}
-
 /// Ship a command's [`Response`] as WS messages: a `Values` walk unpacks
 /// into one [`ServerMsg::Item`] per record, then an [`ServerMsg::End`];
 /// everything else is a bare `End`. Mirrors the HTTP frame shape.
@@ -336,49 +291,4 @@ async fn send(
 /// Best-effort close frame — the socket is going away either way.
 async fn close(write: &mut WriteHalf) {
     let _ = codec::write_message(write, OP_CLOSE, &[], false).await;
-}
-
-#[cfg(test)]
-mod tests {
-    use std::rc::Rc;
-    use std::time::Duration;
-
-    use embassy_futures::select::{Either, select};
-    use wavedb_core::wire::to_wire;
-    use wavedb_net::ws::{ClientMsg, Topic};
-    use wavedb_platform::io::pair;
-    use wavedb_platform::ws::codec::{self, OP_BINARY};
-
-    use super::{FromClient, Inbound, WS_INBOUND_DEPTH, read_loop};
-
-    /// The inbound policy: a client sending faster than its session handles
-    /// stops being read once `WS_INBOUND_DEPTH` messages wait. The rest stay
-    /// in the socket — the node does not buffer them for it.
-    #[tokio::test]
-    async fn a_full_inbound_queue_stops_the_reader() {
-        let (server, client) = pair().await.expect("socket pair");
-        let (read, _server_write) = server.split();
-        let (_client_read, mut write) = client.split();
-        let msg = to_wire(&ClientMsg::Unsubscribe(Topic {
-            struct_hash: 1,
-            pivot: None,
-        }));
-        for _ in 0..WS_INBOUND_DEPTH + 4 {
-            codec::write_message(&mut write, OP_BINARY, &msg, true)
-                .await
-                .expect("client write");
-        }
-
-        let inbound = Rc::new(Inbound::new());
-        let reader = read_loop(read, Rc::clone(&inbound));
-        let settle = wavedb_platform::time::sleep(Duration::from_millis(100));
-        let Either::Second(()) = select(reader, settle).await else {
-            panic!("the reader must be waiting on the full queue, not done");
-        };
-
-        assert_eq!(inbound.len(), WS_INBOUND_DEPTH);
-        while let Ok(item) = inbound.try_receive() {
-            assert!(matches!(item, FromClient::Msg(_)), "no end: still open");
-        }
-    }
 }
