@@ -199,68 +199,84 @@ mod tests {
             .expect("server send");
     }
 
-    #[tokio::test]
-    async fn subscribe_acks_and_buffers_events_arriving_early() {
-        let listener = Listener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr").to_string();
-        let server = tokio::spawn(async move {
-            let (mut msgs, mut w) = upgraded(listener).await;
-            let ClientMsg::Hello(Auth::Anonymous { tenant }) =
-                expect_client_msg(&mut msgs).await
-            else {
-                panic!("first message must be the hello");
-            };
-            assert_eq!(tenant, U48::from(9u32));
-            send_server(&mut w, &ServerMsg::HelloOk).await;
-            assert_eq!(
-                expect_client_msg(&mut msgs).await,
-                ClientMsg::Subscribe(TOPIC)
-            );
-            // An event lands BEFORE the ack — the session must buffer it.
-            send_server(&mut w, &ServerMsg::Event(event(1))).await;
-            send_server(&mut w, &ServerMsg::TopicOk(TOPIC, 0)).await;
-            send_server(&mut w, &ServerMsg::Event(event(2))).await;
-            let _ = codec::write_message(&mut w, OP_CLOSE, &[], false).await;
-        });
+    #[test]
+    fn subscribe_acks_and_buffers_events_arriving_early() {
+        wavedb_platform::carrier::block_on(async {
+            let listener = Listener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("addr").to_string();
+            let server = std::thread::spawn(move || {
+                wavedb_platform::carrier::block_on(async move {
+                    let (mut msgs, mut w) = upgraded(listener).await;
+                    let ClientMsg::Hello(Auth::Anonymous { tenant }) =
+                        expect_client_msg(&mut msgs).await
+                    else {
+                        panic!("first message must be the hello");
+                    };
+                    assert_eq!(tenant, U48::from(9u32));
+                    send_server(&mut w, &ServerMsg::HelloOk).await;
+                    assert_eq!(
+                        expect_client_msg(&mut msgs).await,
+                        ClientMsg::Subscribe(TOPIC)
+                    );
+                    // An event lands BEFORE the ack — the session must buffer it.
+                    send_server(&mut w, &ServerMsg::Event(event(1))).await;
+                    send_server(&mut w, &ServerMsg::TopicOk(TOPIC, 0)).await;
+                    send_server(&mut w, &ServerMsg::Event(event(2))).await;
+                    let _ = codec::write_message(&mut w, OP_CLOSE, &[], false)
+                        .await;
+                });
+            });
 
-        let mut session = WsSession::open(
-            &addr,
-            Auth::Anonymous {
-                tenant: U48::from(9u32),
-            },
-        )
-        .await
-        .expect("hello ok");
-        session.subscribe(TOPIC).await.expect("acked");
-        // The buffered pre-ack event first, then the live one, then the close.
-        assert_eq!(session.next_event().await.expect("event"), Some(event(1)));
-        assert_eq!(session.next_event().await.expect("event"), Some(event(2)));
-        assert_eq!(session.next_event().await.expect("closed"), None);
-        server.await.expect("server task");
+            let mut session = WsSession::open(
+                &addr,
+                Auth::Anonymous {
+                    tenant: U48::from(9u32),
+                },
+            )
+            .await
+            .expect("hello ok");
+            session.subscribe(TOPIC).await.expect("acked");
+            // The buffered pre-ack event first, then the live one, then the close.
+            assert_eq!(
+                session.next_event().await.expect("event"),
+                Some(event(1))
+            );
+            assert_eq!(
+                session.next_event().await.expect("event"),
+                Some(event(2))
+            );
+            assert_eq!(session.next_event().await.expect("closed"), None);
+            server.join().expect("server task");
+        });
     }
 
-    #[tokio::test]
-    async fn refused_hello_is_an_error_not_a_hang() {
-        let listener = Listener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr").to_string();
-        let server = tokio::spawn(async move {
-            let (mut msgs, mut w) = upgraded(listener).await;
-            let _ = expect_client_msg(&mut msgs).await;
-            // The node's refusal: close without a word.
-            let _ = codec::write_message(&mut w, OP_CLOSE, &[], false).await;
-        });
+    #[test]
+    fn refused_hello_is_an_error_not_a_hang() {
+        wavedb_platform::carrier::block_on(async {
+            let listener = Listener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("addr").to_string();
+            let server = std::thread::spawn(move || {
+                wavedb_platform::carrier::block_on(async move {
+                    let (mut msgs, mut w) = upgraded(listener).await;
+                    let _ = expect_client_msg(&mut msgs).await;
+                    // The node's refusal: close without a word.
+                    let _ = codec::write_message(&mut w, OP_CLOSE, &[], false)
+                        .await;
+                });
+            });
 
-        let refused = WsSession::open(
-            &addr,
-            Auth::Anonymous {
-                tenant: U48::from(9u32),
-            },
-        )
-        .await;
-        assert!(matches!(
-            refused,
-            Err(Error::Http("websocket hello refused"))
-        ));
-        server.await.expect("server task");
+            let refused = WsSession::open(
+                &addr,
+                Auth::Anonymous {
+                    tenant: U48::from(9u32),
+                },
+            )
+            .await;
+            assert!(matches!(
+                refused,
+                Err(Error::Http("websocket hello refused"))
+            ));
+            server.join().expect("server task");
+        });
     }
 }
