@@ -40,8 +40,10 @@ use async_channel::{Receiver, SendError, Sender};
 use embassy_futures::select::{Either, select};
 use futures::channel::oneshot;
 use wavedb_core::store::Store;
-use wavedb_storage::{PageStore, Progress};
+use wavedb_platform::carrier::{self, Here};
+use wavedb_storage::PageStore;
 
+use super::disk_work::{maintain, run_now, step};
 use super::msg::{DiskRequest, EngineStats, Maintenance};
 use super::priority::{Available, Class, Priority};
 
@@ -247,85 +249,23 @@ async fn serve(store: &PageStore, request: DiskRequest) {
     }
 }
 
-/// Ids a settle round may take before the actor looks at its queues again.
-///
-/// This is what makes maintenance interruptible in practice: without a bound,
-/// one burst becomes one round and the priority valve has nothing to
-/// interleave between, since it can only choose between *queued* items and not
-/// preempt the one running.
-///
-/// Unmeasured, like the valve's marks — small enough that a round is short,
-/// large enough that the per-round fixed cost (one window allocation, one
-/// positioned write) is not paid per handful of records.
-pub const SETTLE_BUDGET_IDS: usize = 4096;
+/// Disk actors alive at once. One engine per process makes it one; the
+/// headroom covers an actor still returning while the next opens.
+const ACTORS: usize = 4;
 
-/// Run one unit of maintenance. Returns whether a settle is still owed.
-///
-/// Faults are reported, never propagated: nobody asked, so there is nobody to
-/// return to. Nothing acknowledged is at risk either way — the journal still
-/// holds every unsettled batch, and the next round or the reopen retries.
-fn maintain(store: &PageStore, work: &Maintenance) -> bool {
-    match work {
-        Maintenance::Settle => return step(store),
-        // A checkpoint is deliberately **not** stepped: it drains, syncs
-        // `data.bin` and frames the journal as one thing, and a partial
-        // checkpoint is not a checkpoint. It is the one maintenance unit
-        // that must run to completion, and therefore the one that bounds
-        // read latency — see the module note on RFC 0063.
-        Maintenance::Checkpoint => {
-            if let Err(e) = store.commit_journal() {
-                eprintln!("disk actor: checkpoint failed: {e}");
-            }
-        }
-        Maintenance::Evict { budget_bytes } => {
-            store.evict_settled(*budget_bytes);
-        }
-        Maintenance::Defragment { budget_blocks } => {
-            if let Err(e) = store.defragment(*budget_blocks) {
-                eprintln!("disk actor: defragment failed: {e}");
-            }
-        }
-    }
-    false
-}
-
-/// Run one unit of maintenance **to completion**, for a caller who is waiting.
-///
-/// The difference from [`maintain`] is not the work, it is the contract. A hint
-/// is droppable and its faults are unobservable, which is right for a policy
-/// loop and wrong for anyone who asked. So a fault comes back here, and
-/// `Settle` **drains** rather than taking one bounded step: a caller that asked
-/// to settle and was told "done" after 4096 ids would have been misled.
-fn run_now(
-    store: &PageStore,
-    work: &Maintenance,
-) -> Result<(), wavedb_storage::StorageError> {
-    match work {
-        Maintenance::Settle => store.drain(),
-        Maintenance::Checkpoint => store.commit_journal(),
-        Maintenance::Evict { budget_bytes } => {
-            store.evict_settled(*budget_bytes);
-            Ok(())
-        }
-        Maintenance::Defragment { budget_blocks } => {
-            store.defragment(*budget_blocks).map(|_| ())
-        }
-    }
-}
-
-/// One settle round. `true` if more remain.
-fn step(store: &PageStore) -> bool {
-    match store.settle_step(SETTLE_BUDGET_IDS) {
-        Ok(Progress::Settled) => true,
-        Ok(Progress::Done) => false,
-        Err(e) => {
-            eprintln!("disk actor: settle failed: {e}");
-            // The round went back on the queue. Stop claiming to owe a settle
-            // so a failing disk cannot spin the actor at full speed; the next
-            // hint, or the reopen replay, retries it.
-            false
-        }
-    }
+/// The actor as a carrier task.
+#[wavedb_platform::carrier::rt::task(
+    pool_size = ACTORS,
+    embassy_executor = wavedb_platform::carrier::rt
+)]
+async fn actor(
+    store: PageStore,
+    requests: Receiver<DiskRequest>,
+    maintenance: Receiver<Maintenance>,
+    here: Here,
+) {
+    run(store, requests, maintenance).await;
+    drop(here);
 }
 
 /// Start the actor on a thread of its own and return the handle shards use.
@@ -339,9 +279,15 @@ fn step(store: &PageStore) -> bool {
 pub fn start(store: PageStore) -> wavedb_platform::Result<DiskHandle> {
     let (requests, rx) = async_channel::bounded(QUEUE_DEPTH);
     let (maintenance, mrx) = async_channel::bounded(MAINTENANCE_DEPTH);
-    wavedb_platform::task::spawn_detached("wavedb-disk", move || {
-        run(store, rx, mrx)
-    })?;
+    // The carrier ends with the actor: when every handle is gone, or after a
+    // `Shutdown`. The caller learns of either through the handle, so the
+    // `Finished` is not kept.
+    drop(carrier::spawn("wavedb-disk", move |here| {
+        if here.spawn(actor(store, rx, mrx, here.clone())).is_err() {
+            // The store drops here, so every handle sees the actor gone.
+            eprintln!("disk actor: no free slot, engine closed");
+        }
+    })?);
     Ok(DiskHandle {
         requests,
         maintenance,
