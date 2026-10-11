@@ -19,6 +19,8 @@
 //!   `wasm_bindgen_futures::spawn_local` — no tokio in wasm);
 //! - [`io`] — sockets, native only (RFC 0066): the one place a TCP socket is
 //!   named; every protocol above is generic over `embedded-io-async`;
+//! - [`carrier`] — native only (RFC 0066): an OS thread running one Embassy
+//!   executor, whose tasks come from static pools;
 //! - [`cpu`] — usable parallelism (the affinity mask and container quota this
 //!   process actually has / a constant 1, the browser having no threads).
 //!
@@ -31,6 +33,8 @@
 // stance across the workspace.
 #![allow(clippy::future_not_send)]
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod carrier;
 pub mod cpu;
 pub mod error;
 pub mod http;
