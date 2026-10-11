@@ -36,7 +36,9 @@
 //! [RFC 0064]: ../../../../rfcs/0064-pivot-owned-concurrency-PLANNED.md
 //! [RFC 0063]: ../../../../rfcs/0063-engine-yield-map-and-interruptible-engine-PLANNED.md
 
-use tokio::sync::mpsc;
+use async_channel::{Receiver, SendError, Sender};
+use embassy_futures::select::{Either, select};
+use futures::channel::oneshot;
 use wavedb_core::store::Store;
 use wavedb_storage::{PageStore, Progress};
 
@@ -60,8 +62,8 @@ pub const MAINTENANCE_DEPTH: usize = 16;
 /// storage once the actor owns it.
 #[derive(Clone)]
 pub struct DiskHandle {
-    requests: mpsc::Sender<DiskRequest>,
-    maintenance: mpsc::Sender<Maintenance>,
+    requests: Sender<DiskRequest>,
+    maintenance: Sender<Maintenance>,
 }
 
 impl DiskHandle {
@@ -72,7 +74,7 @@ impl DiskHandle {
     pub async fn send(
         &self,
         request: DiskRequest,
-    ) -> Result<(), mpsc::error::SendError<DiskRequest>> {
+    ) -> Result<(), SendError<DiskRequest>> {
         self.requests.send(request).await
     }
 
@@ -116,7 +118,7 @@ impl DiskHandle {
         &self,
         build: impl FnOnce(super::msg::Answer<T>) -> DiskRequest,
     ) -> wavedb_core::Result<T> {
-        let (answer, wait) = tokio::sync::oneshot::channel();
+        let (answer, wait) = oneshot::channel();
         self.requests.send(build(answer)).await.map_err(|_| {
             wavedb_core::Error::Backend("disk actor stopped".into())
         })?;
@@ -129,8 +131,8 @@ impl DiskHandle {
 /// Own `store` and serve both queues until every handle is dropped.
 pub async fn run(
     store: PageStore,
-    mut requests: mpsc::Receiver<DiskRequest>,
-    mut maintenance: mpsc::Receiver<Maintenance>,
+    requests: Receiver<DiskRequest>,
+    maintenance: Receiver<Maintenance>,
 ) {
     let mut priority = Priority::default();
     // A settle left part-done by the last round. It is maintenance the actor
@@ -161,18 +163,23 @@ pub async fn run(
             }
             // Both empty: block until either speaks. Without this the loop
             // would spin on an idle node.
-            None => tokio::select! {
-                request = requests.recv() => match request {
-                    Some(request) => Some(request),
-                    None => break,
-                },
-                // Requests outlive maintenance: with the maintenance senders
-                // gone the actor keeps serving reads, so this arm ends the
-                // round rather than the loop.
-                Some(work) = maintenance.recv() => {
+            //
+            // Requests outlive maintenance: with the maintenance senders gone
+            // the actor keeps serving reads, so a closed maintenance queue
+            // drops out of the wait instead of ending the loop — and must,
+            // since a closed queue is always ready and would spin it.
+            None if maintenance.is_closed() => match requests.recv().await {
+                Ok(request) => Some(request),
+                Err(_) => break,
+            },
+            None => match select(requests.recv(), maintenance.recv()).await {
+                Either::First(Ok(request)) => Some(request),
+                Either::First(Err(_)) => break,
+                Either::Second(Ok(work)) => {
                     settling = maintain(&store, &work);
                     None
                 }
+                Either::Second(Err(_)) => None,
             },
         };
         match next {
@@ -330,8 +337,8 @@ fn step(store: &PageStore) -> bool {
 /// # Errors
 /// The carrier thread failing to spawn.
 pub fn start(store: PageStore) -> wavedb_platform::Result<DiskHandle> {
-    let (requests, rx) = mpsc::channel(QUEUE_DEPTH);
-    let (maintenance, mrx) = mpsc::channel(MAINTENANCE_DEPTH);
+    let (requests, rx) = async_channel::bounded(QUEUE_DEPTH);
+    let (maintenance, mrx) = async_channel::bounded(MAINTENANCE_DEPTH);
     wavedb_platform::task::spawn_detached("wavedb-disk", move || {
         run(store, rx, mrx)
     })?;
@@ -344,22 +351,24 @@ pub fn start(store: PageStore) -> wavedb_platform::Result<DiskHandle> {
 #[cfg(test)]
 mod tests {
     use super::{DiskRequest, QUEUE_DEPTH};
-    use tokio::sync::{mpsc, oneshot};
+    use futures::channel::oneshot;
     use wavedb_core::Id;
 
     /// A queued request whose actor never arrives is still answered.
     ///
     /// The caller is awaiting a `oneshot`; dropping it yields a bare channel
     /// error with no cause, so the shutdown path has to say why instead.
-    #[tokio::test]
-    async fn a_refused_request_reports_a_cause() {
+    #[test]
+    fn a_refused_request_reports_a_cause() {
         let (answer, rx) = oneshot::channel();
         DiskRequest::Get {
             id: Id::from_raw(7),
             answer,
         }
         .refuse("engine closed");
-        let err = rx.await.expect("answered").expect_err("must refuse");
+        let err = futures::executor::block_on(rx)
+            .expect("answered")
+            .expect_err("must refuse");
         assert!(
             format!("{err}").contains("engine closed"),
             "cause lost: {err}"
@@ -368,9 +377,9 @@ mod tests {
 
     /// The request queue bounds itself, so a shard outrunning the disk waits
     /// rather than growing the process.
-    #[tokio::test]
-    async fn the_queue_applies_backpressure() {
-        let (tx, _rx) = mpsc::channel::<DiskRequest>(QUEUE_DEPTH);
+    #[test]
+    fn the_queue_applies_backpressure() {
+        let (tx, _rx) = async_channel::bounded::<DiskRequest>(QUEUE_DEPTH);
         for _ in 0..QUEUE_DEPTH {
             let (answer, _) = oneshot::channel();
             tx.try_send(DiskRequest::Get {
