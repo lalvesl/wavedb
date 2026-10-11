@@ -34,4 +34,4 @@ futures.workspace = true
 embedded-io-async.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tokio = { workspace = true, features = ["macros", "rt"] }

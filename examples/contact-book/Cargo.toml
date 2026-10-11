@@ -36,5 +36,7 @@ wavedb-quick-node = { path = "../../crates/wavedb-quick-node" }
 # The e2e test signs its own access token against the node's fixed secret.
 wavedb-net = { path = "../../crates/wavedb-net" }
 tokio.workspace = true
+# `time::timeout` for the waits that must not hang a run.
+wavedb-platform.workspace = true
 tempfile.workspace = true
 futures.workspace = true

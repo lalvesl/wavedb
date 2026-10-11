@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# `select` for `time::timeout`, the same on both targets.
+embassy-futures.workspace = true
 
 # Native: the client half of the dumb tunnel is a hand-rolled HTTP/1.1 POST
 # over a fresh TcpStream (no HTTP stack — WaveDB uses no HTTP semantics);
@@ -18,8 +20,10 @@ thiserror.workspace = true
 # security boundary, just the RFC.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # `rt` carries the connection manager's dedicated thread (current-thread
-# runtime + LocalSet behind `task::spawn_detached`); `time` its poll timer.
-tokio = { workspace = true, features = ["net", "io-util", "rt", "time"] }
+# runtime + LocalSet behind `task::spawn_detached`) until RFC 0066 step 4.
+tokio = { workspace = true, features = ["rt"] }
+# The timer behind `time::sleep` (RFC 0066 step 3).
+embassy-time.workspace = true
 sha1.workspace = true
 # RFC 0066: the socket (`async-io`) and the I/O traits every protocol layer
 # above is generic over (`embedded-io-async`), bridged by the adapter.

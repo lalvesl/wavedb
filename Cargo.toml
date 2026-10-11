@@ -71,6 +71,11 @@ async-io = "2.6.0"
 embassy-sync = "0.8.0"
 embassy-futures = "0.1.2"
 async-channel = "2.5.0"
+# Timers (`platform::time::sleep`), on its `std` driver natively; the browser
+# keeps `setTimeout`. The generic queue takes any executor's `Waker` (the
+# integrated one needs `embassy-executor`'s tasks). Past 128 pending timers
+# it wakes one of them early, and an Embassy timer simply re-arms.
+embassy-time = { version = "0.5.1", features = ["std", "generic-queue-128"] }
 zstd = "0.13.3"
 byteorder = "1.5.0"
 # The one hash function everywhere: STRUCT_HASH (fixed seed, compile-time type

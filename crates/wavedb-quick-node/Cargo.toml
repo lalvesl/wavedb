@@ -30,9 +30,9 @@ embassy-sync.workspace = true
 embassy-futures.workspace = true
 async-channel.workspace = true
 futures.workspace = true
-# The executor and timers until RFC 0066 steps 3–4 replace them; sockets and
-# channels no longer come from here (`sync` stays for `OwnerLocks`, RFC 0067).
-tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
+# The executor until RFC 0066 step 4 replaces it; sockets, channels and
+# timers no longer come from here (`sync` stays for `OwnerLocks`, RFC 0067).
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 thiserror.workspace = true
 
 [dev-dependencies]
