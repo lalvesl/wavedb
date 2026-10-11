@@ -14,15 +14,17 @@
 //! closed channel and replaced on the next watch — reconnection is a fresh
 //! dial.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use wavedb_wire::{from_wire, to_wire};
 
+use super::tasks::{self, Here, InFlight, Post, Refuse};
 use super::{Cmd, ConnKey, PostFrames, WatchMode, poll, ws_conn};
-use crate::Result;
-use crate::frame::{Auth, CommandFrame, Request, StreamFrame};
+use crate::frame::{Request, StreamFrame};
 use crate::frames::FrameReader;
 use crate::sync::{SyncReply, TopicCursor};
 
@@ -36,7 +38,11 @@ struct Entry<C> {
 
 /// Run the manager until its command channel closes (it never does — the
 /// process-wide handle holds the sender).
-pub(super) async fn run(mut rx: mpsc::UnboundedReceiver<Cmd>) {
+pub(super) async fn run(mut rx: mpsc::UnboundedReceiver<Cmd>, here: Here) {
+    // POSTs in flight. Counted here rather than left to the pool so a
+    // refusal can answer `connected` with a cause: a refused spawn would
+    // drop it unanswered.
+    let in_flight = Rc::new(Cell::new(0usize));
     let mut ws_conns: HashMap<ConnKey, Entry<ws_conn::ConnCmd>> =
         HashMap::new();
     let mut polls: HashMap<ConnKey, Entry<poll::PollCmd>> = HashMap::new();
@@ -56,9 +62,21 @@ pub(super) async fn run(mut rx: mpsc::UnboundedReceiver<Cmd>) {
                     auth: auth.clone(),
                 };
                 let poll = polls.get(&key).map(|entry| entry.tx.clone());
-                wavedb_platform::task::spawn_local(run_post(
-                    addr, auth, frame, connected, poll,
-                ));
+                if in_flight.get() >= tasks::MAX_POSTS {
+                    let _ = connected.send(Err(tasks::saturated("posts")));
+                    continue;
+                }
+                let post = Post {
+                    addr,
+                    auth,
+                    frame,
+                    connected,
+                    poll,
+                    slot: InFlight::take(&in_flight),
+                };
+                // Cannot be refused: the count above keeps the pool from
+                // filling, and a slot is released before its count is.
+                let _ = tasks::spawn_post(&here, post);
             }
             Cmd::Watch {
                 key,
@@ -78,7 +96,7 @@ pub(super) async fn run(mut rx: mpsc::UnboundedReceiver<Cmd>) {
                         events,
                         ack,
                     },
-                    ws_conn::spawn,
+                    |key| ws_conn::spawn(key, &here),
                 ),
                 WatchMode::HttpPoll(every) => register(
                     &mut polls,
@@ -90,7 +108,7 @@ pub(super) async fn run(mut rx: mpsc::UnboundedReceiver<Cmd>) {
                         events,
                         ack,
                     },
-                    |key| poll::spawn(key, every),
+                    |key| poll::spawn(key, every, &here),
                 ),
             },
             Cmd::Unwatch {
@@ -121,12 +139,12 @@ pub(super) async fn run(mut rx: mpsc::UnboundedReceiver<Cmd>) {
 
 /// Deliver a watch registration to `key`'s actor, spawning one (or
 /// replacing a dead one — its channel closed when its connection broke).
-fn register<C>(
+fn register<C: Refuse>(
     actors: &mut HashMap<ConnKey, Entry<C>>,
     key: ConnKey,
     watch: u64,
     cmd: C,
-    spawn: impl FnOnce(&ConnKey) -> mpsc::UnboundedSender<C>,
+    spawn: impl FnOnce(&ConnKey) -> Option<mpsc::UnboundedSender<C>>,
 ) {
     let mut pending = cmd;
     if let Some(entry) = actors.get_mut(&key) {
@@ -138,7 +156,10 @@ fn register<C>(
             Err(returned) => pending = returned.into_inner(),
         }
     }
-    let tx = spawn(&key);
+    let Some(tx) = spawn(&key) else {
+        pending.refuse(); // the actor pool is full
+        return;
+    };
     let _ = tx.unbounded_send(pending);
     let watchers = match actors.remove(&key) {
         // Keep the dead predecessor's ids: their guards' unregistrations
@@ -174,13 +195,15 @@ fn unregister<C>(
 /// then pump the response frames to the caller — peeling a **leading**
 /// piggyback `Sync` frame off the front and routing its delta back to the poll
 /// actor, so only that first frame is ever inspected.
-async fn run_post(
-    addr: String,
-    auth: Auth,
-    frame: CommandFrame,
-    connected: oneshot::Sender<Result<PostFrames>>,
-    poll: Option<mpsc::UnboundedSender<poll::PollCmd>>,
-) {
+pub(super) async fn run_post(post: Post) {
+    let Post {
+        addr,
+        auth,
+        frame,
+        connected,
+        poll,
+        slot: _slot, // held to the end: counted until the exchange is over
+    } = post;
     let sync = match &poll {
         Some(handle) => snapshot(handle).await,
         None => Vec::new(),
