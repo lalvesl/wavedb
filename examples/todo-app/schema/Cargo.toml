@@ -18,7 +18,7 @@ workspace = true
 # guarantee — LTO/DCE is not relied on). Server-only deps ride `server-side`.
 [features]
 default = ["server-side", "client-side"]
-server-side = ["dep:sha2", "dep:futures"]
+server-side = ["dep:wavedb-quick-node", "dep:sha2", "dep:futures"]
 client-side = []
 
 [dependencies]
@@ -42,6 +42,9 @@ futures = { workspace = true, optional = true }
 # defining it. The wasm expansion omits the slots — no storage dep there.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wavedb-storage = { path = "../../../crates/wavedb-storage" }
+# `expose_server!` declares the node's tasks for this crate's registry
+# (RFC 0066): they live in static pools, which need the concrete type.
+wavedb-quick-node = { path = "../../../crates/wavedb-quick-node", optional = true }
 
 [dev-dependencies]
 # The end-to-end proof spins a real node and drives the six functions.

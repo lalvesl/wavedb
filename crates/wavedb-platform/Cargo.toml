@@ -24,6 +24,8 @@ embassy-futures.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 # The timer behind `time::sleep` (RFC 0066 step 3).
 embassy-time.workspace = true
+# Carrier threads: one Embassy executor each (`carrier`, RFC 0066 step 4).
+embassy-executor.workspace = true
 sha1.workspace = true
 # RFC 0066: the socket (`async-io`) and the I/O traits every protocol layer
 # above is generic over (`embedded-io-async`), bridged by the adapter.

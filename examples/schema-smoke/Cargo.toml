@@ -14,7 +14,7 @@ workspace = true
 # registries; `wavedb-wasm`'s browser test pulls `client-side` only.
 [features]
 default = ["server-side", "client-side"]
-server-side = []
+server-side = ["dep:wavedb-quick-node"]
 client-side = []
 
 [dependencies]
@@ -26,6 +26,9 @@ wavedb-macros = { path = "../../crates/wavedb-macros" }
 # The wasm expansion omits the slots — no storage dep there.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wavedb-storage = { path = "../../crates/wavedb-storage" }
+# `expose_server!` declares the node's tasks for this crate's registry
+# (RFC 0066): they live in static pools, which need the concrete type.
+wavedb-quick-node = { path = "../../crates/wavedb-quick-node", optional = true }
 
 [dev-dependencies]
 # block_on + stream combinators for the collection-flow smoke test.
