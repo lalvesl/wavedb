@@ -241,6 +241,14 @@ pub fn expand_server(input: TokenStream) -> syn::Result<TokenStream> {
         }
 
         #storage_impl
+
+        // The node's tasks, made concrete for this registry (RFC 0066):
+        // Embassy keeps tasks in static pools, and a static needs the concrete
+        // type, which only this crate has. Needs `wavedb-quick-node` under
+        // this crate's `server-side` feature.
+        #[cfg(all(not(target_arch = "wasm32"), feature = "server-side"))]
+        ::wavedb_quick_node::node_tasks!(ServerRegistry);
+
         #collision_guard
     })
 }
