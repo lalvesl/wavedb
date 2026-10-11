@@ -7,9 +7,10 @@ use std::collections::HashMap;
 
 use futures::StreamExt;
 use futures::channel::mpsc;
-use wavedb_platform::ws::{self, Received, SendHalf};
+use wavedb_platform::ws::{self, Received, RecvHalf, SendHalf};
 use wavedb_wire::{from_wire, to_wire};
 
+use super::tasks::{self, Here};
 use super::ws_conn::{TopicState, ack_topic, deliver};
 use super::{ConnKey, sync_call};
 use crate::error::{Error, Result};
@@ -25,7 +26,10 @@ pub(super) type MsgRx = mpsc::UnboundedReceiver<Received>;
 /// A dial/handshake fault, or [`Error::Http`] `"websocket hello refused"`
 /// when the node closes instead of answering `HelloOk` (a bad identity) —
 /// the caller treats that specific error as **fatal** (ends the watches).
-pub(super) async fn open(key: &ConnKey) -> Result<(SendHalf, MsgRx)> {
+pub(super) async fn open(
+    key: &ConnKey,
+    here: &Here,
+) -> Result<(SendHalf, MsgRx)> {
     let conn = ws::connect(&key.addr).await?;
     let (mut recv, mut send) = conn.split();
     send.send(&to_wire(&ClientMsg::Hello(key.auth.clone())))
@@ -43,21 +47,32 @@ pub(super) async fn open(key: &ConnKey) -> Result<(SendHalf, MsgRx)> {
         }
     }
     let (msg_tx, msg_rx) = mpsc::unbounded();
-    wavedb_platform::task::spawn_local(async move {
-        loop {
-            match recv.next().await {
-                Ok(Some(received)) => {
-                    if msg_tx.unbounded_send(received).is_err() {
-                        return; // The actor ended first.
-                    }
-                }
-                // Close, clean end, or a fault: dropping `msg_tx` tells the
-                // actor the connection is over.
-                _ => return,
-            }
-        }
-    });
+    if !tasks::spawn_reader(here, recv, msg_tx) {
+        // The reader pool is full. A transport-class fault: the caller's
+        // reconnect loop backs off and dials again.
+        return Err(tasks::saturated("websocket readers"));
+    }
     Ok((send, msg_rx))
+}
+
+/// The reader half as its own task: push each decoded message onto `msgs`
+/// until the socket ends or the actor does.
+pub(super) async fn read_into(
+    mut recv: RecvHalf,
+    msgs: mpsc::UnboundedSender<Received>,
+) {
+    loop {
+        match recv.next().await {
+            Ok(Some(received)) => {
+                if msgs.unbounded_send(received).is_err() {
+                    return; // The actor ended first.
+                }
+            }
+            // Close, clean end, or a fault: dropping `msgs` tells the actor
+            // the connection is over.
+            _ => return,
+        }
+    }
 }
 
 /// Re-subscribe every topic on a fresh socket and catch up past each cursor
