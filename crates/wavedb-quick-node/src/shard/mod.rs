@@ -27,6 +27,7 @@
 //! [RFC 0064]: ../../../../rfcs/0064-pivot-owned-concurrency-PLANNED.md
 
 mod disk;
+mod disk_work;
 mod lock;
 mod msg;
 pub mod priority;
@@ -44,7 +45,7 @@ pub use priority::Priority;
 pub use route::{Owner, shard_of};
 pub use router::Router;
 pub use store::{CACHE_BYTES, ShardStore};
-pub use worker::{JOB_DEPTH, Job};
+pub use worker::{JOB_DEPTH, Job, JobSlot, ShardCtx, Worker, job, shard};
 
 use std::rc::Rc;
 
