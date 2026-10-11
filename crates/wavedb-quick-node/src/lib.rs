@@ -9,8 +9,7 @@
 //!
 //! ```no_run
 //! # async fn run<E>(registry: E) -> wavedb_quick_node::Result<()>
-//! # where E: wavedb_core::expose::Exposure
-//! #     + wavedb_storage::StorageRegistry + Copy + Send + 'static {
+//! # where E: wavedb_quick_node::NodeTasks + wavedb_storage::StorageRegistry {
 //! wavedb_quick_node::Server::new(registry)
 //!     .data_dir("./data")
 //!     .serve("0.0.0.0:7700")
@@ -26,12 +25,15 @@
 //! [`StorageRegistry`]: wavedb_storage::StorageRegistry
 //! [`StructStorage`]: wavedb_storage::StructStorage
 
-// The node serves connections on a single-thread `LocalSet` (see `serve`), so
-// the `Store`-generic engine futures are deliberately non-`Send` — an
+// The node runs each thread on one Embassy executor (see `serve`, RFC 0066),
+// so the `Store`-generic engine futures are deliberately non-`Send` — an
 // internal node seam, not a public `Send`-bounded API. Same stance
 // `wavedb-core` and `wavedb-storage` take with their engine seams.
 #![allow(clippy::future_not_send)]
 
+#[doc(hidden)]
+#[path = "rt.rs"]
+pub mod __rt;
 pub mod dispatch;
 pub mod error;
 pub mod feed;
@@ -40,29 +42,31 @@ mod serve_ws;
 pub mod shard;
 mod subscribe;
 mod upkeep;
+mod ws_read;
 
-use std::cell::RefCell;
 use std::future::{Future, pending};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
-use wavedb_core::expose::Exposure;
+use embassy_futures::select::{Either, select};
 use wavedb_platform::io::Listener;
 use wavedb_storage::{PageStore, StorageRegistry, StoreOptions};
 
 pub use error::{Result, ServerError};
 
-use subscribe::{NotifyStore, SubTable};
+/// Implemented for a schema's `ServerRegistry` by `expose_server!` — the
+/// node's tasks, made concrete for that registry (RFC 0066).
+pub use __rt::NodeTasks;
 use upkeep::Maintenance;
 
 /// A node, configured but not yet bound.
 ///
-/// `E` is a schema crate's `expose_server!` registry: it is both the
-/// [`Exposure`] dispatch surface and the
-/// [`StorageRegistry`] that names the engine's per-type slots.
+/// `E` is a schema crate's `expose_server!` registry: it is the
+/// [`Exposure`](wavedb_core::expose::Exposure) dispatch surface, the
+/// [`StorageRegistry`] that names the engine's per-type slots, and — through
+/// [`NodeTasks`] — the node's tasks made concrete for it.
 #[derive(Debug, Clone)]
 pub struct Server<E> {
     registry: E,
@@ -84,18 +88,13 @@ pub struct Bound<E> {
     /// the `PageStore` except by message; requests are routed across
     /// [`Server::shards`] workers, one by default.
     shards: crate::shard::Shards,
-    /// Shared with the serve-time [`NotifyStore`]; the WS session loops
-    /// register their subscriptions here. (HTTP poll-watches hold no node
-    /// state at all — each sync navigates the disk from the client's
-    /// cursor.)
-    subs: Rc<RefCell<SubTable>>,
     maintenance: Maintenance,
     secret: [u8; 32],
 }
 
 impl<E> Server<E>
 where
-    E: Exposure + StorageRegistry + Copy + Send + 'static,
+    E: NodeTasks + StorageRegistry,
 {
     /// Configure a node around a schema registry. Data goes to `./data`
     /// until [`data_dir`](Self::data_dir) says otherwise.
@@ -204,7 +203,6 @@ where
         );
         let secret = *wavedb_net::auth::node_secret()
             .unwrap_or_else(|| unreachable!("just installed"));
-        let subs = Rc::new(RefCell::new(SubTable::default()));
         Ok(Bound {
             registry: self.registry,
             listener,
@@ -212,7 +210,6 @@ where
                 .map_err(|e| {
                     ServerError::Io(std::io::Error::other(e.to_string()))
                 })?,
-            subs,
             maintenance: self.maintenance,
             secret,
         })
@@ -229,7 +226,7 @@ where
 
 impl<E> Bound<E>
 where
-    E: Exposure + Copy + Send + 'static,
+    E: NodeTasks,
 {
     /// The address the listener actually bound (resolves an `:0` request).
     ///
@@ -271,61 +268,47 @@ where
         self,
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
-        // One table for the node: the brake that keeps two interleaved
-        // collection ops from losing an index update now that the store
-        // underneath genuinely suspends (`CONCURRENCY_BRAKE.md`). Shared with
-        // every shard worker, which is what makes it exclude anything at all
-        // once operations run on more than this thread.
-        let locks = Arc::new(shard::OwnerLocks::new());
-        // Committed mutations come back from the shards as plain data; the
-        // subscription table lives here and is fanned out by `feed::publish`.
-        let (mutations, incoming) = feed::feed(feed::MUTATION_DEPTH);
-        let router = shard::Router::start(
-            self.registry,
-            &self.shards.handle(),
-            &locks,
-            &mutations,
-            self.secret,
-            self.shards.count(),
-        )
-        .map_err(|e| ServerError::Io(std::io::Error::other(e.to_string())))?;
-        // Ours goes; the workers hold the live clones, so the publisher task
-        // ends when the last of them does rather than never.
-        drop(mutations);
-        // The accept thread's own view: cacheless (see `Shards::store`) and
-        // wrapped so a WebSocket `Call` executed here still reaches the
-        // watchers, exactly as a routed one does from its shard.
-        let serving = Rc::new(NotifyStore::new(
-            self.shards.store(),
-            Rc::clone(&self.subs),
-        ));
-        serve::run(
-            self.listener,
-            self.registry,
-            serve::Node {
-                router,
-                store: serving,
-                secret: self.secret,
-                locks,
-                subs: Rc::clone(&self.subs),
-            },
-            // Both background jobs as one future: `serve::run` spawns it on
-            // the accept `LocalSet` and aborts it on shutdown, which is the
-            // right lifetime for each.
-            upkeep::background(
-                upkeep::maintain(self.shards.handle(), self.maintenance),
-                feed::publish(incoming, Rc::clone(&self.subs)),
-            ),
-            shutdown,
-        )
-        .await?;
+        let disk = self.shards.handle();
+        let (stop, stopped) = async_channel::bounded::<()>(1);
+        let (outcome, served) = futures::channel::oneshot::channel();
+        let ctx = serve::Accept {
+            registry: self.registry,
+            listener: self.listener,
+            shards: self.shards,
+            maintenance: self.maintenance,
+            secret: self.secret,
+            stop: stopped,
+            outcome,
+        };
+        // The node runs on its own carrier thread (RFC 0066); this future only
+        // waits for it, so the caller may await it under any executor.
+        let finished =
+            wavedb_platform::carrier::spawn("wavedb-accept", |here| {
+                // Refused (`MAX_NODES` running): `outcome` drops, and the caller
+                // hears `served` cancelled below.
+                let _ = E::spawn_accept(ctx, here);
+            })
+            .map_err(|e| {
+                ServerError::Io(std::io::Error::other(e.to_string()))
+            })?;
+        let mut served = std::pin::pin!(served);
+        let result = match select(std::pin::pin!(shutdown), &mut served).await {
+            Either::First(()) => {
+                stop.close();
+                served.await
+            }
+            Either::Second(result) => result,
+        };
+        stop.close();
+        // Every connection, the WS readers and the background task have
+        // returned once the carrier has — the engine is quiet.
+        finished.await;
+        result.unwrap_or_else(|_| Err(node_refused()))?;
         // Clean shutdown: everything settled + committed, and the checkpoint's
         // frame forced durable — a restart replays nothing. It is a *request*
         // rather than a hint because this outcome is returned to the caller.
         let (answer, wait) = futures::channel::oneshot::channel();
-        self.shards
-            .handle()
-            .send(shard::DiskRequest::Shutdown { answer })
+        disk.send(shard::DiskRequest::Shutdown { answer })
             .await
             .map_err(|_| upkeep::stopped())?;
         wait.await
@@ -333,6 +316,12 @@ where
             .and_then(|r| r.map_err(|_| upkeep::stopped()))?;
         Ok(())
     }
+}
+
+/// The accept loop never ran: `MAX_NODES` nodes are already running in this
+/// process.
+fn node_refused() -> ServerError {
+    ServerError::Io(std::io::Error::other("no free node slot"))
 }
 
 /// A fresh random 32-byte secret from platform entropy
