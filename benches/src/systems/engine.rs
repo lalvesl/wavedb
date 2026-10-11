@@ -249,7 +249,7 @@ impl Engineish for Sharded {
         // retirement barrier — and release the `EngineClaim` before the next
         // phase opens this directory. Dropping the handles would end the actor
         // eventually, and "eventually" reopens as `EngineBusy`.
-        let (answer, wait) = tokio::sync::oneshot::channel();
+        let (answer, wait) = futures::channel::oneshot::channel();
         let handle = self.shards.handle();
         drop(self.store);
         if block_on(handle.send(DiskRequest::Shutdown { answer })).is_ok() {
