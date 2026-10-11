@@ -30,14 +30,15 @@
 
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot};
+use async_channel::Sender;
+use futures::channel::oneshot;
 use wavedb_core::expose::Exposure;
-use wavedb_core::notify::Mutation;
 use wavedb_net::frame::{NodeError, NodeErrorKind, Request, Response};
 
 use super::worker::{self, Job};
 use super::{DiskHandle, Owner, OwnerLocks};
 use crate::dispatch::{self, Answer};
+use crate::feed::MutationFeed;
 
 /// The fan-out onto the shard workers.
 ///
@@ -45,7 +46,7 @@ use crate::dispatch::{self, Answer};
 /// connection task can hold one.
 #[derive(Clone)]
 pub struct Router {
-    workers: Vec<mpsc::Sender<Job>>,
+    workers: Vec<Sender<Job>>,
     secret: [u8; 32],
 }
 
@@ -64,7 +65,7 @@ impl Router {
         registry: E,
         disk: &DiskHandle,
         locks: &Arc<OwnerLocks>,
-        publisher: &mpsc::UnboundedSender<Mutation>,
+        publisher: &MutationFeed,
         secret: [u8; 32],
         count: usize,
     ) -> wavedb_platform::Result<Self>
@@ -175,9 +176,7 @@ mod tests {
     /// every dispatch takes the "shard stopped" path. Enough to pin routing,
     /// which is the pure part.
     fn router(count: usize) -> Router {
-        let workers = (0..count)
-            .map(|_| tokio::sync::mpsc::channel(1).0)
-            .collect();
+        let workers = (0..count).map(|_| async_channel::bounded(1).0).collect();
         Router {
             workers,
             secret: [0u8; 32],
