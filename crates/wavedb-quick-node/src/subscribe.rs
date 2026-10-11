@@ -31,8 +31,7 @@ struct Sub {
 }
 
 /// The live subscription table — one per node, shared (`Rc<RefCell>`) by
-/// every connection task on the serve `LocalSet` (current-thread, so no
-/// lock).
+/// every connection task on the accept carrier (one thread, so no lock).
 #[derive(Default)]
 pub struct SubTable {
     by_topic: HashMap<Key, Vec<Sub>>,
