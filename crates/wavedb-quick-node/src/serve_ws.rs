@@ -371,7 +371,7 @@ mod tests {
 
         let inbound = Rc::new(Inbound::new());
         let reader = read_loop(read, Rc::clone(&inbound));
-        let settle = tokio::time::sleep(Duration::from_millis(100));
+        let settle = wavedb_platform::time::sleep(Duration::from_millis(100));
         let Either::Second(()) = select(reader, settle).await else {
             panic!("the reader must be waiting on the full queue, not done");
         };
