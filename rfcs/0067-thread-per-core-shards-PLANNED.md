@@ -72,24 +72,37 @@ priority the way this RFC needs — one executor per priority level.
 
 ## Design
 
-### 1. Shards: fixed at creation, a power of two
+### 1. Shards: fixed at creation, routed by remainder
 
 - **`P = 64` by default**, chosen when the database is created and written to
   `<root>/MANIFEST` (shard count, format), which is immutable afterwards.
-  Configurable at creation; a power of two always.
-- **Routing:** `shard = mix(key) & (P - 1)`, where `key` and `mix` are
-  today's `route.rs` (`bits(pivot)` for a collection, the injective
-  `unique_key(tenant, type_salt)` for a Unique type; SplitMix64's finalizer).
-  The modulo becomes a mask; nothing else changes.
+  Configurable at creation.
+- **Routing is a plain remainder:** `shard = mix(key) % P`. The owner gives
+  the key — the Pivot for a NonUnique collection (`bits(pivot)`), the
+  `(tenant, type)` pair for a Unique (`unique_key`) — exactly as `route.rs`
+  computes it today.
+- **The `mix` before the remainder is not optional**, and the reason is
+  arithmetic, not taste. The bare key modulo 64 collapses in both cases:
+  - **Unique:** `unique_key = tenant << 15 | type_salt`. Since `2^15` is a
+    multiple of 64, `unique_key % 64 = type_salt % 64`: the tenant drops out,
+    and every tenant's `User` lands on one shard.
+  - **Pivot:** a Pivot's key is `key_nanos()` = `ms · 10^6 + counter`, and
+    `10^6 = 15 625 · 64`, so `key % 64 = counter % 64`. The counter is one
+    process-wide sequence shared by every mint. A loop that mints `k` ids per
+    created collection (the shop: one Pivot, then the holder's id and its
+    instants) deals Pivots out every `k`-th shard, so only `64 / gcd(k, 64)`
+    shards are ever used — 16 of them when `k = 4`.
+
+  SplitMix64's finalizer (five lines, already in `route.rs`) removes both
+  patterns, and the remainder after it is uniform for any `P`.
 - **The routing function becomes load-bearing on disk.** Today it only
   decides a thread, and changing it costs a restart. Once it decides which
   `data.bin` holds a record, changing it puts every record in the wrong shard,
   the same way changing `seahash` would. `mix` and both keys are frozen and
   pinned by golden-vector tests.
-- **Growing `P` later is a local split.** With routing on the low bits, going
-  from 64 to 128 splits shard `s` into `s` and `s + 64` by one more bit of the
-  same hash. Each shard splits independently, with no global shuffle. The
-  tooling is out of scope; the mask is what keeps it possible.
+- **Growing `P` later** is not designed here. If it is ever wanted, keeping
+  `P` a power of two makes it a local split: going from 64 to 128 splits
+  shard `s` into `s` and `s + 64` by one more bit of the same hash.
 
 ### 2. Layout: each shard is self-contained
 
@@ -102,9 +115,23 @@ priority the way this RFC needs — one executor per priority level.
     3f/  …
 ```
 
-`data.bin` keeps its current structure: superblock, allocator, per-type
-linear-hashed directories, slot pages, and the per-type **dictionaries**. The
-dictionaries stay per shard. They are not trained: each is a capped (64 KiB),
+Everything a store needs to recompose itself is **per shard**. Each shard's
+`data.bin` keeps today's structure, unchanged:
+
+- the superblock, with its own random directory seed;
+- the per-type **linear-hashed directories**, which split themselves as the
+  type grows in that shard. The bucket hash is today's `bucket_of(id)`; only
+  the population is smaller;
+- the slot pages;
+- the **addressing log** and the `Commit` frame that names it (RFCs
+  0041/0043/0046). They describe where every directory, dictionary and page
+  lives, and on open they rebuild the directories, the dictionaries and the
+  **allocator** of that shard alone;
+- the per-type **dictionaries**.
+
+A shard is therefore exactly one of today's stores, opened at its own path.
+
+The dictionaries stay per shard. They are not trained: each is a capped (64 KiB),
 append-only sample of the type's record bytes, versioned by length, rebuilt
 deterministically by journal replay (`wavedb-storage/src/dictionary.rs`).
 Per shard they cost at most 64 KiB per type and keep every shard rebuildable
@@ -240,7 +267,7 @@ the meantime.
 | one journal, one `data.bin` | 64 of each, under `shards/xx/` |
 | shard workers + disk actor + serve loop on a `LocalSet` | `T` identical threads, three executors each |
 | `OwnerLocks`: process-wide map of async mutexes | thread-local table plus leases |
-| `shard_of`: `mix(key) % shards`, a thread choice | `mix(key) & (P - 1)`, a frozen on-disk placement |
+| `shard_of`: `mix(key) % shards`, a thread choice | `mix(key) % P`, a frozen on-disk placement |
 
 ## Delivery
 
@@ -250,7 +277,7 @@ the meantime.
    largest step and a prerequisite for the rest; it also simplifies the
    tests' `engine_gate()`.
 2. **The shard layout.** `MANIFEST`, `shards/xx/`, open and replay per shard,
-   routing by mask, golden vectors for `mix`.
+   routing by remainder, golden vectors for `mix`.
 3. **Interruptible background work** (0063 part 3), so BG can share a thread
    with DATA.
 4. **The thread loop** with three executors — 0066 step 4, reshaped.
