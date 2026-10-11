@@ -440,6 +440,23 @@ The reason this file matters more than the checklist above.
   4 changed the bench source, so the seed had to be rebuilt regardless; the
   timing above is what 3.9 asked for, and it survived.)
 
+- **The `large` rebuild (2026-10-07/08) is pinned, and its WaveDB seed is
+  already a baseline.** Started through `scripts/bench_seeds.sh large
+  --build` at 23:51:42, it closed `exit=0` at 09:50:17 with every root in
+  `.bench-seeds/large/`. The WaveDB fill took **9h40m (~34 800 s, ~144
+  rows/s)** with peak RSS **7.43 GB** (sampled every 30 s), and the four
+  other seeds took 3–6 minutes each. The 2.5× slowdown against
+  September's 3h53m is not attributable: the machine was not quiet (RFC 0066
+  step 1 was compiled and tested alongside it) and MemAvailable fell to
+  **427 MB** at 09:18, so the page cache was squeezed. Treat it as a
+  build time, not a measurement.
+  The WaveDB seed was evaluated before RFC 0066 step 1 landed (drv
+  `fh8mmn…`). `bench-gen` links `wavedb-platform`, so at HEAD the wanted drv
+  is `y5pqmg…` and the report lists it as not built; the other four seeds
+  were evaluated after the commit and match HEAD. The old WaveDB output
+  stays rooted as the **pre-0066 baseline**, and the seed is rebuilt once,
+  after RFC 0066 step 5.
+
 - **Observing the counters is a read.** Each snapshot of `/proc/self/io`
   adds that file's size (~100 bytes) to `rchar`, so two consecutive
   snapshots are never equal and every phase's `rchar` carries one snapshot
