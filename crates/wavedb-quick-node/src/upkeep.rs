@@ -9,6 +9,13 @@
 //! also serving (`shard::priority`). A hint dropped because the queue is full
 //! is a hint the actor has already been given.
 
+use async_channel::Receiver;
+use embassy_futures::join::join;
+use embassy_futures::select::select;
+use wavedb_platform::carrier::Here;
+
+use crate::feed::FeedReceiver;
+use crate::subscribe::Subscriptions;
 use crate::{ServerError, shard};
 
 /// The background maintenance policy: how the node settles, checkpoints,
@@ -90,13 +97,44 @@ pub const fn stopped() -> ServerError {
     ))
 }
 
-/// Run two never-ending background jobs as one future.
+/// Background tasks alive at once: one per node, with headroom for a node
+/// still winding down (see `__rt::MAX_NODES`).
+const BACKGROUND: usize = crate::__rt::MAX_NODES;
+
+/// Start the node's background task on the accept carrier: [`maintain`] and
+/// the mutation publisher, until `halt` closes.
 ///
-/// Neither returns under normal operation, so this is a way to hand the serve
-/// loop a single thing to spawn and abort — not a join whose result matters.
-pub async fn background(
-    a: impl std::future::Future<Output = ()>,
-    b: impl std::future::Future<Output = ()>,
+/// # Errors
+/// [`ServerError::Io`] when the background pool is full — a node that could
+/// not maintain its engine refuses to start rather than serve without it.
+pub fn spawn_background(
+    disk: shard::DiskHandle,
+    policy: Maintenance,
+    feed: FeedReceiver,
+    subs: Subscriptions,
+    halt: Receiver<()>,
+    here: &Here,
+) -> crate::Result<()> {
+    here.spawn(background(disk, policy, feed, subs, halt, here.clone()))
+        .map_err(|_| {
+            ServerError::Io(std::io::Error::other("background pool full"))
+        })
+}
+
+/// Both never-ending background jobs, until the node halts.
+#[wavedb_platform::carrier::rt::task(
+    pool_size = BACKGROUND,
+    embassy_executor = wavedb_platform::carrier::rt
+)]
+async fn background(
+    disk: shard::DiskHandle,
+    policy: Maintenance,
+    feed: FeedReceiver,
+    subs: Subscriptions,
+    halt: Receiver<()>,
+    here: Here,
 ) {
-    embassy_futures::join::join(a, b).await;
+    let work = join(maintain(disk, policy), crate::feed::publish(feed, subs));
+    select(work, halt.recv()).await;
+    drop(here); // held to the end: the carrier waits for this task
 }
