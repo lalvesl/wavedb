@@ -50,17 +50,47 @@ pub fn key_nanos() -> u64 {
     (unix_nanos() / 1_000_000) * 1_000_000 + count
 }
 
-/// Sleep for `duration` — the timer the connection manager's poll loop
-/// runs on (tokio's timer natively, `setTimeout` in the browser — no
-/// tokio in wasm).
+/// Sleep for `duration` — the timer the connection manager's poll loop and
+/// the node's upkeep run on (`embassy-time` natively, RFC 0066; `setTimeout`
+/// in the browser).
+///
+/// Executor-independent: the `std` driver keeps its own alarm thread and wakes
+/// the task through its `Waker`, so this works under any executor.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn sleep(duration: core::time::Duration) {
-    tokio::time::sleep(duration).await;
+    // Microsecond resolution, the driver's tick. Saturating, because a
+    // duration past `u64` microseconds (584 000 years) means "forever".
+    let micros = u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+    embassy_time::Timer::after(embassy_time::Duration::from_micros(micros))
+        .await;
+}
+
+/// `future` did not finish within its [`timeout`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("timed out")]
+pub struct Elapsed;
+
+/// Run `future`, giving up after `duration`.
+///
+/// One definition for both targets: a race between `future` and [`sleep`],
+/// which is itself the target's timer. A future that loses is dropped.
+///
+/// # Errors
+/// [`Elapsed`] when `duration` passes first.
+pub async fn timeout<F: core::future::Future>(
+    duration: core::time::Duration,
+    future: F,
+) -> Result<F::Output, Elapsed> {
+    use embassy_futures::select::{Either, select};
+
+    match select(future, sleep(duration)).await {
+        Either::First(output) => Ok(output),
+        Either::Second(()) => Err(Elapsed),
+    }
 }
 
 /// Sleep for `duration` — the timer the connection manager's poll loop
-/// runs on (tokio's timer natively, `setTimeout` in the browser — no
-/// tokio in wasm).
+/// runs on (`embassy-time` natively, `setTimeout` in the browser).
 #[cfg(target_arch = "wasm32")]
 pub async fn sleep(duration: core::time::Duration) {
     let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
@@ -79,7 +109,9 @@ pub async fn sleep(duration: core::time::Duration) {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::{key_nanos, unix_nanos, unix_secs};
+    use std::time::{Duration, Instant};
+
+    use super::{Elapsed, key_nanos, sleep, timeout, unix_nanos, unix_secs};
 
     #[test]
     fn clock_is_past_2023_and_units_agree() {
@@ -104,5 +136,32 @@ mod tests {
         let key_ms = key_nanos() / 1_000_000;
         let clock_ms = unix_nanos() / 1_000_000;
         assert!(key_ms.abs_diff(clock_ms) < 1_000);
+    }
+
+    /// The timer is the driver's, not the executor's: a plain `block_on`
+    /// with no runtime at all still wakes on time.
+    #[test]
+    fn sleep_wakes_without_a_runtime() {
+        let start = Instant::now();
+        futures::executor::block_on(sleep(Duration::from_millis(30)));
+        assert!(start.elapsed() >= Duration::from_millis(30));
+    }
+
+    #[test]
+    fn timeout_returns_the_output_when_the_future_wins() {
+        let won = futures::executor::block_on(timeout(
+            Duration::from_secs(5),
+            async { 7 },
+        ));
+        assert_eq!(won, Ok(7));
+    }
+
+    #[test]
+    fn timeout_is_elapsed_when_the_timer_wins() {
+        let lost = futures::executor::block_on(timeout(
+            Duration::from_millis(10),
+            sleep(Duration::from_secs(5)),
+        ));
+        assert_eq!(lost, Err(Elapsed));
     }
 }
