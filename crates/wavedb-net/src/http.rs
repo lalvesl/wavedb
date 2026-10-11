@@ -282,110 +282,125 @@ mod tests {
         assert_eq!(head_end(b"a\r\nb"), None);
     }
 
-    #[tokio::test]
-    async fn post_body_and_frame_bytes_roundtrip_over_a_socket_pair() {
-        let (mut client, mut server) = pair().await.unwrap();
+    #[test]
+    fn post_body_and_frame_bytes_roundtrip_over_a_socket_pair() {
+        wavedb_platform::carrier::block_on(async {
+            let (mut client, mut server) = pair().await.unwrap();
 
-        // Client writes a request by hand; the server side reads it.
-        client
-            .write_all(b"POST / HTTP/1.1\r\ncontent-length: 5\r\n\r\nhello")
-            .await
-            .unwrap();
-        let body = read_post(&mut server).await.unwrap().unwrap();
-        assert_eq!(body, b"hello");
+            // Client writes a request by hand; the server side reads it.
+            client
+                .write_all(b"POST / HTTP/1.1\r\ncontent-length: 5\r\n\r\nhello")
+                .await
+                .unwrap();
+            let body = read_post(&mut server).await.unwrap().unwrap();
+            assert_eq!(body, b"hello");
 
-        // Server answers with a head and two frames, then closes; the raw
-        // bytes are exactly what `wavedb_net::frames::FrameReader` expects
-        // (the client-side reassembly is tested there over a real socket).
-        write_ok_head(&mut server).await.unwrap();
-        write_frame(&mut server, b"one").await.unwrap();
-        write_frame(&mut server, b"world").await.unwrap();
-        drop(server);
+            // Server answers with a head and two frames, then closes; the raw
+            // bytes are exactly what `wavedb_net::frames::FrameReader` expects
+            // (the client-side reassembly is tested there over a real socket).
+            write_ok_head(&mut server).await.unwrap();
+            write_frame(&mut server, b"one").await.unwrap();
+            write_frame(&mut server, b"world").await.unwrap();
+            drop(server);
 
-        let mut raw = Vec::new();
-        let mut chunk = [0u8; 256];
-        loop {
-            let n = client.read(&mut chunk).await.unwrap();
-            if n == 0 {
-                break;
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 256];
+            loop {
+                let n = client.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&chunk[..n]);
             }
-            raw.extend_from_slice(&chunk[..n]);
-        }
-        let mut expected = b"HTTP/1.1 200 OK\r\n\
+            let mut expected = b"HTTP/1.1 200 OK\r\n\
               content-type: application/octet-stream\r\n\
               access-control-allow-origin: *\r\n\
               connection: close\r\n\r\n"
-            .to_vec();
-        expected.extend_from_slice(&3u32.to_le_bytes());
-        expected.extend_from_slice(b"one");
-        expected.extend_from_slice(&5u32.to_le_bytes());
-        expected.extend_from_slice(b"world");
-        assert_eq!(raw, expected);
+                .to_vec();
+            expected.extend_from_slice(&3u32.to_le_bytes());
+            expected.extend_from_slice(b"one");
+            expected.extend_from_slice(&5u32.to_le_bytes());
+            expected.extend_from_slice(b"world");
+            assert_eq!(raw, expected);
+        });
     }
 
-    #[tokio::test]
-    async fn clean_close_reads_as_none() {
-        let (client, mut server) = pair().await.unwrap();
-        drop(client);
-        assert!(read_post(&mut server).await.unwrap().is_none());
+    #[test]
+    fn clean_close_reads_as_none() {
+        wavedb_platform::carrier::block_on(async {
+            let (client, mut server) = pair().await.unwrap();
+            drop(client);
+            assert!(read_post(&mut server).await.unwrap().is_none());
+        });
     }
 
-    #[tokio::test]
-    async fn plain_get_is_refused() {
-        let (mut client, mut server) = pair().await.unwrap();
-        client
-            .write_all(b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n")
-            .await
-            .unwrap();
-        let err = read_request(&mut server).await.unwrap_err();
-        assert!(matches!(err, Error::Http("only POST or websocket upgrade")));
+    #[test]
+    fn plain_get_is_refused() {
+        wavedb_platform::carrier::block_on(async {
+            let (mut client, mut server) = pair().await.unwrap();
+            client
+                .write_all(b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            let err = read_request(&mut server).await.unwrap_err();
+            assert!(matches!(
+                err,
+                Error::Http("only POST or websocket upgrade")
+            ));
+        });
     }
 
-    #[tokio::test]
-    async fn websocket_upgrade_surfaces_its_key() {
-        let (mut client, mut server) = pair().await.unwrap();
-        client
-            .write_all(
-                b"GET / HTTP/1.1\r\nupgrade: websocket\r\n\
+    #[test]
+    fn websocket_upgrade_surfaces_its_key() {
+        wavedb_platform::carrier::block_on(async {
+            let (mut client, mut server) = pair().await.unwrap();
+            client
+                .write_all(
+                    b"GET / HTTP/1.1\r\nupgrade: websocket\r\n\
                   connection: Upgrade\r\n\
                   Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
                   sec-websocket-version: 13\r\n\r\n",
-            )
-            .await
-            .unwrap();
-        let Some(Incoming::Upgrade { key }) =
-            read_request(&mut server).await.unwrap()
-        else {
-            panic!("must be an upgrade");
-        };
-        assert_eq!(key, "dGhlIHNhbXBsZSBub25jZQ==");
+                )
+                .await
+                .unwrap();
+            let Some(Incoming::Upgrade { key }) =
+                read_request(&mut server).await.unwrap()
+            else {
+                panic!("must be an upgrade");
+            };
+            assert_eq!(key, "dGhlIHNhbXBsZSBub25jZQ==");
+        });
     }
 
-    #[tokio::test]
-    async fn frames_pipelined_before_the_101_are_refused() {
-        let (mut client, mut server) = pair().await.unwrap();
-        client
-            .write_all(
-                b"GET / HTTP/1.1\r\nsec-websocket-key: abc\r\n\r\n\x82\x00",
-            )
-            .await
-            .unwrap();
-        let err = read_request(&mut server).await.unwrap_err();
-        assert!(matches!(
-            err,
-            Error::Http("bytes before the upgrade completed")
-        ));
+    #[test]
+    fn frames_pipelined_before_the_101_are_refused() {
+        wavedb_platform::carrier::block_on(async {
+            let (mut client, mut server) = pair().await.unwrap();
+            client
+                .write_all(
+                    b"GET / HTTP/1.1\r\nsec-websocket-key: abc\r\n\r\n\x82\x00",
+                )
+                .await
+                .unwrap();
+            let err = read_request(&mut server).await.unwrap_err();
+            assert!(matches!(
+                err,
+                Error::Http("bytes before the upgrade completed")
+            ));
+        });
     }
 
-    #[tokio::test]
-    async fn oversized_body_is_capped_before_reading() {
-        let (mut client, mut server) = pair().await.unwrap();
-        let head = format!(
-            "POST / HTTP/1.1\r\ncontent-length: {}\r\n\r\n",
-            super::MAX_BODY + 1
-        );
-        client.write_all(head.as_bytes()).await.unwrap();
-        let err = read_post(&mut server).await.unwrap_err();
-        assert!(matches!(err, Error::BodyTooLarge { .. }));
+    #[test]
+    fn oversized_body_is_capped_before_reading() {
+        wavedb_platform::carrier::block_on(async {
+            let (mut client, mut server) = pair().await.unwrap();
+            let head = format!(
+                "POST / HTTP/1.1\r\ncontent-length: {}\r\n\r\n",
+                super::MAX_BODY + 1
+            );
+            client.write_all(head.as_bytes()).await.unwrap();
+            let err = read_post(&mut server).await.unwrap_err();
+            assert!(matches!(err, Error::BodyTooLarge { .. }));
+        });
     }
 }
