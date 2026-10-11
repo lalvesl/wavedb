@@ -159,7 +159,7 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   — RFC 0061, `flush()` forces it),
   replay on open. Per-type state is compile-time (`StructStorage` statics) —
   consequence: **one open `PageStore` per process** (`EngineBusy`); tests serialize
-  via an `engine_gate()` mutex and integration tests use a single `#[tokio::test]`.
+  via an `engine_gate()` mutex and integration tests use a single test function.
 - **wavedb-net** — hand-rolled minimal HTTP/1.1 POST as a **dumb tunnel**: no headers,
   cookies, or status semantics as API; the body is a self-contained
   `Request { tenant, CommandFrame { struct_hash, command, payload } }` and a WaveDB

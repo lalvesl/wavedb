@@ -103,14 +103,16 @@ mod tests {
     async fn reader_over(response_body: Vec<u8>) -> FrameReader {
         let listener = Listener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
-        tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut sink = [0u8; 1024];
-            let _ = sock.read(&mut sink).await;
-            sock.write_all(b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n")
-                .await
-                .unwrap();
-            sock.write_all(&response_body).await.unwrap();
+        std::thread::spawn(move || {
+            wavedb_platform::carrier::block_on(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut sink = [0u8; 1024];
+                let _ = sock.read(&mut sink).await;
+                sock.write_all(b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                sock.write_all(&response_body).await.unwrap();
+            });
         });
         let body = wavedb_platform::http::post(&addr, b"req").await.unwrap();
         FrameReader::new(body)
@@ -122,31 +124,37 @@ mod tests {
         v
     }
 
-    #[tokio::test]
-    async fn frames_arrive_in_order_then_a_clean_end() {
-        let mut body = frame(b"one");
-        body.extend(frame(b"world"));
-        let mut frames = reader_over(body).await;
-        assert_eq!(frames.next_frame().await.unwrap().unwrap(), b"one");
-        assert_eq!(frames.next_frame().await.unwrap().unwrap(), b"world");
-        assert!(frames.next_frame().await.unwrap().is_none(), "clean end");
+    #[test]
+    fn frames_arrive_in_order_then_a_clean_end() {
+        wavedb_platform::carrier::block_on(async {
+            let mut body = frame(b"one");
+            body.extend(frame(b"world"));
+            let mut frames = reader_over(body).await;
+            assert_eq!(frames.next_frame().await.unwrap().unwrap(), b"one");
+            assert_eq!(frames.next_frame().await.unwrap().unwrap(), b"world");
+            assert!(frames.next_frame().await.unwrap().is_none(), "clean end");
+        });
     }
 
-    #[tokio::test]
-    async fn close_mid_frame_is_a_transport_fault() {
-        // A length prefix promising 8 bytes, then only 3, then close.
-        let mut body = 8u32.to_le_bytes().to_vec();
-        body.extend_from_slice(b"abc");
-        let mut frames = reader_over(body).await;
-        let err = frames.next_frame().await.unwrap_err();
-        assert!(matches!(err, Error::Http("connection closed mid-frame")));
+    #[test]
+    fn close_mid_frame_is_a_transport_fault() {
+        wavedb_platform::carrier::block_on(async {
+            // A length prefix promising 8 bytes, then only 3, then close.
+            let mut body = 8u32.to_le_bytes().to_vec();
+            body.extend_from_slice(b"abc");
+            let mut frames = reader_over(body).await;
+            let err = frames.next_frame().await.unwrap_err();
+            assert!(matches!(err, Error::Http("connection closed mid-frame")));
+        });
     }
 
-    #[tokio::test]
-    async fn oversized_frame_is_capped_before_reading() {
-        let too_big = u32::try_from(MAX_BODY + 1).unwrap();
-        let mut frames = reader_over(too_big.to_le_bytes().to_vec()).await;
-        let err = frames.next_frame().await.unwrap_err();
-        assert!(matches!(err, Error::BodyTooLarge { .. }));
+    #[test]
+    fn oversized_frame_is_capped_before_reading() {
+        wavedb_platform::carrier::block_on(async {
+            let too_big = u32::try_from(MAX_BODY + 1).unwrap();
+            let mut frames = reader_over(too_big.to_le_bytes().to_vec()).await;
+            let err = frames.next_frame().await.unwrap_err();
+            assert!(matches!(err, Error::BodyTooLarge { .. }));
+        });
     }
 }
