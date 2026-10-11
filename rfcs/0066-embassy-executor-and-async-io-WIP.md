@@ -1,7 +1,7 @@
 # RFC 0066 — Embassy executor and async-io: tokio out of the node
 
-- **Status:** In progress — opened 2026-10-08. **Steps 1–3 landed
-  2026-10-08** (see "Progress").
+- **Status:** In progress — opened 2026-10-08. **Steps 1–3 and the node
+  half of step 4 landed 2026-10-08** (see "Progress").
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the shard
   workers and disk actors this changes the carrier of),
   [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) (the `wavedb/multi`
