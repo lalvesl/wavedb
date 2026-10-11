@@ -28,14 +28,14 @@ use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tokio::io::AsyncWrite;
-use tokio::net::{TcpListener, TcpStream};
+use embedded_io_async::Write;
 use tokio::task::{LocalSet, spawn_local};
 use wavedb_core::Store;
 use wavedb_core::expose::{Exposure, Reply};
 use wavedb_core::wire::{from_wire, to_wire};
 use wavedb_net::frame::{Request, Response, StreamFrame};
 use wavedb_net::http::{self, Incoming};
+use wavedb_platform::io::{IoError, Listener, Stream};
 
 use crate::shard::{OwnerLocks, Router};
 use crate::subscribe::SubTable;
@@ -50,7 +50,7 @@ use crate::{dispatch, serve_ws};
 /// # Errors
 /// A fatal accept fault (the listener socket broke).
 pub async fn run<E, S, F, M>(
-    listener: TcpListener,
+    listener: Listener,
     registry: E,
     node: Node<S>,
     maintenance: M,
@@ -124,7 +124,7 @@ impl<S> Clone for Node<S> {
 /// framed response; a WebSocket upgrade switches protocols and hands the
 /// socket to the [`serve_ws`] session loop.
 async fn serve_connection<E, S>(
-    sock: TcpStream,
+    sock: Stream,
     registry: &E,
     node: &Node<S>,
 ) -> wavedb_net::Result<()>
@@ -132,7 +132,7 @@ where
     E: Exposure,
     S: Store,
 {
-    let (mut reader, mut writer) = sock.into_split();
+    let (mut reader, mut writer) = sock.split();
     match http::read_request(&mut reader).await? {
         None => Ok(()), // peer closed without sending — clean.
         Some(Incoming::Post(body)) => {
@@ -178,7 +178,7 @@ async fn write_response<W>(
     answer: dispatch::Answer,
 ) -> wavedb_net::Result<()>
 where
-    W: AsyncWrite + Unpin,
+    W: Write<Error = IoError>,
 {
     let dispatch::Answer { response, sync } = answer;
     http::write_ok_head(w).await?;
