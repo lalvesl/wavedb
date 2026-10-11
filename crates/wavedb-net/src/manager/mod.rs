@@ -323,9 +323,12 @@ mod tests {
         // Hang guard: any broken path must fail the test, not wedge it.
         macro_rules! within {
             ($fut:expr) => {
-                tokio::time::timeout(std::time::Duration::from_secs(30), $fut)
-                    .await
-                    .expect("timed out")
+                wavedb_platform::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    $fut,
+                )
+                .await
+                .expect("timed out")
             };
         }
 
@@ -457,7 +460,7 @@ mod tests {
 
         macro_rules! within {
             ($fut:expr) => {
-                tokio::time::timeout(Duration::from_secs(30), $fut)
+                wavedb_platform::time::timeout(Duration::from_secs(30), $fut)
                     .await
                     .expect("timed out")
             };
@@ -556,7 +559,7 @@ mod tests {
     async fn a_command_piggybacks_the_delta_to_a_live_poll_watch() {
         macro_rules! within {
             ($fut:expr) => {
-                tokio::time::timeout(Duration::from_secs(30), $fut)
+                wavedb_platform::time::timeout(Duration::from_secs(30), $fut)
                     .await
                     .expect("timed out")
             };
