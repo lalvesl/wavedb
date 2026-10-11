@@ -1,6 +1,6 @@
 # RFC 0066 — Embassy executor and async-io: tokio out of the node
 
-- **Status:** In progress — opened 2026-10-08. **Steps 1 and 2 landed
+- **Status:** In progress — opened 2026-10-08. **Steps 1–3 landed
   2026-10-08** (see "Progress").
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the shard
   workers and disk actors this changes the carrier of),
@@ -318,6 +318,38 @@ from `embassy-futures`. What still uses tokio in quick-node: the `LocalSet`,
 `spawn_local` and accept-loop `select!` (step 4), the upkeep interval
 (step 3), `OwnerLocks` (RFC 0067), and `#[tokio::test]`. Workspace bar green
 (497 tests), bench crates green, `cargo deny` clean.
+
+**Step 3 — landed 2026-10-08.** `platform::time::sleep` runs on
+`embassy_time::Timer` natively (the browser keeps `setTimeout`), and a new
+`platform::time::timeout` races a future against that `sleep` with
+`embassy-futures`' `select`. It is one definition for both targets, and it
+returns a typed `Elapsed`. Uses:
+- the node's upkeep loop sleeps between rounds instead of a tokio
+  `interval`. It is a sleep and not an `embassy_time::Ticker`, because a
+  ticker that fell behind fires back to back, which is what tokio's
+  `MissedTickBehavior::Delay` had been set to prevent;
+- the connection manager's poll and backoff timers already went through
+  `platform::time::sleep`;
+- the hang guards in the net manager's tests, the contact-book e2e tests
+  and the showcase client use `platform::time::timeout`.
+
+No `tokio::time` is left in the workspace.
+
+One configuration detail decides whether this works at all. Without a queue
+feature, `embassy-time`'s `std` driver expects the **integrated** timer
+queue, which lives inside `embassy-executor`'s tasks, and linking fails
+(`__embassy_time_queue_item_from_waker`). The workspace enables
+**`generic-queue-128`**, which accepts any executor's `Waker`. That is
+required as long as timers are awaited under tokio and under
+`futures::executor::block_on`, and it stays useful after step 4 for tests
+and helpers outside Embassy tasks. Past 128 pending timers the generic queue
+wakes one of them early; an Embassy timer re-checks the clock and re-arms, so
+overflow costs a spurious wake, never a lost one. The node holds a handful:
+upkeep, one per connection manager, and test guards.
+
+The platform's tokio is down to `rt` (the `spawn_detached` runtime, step 4).
+Workspace bar green (500 tests: 3 new timer tests), bench crates green,
+wasm32 build and clippy clean.
 
 **Every step invalidates the benchmark seeds.** `bench-gen` links
 `wavedb-storage`, which links `wavedb-platform`, and `benches/nix/gen.nix`
