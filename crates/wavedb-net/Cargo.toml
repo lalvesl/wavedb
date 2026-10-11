@@ -32,6 +32,3 @@ futures.workspace = true
 # The I/O traits the server half is generic over (RFC 0066); the socket
 # itself comes from `wavedb_platform::io`.
 embedded-io-async.workspace = true
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }

@@ -136,7 +136,6 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "tempfile",
- "tokio",
  "wavedb",
  "wavedb-core",
  "wavedb-net",
@@ -1142,7 +1141,6 @@ name = "showcase"
 version = "0.1.0"
 dependencies = [
  "futures",
- "tokio",
  "wavedb",
  "wavedb-core",
  "wavedb-net",
@@ -1275,8 +1273,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "todo-app-schema",
- "tokio",
  "wavedb",
+ "wavedb-platform",
 ]
 
 [[package]]
@@ -1286,9 +1284,9 @@ dependencies = [
  "futures",
  "sha2",
  "tempfile",
- "tokio",
  "wavedb",
  "wavedb-core",
+ "wavedb-platform",
  "wavedb-quick-node",
  "wavedb-storage",
  "wavedb-wire",
@@ -1300,7 +1298,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "todo-app-schema",
- "tokio",
+ "wavedb-platform",
  "wavedb-quick-node",
 ]
 
@@ -1655,11 +1653,11 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
- "tokio",
  "wasm-bindgen",
  "wavedb-core",
  "wavedb-macros",
  "wavedb-net",
+ "wavedb-platform",
  "wavedb-quick-node",
  "wavedb-storage",
  "wavedb-wire",
@@ -1699,7 +1697,6 @@ dependencies = [
  "hmac",
  "sha2",
  "thiserror",
- "tokio",
  "wavedb-core",
  "wavedb-platform",
  "wavedb-wire",
@@ -1719,7 +1716,6 @@ dependencies = [
  "js-sys",
  "sha1",
  "thiserror",
- "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

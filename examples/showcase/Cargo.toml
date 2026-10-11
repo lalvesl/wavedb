@@ -40,7 +40,7 @@ wavedb-quick-node = { path = "../../crates/wavedb-quick-node" }
 # The client example signs its own access token against the demo secret —
 # the same shortcut every e2e takes; a real app logs in over `#[server]` fns.
 wavedb-net = { path = "../../crates/wavedb-net" }
-tokio.workspace = true
-# `time::timeout` for the waits that must not hang a run.
+# `carrier::block_on` runs the tests and examples; `time::timeout` guards
+# the waits that must not hang a run.
 wavedb-platform.workspace = true
 futures.workspace = true

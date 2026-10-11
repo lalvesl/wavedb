@@ -54,6 +54,3 @@ web-sys = { workspace = true, features = [
   "WebSocket",
   "Window",
 ] }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }

@@ -49,6 +49,7 @@ wavedb-quick-node = { path = "../../../crates/wavedb-quick-node", optional = tru
 [dev-dependencies]
 # The end-to-end proof spins a real node and drives the six functions.
 wavedb-quick-node = { path = "../../../crates/wavedb-quick-node" }
-tokio.workspace = true
+# `carrier::block_on` runs this (RFC 0066).
+wavedb-platform.workspace = true
 tempfile.workspace = true
 futures.workspace = true

@@ -57,7 +57,8 @@ web-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "sync", "time"] }
+# `carrier::block_on` drives the integration tests (RFC 0066).
+wavedb-platform.workspace = true
 tempfile.workspace = true
 futures.workspace = true
 # End-to-end tests drive a real node with a real schema crate + REGISTRY.

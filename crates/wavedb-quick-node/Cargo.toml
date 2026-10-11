@@ -36,7 +36,6 @@ tokio = { workspace = true, features = ["sync"] }
 thiserror.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "sync", "time"] }
 tempfile.workspace = true
 wavedb-net = { path = "../wavedb-net" }
 # Integration tests drive the node with real `#[wavedb]` structs + a REGISTRY.

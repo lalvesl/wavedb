@@ -19,6 +19,7 @@ todo-app-schema = { path = "../schema", default-features = false, features = [
   "client-side",
 ] }
 wavedb = { path = "../../../crates/wavedb" }
-tokio.workspace = true
+# `carrier::block_on` runs this (RFC 0066).
+wavedb-platform.workspace = true
 # Binary-level error reporting (apps aren't layers; anyhow is fine here).
 anyhow = "1"
