@@ -1,9 +1,8 @@
 //! Boot the ONE manager task per process, lazily, on first use.
 //!
-//! Native: a `OnceLock` handle whose task runs on a dedicated thread
-//! ([`wavedb_platform::task::spawn_detached`] — current-thread runtime +
-//! `LocalSet`, so the actor world is single-threaded and may hold
-//! `Rc`/`RefCell` state). Browser: a `thread_local` handle whose task is a
+//! Native: a `OnceLock` handle whose task runs on a carrier thread of its
+//! own (one Embassy executor, RFC 0066 — so the actor world is
+//! single-threaded and may hold `Rc`/`RefCell` state). Browser: a `thread_local` handle whose task is a
 //! detached `spawn_local` — the page world is already single-threaded.
 //!
 //! If the carrier thread cannot spawn (environment-catastrophic), the
@@ -13,7 +12,7 @@
 
 use futures::channel::mpsc;
 
-use super::{Cmd, Handle, actor};
+use super::{Cmd, Handle, tasks};
 use crate::error::Result;
 
 /// The process-wide manager handle, booting the task on first call.
@@ -32,9 +31,7 @@ pub(super) fn handle() -> Result<Handle> {
             return Ok(winner.clone());
         }
     }
-    wavedb_platform::task::spawn_detached("wavedb-conn-manager", move || {
-        actor::run(rx)
-    })?;
+    tasks::start(rx)?;
     Ok(handle)
 }
 
@@ -51,10 +48,7 @@ pub(super) fn handle() -> Result<Handle> {
         }
         let (tx, rx) = mpsc::unbounded::<Cmd>();
         let handle = Handle { tx };
-        wavedb_platform::task::spawn_detached(
-            "wavedb-conn-manager",
-            move || actor::run(rx),
-        )?;
+        tasks::start(rx)?;
         *slot.borrow_mut() = Some(handle.clone());
         Ok(handle)
     })
