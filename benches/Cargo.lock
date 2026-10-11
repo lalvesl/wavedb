@@ -2864,7 +2864,6 @@ dependencies = [
  "js-sys",
  "sha1 0.10.7",
  "thiserror",
- "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

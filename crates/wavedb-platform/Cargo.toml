@@ -19,9 +19,6 @@ embassy-futures.workspace = true
 # stance. `sha1` is the handshake's pinned accept-key digest — not a
 # security boundary, just the RFC.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# `rt` carries the connection manager's dedicated thread (current-thread
-# runtime + LocalSet behind `task::spawn_detached`) until RFC 0066 step 4.
-tokio = { workspace = true, features = ["rt"] }
 # The timer behind `time::sleep` (RFC 0066 step 3).
 embassy-time.workspace = true
 # Carrier threads: one Embassy executor each (`carrier`, RFC 0066 step 4).
