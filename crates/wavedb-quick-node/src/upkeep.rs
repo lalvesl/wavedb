@@ -9,12 +9,6 @@
 //! also serving (`shard::priority`). A hint dropped because the queue is full
 //! is a hint the actor has already been given.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
-use wavedb_core::notify::Mutation;
-
-use crate::subscribe::{Publish, SubTable};
 use crate::{ServerError, shard};
 
 /// The background maintenance policy: how the node settles, checkpoints,
@@ -42,22 +36,6 @@ impl Default for Maintenance {
             defrag_below_blocks: 256, // 1 MiB of contiguous room
             defrag_budget_blocks: 256, // ≤ 1 MiB copied per tick
         }
-    }
-}
-
-/// Fan committed mutations out to the WebSocket subscribers.
-///
-/// The shards execute writes on their own threads and cannot touch the
-/// subscription table, so each one hands its [`Mutation`] over as plain data
-/// and this task — on the accept thread, which owns the table — does the
-/// delivery. Ends when the last shard's sender drops, i.e. when there is
-/// nothing left that could publish.
-pub async fn publish(
-    mut incoming: tokio::sync::mpsc::UnboundedReceiver<Mutation>,
-    subs: Rc<RefCell<SubTable>>,
-) {
-    while let Some(mutation) = incoming.recv().await {
-        subs.publish(&mutation);
     }
 }
 
@@ -114,5 +92,5 @@ pub async fn background(
     a: impl std::future::Future<Output = ()>,
     b: impl std::future::Future<Output = ()>,
 ) {
-    tokio::join!(a, b);
+    embassy_futures::join::join(a, b).await;
 }
