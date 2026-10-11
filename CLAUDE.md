@@ -83,8 +83,9 @@ Full rationale in `docs/development_standards.md`. The load-bearing ones:
   count). Over budget ⇒ split by layer. Complexity thresholds live in `clippy.toml`
   only (single source of truth, ratchet down only) — don't repeat numbers in docs.
 - **`async` end to end**; the engine's futures are deliberately non-`Send`
-  (current-thread `LocalSet` model) — `#![allow(clippy::future_not_send)]` at crate
-  root is the established stance in core/storage/quick-node.
+  (one executor per thread: Embassy carriers in the node, RFC 0066) —
+  `#![allow(clippy::future_not_send)]` at crate root is the established stance
+  in core/storage/quick-node.
 
 ## Architecture (bottom-up)
 
@@ -98,8 +99,12 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   `rand` (`RandomState` keys / `window.crypto`), `http` (the tunnel's **client half**:
   hand-rolled TcpStream POST / `fetch` + streamed body), `ws` (the WebSocket client
   half: hand-rolled RFC 6455 / browser `WebSocket`; `Conn::split()` for reader-task
-  patterns), and `task` (`spawn_detached` = dedicated thread w/ current-thread
-  runtime + LocalSet / `wasm_bindgen_futures::spawn_local` — **no tokio in wasm**).
+  patterns), `task` (`spawn_detached` = dedicated thread w/ current-thread
+  runtime + LocalSet / `wasm_bindgen_futures::spawn_local` — **no tokio in wasm**;
+  the client manager's, until RFC 0066 moves it), `io` (native sockets from
+  `async-io`; protocols are generic over `embedded-io-async`) and `carrier`
+  (native: an OS thread running one Embassy executor whose tasks come from
+  static pools — the node runs on these).
   Everything above must route clock/entropy/client-HTTP through it — never name
   `SystemTime` or a socket directly.
 - **wavedb-wire / wavedb-wire-derive** — standalone `WaveWire` codec (no STRUCT_HASH,
@@ -139,7 +144,11 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   `default-features = false` + their side — the other side is never *compiled* in
   (the cfg is the guarantee, not LTO). Server-only helpers outside `#[server]` bodies
   carry the cfg by hand; wasm32 + `server-side` is a `compile_error!`. Defaults keep
-  both on so schema-crate tests run the full loop.
+  both on so schema-crate tests run the full loop. `expose_server!` also emits
+  `wavedb_quick_node::node_tasks!(ServerRegistry)` — the node's Embassy tasks made
+  concrete for the registry (static pools need the concrete type, RFC 0066) — so a
+  schema crate's `server-side` feature must enable an optional `wavedb-quick-node`
+  dependency (native target).
 - **wavedb-storage** — the node engine behind `Store`: `data.bin` (4 KiB blocks,
   superblock in block 0), per-STRUCT_HASH linear-hashed page directories, `SlotPage`
   (checked-wire envelope, per-type zstd dictionaries with version = prefix length),
