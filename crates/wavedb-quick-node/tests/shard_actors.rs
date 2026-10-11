@@ -284,7 +284,8 @@ async fn maintain_waits(
 async fn ingress_routes_to_a_worker(shards: &Shards, bypass: &ShardStore) {
     wavedb_net::auth::set_node_secret(SECRET);
     let locks = Arc::new(OwnerLocks::new());
-    let (mutations, _drain) = tokio::sync::mpsc::unbounded_channel();
+    let (mutations, _drain) =
+        wavedb_quick_node::feed::feed(wavedb_quick_node::feed::MUTATION_DEPTH);
     let router = Router::start(
         REGISTRY,
         &shards.handle(),
