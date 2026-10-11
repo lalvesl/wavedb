@@ -41,6 +41,11 @@ pub enum Error {
     /// not start or has stopped, so no exchange can be made at all.
     #[error("connection manager unavailable")]
     ManagerUnavailable,
+    /// The client is at its limit of `what` in flight (RFC 0066): a full
+    /// task pool refuses rather than queues. Nothing was sent; trying again
+    /// once load drops is safe.
+    #[error("too many {0} in flight")]
+    Saturated(&'static str),
     /// A node-side refusal, surfaced by [`call_ok`](crate::NetClient::call_ok)
     /// (which flattens the `Response::Err` arm into this error type). The
     /// lower-level [`call`](crate::NetClient::call) returns it as a value.
