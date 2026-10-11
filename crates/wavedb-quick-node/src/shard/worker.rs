@@ -29,13 +29,14 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot};
+use async_channel::{Receiver, Sender};
+use futures::channel::oneshot;
 use wavedb_core::expose::Exposure;
-use wavedb_core::notify::Mutation;
 use wavedb_net::frame::Request;
 
 use super::{DiskHandle, OwnerLocks, ShardStore};
 use crate::dispatch::{self, Answer};
+use crate::feed::MutationFeed;
 use crate::subscribe::NotifyStore;
 
 /// Jobs queued on one shard before its sender waits.
@@ -56,7 +57,7 @@ pub struct Job {
 
 /// The store a worker serves through: its own cache in front of the disk
 /// actor, wrapped so committed mutations reach the accept thread's publisher.
-type WorkerStore = NotifyStore<ShardStore, mpsc::UnboundedSender<Mutation>>;
+type WorkerStore = NotifyStore<ShardStore, MutationFeed>;
 
 /// Start a worker and return the channel that reaches it.
 ///
@@ -69,13 +70,13 @@ pub fn start<E>(
     registry: E,
     disk: DiskHandle,
     locks: Arc<OwnerLocks>,
-    publisher: mpsc::UnboundedSender<Mutation>,
+    publisher: MutationFeed,
     secret: [u8; 32],
-) -> wavedb_platform::Result<mpsc::Sender<Job>>
+) -> wavedb_platform::Result<Sender<Job>>
 where
     E: Exposure + Copy + Send + 'static,
 {
-    let (jobs, rx) = mpsc::channel(JOB_DEPTH);
+    let (jobs, rx) = async_channel::bounded(JOB_DEPTH);
     wavedb_platform::task::spawn_detached("wavedb-shard", move || {
         // Built here, on the worker's own thread: `ShardStore` holds an `Rc`
         // and must never be constructed anywhere it could be moved from.
@@ -94,11 +95,11 @@ async fn run<E>(
     store: Rc<WorkerStore>,
     locks: Arc<OwnerLocks>,
     secret: [u8; 32],
-    mut jobs: mpsc::Receiver<Job>,
+    jobs: Receiver<Job>,
 ) where
     E: Exposure + Copy + 'static,
 {
-    while let Some(Job { request, answer }) = jobs.recv().await {
+    while let Ok(Job { request, answer }) = jobs.recv().await {
         let store = Rc::clone(&store);
         let locks = Arc::clone(&locks);
         wavedb_platform::task::spawn_local(async move {
@@ -119,5 +120,5 @@ async fn run<E>(
 const _: fn() = || {
     const fn assert_send<T: Send>() {}
     assert_send::<Job>();
-    assert_send::<mpsc::Sender<Job>>();
+    assert_send::<Sender<Job>>();
 };
