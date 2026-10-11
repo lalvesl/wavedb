@@ -5,10 +5,10 @@
 //! watch — routes through this task; it is the single place connections
 //! are dialed, shared, and torn down (and the natural seam for the M7
 //! reconnect cursor and the offline write queue to land on). Natively it
-//! lives on a dedicated thread with its own current-thread runtime; in the
-//! browser it is a detached `spawn_local` task — no tokio in wasm
-//! ([`wavedb_platform::task`] is the seam). It boots lazily on first use
-//! and never ends.
+//! lives on a carrier thread of its own (one Embassy executor, its subtasks
+//! from static pools — `tasks`, RFC 0066); in the browser it is a detached
+//! `spawn_local` task — no tokio in wasm. It boots lazily on first use and
+//! never ends.
 //!
 //! **Watches multiplex.** All watches presenting the same identity to the
 //! same address share ONE WebSocket connection (`ws_conn` — the `Hello`
@@ -26,6 +26,7 @@ mod actor;
 mod boot;
 mod poll;
 mod sync_call;
+mod tasks;
 mod ws_conn;
 mod ws_dial;
 
