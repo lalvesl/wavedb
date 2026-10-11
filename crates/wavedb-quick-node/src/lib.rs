@@ -34,6 +34,7 @@
 
 pub mod dispatch;
 pub mod error;
+pub mod feed;
 mod serve;
 mod serve_ws;
 pub mod shard;
@@ -277,8 +278,8 @@ where
         // once operations run on more than this thread.
         let locks = Arc::new(shard::OwnerLocks::new());
         // Committed mutations come back from the shards as plain data; the
-        // subscription table lives here and is fanned out by `publish`.
-        let (mutations, incoming) = tokio::sync::mpsc::unbounded_channel();
+        // subscription table lives here and is fanned out by `feed::publish`.
+        let (mutations, incoming) = feed::feed(feed::MUTATION_DEPTH);
         let router = shard::Router::start(
             self.registry,
             &self.shards.handle(),
@@ -313,7 +314,7 @@ where
             // right lifetime for each.
             upkeep::background(
                 upkeep::maintain(self.shards.handle(), self.maintenance),
-                upkeep::publish(incoming, Rc::clone(&self.subs)),
+                feed::publish(incoming, Rc::clone(&self.subs)),
             ),
             shutdown,
         )
@@ -321,7 +322,7 @@ where
         // Clean shutdown: everything settled + committed, and the checkpoint's
         // frame forced durable — a restart replays nothing. It is a *request*
         // rather than a hint because this outcome is returned to the caller.
-        let (answer, wait) = tokio::sync::oneshot::channel();
+        let (answer, wait) = futures::channel::oneshot::channel();
         self.shards
             .handle()
             .send(shard::DiskRequest::Shutdown { answer })
