@@ -19,7 +19,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use tokio::sync::oneshot;
+use futures::channel::oneshot;
 use wavedb_core::store::{Store, Write};
 use wavedb_core::{Error, Id, Result};
 
