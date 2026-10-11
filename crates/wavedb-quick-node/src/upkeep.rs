@@ -39,15 +39,21 @@ impl Default for Maintenance {
     }
 }
 
+/// How often the upkeep loop looks at the engine.
+const UPKEEP_PERIOD: std::time::Duration =
+    std::time::Duration::from_millis(200);
+
 /// The background maintenance loop: periodically settle the pending queue,
 /// checkpoint once the journal crosses the threshold, and evict settled
 /// cache entries down to budget. An engine fault stops maintenance (acked
 /// writes stay safe in the journal); serving continues.
 pub async fn maintain(disk: shard::DiskHandle, policy: Maintenance) {
-    let mut tick = tokio::time::interval(std::time::Duration::from_millis(200));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        tick.tick().await;
+        // A sleep per round rather than a ticker: a ticker that fell behind
+        // fires back to back to catch up, and a burst of hints is exactly
+        // what a busy actor does not need. (tokio's interval needed
+        // `MissedTickBehavior::Delay` to say the same thing.)
+        wavedb_platform::time::sleep(UPKEEP_PERIOD).await;
         // Hints, not calls: the actor owns the engine, and it decides *when*
         // to act on them against the reads it is also serving (`shard::
         // priority`). A hint dropped because the queue is full is a hint the
