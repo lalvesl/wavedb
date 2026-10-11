@@ -32,11 +32,11 @@ use std::sync::Arc;
 
 use async_channel::Sender;
 use futures::channel::oneshot;
-use wavedb_core::expose::Exposure;
 use wavedb_net::frame::{NodeError, NodeErrorKind, Request, Response};
 
 use super::worker::{self, Job};
 use super::{DiskHandle, Owner, OwnerLocks};
+use crate::__rt::NodeTasks;
 use crate::dispatch::{self, Answer};
 use crate::feed::MutationFeed;
 
@@ -70,7 +70,7 @@ impl Router {
         count: usize,
     ) -> wavedb_platform::Result<Self>
     where
-        E: Exposure + Copy + Send + 'static,
+        E: NodeTasks,
     {
         let workers = (0..count.max(1))
             .map(|_| {
