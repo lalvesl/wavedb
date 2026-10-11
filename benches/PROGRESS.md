@@ -440,6 +440,19 @@ The reason this file matters more than the checklist above.
   4 changed the bench source, so the seed had to be rebuilt regardless; the
   timing above is what 3.9 asked for, and it survived.)
 
+- **WaveDB shop rows do not fit the 500 MB cage, at `smoke` or `small`.**
+  All four (`single`/`multi` × `durable`/`relaxed`) were OOM-killed
+  (`exit 137`, systemd: "500M memory peak") about 45 s in, at
+  `aa1bd2b` and at the pre-RFC-0066 commit `462a8bb` alike — so it predates
+  the executor work. The fixture is 100 000 live records at `smoke`, whose
+  store reaches ~415 MB **on disk** uncaged; which part of the cgroup's
+  memory (process RSS or the page cache it dirties) crosses 500 MB is not
+  measured yet. The ~2.3×
+  sharded finding above was taken uncaged, which is why it never hit this.
+  Until the shop fixture shrinks or the lane grows, shop rows cannot be
+  recorded on the 4c-500m lane; RFC 0066 compared them in a 4 GB cage with
+  the results kept out of the corpus.
+
 - **The `large` rebuild (2026-10-07/08) is pinned, and its WaveDB seed is
   already a baseline.** Started through `scripts/bench_seeds.sh large
   --build` at 23:51:42, it closed `exit=0` at 09:50:17 with every root in

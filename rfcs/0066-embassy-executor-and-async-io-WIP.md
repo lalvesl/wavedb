@@ -351,6 +351,91 @@ The platform's tokio is down to `rt` (the `spawn_detached` runtime, step 4).
 Workspace bar green (500 tests: 3 new timer tests), bench crates green,
 wasm32 build and clippy clean.
 
+**Step 4, node half — landed 2026-10-08.** The node no longer runs on tokio.
+Step 4 is split in two. This half covers the node; the client's connection
+manager (`net::manager`) is still on `platform::task`'s tokio runtime and
+moves in the second half.
+
+*The spike* (two crates, standing in for the node and an application) settled
+§4's question on Embassy 0.10:
+- a `#[task]` takes non-`Send` arguments (an `Rc`) when spawned by its
+  thread's own `Spawner`;
+- `pool_size` takes any constant expression, including one from another
+  crate;
+- `embassy_executor = path` points the generated code at a re-export, so an
+  application never names `embassy-executor` itself;
+- one static pool serves executors on several threads at once;
+- the `std` platform's `Executor::run_until` **returns**, so a carrier can end
+  without the `unsafe` that `raw::Executor::poll` requires.
+
+The deduced-`TaskPool` route was dropped in favour of generated tasks: it
+would have put the pool on the heap, and generated tasks need no allocator at
+all.
+
+*What landed:*
+- **`platform::carrier`**: an OS thread with one Embassy executor. Tasks take
+  a `Here` (the carrier's `Spawner` plus a `Live` token) and pass clones on.
+  The thread returns when the last token drops. Embassy cannot abort a task,
+  and a task left unpolled would hold its pool slot forever, so stopping is
+  cooperative: each task on the accept carrier selects on one `halt`
+  channel, and the WebSocket reader stops through a drop guard on its
+  session.
+- **`NodeTasks` and `node_tasks!`**: the four registry-generic tasks
+  (accept, connection, shard, job) are declared by `expose_server!` in the
+  schema crate, inside an `allow(clippy::future_not_send)` `const _` block,
+  which also lets an expansion inside a function body see its registry. A
+  schema crate's `server-side` feature therefore enables an optional
+  `wavedb-quick-node` dependency.
+- **Concrete tasks** declared by the node itself: the disk actor, the
+  background task (upkeep plus publisher) and the WebSocket reader.
+- **Pools** (`__rt`): `MAX_CONNECTIONS` = 1024 (one more is refused: its
+  socket closes), `MAX_JOBS` = 1024 shared by every shard, `MAX_SHARDS` =
+  256, `MAX_NODES` = 4. A shard that finds the job pool full **runs the job
+  itself**. The job travels in a `JobSlot` because a refused spawn drops its
+  arguments, and the slot is how the shard gets the job back. So nothing is
+  lost, and the shard's bounded queue absorbs the backlog.
+- **The public API is unchanged.** `Server::new(REGISTRY)`, `bind().await`
+  and `run().await` stay as they were: `run` starts the accept carrier and
+  only awaits its outcome and its `Finished`, so it works under any executor.
+  Every test and example ran unmodified.
+
+*Measured* (a temporary probe, reverted): a connection task is about 6 KB
+with `schema-smoke`'s registry. About 5 KB of that is `Exposure::execute`,
+whose largest arm is a collection insert. An idle WebSocket connection costs
+about 58 KB, and 51 KB of that is the outbound queue: a bounded
+`async-channel` preallocates all `WS_OUTBOUND_DEPTH` slots of 192 bytes. Two
+reductions were identified and deliberately deferred (user decision):
+- a lazily allocated outbound queue with the cap checked on push;
+- routing WebSocket `Call`s through the `Router`, which would move the 5 KB
+  out of the connection and into the job pool.
+
+*Benchmarked against the pre-0066 commit (`462a8bb`):*
+- **Setup.** Shop rows at `smoke`, one run each, both commits on the same
+  machine, each started below load 1.0. The cage was raised to 4 GB and
+  the results kept outside the corpus, because shop rows do not fit 500 MB
+  at either commit (see `benches/PROGRESS.md`).
+- **The control is noisy.** `wavedb/single` does not touch the changed
+  code: it runs a `PageStore` in process, with no carrier. Yet between the
+  two runs its durable checkout went from 62/s to 31/s (an fsync-bound
+  phase), and its reads moved by ±9%. Differences of that size are noise in
+  this setup.
+- **`wavedb/multi`, which runs on the carriers, stayed within that noise.**
+  The relaxed variant matched in every phase: profile 1 729 against
+  1 789/s, order_page 473 against 476, order_detail 297 against 298. The
+  durable variant's reads came out 11–14% lower (order_page 410 against
+  475/s), inside the band the control just showed.
+- **The multi/single ratio was ~1.2–1.3× at both commits** in this shape —
+  not the ~2.3× of the original smoke shape. So that number depends on the
+  shape, and it did not move.
+- **Verdict:** no regression measurable at one run each. Resolving
+  differences under ~15% needs repeated runs, which belongs to step 5's exit
+  proof.
+
+Workspace bar green (502 tests: 2 new carrier tests), bench crates green,
+wasm32 build clean, docs warning-free against the baseline. The WebSocket
+reader and the disk actor's maintenance work moved to `ws_read.rs` and
+`shard/disk_work.rs` for the file budget.
+
 **Every step invalidates the benchmark seeds.** `bench-gen` links
 `wavedb-storage`, which links `wavedb-platform`, and `benches/nix/gen.nix`
 hashes every `.rs` under `crates/` plus the root manifest. Step 1 moved the
@@ -381,8 +466,10 @@ not `platform`'s.
 
 ## Open questions
 
-1. **`TaskPool` inference** in a generic context on the pinned Embassy
-   version (step 4's spike decides between it and generated tasks).
+1. **`TaskPool` inference** — resolved in step 4 by choosing generated
+   tasks instead: a pool deduced inside a generic function would live on the
+   heap, while `node_tasks!` gives static pools with no allocator at all,
+   which is the embedded direction. See "Progress".
 2. **Capacities.** `MAX_CONNECTIONS`, `WS_OUTBOUND_DEPTH`, `MUTATION_DEPTH`:
    starting numbers are guesses until the suite measures them.
 3. **The bench crate** — resolved in step 2: it used tokio only for the
