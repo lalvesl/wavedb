@@ -26,7 +26,10 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use tokio::sync::mpsc;
+use async_channel::Sender;
+use embassy_futures::select::{Either, select};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::channel::Channel;
 use tokio::task::spawn_local;
 use wavedb_core::Store;
 use wavedb_core::expose::{Caller, Exposure, Reply};
@@ -41,12 +44,33 @@ use wavedb_platform::ws::codec::{
 use crate::dispatch;
 use crate::subscribe::SubTable;
 
+/// Client messages decoded and waiting for the session loop.
+///
+/// Small: when it is full the reader stops reading, which leaves the bytes in
+/// the socket and pushes back onto the client's own send window. A client
+/// can only make the node buffer this many of its messages, not more.
+pub const WS_INBOUND_DEPTH: usize = 16;
+
+/// Events queued for one connection before it is disconnected.
+///
+/// Deliberately not a backpressure point: the publisher serves every
+/// connection, so waiting on one slow reader would stall them all. A client
+/// that falls this far behind is cut off and catches up by cursor
+/// (`SubTable::publish`).
+pub const WS_OUTBOUND_DEPTH: usize = 256;
+
 /// What the reader task forwards to the session loop — a decoded client
-/// message, or a ping to answer (the loop owns the write half).
+/// message, a ping to answer (the loop owns the write half), or the end of
+/// the stream.
 enum FromClient {
     Msg(ClientMsg),
     Ping(Vec<u8>),
+    End,
 }
+
+/// The reader-to-loop queue. Both ends run on the connection's thread, so
+/// it needs no lock at all.
+type Inbound = Channel<NoopRawMutex, FromClient, WS_INBOUND_DEPTH>;
 
 /// Run one upgraded connection to its end. Returns `Ok` on any clean or
 /// faulted disconnect — a per-connection fault never propagates (the caller
@@ -68,12 +92,12 @@ where
     E: Exposure,
     S: Store,
 {
-    let (client_tx, mut client_rx) = mpsc::unbounded_channel();
-    let reader = spawn_local(read_loop(read, client_tx));
+    let inbound = Rc::new(Inbound::new());
+    let reader = spawn_local(read_loop(read, Rc::clone(&inbound)));
 
     // Gate 1, once: the first message must be a `Hello` whose identity
     // verifies — otherwise the connection is refused and closed.
-    let Some(FromClient::Msg(ClientMsg::Hello(auth))) = client_rx.recv().await
+    let FromClient::Msg(ClientMsg::Hello(auth)) = inbound.receive().await
     else {
         close(&mut write).await;
         reader.abort();
@@ -86,32 +110,47 @@ where
     };
     send(&mut write, &ServerMsg::HelloOk).await?;
 
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ServerMsg>();
+    let (event_tx, event_rx) = async_channel::bounded(WS_OUTBOUND_DEPTH);
     let conn = subs.borrow_mut().new_conn();
     // The connection's own subscription set: keeps `subscribe` one-per-topic
     // and drives teardown on disconnect.
     let mut topics: HashSet<Topic> = HashSet::new();
 
+    // Both receives are cancel-safe: losing the race leaves the message
+    // queued for the next round.
     let result = loop {
-        tokio::select! {
-            from_client = client_rx.recv() => {
-                let Some(item) = from_client else { break Ok(()); };
+        match select(inbound.receive(), event_rx.recv()).await {
+            Either::First(FromClient::End) => break Ok(()),
+            Either::First(item) => {
                 if let Err(e) = handle_client(
-                    &mut write, registry, store, locks, caller, subs, conn,
-                    &event_tx, &mut topics, item,
+                    &mut write,
+                    registry,
+                    store,
+                    locks,
+                    caller,
+                    subs,
+                    conn,
+                    &event_tx,
+                    &mut topics,
+                    item,
                 )
                 .await
                 {
                     break Err(e);
                 }
             }
-            event = event_rx.recv() => {
-                // `event_tx` is held here and in the table, so `recv` yields
-                // `Some` until teardown — a `None` simply ends the loop.
-                let Some(msg) = event else { break Ok(()); };
+            Either::Second(Ok(msg)) => {
                 if let Err(e) = send(&mut write, &msg).await {
                     break Err(e);
                 }
+            }
+            // `event_tx` is held here, so the outbox only fails when the
+            // publisher closed it: this client fell behind, or the feed
+            // dropped a mutation. Say so and end; the client reconnects and
+            // catches up by cursor.
+            Either::Second(Err(_)) => {
+                close(&mut write).await;
+                break Ok(());
             }
         }
     };
@@ -137,7 +176,7 @@ async fn handle_client<E, S>(
     caller: Caller,
     subs: &Rc<RefCell<SubTable>>,
     conn: u64,
-    event_tx: &mpsc::UnboundedSender<ServerMsg>,
+    event_tx: &Sender<ServerMsg>,
     topics: &mut HashSet<Topic>,
     item: FromClient,
 ) -> wavedb_net::Result<()>
@@ -149,6 +188,8 @@ where
         FromClient::Ping(payload) => {
             codec::write_message(write, OP_PONG, &payload, false).await?;
         }
+        // Ended by the session loop before it gets here.
+        FromClient::End => {}
         FromClient::Msg(ClientMsg::Call(frame)) => {
             // Under the same brake the routed path takes, against the same
             // table. Without it a WebSocket write and a POST write on one
@@ -236,9 +277,16 @@ where
 }
 
 /// The reader half: decode masked binary frames into [`ClientMsg`]s (and
-/// pings) and forward them; any close, decode fault, or socket error ends
-/// the task, which drops the sender and so ends the session.
-async fn read_loop(read: ReadHalf, tx: mpsc::UnboundedSender<FromClient>) {
+/// pings) and forward them. Any close, decode fault, or socket error ends the
+/// stream, and the session hears [`FromClient::End`].
+async fn read_loop(read: ReadHalf, inbound: Rc<Inbound>) {
+    forward(read, &inbound).await;
+    inbound.send(FromClient::End).await;
+}
+
+/// Forward until the stream ends. A full queue suspends the send, and with it
+/// the reading: that is the inbound backpressure.
+async fn forward(read: ReadHalf, inbound: &Inbound) {
     let mut msgs = Messages::new(read);
     loop {
         let forward = match msgs.next(true).await {
@@ -253,9 +301,7 @@ async fn read_loop(read: ReadHalf, tx: mpsc::UnboundedSender<FromClient>) {
             // Close, clean end, or any fault: stop reading.
             _ => return,
         };
-        if tx.send(forward).is_err() {
-            return;
-        }
+        inbound.send(forward).await;
     }
 }
 
@@ -290,4 +336,49 @@ async fn send(
 /// Best-effort close frame — the socket is going away either way.
 async fn close(write: &mut WriteHalf) {
     let _ = codec::write_message(write, OP_CLOSE, &[], false).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use embassy_futures::select::{Either, select};
+    use wavedb_core::wire::to_wire;
+    use wavedb_net::ws::{ClientMsg, Topic};
+    use wavedb_platform::io::pair;
+    use wavedb_platform::ws::codec::{self, OP_BINARY};
+
+    use super::{FromClient, Inbound, WS_INBOUND_DEPTH, read_loop};
+
+    /// The inbound policy: a client sending faster than its session handles
+    /// stops being read once `WS_INBOUND_DEPTH` messages wait. The rest stay
+    /// in the socket — the node does not buffer them for it.
+    #[tokio::test]
+    async fn a_full_inbound_queue_stops_the_reader() {
+        let (server, client) = pair().await.expect("socket pair");
+        let (read, _server_write) = server.split();
+        let (_client_read, mut write) = client.split();
+        let msg = to_wire(&ClientMsg::Unsubscribe(Topic {
+            struct_hash: 1,
+            pivot: None,
+        }));
+        for _ in 0..WS_INBOUND_DEPTH + 4 {
+            codec::write_message(&mut write, OP_BINARY, &msg, true)
+                .await
+                .expect("client write");
+        }
+
+        let inbound = Rc::new(Inbound::new());
+        let reader = read_loop(read, Rc::clone(&inbound));
+        let settle = tokio::time::sleep(Duration::from_millis(100));
+        let Either::Second(()) = select(reader, settle).await else {
+            panic!("the reader must be waiting on the full queue, not done");
+        };
+
+        assert_eq!(inbound.len(), WS_INBOUND_DEPTH);
+        while let Ok(item) = inbound.try_receive() {
+            assert!(matches!(item, FromClient::Msg(_)), "no end: still open");
+        }
+    }
 }
