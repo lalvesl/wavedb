@@ -284,85 +284,111 @@ mod tests {
     }
 
     fn mini_node() -> (String, Arc<AtomicUsize>) {
-        // Bind before spawning: on the test's current-thread runtime a
-        // blocking wait for the spawned task would deadlock.
+        // Bind before spawning, so the address is known before the server
+        // thread runs.
         let listener = Listener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
         let conns = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&conns);
-        tokio::spawn(async move {
-            loop {
-                let (sock, _) = listener.accept().await.expect("accept");
-                counted.fetch_add(1, Ordering::SeqCst);
-                tokio::spawn(async move {
-                    let (mut r, mut w) = sock.split();
-                    let Ok(Some(http::Incoming::Upgrade { key })) =
-                        http::read_request(&mut r).await
-                    else {
-                        return;
-                    };
-                    http::write_switching_head(
-                        &mut w,
-                        &codec::accept_key(&key),
-                    )
-                    .await
-                    .expect("101");
-                    serve_conn(Messages::new(r), w).await;
-                });
-            }
+        std::thread::spawn(move || {
+            wavedb_platform::carrier::block_on(async move {
+                loop {
+                    let (sock, _) = listener.accept().await.expect("accept");
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    std::thread::spawn(move || {
+                        wavedb_platform::carrier::block_on(async move {
+                            let (mut r, mut w) = sock.split();
+                            let Ok(Some(http::Incoming::Upgrade { key })) =
+                                http::read_request(&mut r).await
+                            else {
+                                return;
+                            };
+                            http::write_switching_head(
+                                &mut w,
+                                &codec::accept_key(&key),
+                            )
+                            .await
+                            .expect("101");
+                            serve_conn(Messages::new(r), w).await;
+                        });
+                    });
+                }
+            });
         });
         (addr, conns)
     }
 
-    #[tokio::test]
-    async fn watches_of_one_identity_share_one_connection() {
-        let (addr, conns) = mini_node();
-        let auth = Auth::Anonymous {
-            tenant: U48::from(7u32),
-        };
-
-        // Hang guard: any broken path must fail the test, not wedge it.
-        macro_rules! within {
-            ($fut:expr) => {
-                wavedb_platform::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    $fut,
-                )
-                .await
-                .expect("timed out")
+    #[test]
+    fn watches_of_one_identity_share_one_connection() {
+        wavedb_platform::carrier::block_on(async {
+            let (addr, conns) = mini_node();
+            let auth = Auth::Anonymous {
+                tenant: U48::from(7u32),
             };
-        }
 
-        // Three watches, two topics, one identity — and later, a trigger.
-        let (mut a1, g1) =
-            within!(watch(&addr, auth.clone(), WatchMode::WebSocket, TOPIC_A))
-                .expect("watch a1");
-        let (mut b, g2) =
-            within!(watch(&addr, auth.clone(), WatchMode::WebSocket, TOPIC_B))
-                .expect("watch b");
-        let (mut a2, g3) =
-            within!(watch(&addr, auth.clone(), WatchMode::WebSocket, TOPIC_A))
-                .expect("watch a2 — shared topic acks locally");
-        let (_trigger_rx, g4) =
-            within!(watch(&addr, auth.clone(), WatchMode::WebSocket, TRIGGER))
-                .expect("trigger");
+            // Hang guard: any broken path must fail the test, not wedge it.
+            macro_rules! within {
+                ($fut:expr) => {
+                    wavedb_platform::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        $fut,
+                    )
+                    .await
+                    .expect("timed out")
+                };
+            }
 
-        assert_eq!(within!(a1.next()), Some(event(TOPIC_A)), "first A watcher");
-        assert_eq!(within!(a2.next()), Some(event(TOPIC_A)), "fanned out");
-        assert_eq!(within!(b.next()), Some(event(TOPIC_B)));
-        assert_eq!(
-            conns.load(Ordering::SeqCst),
-            1,
-            "one identity = one connection, however many watches"
-        );
+            // Three watches, two topics, one identity — and later, a trigger.
+            let (mut a1, g1) = within!(watch(
+                &addr,
+                auth.clone(),
+                WatchMode::WebSocket,
+                TOPIC_A
+            ))
+            .expect("watch a1");
+            let (mut b, g2) = within!(watch(
+                &addr,
+                auth.clone(),
+                WatchMode::WebSocket,
+                TOPIC_B
+            ))
+            .expect("watch b");
+            let (mut a2, g3) = within!(watch(
+                &addr,
+                auth.clone(),
+                WatchMode::WebSocket,
+                TOPIC_A
+            ))
+            .expect("watch a2 — shared topic acks locally");
+            let (_trigger_rx, g4) = within!(watch(
+                &addr,
+                auth.clone(),
+                WatchMode::WebSocket,
+                TRIGGER
+            ))
+            .expect("trigger");
 
-        // Dropping every guard closes the connection; the next watch of
-        // the same identity dials a fresh one — never a dying actor.
-        drop((g1, g2, g3, g4));
-        let (_rx, _g) =
-            within!(watch(&addr, auth, WatchMode::WebSocket, TOPIC_A))
-                .expect("fresh watch after teardown");
-        assert_eq!(conns.load(Ordering::SeqCst), 2, "a fresh dial");
+            assert_eq!(
+                within!(a1.next()),
+                Some(event(TOPIC_A)),
+                "first A watcher"
+            );
+            assert_eq!(within!(a2.next()), Some(event(TOPIC_A)), "fanned out");
+            assert_eq!(within!(b.next()), Some(event(TOPIC_B)));
+            assert_eq!(
+                conns.load(Ordering::SeqCst),
+                1,
+                "one identity = one connection, however many watches"
+            );
+
+            // Dropping every guard closes the connection; the next watch of
+            // the same identity dials a fresh one — never a dying actor.
+            drop((g1, g2, g3, g4));
+            let (_rx, _g) =
+                within!(watch(&addr, auth, WatchMode::WebSocket, TOPIC_A))
+                    .expect("fresh watch after teardown");
+            assert_eq!(conns.load(Ordering::SeqCst), 2, "a fresh dial");
+        });
     }
 
     /// A `Saved` event carrying a live-version instant in its metadata, so
@@ -420,77 +446,96 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_watch_survives_a_dropped_socket_and_catches_up() {
-        let listener = Listener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr").to_string();
-        let ws_conns = Arc::new(AtomicUsize::new(0));
-        let counted = Arc::clone(&ws_conns);
-        tokio::spawn(async move {
-            loop {
-                let (sock, _) = listener.accept().await.expect("accept");
-                let counted = Arc::clone(&counted);
-                tokio::spawn(async move {
-                    let (mut r, mut w) = sock.split();
-                    match http::read_request(&mut r).await {
-                        Ok(Some(http::Incoming::Upgrade { key })) => {
-                            http::write_switching_head(
-                                &mut w,
-                                &codec::accept_key(&key),
-                            )
-                            .await
-                            .expect("101");
-                            let first =
-                                counted.fetch_add(1, Ordering::SeqCst) == 0;
-                            reconnect_ws(Messages::new(r), w, first).await;
-                        }
-                        Ok(Some(http::Incoming::Post(body))) => {
-                            let request =
-                                from_wire::<Request>(&body).expect("request");
-                            assert_eq!(
-                                request.frame.struct_hash,
-                                SYNC_STRUCT_HASH
-                            );
-                            answer_catch_up(&mut w, TOPIC_A).await;
-                        }
-                        _ => {}
+    #[test]
+    fn a_watch_survives_a_dropped_socket_and_catches_up() {
+        wavedb_platform::carrier::block_on(async {
+            let listener = Listener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("addr").to_string();
+            let ws_conns = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&ws_conns);
+            std::thread::spawn(move || {
+                wavedb_platform::carrier::block_on(async move {
+                    loop {
+                        let (sock, _) =
+                            listener.accept().await.expect("accept");
+                        let counted = Arc::clone(&counted);
+                        std::thread::spawn(move || {
+                            wavedb_platform::carrier::block_on(async move {
+                                let (mut r, mut w) = sock.split();
+                                match http::read_request(&mut r).await {
+                                    Ok(Some(http::Incoming::Upgrade {
+                                        key,
+                                    })) => {
+                                        http::write_switching_head(
+                                            &mut w,
+                                            &codec::accept_key(&key),
+                                        )
+                                        .await
+                                        .expect("101");
+                                        let first = counted
+                                            .fetch_add(1, Ordering::SeqCst)
+                                            == 0;
+                                        reconnect_ws(
+                                            Messages::new(r),
+                                            w,
+                                            first,
+                                        )
+                                        .await;
+                                    }
+                                    Ok(Some(http::Incoming::Post(body))) => {
+                                        let request =
+                                            from_wire::<Request>(&body)
+                                                .expect("request");
+                                        assert_eq!(
+                                            request.frame.struct_hash,
+                                            SYNC_STRUCT_HASH
+                                        );
+                                        answer_catch_up(&mut w, TOPIC_A).await;
+                                    }
+                                    _ => {}
+                                }
+                            });
+                        });
                     }
                 });
-            }
-        });
+            });
 
-        macro_rules! within {
-            ($fut:expr) => {
-                wavedb_platform::time::timeout(Duration::from_secs(30), $fut)
+            macro_rules! within {
+                ($fut:expr) => {
+                    wavedb_platform::time::timeout(
+                        Duration::from_secs(30),
+                        $fut,
+                    )
                     .await
                     .expect("timed out")
+                };
+            }
+
+            let auth = Auth::Anonymous {
+                tenant: U48::from(3u32),
             };
-        }
+            let (mut events, _guard) =
+                within!(watch(&addr, auth, WatchMode::WebSocket, TOPIC_A))
+                    .expect("watch");
 
-        let auth = Auth::Anonymous {
-            tenant: U48::from(3u32),
-        };
-        let (mut events, _guard) =
-            within!(watch(&addr, auth, WatchMode::WebSocket, TOPIC_A))
-                .expect("watch");
-
-        // The live event before the drop, then — after the socket dies and the
-        // manager reconnects — the event missed during the outage, delivered by
-        // navigation catch-up. The stream never ended.
-        assert_eq!(
-            within!(events.next()),
-            Some(saved_event(TOPIC_A, 10)),
-            "the pre-drop live event"
-        );
-        assert_eq!(
-            within!(events.next()),
-            Some(saved_event(TOPIC_A, 20)),
-            "the missed event, delivered by catch-up after reconnect"
-        );
-        assert!(
-            ws_conns.load(Ordering::SeqCst) >= 2,
-            "the watch re-dialed after the socket dropped"
-        );
+            // The live event before the drop, then — after the socket dies and the
+            // manager reconnects — the event missed during the outage, delivered by
+            // navigation catch-up. The stream never ended.
+            assert_eq!(
+                within!(events.next()),
+                Some(saved_event(TOPIC_A, 10)),
+                "the pre-drop live event"
+            );
+            assert_eq!(
+                within!(events.next()),
+                Some(saved_event(TOPIC_A, 20)),
+                "the missed event, delivered by catch-up after reconnect"
+            );
+            assert!(
+                ws_conns.load(Ordering::SeqCst) >= 2,
+                "the watch re-dialed after the socket dropped"
+            );
+        });
     }
 
     /// An HTTP mini-node for the piggyback path: it answers a poll register
@@ -500,99 +545,112 @@ mod tests {
     fn piggyback_node() -> String {
         let listener = Listener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
-        tokio::spawn(async move {
-            loop {
-                let (sock, _) = listener.accept().await.expect("accept");
-                tokio::spawn(async move {
-                    let (mut r, mut w) = sock.split();
-                    let Ok(Some(http::Incoming::Post(body))) =
-                        http::read_request(&mut r).await
-                    else {
-                        return;
-                    };
-                    let request = from_wire::<Request>(&body).expect("request");
-                    http::write_ok_head(&mut w).await.expect("ok head");
-                    if request.frame.struct_hash == SYNC_STRUCT_HASH {
-                        // Poll register: seed the cursor at tail 100, no events.
-                        let reply = SyncReply {
-                            events: Vec::new(),
-                            cursors: vec![(TOPIC_A, 100)],
-                        };
-                        let end = StreamFrame::End(Response::Ok(
-                            Reply::Returned(to_wire(&reply)),
-                        ));
-                        http::write_frame(&mut w, &to_wire(&end))
-                            .await
-                            .expect("end");
-                    } else {
-                        assert!(
-                            request
-                                .sync
-                                .iter()
-                                .any(|c| c.topic == TOPIC_A
-                                    && c.since == Some(100)),
-                            "the command carried the live poll cursor"
-                        );
-                        let delta = SyncReply {
-                            events: vec![saved_event(TOPIC_A, 150)],
-                            cursors: vec![(TOPIC_A, 150)],
-                        };
-                        http::write_frame(
-                            &mut w,
-                            &to_wire(&StreamFrame::Sync(to_wire(&delta))),
-                        )
-                        .await
-                        .expect("sync frame");
-                        let end = StreamFrame::End(Response::Ok(Reply::Value(
-                            Some(vec![1]),
-                        )));
-                        http::write_frame(&mut w, &to_wire(&end))
-                            .await
-                            .expect("end");
-                    }
-                });
-            }
+        std::thread::spawn(move || {
+            wavedb_platform::carrier::block_on(async move {
+                loop {
+                    let (sock, _) = listener.accept().await.expect("accept");
+                    std::thread::spawn(move || {
+                        wavedb_platform::carrier::block_on(async move {
+                            let (mut r, mut w) = sock.split();
+                            let Ok(Some(http::Incoming::Post(body))) =
+                                http::read_request(&mut r).await
+                            else {
+                                return;
+                            };
+                            let request =
+                                from_wire::<Request>(&body).expect("request");
+                            http::write_ok_head(&mut w).await.expect("ok head");
+                            if request.frame.struct_hash == SYNC_STRUCT_HASH {
+                                // Poll register: seed the cursor at tail 100, no events.
+                                let reply = SyncReply {
+                                    events: Vec::new(),
+                                    cursors: vec![(TOPIC_A, 100)],
+                                };
+                                let end = StreamFrame::End(Response::Ok(
+                                    Reply::Returned(to_wire(&reply)),
+                                ));
+                                http::write_frame(&mut w, &to_wire(&end))
+                                    .await
+                                    .expect("end");
+                            } else {
+                                assert!(
+                                    request
+                                        .sync
+                                        .iter()
+                                        .any(|c| c.topic == TOPIC_A
+                                            && c.since == Some(100)),
+                                    "the command carried the live poll cursor"
+                                );
+                                let delta = SyncReply {
+                                    events: vec![saved_event(TOPIC_A, 150)],
+                                    cursors: vec![(TOPIC_A, 150)],
+                                };
+                                http::write_frame(
+                                    &mut w,
+                                    &to_wire(&StreamFrame::Sync(to_wire(
+                                        &delta,
+                                    ))),
+                                )
+                                .await
+                                .expect("sync frame");
+                                let end = StreamFrame::End(Response::Ok(
+                                    Reply::Value(Some(vec![1])),
+                                ));
+                                http::write_frame(&mut w, &to_wire(&end))
+                                    .await
+                                    .expect("end");
+                            }
+                        });
+                    });
+                }
+            });
         });
         addr
     }
 
-    #[tokio::test]
-    async fn a_command_piggybacks_the_delta_to_a_live_poll_watch() {
-        macro_rules! within {
-            ($fut:expr) => {
-                wavedb_platform::time::timeout(Duration::from_secs(30), $fut)
+    #[test]
+    fn a_command_piggybacks_the_delta_to_a_live_poll_watch() {
+        wavedb_platform::carrier::block_on(async {
+            macro_rules! within {
+                ($fut:expr) => {
+                    wavedb_platform::time::timeout(
+                        Duration::from_secs(30),
+                        $fut,
+                    )
                     .await
                     .expect("timed out")
+                };
+            }
+
+            let addr = piggyback_node();
+            let auth = Auth::Anonymous {
+                tenant: U48::from(5u32),
             };
-        }
+            // A long interval so no automatic tick fires — the only delivery is
+            // the one piggybacked onto the command below.
+            let mode = WatchMode::HttpPoll(Duration::from_secs(1_000));
+            let (mut events, _guard) =
+                within!(watch(&addr, auth.clone(), mode, TOPIC_A))
+                    .expect("poll watch registered");
 
-        let addr = piggyback_node();
-        let auth = Auth::Anonymous {
-            tenant: U48::from(5u32),
-        };
-        // A long interval so no automatic tick fires — the only delivery is
-        // the one piggybacked onto the command below.
-        let mode = WatchMode::HttpPoll(Duration::from_secs(1_000));
-        let (mut events, _guard) =
-            within!(watch(&addr, auth.clone(), mode, TOPIC_A))
-                .expect("poll watch registered");
+            // Issue an ordinary command; the manager attaches the live cursor and
+            // routes the returned delta back to the watch.
+            let frame = CommandFrame {
+                struct_hash: 0x1234,
+                command: Command::Get,
+                payload: Vec::new(),
+            };
+            let mut frames =
+                within!(post(&addr, auth, frame)).expect("command");
+            // Drain the command's own frames to the End (the caller's behaviour);
+            // the leading Sync frame was already peeled by the manager.
+            while let Ok(Some(_)) = frames.next_frame().await {}
 
-        // Issue an ordinary command; the manager attaches the live cursor and
-        // routes the returned delta back to the watch.
-        let frame = CommandFrame {
-            struct_hash: 0x1234,
-            command: Command::Get,
-            payload: Vec::new(),
-        };
-        let mut frames = within!(post(&addr, auth, frame)).expect("command");
-        // Drain the command's own frames to the End (the caller's behaviour);
-        // the leading Sync frame was already peeled by the manager.
-        while let Ok(Some(_)) = frames.next_frame().await {}
-
-        assert_eq!(
-            within!(events.next()),
-            Some(saved_event(TOPIC_A, 150)),
-            "the watch saw the event the command piggybacked — no dedicated poll"
-        );
+            assert_eq!(
+                within!(events.next()),
+                Some(saved_event(TOPIC_A, 150)),
+                "the watch saw the event the command piggybacked — no dedicated poll"
+            );
+        });
     }
 }
