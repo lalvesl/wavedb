@@ -1,7 +1,7 @@
 # RFC 0066 — Embassy executor and async-io: tokio out of the node
 
-- **Status:** In progress — opened 2026-10-08. **Step 1 landed 2026-10-08**
-  (see "Progress").
+- **Status:** In progress — opened 2026-10-08. **Steps 1 and 2 landed
+  2026-10-08** (see "Progress").
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the shard
   workers and disk actors this changes the carrier of),
   [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) (the `wavedb/multi`
@@ -247,7 +247,7 @@ working. tokio and the new stack coexist until step 5.
    step can build the single-executor loop first, as long as nothing assumes
    one executor per thread.
 5. **tokio removed** from every manifest; `cargo tree -i tokio` empty for the
-   workspace (the bench crate keeps its own until it is ported).
+   workspace and the bench crate (which dropped it in step 2).
 
 **Exit proof:** the full bar, the two-process e2e tests (contact-book cache,
 offline queue), the browser demo, and the RFC 0065 `wavedb/multi` and
@@ -275,6 +275,49 @@ resolves on a short-lived thread rather than blocking the executor in
 `getaddrinfo`; `Server::bind` stays `async` with nothing to await, because
 bringing a network up is asynchronous on `embassy-net`. Workspace bar green
 (491 tests), bench crates and the wasm target build.
+
+**Step 2 — landed 2026-10-08.** No queue in `wavedb-quick-node` is unbounded
+any more, and none comes from tokio:
+
+| queue | now | depth | when full |
+|---|---|---|---|
+| shard jobs, disk requests, disk maintenance | `async-channel` | 512 / 1024 / 16 (unchanged) | sender waits; maintenance hints drop, as before |
+| one-shot replies (disk answers, routed jobs, shutdown) | `futures::channel::oneshot` | 1 | — |
+| WS reader → session loop | `embassy-sync` `Channel`, `NoopRawMutex` | `WS_INBOUND_DEPTH` = 16 | the reader stops reading |
+| publisher → connection (events) | `async-channel` | `WS_OUTBOUND_DEPTH` = 256 | the connection is closed |
+| shards → publisher (mutations) | `async-channel` + a lag signal (`feed.rs`) | `MUTATION_DEPTH` = 4096 | dropped; every subscriber is disconnected |
+
+Three choices differ from §2 as written, each for a reason that only showed
+in the code:
+
+- **One-shot replies use `futures`' oneshot**, not a capacity-one
+  `async-channel`. It is runtime-independent, it is a future itself (so no
+  call site changed beyond the import), and it is what the bench crate
+  needed in order to drop tokio entirely.
+- **The outbound event queue is `async-channel`**, although today both ends
+  share a thread. Under [RFC 0067](0067-thread-per-core-shards-PLANNED.md)
+  the owner publishes into a connection on another thread, so this queue
+  crosses threads in the target. It also needs `close()`, the publisher's
+  way to disconnect a client, which `embassy-sync`'s channel does not have.
+  The reader-to-loop queue, which never leaves its connection's thread, is
+  the `embassy-sync` one.
+- **A dropped mutation disconnects every subscriber**, not just the
+  dropped event's topic. A shard that finds the feed full raises a
+  capacity-one lag signal *before* pushing anything newer; the publisher
+  checks it after each pop and before delivering. So no subscriber ever
+  receives a later event of a topic without the earlier one. Knowing which
+  topics lost an event would need a structure the shards share; a full feed
+  is an overload, and a coarse recovery is the right price for it.
+
+Tests, one per policy: `a_full_inbound_queue_stops_the_reader`,
+`a_full_outbox_disconnects_the_slow_client`,
+`a_full_feed_drops_and_signals_instead_of_waiting`,
+`a_lagging_publisher_disconnects_the_subscribers` (plus an unlagged-order
+test and `disconnect_all`). `select`/`join` in the node's own code come
+from `embassy-futures`. What still uses tokio in quick-node: the `LocalSet`,
+`spawn_local` and accept-loop `select!` (step 4), the upkeep interval
+(step 3), `OwnerLocks` (RFC 0067), and `#[tokio::test]`. Workspace bar green
+(497 tests), bench crates green, `cargo deny` clean.
 
 **Every step invalidates the benchmark seeds.** `bench-gen` links
 `wavedb-storage`, which links `wavedb-platform`, and `benches/nix/gen.nix`
@@ -310,9 +353,9 @@ not `platform`'s.
    version (step 4's spike decides between it and generated tasks).
 2. **Capacities.** `MAX_CONNECTIONS`, `WS_OUTBOUND_DEPTH`, `MUTATION_DEPTH`:
    starting numbers are guesses until the suite measures them.
-3. **The bench crate** uses tokio only for `sync` (to `block_on` the disk
-   actor's replies). It follows once the node does; until then it keeps its
-   own dependency, outside the workspace.
+3. **The bench crate** — resolved in step 2: it used tokio only for the
+   disk actor's one-shot reply, which is now `futures`', so it no longer
+   depends on tokio at all.
 4. **Timers per thread.** `embassy-time`'s std driver is one queue for the
    process. Not on the shards' hot path today; if it ever is, each carrier
    thread could keep its own timer wheel driven from its own loop.
