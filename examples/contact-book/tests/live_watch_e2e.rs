@@ -105,7 +105,7 @@ fn contact(name: &str, phone: &str, city: &str) -> Contact {
 /// fail the test, not wedge it).
 macro_rules! next_event {
     ($watch:expr) => {
-        tokio::time::timeout(Duration::from_secs(30), $watch.next())
+        wavedb_platform::time::timeout(Duration::from_secs(30), $watch.next())
             .await
             .expect("watcher timed out — no event arrived")
             .expect("watch stream fault")
