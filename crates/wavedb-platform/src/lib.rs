@@ -14,9 +14,8 @@
 //!   response body);
 //! - [`ws`] — the **client half** of the WebSocket transport (hand-rolled
 //!   RFC 6455 over `TcpStream` / the browser's own `WebSocket` object);
-//! - [`task`] — background tasks: the never-ending world the connection
-//!   manager runs on (dedicated thread + current-thread runtime /
-//!   `wasm_bindgen_futures::spawn_local` — no tokio in wasm);
+//! - `task` — browser only: background tasks for the connection manager
+//!   (`wasm_bindgen_futures::spawn_local`); natively that is [`carrier`];
 //! - [`io`] — sockets, native only (RFC 0066): the one place a TCP socket is
 //!   named; every protocol above is generic over `embedded-io-async`;
 //! - [`carrier`] — native only (RFC 0066): an OS thread running one Embassy
@@ -41,6 +40,7 @@ pub mod http;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod io;
 pub mod rand;
+#[cfg(target_arch = "wasm32")]
 pub mod task;
 pub mod time;
 pub mod ws;
