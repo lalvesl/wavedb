@@ -23,14 +23,20 @@ wavedb-net = { path = "../wavedb-net" }
 wavedb-platform.workspace = true
 # The I/O traits the serve loop is generic over (RFC 0066).
 embedded-io-async.workspace = true
-# The executor, timers and channels until RFC 0066 steps 2–4 replace them;
-# sockets no longer come from here.
+# Bounded queues (RFC 0066 step 2): `embassy-sync` within a thread,
+# `async-channel` across threads, `futures` one-shot replies, and
+# `embassy-futures` to select between them.
+embassy-sync.workspace = true
+embassy-futures.workspace = true
+async-channel.workspace = true
+futures.workspace = true
+# The executor and timers until RFC 0066 steps 3–4 replace them; sockets and
+# channels no longer come from here (`sync` stays for `OwnerLocks`, RFC 0067).
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 thiserror.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "sync", "time"] }
-futures.workspace = true
 tempfile.workspace = true
 wavedb-net = { path = "../wavedb-net" }
 # Integration tests drive the node with real `#[wavedb]` structs + a REGISTRY.
