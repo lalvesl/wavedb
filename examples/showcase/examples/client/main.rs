@@ -257,11 +257,12 @@ async fn save_with_retry(
 
 /// Await a watch's `next()` future with a hang guard, so a broken push
 /// path fails the demo loudly instead of wedging it. Generic over the
-/// future, so the same helper serves both watch types.
+/// future, so the same helper serves both watch types. Boxed, because a
+/// watch future is large and the race would otherwise hold a second copy.
 async fn next_event<T, E: core::fmt::Debug>(
     next: impl Future<Output = core::result::Result<Option<WatchEvent<T>>, E>>,
 ) -> WatchEvent<T> {
-    tokio::time::timeout(Duration::from_secs(10), next)
+    wavedb_platform::time::timeout(Duration::from_secs(10), Box::pin(next))
         .await
         .expect("no watch event within 10s")
         .expect("decode")
