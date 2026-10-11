@@ -1,10 +1,17 @@
 //! The accept loop and per-connection handling (native, HTTP POST).
 //!
 //! One connection = one request/response exchange (the tunnel sends
-//! `connection: close`). Connections are handled concurrently on the current
-//! thread via a [`LocalSet`] + [`spawn_local`], so no `Send` bound leaks onto
-//! the `Store`-generic engine futures (deliberately non-`Send` — an internal
-//! node seam, not a public API).
+//! `connection: close`). The node runs on its own **accept carrier** — a
+//! thread with one Embassy executor (RFC 0066) — and each connection is a
+//! task from a static pool there, so no `Send` bound leaks onto the
+//! `Store`-generic engine futures (deliberately non-`Send` — an internal node
+//! seam, not a public API). A full pool refuses the connection.
+//!
+//! ## Stopping
+//!
+//! Embassy cannot abort a task, so every task on the carrier watches one
+//! `halt` channel and returns when the accept loop closes it. The carrier's
+//! thread returns once the last of them has (`wavedb_platform::carrier`).
 //!
 //! ## What this thread does, and what it hands off
 //!
@@ -20,72 +27,167 @@
 //! its identity once at `Hello`, and routing re-verifies the token per
 //! command, so a long-lived watch would start refusing the moment its token
 //! expired. That is arguably more correct and definitely a behaviour change.
-//!
-//! [`spawn_local`]: tokio::task::spawn_local
 
 use std::cell::RefCell;
-use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use async_channel::Receiver;
+use embassy_futures::select::{Either, select};
 use embedded_io_async::Write;
-use tokio::task::{LocalSet, spawn_local};
+use futures::channel::oneshot;
 use wavedb_core::Store;
 use wavedb_core::expose::{Exposure, Reply};
 use wavedb_core::wire::{from_wire, to_wire};
 use wavedb_net::frame::{Request, Response, StreamFrame};
 use wavedb_net::http::{self, Incoming};
+use wavedb_platform::carrier::Here;
 use wavedb_platform::io::{IoError, Listener, Stream};
 
-use crate::shard::{OwnerLocks, Router};
-use crate::subscribe::SubTable;
-use crate::{dispatch, serve_ws};
+use crate::__rt::NodeTasks;
+use crate::shard::{OwnerLocks, Router, ShardStore, Shards};
+use crate::subscribe::{NotifyStore, SubTable, Subscriptions};
+use crate::upkeep::{self, Maintenance};
+use crate::{ServerError, dispatch, feed, serve_ws};
 
-/// Serve `store` under `registry` on an already-bound `listener` until either
-/// the `shutdown` future resolves or an accept fault. Each connection is
-/// handled on its own local task (current-thread, no `Send` bound);
-/// `maintenance` runs alongside on the same [`LocalSet`] (cancelled when
-/// serving stops).
-///
-/// # Errors
-/// A fatal accept fault (the listener socket broke).
-pub async fn run<E, S, F, M>(
-    listener: Listener,
+/// The store the accept carrier serves WebSocket sessions through.
+type Serving = NotifyStore<ShardStore, Subscriptions>;
+
+/// What the accept loop is started with. Built on the caller's thread and
+/// moved onto the accept carrier, so every field is `Send`; the node's
+/// non-`Send` state is built over there, by [`accept`].
+pub struct Accept<E> {
+    pub(crate) registry: E,
+    pub(crate) listener: Listener,
+    pub(crate) shards: Shards,
+    pub(crate) maintenance: Maintenance,
+    pub(crate) secret: [u8; 32],
+    /// Closed by the caller to stop serving.
+    pub(crate) stop: Receiver<()>,
+    /// How serving ended: `Ok` on a stop, the fault otherwise.
+    pub(crate) outcome: oneshot::Sender<crate::Result<()>>,
+}
+
+/// One accepted connection, as its task receives it.
+pub struct Connection<E> {
     registry: E,
-    node: Node<S>,
-    maintenance: M,
-    shutdown: F,
-) -> wavedb_net::Result<()>
-where
-    E: Exposure + Copy + 'static,
-    S: Store + 'static,
-    F: Future<Output = ()>,
-    M: Future<Output = ()> + 'static,
-{
-    let local = LocalSet::new();
-    local
-        .run_until(async move {
-            let upkeep = spawn_local(maintenance);
-            tokio::pin!(shutdown);
-            loop {
-                let sock = tokio::select! {
-                    accepted = listener.accept() => accepted?.0,
-                    () = &mut shutdown => {
-                        // Stop maintaining before the caller's final
-                        // drain + checkpoint takes over.
-                        upkeep.abort();
-                        return Ok(());
-                    }
+    sock: Stream,
+    node: Node<Serving>,
+    halt: Receiver<()>,
+}
+
+/// The accept loop: build the node on this thread, then accept until stopped
+/// or until the listener faults.
+pub async fn accept<E: NodeTasks>(ctx: Accept<E>, here: Here) {
+    let Accept {
+        registry,
+        listener,
+        shards,
+        maintenance,
+        secret,
+        stop,
+        outcome,
+    } = ctx;
+    let result = serve(
+        registry,
+        &listener,
+        &shards,
+        maintenance,
+        secret,
+        &stop,
+        &here,
+    )
+    .await;
+    let _ = outcome.send(result);
+}
+
+async fn serve<E: NodeTasks>(
+    registry: E,
+    listener: &Listener,
+    shards: &Shards,
+    maintenance: Maintenance,
+    secret: [u8; 32],
+    stop: &Receiver<()>,
+    here: &Here,
+) -> crate::Result<()> {
+    // One table for the node: the brake that keeps two interleaved
+    // collection ops from losing an index update now that the store
+    // underneath genuinely suspends (`CONCURRENCY_BRAKE.md`). Shared with
+    // every shard worker, which is what makes it exclude anything at all
+    // once operations run on more than this thread.
+    let locks = Arc::new(OwnerLocks::new());
+    let subs = Rc::new(RefCell::new(SubTable::default()));
+    // Committed mutations come back from the shards as plain data; the
+    // subscription table lives here and is fanned out by `feed::publish`.
+    let (mutations, incoming) = feed::feed(feed::MUTATION_DEPTH);
+    let router = Router::start(
+        registry,
+        &shards.handle(),
+        &locks,
+        &mutations,
+        secret,
+        shards.count(),
+    )
+    .map_err(|e| ServerError::Io(std::io::Error::other(e.to_string())))?;
+    // Ours goes; the workers hold the live clones, so the publisher ends when
+    // the last of them does rather than never.
+    drop(mutations);
+
+    // Closed when serving stops: every task on this carrier watches it.
+    let (halt, halted) = async_channel::bounded::<()>(1);
+    upkeep::spawn_background(
+        shards.handle(),
+        maintenance,
+        incoming,
+        Rc::clone(&subs),
+        halted.clone(),
+        here,
+    )?;
+    // The accept thread's own view: cacheless (see `Shards::store`) and
+    // wrapped so a WebSocket `Call` executed here still reaches the
+    // watchers, exactly as a routed one does from its shard.
+    let node = Node {
+        router,
+        store: Rc::new(NotifyStore::new(shards.store(), Rc::clone(&subs))),
+        secret,
+        locks,
+        subs,
+    };
+    let result = loop {
+        match select(listener.accept(), stop.recv()).await {
+            Either::First(Ok((sock, _))) => {
+                let conn = Connection {
+                    registry,
+                    sock,
+                    node: node.clone(),
+                    halt: halted.clone(),
                 };
-                let node = node.clone();
-                spawn_local(async move {
-                    // A per-connection fault is dropped: it never takes the
-                    // node down. (No tracing dep yet — silent.)
-                    let _ = serve_connection(sock, &registry, &node).await;
-                });
+                // A full pool refuses: the connection drops, closing its
+                // socket — an explicit refusal, never a queue.
+                let _ = E::spawn_connection(conn, here.clone());
             }
-        })
-        .await
+            Either::First(Err(e)) => break Err(e.into()),
+            // A message or a closed channel: either way, stop.
+            Either::Second(_) => break Ok(()),
+        }
+    };
+    halt.close();
+    result
+}
+
+/// One connection's task: serve it, or stop with the node.
+pub async fn connection<E: NodeTasks>(conn: Connection<E>, here: Here) {
+    let Connection {
+        registry,
+        sock,
+        node,
+        halt,
+    } = conn;
+    // A per-connection fault is dropped: it never takes the node down. (No
+    // tracing dep yet — silent.)
+    let _ =
+        select(serve_connection(sock, &registry, &node, &here), halt.recv())
+            .await;
 }
 
 /// Everything a connection needs beyond its socket and the registry.
@@ -127,6 +229,7 @@ async fn serve_connection<E, S>(
     sock: Stream,
     registry: &E,
     node: &Node<S>,
+    here: &Here,
 ) -> wavedb_net::Result<()>
 where
     E: Exposure,
@@ -152,16 +255,7 @@ where
         Some(Incoming::Upgrade { key }) => {
             let accept = wavedb_platform::ws::codec::accept_key(&key);
             http::write_switching_head(&mut writer, &accept).await?;
-            serve_ws::serve(
-                reader,
-                writer,
-                registry,
-                &*node.store,
-                &node.locks,
-                &node.secret,
-                &node.subs,
-            )
-            .await
+            serve_ws::serve(reader, writer, registry, node, here).await
         }
     }
 }
