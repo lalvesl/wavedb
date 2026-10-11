@@ -77,11 +77,25 @@ priority the way this RFC needs — one executor per priority level.
 - **`P = 64` by default**, chosen when the database is created and written to
   `<root>/MANIFEST` (shard count, format), which is immutable afterwards.
   Configurable at creation.
-- **Routing is a plain remainder:** `shard = mix(key) % P`. The owner gives
-  the key — the Pivot for a NonUnique collection (`bits(pivot)`), the
-  `(tenant, type)` pair for a Unique (`unique_key`) — exactly as `route.rs`
-  computes it today.
-- **The `mix` before the remainder is not optional**, and the reason is
+- **Routing is SeaHash, then a plain remainder:**
+  `shard = seahash(owner bytes) % P`, over
+  - the Pivot's `LocalId` bytes for a NonUnique collection;
+  - the tenant (6 bytes, LE) followed by the **full** `STRUCT_HASH` (8 bytes,
+    LE) for a Unique type.
+
+  SeaHash is the project's identity hash, pinned `=4.1.0` and already called
+  at runtime (`mint::natural_key_hash`, segment keys). Nothing about it is
+  compile-time: it runs over the bytes at hand. The pin is what this needs,
+  because the shard becomes an on-disk address (below): the hash can never
+  drift under a dependency bump. The function lives in `wavedb-core` next to
+  `natural_key_hash`.
+- **This replaces today's `route.rs`**, which only picks a thread and uses
+  SplitMix64's finalizer over hand-packed keys: `bits(pivot)`, and
+  `unique_key = tenant << 15 | type_salt`. The packing was needed only to fit
+  a `u64` for that mixer. It is why a Unique routed by the 15-bit salt rather
+  than the whole `STRUCT_HASH`, so two types sharing their low 15 bits shared
+  a shard within a tenant. Hashing bytes removes that limit.
+- **A hash before the remainder is not optional**, and the reason is
   arithmetic, not taste. The bare key modulo 64 collapses in both cases:
   - **Unique:** `unique_key = tenant << 15 | type_salt`. Since `2^15` is a
     multiple of 64, `unique_key % 64 = type_salt % 64`: the tenant drops out,
@@ -93,13 +107,14 @@ priority the way this RFC needs — one executor per priority level.
     instants) deals Pivots out every `k`-th shard, so only `64 / gcd(k, 64)`
     shards are ever used — 16 of them when `k = 4`.
 
-  SplitMix64's finalizer (five lines, already in `route.rs`) removes both
-  patterns, and the remainder after it is uniform for any `P`.
+  A hash over the bytes removes both patterns, and the remainder after it is
+  uniform for any `P`.
 - **The routing function becomes load-bearing on disk.** Today it only
   decides a thread, and changing it costs a restart. Once it decides which
   `data.bin` holds a record, changing it puts every record in the wrong shard,
-  the same way changing `seahash` would. `mix` and both keys are frozen and
-  pinned by golden-vector tests.
+  the same way changing `STRUCT_HASH` would. The byte layout of both keys is
+  frozen and pinned by golden-vector tests, and the SeaHash pin covers the
+  rest.
 - **Growing `P` later** is not designed here. If it is ever wanted, keeping
   `P` a power of two makes it a local split: going from 64 to 128 splits
   shard `s` into `s` and `s + 64` by one more bit of the same hash.
@@ -267,7 +282,7 @@ the meantime.
 | one journal, one `data.bin` | 64 of each, under `shards/xx/` |
 | shard workers + disk actor + serve loop on a `LocalSet` | `T` identical threads, three executors each |
 | `OwnerLocks`: process-wide map of async mutexes | thread-local table plus leases |
-| `shard_of`: `mix(key) % shards`, a thread choice | `mix(key) % P`, a frozen on-disk placement |
+| `shard_of`: SplitMix64 over packed keys, `% shards`, a thread choice | `seahash(owner bytes) % P`, a frozen on-disk placement |
 
 ## Delivery
 
@@ -277,7 +292,7 @@ the meantime.
    largest step and a prerequisite for the rest; it also simplifies the
    tests' `engine_gate()`.
 2. **The shard layout.** `MANIFEST`, `shards/xx/`, open and replay per shard,
-   routing by remainder, golden vectors for `mix`.
+   routing by SeaHash and remainder, with golden vectors.
 3. **Interruptible background work** (0063 part 3), so BG can share a thread
    with DATA.
 4. **The thread loop** with three executors — 0066 step 4, reshaped.
