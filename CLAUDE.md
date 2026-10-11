@@ -17,6 +17,8 @@ mechanism exists:
 When an idea lands or changes, add or update its RFC in `rfcs/` (process in
 `rfcs/0000-rfc-process.md`). READMEs carry `> Status:` blocks where a documented
 mechanism isn't built yet — keep that honesty when editing docs.
+Smaller deliberate deferrals — "simple now, better later" — live in
+`docs/improvements.md`; an entry that grows into a design becomes an RFC.
 
 ## Commands
 
