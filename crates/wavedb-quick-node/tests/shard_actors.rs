@@ -146,18 +146,19 @@ async fn shards_serve_collections_over_one_disk_actor() {
     let handle = shards.handle();
     let probe = ids[7];
     let (done, wait) = std::sync::mpsc::channel::<Result<String, String>>();
-    wavedb_platform::task::spawn_detached("shard-test", move || async move {
-        let own = Rc::new(ShardStore::new(handle));
-        let db = LocalHandle::new(&*own, U48::from(TENANT));
-        let col = Note::collection(pivot);
-        let answer = match col.get(&db, probe).await {
-            Ok(Some(v)) => Ok(v.body),
-            Ok(None) => Err("absent on the far thread".into()),
-            Err(e) => Err(format!("{e}")),
-        };
-        let _ = done.send(answer);
-    })
-    .expect("spawn shard thread");
+    std::thread::spawn(move || {
+        futures::executor::block_on(async move {
+            let own = Rc::new(ShardStore::new(handle));
+            let db = LocalHandle::new(&*own, U48::from(TENANT));
+            let col = Note::collection(pivot);
+            let answer = match col.get(&db, probe).await {
+                Ok(Some(v)) => Ok(v.body),
+                Ok(None) => Err("absent on the far thread".into()),
+                Err(e) => Err(format!("{e}")),
+            };
+            let _ = done.send(answer);
+        });
+    });
 
     let from_other_thread = wait
         .recv_timeout(std::time::Duration::from_secs(30))
