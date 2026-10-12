@@ -6,11 +6,12 @@
 use todo_app_schema::REGISTRY;
 use wavedb_quick_node::Server;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    Server::new(REGISTRY)
-        .data_dir("./data")
-        .serve("127.0.0.1:7700")
-        .await?;
-    Ok(())
+fn main() -> anyhow::Result<()> {
+    wavedb_platform::carrier::block_on(async {
+        Server::new(REGISTRY)
+            .data_dir("./data")
+            .serve("127.0.0.1:7700")
+            .await?;
+        Ok(())
+    })
 }
