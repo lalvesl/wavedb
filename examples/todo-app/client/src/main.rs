@@ -12,65 +12,66 @@ use wavedb::prelude::*;
 const SERVER: &str = "127.0.0.1:7700";
 const SYSTEM_TENANT: U48 = U48::ZERO;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // ── Step 1: connect as the system tenant to call the auth functions ───
-    let sys = Db::connect(SERVER, SYSTEM_TENANT, SYSTEM_TENANT).await?;
+fn main() -> anyhow::Result<()> {
+    wavedb_platform::carrier::block_on(async {
+        // ── Step 1: connect as the system tenant to call the auth functions ───
+        let sys = Db::connect(SERVER, SYSTEM_TENANT, SYSTEM_TENANT).await?;
 
-    let tenant_id = register(&sys, "alice".into(), "secret".into()).await?;
-    println!("registered  tenant_id={tenant_id}");
+        let tenant_id = register(&sys, "alice".into(), "secret".into()).await?;
+        println!("registered  tenant_id={tenant_id}");
 
-    let (tenant_id, pair) =
-        login(&sys, "alice".into(), "secret".into()).await?;
-    println!("logged in   tenant_id={tenant_id}");
+        let (tenant_id, pair) =
+            login(&sys, "alice".into(), "secret".into()).await?;
+        println!("logged in   tenant_id={tenant_id}");
 
-    // ── Step 2: reconnect as the real user tenant ──────────────────────────
-    let tenant = U48::try_from(tenant_id)?;
-    let db = Db::connect(SERVER, tenant, tenant)
-        .await?
-        .with_access_token(pair.access.clone());
+        // ── Step 2: reconnect as the real user tenant ──────────────────────────
+        let tenant = U48::try_from(tenant_id)?;
+        let db = Db::connect(SERVER, tenant, tenant)
+            .await?
+            .with_access_token(pair.access.clone());
 
-    // ── Write ──────────────────────────────────────────────────────────────
-    let id_milk = add_todo(&db, "Buy milk".into()).await?;
-    let id_docs = add_todo(&db, "Write docs".into()).await?;
-    let _id_rust = add_todo(&db, "Read the Rust book".into()).await?;
-    println!("added 3 todos");
+        // ── Write ──────────────────────────────────────────────────────────────
+        let id_milk = add_todo(&db, "Buy milk".into()).await?;
+        let id_docs = add_todo(&db, "Write docs".into()).await?;
+        let _id_rust = add_todo(&db, "Read the Rust book".into()).await?;
+        println!("added 3 todos");
 
-    // ── Read ───────────────────────────────────────────────────────────────
-    println!("\n── todos ──");
-    print_todos(&db).await?;
+        // ── Read ───────────────────────────────────────────────────────────────
+        println!("\n── todos ──");
+        print_todos(&db).await?;
 
-    // ── Search ─────────────────────────────────────────────────────────────
-    //
-    // None of these is a title, and the first three still find one: the index
-    // is built over the title's trigrams, so a partial word — or one with a
-    // letter dropped — still shares enough of them. The last shares none and
-    // comes back empty rather than ranked-but-wrong.
-    //
-    // `search` is not a DSL. It is one more `#[server]` function, run next to
-    // the data, exactly like `all_todos`.
-    println!("\n── search ──");
-    for query in ["milk", "rust", "mlk", "quantum chromodynamics"] {
-        search(&db, query).await?;
-    }
+        // ── Search ─────────────────────────────────────────────────────────────
+        //
+        // None of these is a title, and the first three still find one: the index
+        // is built over the title's trigrams, so a partial word — or one with a
+        // letter dropped — still shares enough of them. The last shares none and
+        // comes back empty rather than ranked-but-wrong.
+        //
+        // `search` is not a DSL. It is one more `#[server]` function, run next to
+        // the data, exactly like `all_todos`.
+        println!("\n── search ──");
+        for query in ["milk", "rust", "mlk", "quantum chromodynamics"] {
+            search(&db, query).await?;
+        }
 
-    // ── Mutate ─────────────────────────────────────────────────────────────
-    complete_todo(&db, id_milk).await?;
-    delete_todo(&db, id_docs).await?;
+        // ── Mutate ─────────────────────────────────────────────────────────────
+        complete_todo(&db, id_milk).await?;
+        delete_todo(&db, id_docs).await?;
 
-    println!("\n── todos after complete + delete ──");
-    print_todos(&db).await?;
+        println!("\n── todos after complete + delete ──");
+        print_todos(&db).await?;
 
-    // Completing a todo does not touch the fuzzy index at all — a posting
-    // holds a gram, a length and an anchor, never the record, so a save that
-    // leaves the title alone has nothing to rewrite. "Buy milk" is still
-    // exactly as findable, and "Write docs" is gone with its postings.
-    println!("\n── search again, after the mutations ──");
-    for query in ["milk", "docs"] {
-        search(&db, query).await?;
-    }
+        // Completing a todo does not touch the fuzzy index at all — a posting
+        // holds a gram, a length and an anchor, never the record, so a save that
+        // leaves the title alone has nothing to rewrite. "Buy milk" is still
+        // exactly as findable, and "Write docs" is gone with its postings.
+        println!("\n── search again, after the mutations ──");
+        for query in ["milk", "docs"] {
+            search(&db, query).await?;
+        }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Run one fuzzy search and print what came back, best first.
