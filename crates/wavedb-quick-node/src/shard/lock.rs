@@ -191,49 +191,55 @@ mod tests {
     ) {
         let _guard = locks.acquire(key(1, hash)).await;
         trace.borrow_mut().push(format!("{tag}1"));
-        tokio::task::yield_now().await;
+        embassy_futures::yield_now().await;
         trace.borrow_mut().push(format!("{tag}2"));
     }
 
-    #[tokio::test]
-    async fn one_owner_runs_one_operation_at_a_time() {
-        let locks = OwnerLocks::new();
-        let trace = RefCell::new(Vec::new());
-        tokio::join!(
-            op(&locks, &trace, "a", 0xAA),
-            op(&locks, &trace, "b", 0xAA),
-        );
-        let seen = trace.borrow().join(" ");
-        assert!(
-            seen == "a1 a2 b1 b2" || seen == "b1 b2 a1 a2",
-            "operations interleaved: {seen}"
-        );
+    #[test]
+    fn one_owner_runs_one_operation_at_a_time() {
+        wavedb_platform::carrier::block_on(async {
+            let locks = OwnerLocks::new();
+            let trace = RefCell::new(Vec::new());
+            embassy_futures::join::join(
+                op(&locks, &trace, "a", 0xAA),
+                op(&locks, &trace, "b", 0xAA),
+            )
+            .await;
+            let seen = trace.borrow().join(" ");
+            assert!(
+                seen == "a1 a2 b1 b2" || seen == "b1 b2 a1 a2",
+                "operations interleaved: {seen}"
+            );
+        });
     }
 
     /// Different owners are not held up by each other — the lock is a brake on
     /// one collection, not on the shard.
-    #[tokio::test]
-    async fn different_owners_run_concurrently() {
-        let locks = OwnerLocks::new();
-        let trace = RefCell::new(Vec::new());
-        tokio::join!(
-            op(&locks, &trace, "a", 0xAA),
-            op(&locks, &trace, "b", 0xBB),
-        );
-        // The property is *interleaving*, not a particular order: `b` must
-        // start before `a` finishes. Which of them finishes first afterwards
-        // is a wake-up ordering detail and pinning it would make this test
-        // fail for a reason it is not about.
-        let seen = trace.borrow().join(" ");
-        let (b_start, a_end) = (
-            seen.find("b1").expect("b must run"),
-            seen.find("a2").expect("a must finish"),
-        );
-        assert!(
-            b_start < a_end,
-            "distinct owners serialised: {seen} — the brake is on the shard, \
+    #[test]
+    fn different_owners_run_concurrently() {
+        wavedb_platform::carrier::block_on(async {
+            let locks = OwnerLocks::new();
+            let trace = RefCell::new(Vec::new());
+            embassy_futures::join::join(
+                op(&locks, &trace, "a", 0xAA),
+                op(&locks, &trace, "b", 0xBB),
+            )
+            .await;
+            // The property is *interleaving*, not a particular order: `b` must
+            // start before `a` finishes. Which of them finishes first afterwards
+            // is a wake-up ordering detail and pinning it would make this test
+            // fail for a reason it is not about.
+            let seen = trace.borrow().join(" ");
+            let (b_start, a_end) = (
+                seen.find("b1").expect("b must run"),
+                seen.find("a2").expect("a must finish"),
+            );
+            assert!(
+                b_start < a_end,
+                "distinct owners serialised: {seen} — the brake is on the shard, \
              not on one collection"
-        );
-        assert_eq!(locks.len(), 2);
+            );
+            assert_eq!(locks.len(), 2);
+        });
     }
 }
