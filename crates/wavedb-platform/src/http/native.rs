@@ -122,43 +122,52 @@ mod tests {
     fn one_shot(response: &'static [u8]) -> String {
         let listener = Listener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
-        tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut sink = [0u8; 1024];
-            let _ = sock.read(&mut sink).await;
-            sock.write_all(response).await.unwrap();
+        std::thread::spawn(move || {
+            crate::carrier::block_on(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut sink = [0u8; 1024];
+                let _ = sock.read(&mut sink).await;
+                sock.write_all(response).await.unwrap();
+            });
         });
         addr
     }
 
-    #[tokio::test]
-    async fn post_streams_the_body_across_chunks() {
-        let addr = one_shot(
-            b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\nhello world",
-        );
-        let mut body = post(&addr, b"req").await.unwrap();
-        let mut got = Vec::new();
-        while let Some(chunk) = body.chunk().await.unwrap() {
-            got.extend_from_slice(&chunk);
-        }
-        assert_eq!(got, b"hello world");
+    #[test]
+    fn post_streams_the_body_across_chunks() {
+        crate::carrier::block_on(async {
+            let addr = one_shot(
+                b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\nhello world",
+            );
+            let mut body = post(&addr, b"req").await.unwrap();
+            let mut got = Vec::new();
+            while let Some(chunk) = body.chunk().await.unwrap() {
+                got.extend_from_slice(&chunk);
+            }
+            assert_eq!(got, b"hello world");
+        });
     }
 
-    #[tokio::test]
-    async fn non_200_is_a_status_error() {
-        let addr =
-            one_shot(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n");
-        let err = post(&addr, b"req").await.unwrap_err();
-        assert!(matches!(err, Error::Status(404)));
+    #[test]
+    fn non_200_is_a_status_error() {
+        crate::carrier::block_on(async {
+            let addr = one_shot(
+                b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n",
+            );
+            let err = post(&addr, b"req").await.unwrap_err();
+            assert!(matches!(err, Error::Status(404)));
+        });
     }
 
-    #[tokio::test]
-    async fn close_before_any_response_is_a_fault() {
-        let addr = one_shot(b"");
-        let err = post(&addr, b"req").await.unwrap_err();
-        assert!(matches!(
-            err,
-            Error::Http("connection closed before response")
-        ));
+    #[test]
+    fn close_before_any_response_is_a_fault() {
+        crate::carrier::block_on(async {
+            let addr = one_shot(b"");
+            let err = post(&addr, b"req").await.unwrap_err();
+            assert!(matches!(
+                err,
+                Error::Http("connection closed before response")
+            ));
+        });
     }
 }
