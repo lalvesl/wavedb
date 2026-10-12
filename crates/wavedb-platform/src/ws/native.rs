@@ -237,99 +237,115 @@ mod tests {
     fn echo_server() -> String {
         let listener = Listener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
-        tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 1024];
-            let key = loop {
-                let n = sock.read(&mut chunk).await.unwrap();
-                buf.extend_from_slice(&chunk[..n]);
-                if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n")
-                {
-                    let head = String::from_utf8(buf[..end].to_vec()).unwrap();
-                    break head
-                        .split("\r\n")
-                        .filter_map(|l| l.split_once(':'))
-                        .find(|(n, _)| {
-                            n.eq_ignore_ascii_case("sec-websocket-key")
-                        })
-                        .map(|(_, v)| v.trim().to_owned())
-                        .unwrap();
-                }
-            };
-            let response = format!(
-                "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\n\
-                 connection: Upgrade\r\nsec-websocket-accept: {}\r\n\r\n",
-                codec::accept_key(&key)
-            );
-            sock.write_all(response.as_bytes()).await.unwrap();
-            let (r, mut w) = sock.split();
-            codec::write_message(&mut w, OP_PING, b"beat", false)
-                .await
-                .unwrap();
-            let mut msgs = Messages::new(r);
-            while let Some(msg) = msgs.next(true).await.unwrap() {
-                match msg {
-                    Msg::Binary(bytes) => {
-                        codec::write_message(&mut w, OP_BINARY, &bytes, false)
-                            .await
+        std::thread::spawn(move || {
+            crate::carrier::block_on(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                let key = loop {
+                    let n = sock.read(&mut chunk).await.unwrap();
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(end) =
+                        buf.windows(4).position(|w| w == b"\r\n\r\n")
+                    {
+                        let head =
+                            String::from_utf8(buf[..end].to_vec()).unwrap();
+                        break head
+                            .split("\r\n")
+                            .filter_map(|l| l.split_once(':'))
+                            .find(|(n, _)| {
+                                n.eq_ignore_ascii_case("sec-websocket-key")
+                            })
+                            .map(|(_, v)| v.trim().to_owned())
                             .unwrap();
                     }
-                    Msg::Pong(p) => assert_eq!(p, b"beat"),
-                    Msg::Ping(_) => {}
-                    Msg::Close => break,
+                };
+                let response = format!(
+                    "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\n\
+                 connection: Upgrade\r\nsec-websocket-accept: {}\r\n\r\n",
+                    codec::accept_key(&key)
+                );
+                sock.write_all(response.as_bytes()).await.unwrap();
+                let (r, mut w) = sock.split();
+                codec::write_message(&mut w, OP_PING, b"beat", false)
+                    .await
+                    .unwrap();
+                let mut msgs = Messages::new(r);
+                while let Some(msg) = msgs.next(true).await.unwrap() {
+                    match msg {
+                        Msg::Binary(bytes) => {
+                            codec::write_message(
+                                &mut w, OP_BINARY, &bytes, false,
+                            )
+                            .await
+                            .unwrap();
+                        }
+                        Msg::Pong(p) => assert_eq!(p, b"beat"),
+                        Msg::Ping(_) => {}
+                        Msg::Close => break,
+                    }
                 }
-            }
+            });
         });
         addr
     }
 
-    #[tokio::test]
-    async fn handshake_echo_and_close_roundtrip() {
-        let addr = echo_server();
-        let mut conn = connect(&addr).await.unwrap();
-        conn.send(b"one").await.unwrap();
-        // The server's ping rides ahead of the echo; recv answers it
-        // internally and still yields the binary message.
-        assert_eq!(conn.recv().await.unwrap().unwrap(), b"one");
-        let big = vec![7u8; 70_000];
-        conn.send(&big).await.unwrap();
-        assert_eq!(conn.recv().await.unwrap().unwrap(), big);
-        conn.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn non_upgrade_answer_is_a_status_error() {
-        let listener = Listener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
-        tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut sink = [0u8; 1024];
-            let _ = sock.read(&mut sink).await;
-            sock.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
-                .await
-                .unwrap();
+    #[test]
+    fn handshake_echo_and_close_roundtrip() {
+        crate::carrier::block_on(async {
+            let addr = echo_server();
+            let mut conn = connect(&addr).await.unwrap();
+            conn.send(b"one").await.unwrap();
+            // The server's ping rides ahead of the echo; recv answers it
+            // internally and still yields the binary message.
+            assert_eq!(conn.recv().await.unwrap().unwrap(), b"one");
+            let big = vec![7u8; 70_000];
+            conn.send(&big).await.unwrap();
+            assert_eq!(conn.recv().await.unwrap().unwrap(), big);
+            conn.close().await.unwrap();
         });
-        let err = connect(&addr).await.unwrap_err();
-        assert!(matches!(err, Error::Status(400)));
     }
 
-    #[tokio::test]
-    async fn wrong_accept_key_is_refused() {
-        let listener = Listener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
-        tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut sink = [0u8; 1024];
-            let _ = sock.read(&mut sink).await;
-            sock.write_all(
-                b"HTTP/1.1 101 Switching Protocols\r\n\
+    #[test]
+    fn non_upgrade_answer_is_a_status_error() {
+        crate::carrier::block_on(async {
+            let listener = Listener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap().to_string();
+            std::thread::spawn(move || {
+                crate::carrier::block_on(async move {
+                    let (mut sock, _) = listener.accept().await.unwrap();
+                    let mut sink = [0u8; 1024];
+                    let _ = sock.read(&mut sink).await;
+                    sock.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                        .await
+                        .unwrap();
+                });
+            });
+            let err = connect(&addr).await.unwrap_err();
+            assert!(matches!(err, Error::Status(400)));
+        });
+    }
+
+    #[test]
+    fn wrong_accept_key_is_refused() {
+        crate::carrier::block_on(async {
+            let listener = Listener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap().to_string();
+            std::thread::spawn(move || {
+                crate::carrier::block_on(async move {
+                    let (mut sock, _) = listener.accept().await.unwrap();
+                    let mut sink = [0u8; 1024];
+                    let _ = sock.read(&mut sink).await;
+                    sock.write_all(
+                        b"HTTP/1.1 101 Switching Protocols\r\n\
                   sec-websocket-accept: bogus\r\n\r\n",
-            )
-            .await
-            .unwrap();
+                    )
+                    .await
+                    .unwrap();
+                });
+            });
+            let err = connect(&addr).await.unwrap_err();
+            assert!(matches!(err, Error::Http("bad sec-websocket-accept")));
         });
-        let err = connect(&addr).await.unwrap_err();
-        assert!(matches!(err, Error::Http("bad sec-websocket-accept")));
     }
 }
