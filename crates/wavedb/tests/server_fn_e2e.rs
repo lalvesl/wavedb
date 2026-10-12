@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 
-use tokio::sync::oneshot;
+use futures::channel::oneshot;
 use wavedb::prelude::*;
 use wavedb_quick_node::{Bound, Server};
 
@@ -83,11 +83,7 @@ fn start(dir: PathBuf) -> Node {
     let (info_tx, info_rx) = mpsc::channel();
     let (stop, stop_rx) = oneshot::channel::<()>();
     let thread = thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build runtime");
-        rt.block_on(async move {
+        wavedb_platform::carrier::block_on(async move {
             let bound: Bound<_> = Server::new(REGISTRY)
                 .secret(SECRET)
                 .data_dir(&dir)
@@ -109,28 +105,30 @@ fn start(dir: PathBuf) -> Node {
     Node { addr, stop, thread }
 }
 
-#[tokio::test]
-async fn server_function_runs_on_the_node() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let node = start(dir.path().to_path_buf());
-    let db = Db::connect(
-        node.addr.to_string(),
-        U48::from(TENANT),
-        U48::from(TENANT),
-    )
-    .await
-    .expect("connect")
-    .with_access_token(access_token());
+#[test]
+fn server_function_runs_on_the_node() {
+    wavedb_platform::carrier::block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let node = start(dir.path().to_path_buf());
+        let db = Db::connect(
+            node.addr.to_string(),
+            U48::from(TENANT),
+            U48::from(TENANT),
+        )
+        .await
+        .expect("connect")
+        .with_access_token(access_token());
 
-    // Empty before any write.
-    assert_eq!(get_city(&db).await.expect("get_city"), "");
+        // Empty before any write.
+        assert_eq!(get_city(&db).await.expect("get_city"), "");
 
-    // The function body runs node-side, upserts Profile, returns the value.
-    let stored = set_city(&db, "Lisbon".into()).await.expect("set_city");
-    assert_eq!(stored, "Lisbon");
+        // The function body runs node-side, upserts Profile, returns the value.
+        let stored = set_city(&db, "Lisbon".into()).await.expect("set_city");
+        assert_eq!(stored, "Lisbon");
 
-    // A fresh call sees the persisted state.
-    assert_eq!(get_city(&db).await.expect("get_city"), "Lisbon");
+        // A fresh call sees the persisted state.
+        assert_eq!(get_city(&db).await.expect("get_city"), "Lisbon");
 
-    node.shutdown();
+        node.shutdown();
+    });
 }
