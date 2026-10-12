@@ -518,190 +518,225 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn sync_navigates_each_topic_from_its_cursor() {
-        use wavedb_net::sync::SyncReply;
-        use wavedb_net::ws::EventKind;
+    #[test]
+    fn sync_navigates_each_topic_from_its_cursor() {
+        wavedb_platform::carrier::block_on(async {
+            use wavedb_net::sync::SyncReply;
+            use wavedb_net::ws::EventKind;
 
-        let store = MemStore::default();
-        let auth =
-            Auth::Token(token(42, unix_now() + 60, TokenPurpose::Access));
-        // A `None` cursor registers: the tail comes back, no events.
-        let Response::Ok(Reply::Returned(bytes)) =
-            handle(&OneHash, &store, &SECRET, sync_request(auth.clone(), None))
-                .await
-        else {
-            panic!("sync must answer with a return");
-        };
-        let reply: SyncReply = wavedb_core::wire::from_wire(&bytes).unwrap();
-        assert!(reply.events.is_empty());
-        assert_eq!(reply.cursors.first().map(|(_, c)| *c), Some(40));
+            let store = MemStore::default();
+            let auth =
+                Auth::Token(token(42, unix_now() + 60, TokenPurpose::Access));
+            // A `None` cursor registers: the tail comes back, no events.
+            let Response::Ok(Reply::Returned(bytes)) = handle(
+                &OneHash,
+                &store,
+                &SECRET,
+                sync_request(auth.clone(), None),
+            )
+            .await
+            else {
+                panic!("sync must answer with a return");
+            };
+            let reply: SyncReply =
+                wavedb_core::wire::from_wire(&bytes).unwrap();
+            assert!(reply.events.is_empty());
+            assert_eq!(reply.cursors.first().map(|(_, c)| *c), Some(40));
 
-        // A cursored sync navigates: the canned step answers one saved and
-        // one removed change past it, and the cursor advances.
-        let Response::Ok(Reply::Returned(bytes)) =
-            handle(&OneHash, &store, &SECRET, sync_request(auth, Some(40)))
-                .await
-        else {
-            panic!("sync must answer with a return");
-        };
-        let reply: SyncReply = wavedb_core::wire::from_wire(&bytes).unwrap();
-        assert_eq!(reply.events.len(), 2);
-        assert_eq!(reply.events[0].kind, EventKind::Saved);
-        assert!(
-            reply.events[0].meta.is_some(),
-            "navigated saves carry the node metadata for verbatim adoption"
-        );
-        assert_eq!(reply.events[1].kind, EventKind::Removed(42));
-        assert_eq!(reply.cursors.first().map(|(_, c)| *c), Some(42));
+            // A cursored sync navigates: the canned step answers one saved and
+            // one removed change past it, and the cursor advances.
+            let Response::Ok(Reply::Returned(bytes)) =
+                handle(&OneHash, &store, &SECRET, sync_request(auth, Some(40)))
+                    .await
+            else {
+                panic!("sync must answer with a return");
+            };
+            let reply: SyncReply =
+                wavedb_core::wire::from_wire(&bytes).unwrap();
+            assert_eq!(reply.events.len(), 2);
+            assert_eq!(reply.events[0].kind, EventKind::Saved);
+            assert!(
+                reply.events[0].meta.is_some(),
+                "navigated saves carry the node metadata for verbatim adoption"
+            );
+            assert_eq!(reply.events[1].kind, EventKind::Removed(42));
+            assert_eq!(reply.cursors.first().map(|(_, c)| *c), Some(42));
+        });
     }
 
-    #[tokio::test]
-    async fn a_command_piggybacks_the_sync_delta_for_declared_topics() {
-        use wavedb_net::sync::{SyncReply, TopicCursor};
-        use wavedb_net::ws::{EventKind, Topic};
+    #[test]
+    fn a_command_piggybacks_the_sync_delta_for_declared_topics() {
+        wavedb_platform::carrier::block_on(async {
+            use wavedb_net::sync::{SyncReply, TopicCursor};
+            use wavedb_net::ws::{EventKind, Topic};
 
-        let store = MemStore::default();
-        let auth =
-            Auth::Token(token(42, unix_now() + 60, TokenPurpose::Access));
+            let store = MemStore::default();
+            let auth =
+                Auth::Token(token(42, unix_now() + 60, TokenPurpose::Access));
 
-        // A plain command with no declared topics: the reply alone, no delta.
-        let plain = super::handle(
-            &OneHash,
-            &store,
-            &crate::shard::OwnerLocks::new(),
-            &SECRET,
-            request(auth.clone(), 0x1234),
-        )
-        .await;
-        assert_eq!(plain.response, Response::Ok(Reply::Value(Some(vec![42]))));
-        assert!(plain.sync.is_none(), "no topics declared → no piggyback");
+            // A plain command with no declared topics: the reply alone, no delta.
+            let plain = super::handle(
+                &OneHash,
+                &store,
+                &crate::shard::OwnerLocks::new(),
+                &SECRET,
+                request(auth.clone(), 0x1234),
+            )
+            .await;
+            assert_eq!(
+                plain.response,
+                Response::Ok(Reply::Value(Some(vec![42])))
+            );
+            assert!(plain.sync.is_none(), "no topics declared → no piggyback");
 
-        // The same command now declares a watched topic at cursor 40: the
-        // command still answers, and the navigation past 40 rides alongside.
-        let mut req = request(auth, 0x1234);
-        req.sync = vec![TopicCursor {
-            topic: Topic {
-                struct_hash: 0x1234,
-                pivot: None,
-            },
-            since: Some(40),
-        }];
-        let answer = super::handle(
-            &OneHash,
-            &store,
-            &crate::shard::OwnerLocks::new(),
-            &SECRET,
-            req,
-        )
-        .await;
-        assert_eq!(
-            answer.response,
-            Response::Ok(Reply::Value(Some(vec![42]))),
-            "the command's own reply is unchanged by the piggyback"
-        );
-        let delta: SyncReply = wavedb_core::wire::from_wire(
-            &answer.sync.expect("a sync delta rides the reply"),
-        )
-        .unwrap();
-        assert_eq!(delta.events.len(), 2, "the canned saved + removed changes");
-        assert_eq!(delta.events[0].kind, EventKind::Saved);
-        assert_eq!(delta.events[1].kind, EventKind::Removed(42));
-        assert_eq!(delta.cursors.first().map(|(_, c)| *c), Some(42));
+            // The same command now declares a watched topic at cursor 40: the
+            // command still answers, and the navigation past 40 rides alongside.
+            let mut req = request(auth, 0x1234);
+            req.sync = vec![TopicCursor {
+                topic: Topic {
+                    struct_hash: 0x1234,
+                    pivot: None,
+                },
+                since: Some(40),
+            }];
+            let answer = super::handle(
+                &OneHash,
+                &store,
+                &crate::shard::OwnerLocks::new(),
+                &SECRET,
+                req,
+            )
+            .await;
+            assert_eq!(
+                answer.response,
+                Response::Ok(Reply::Value(Some(vec![42]))),
+                "the command's own reply is unchanged by the piggyback"
+            );
+            let delta: SyncReply = wavedb_core::wire::from_wire(
+                &answer.sync.expect("a sync delta rides the reply"),
+            )
+            .unwrap();
+            assert_eq!(
+                delta.events.len(),
+                2,
+                "the canned saved + removed changes"
+            );
+            assert_eq!(delta.events[0].kind, EventKind::Saved);
+            assert_eq!(delta.events[1].kind, EventKind::Removed(42));
+            assert_eq!(delta.cursors.first().map(|(_, c)| *c), Some(42));
+        });
     }
 
-    #[tokio::test]
-    async fn anonymous_sync_is_unauthorized() {
-        let store = MemStore::default();
-        let Response::Err(e) =
-            handle(&OneHash, &store, &SECRET, sync_request(anon(), None)).await
-        else {
-            panic!("must refuse");
-        };
-        assert_eq!(e.kind, NodeErrorKind::Unauthorized);
+    #[test]
+    fn anonymous_sync_is_unauthorized() {
+        wavedb_platform::carrier::block_on(async {
+            let store = MemStore::default();
+            let Response::Err(e) =
+                handle(&OneHash, &store, &SECRET, sync_request(anon(), None))
+                    .await
+            else {
+                panic!("must refuse");
+            };
+            assert_eq!(e.kind, NodeErrorKind::Unauthorized);
+        });
     }
 
-    #[tokio::test]
-    async fn verified_token_reaches_the_engine_as_its_user() {
-        let store = MemStore::default();
-        let auth =
-            Auth::Token(token(42, unix_now() + 60, TokenPurpose::Access));
-        let resp =
-            handle(&OneHash, &store, &SECRET, request(auth, 0x1234)).await;
-        assert_eq!(resp, Response::Ok(Reply::Value(Some(vec![42]))));
+    #[test]
+    fn verified_token_reaches_the_engine_as_its_user() {
+        wavedb_platform::carrier::block_on(async {
+            let store = MemStore::default();
+            let auth =
+                Auth::Token(token(42, unix_now() + 60, TokenPurpose::Access));
+            let resp =
+                handle(&OneHash, &store, &SECRET, request(auth, 0x1234)).await;
+            assert_eq!(resp, Response::Ok(Reply::Value(Some(vec![42]))));
+        });
     }
 
-    #[tokio::test]
-    async fn anonymous_reaches_the_engine_as_the_max_user() {
-        // The tier itself passes gate 1; refusing non-public work is the
-        // engine arms' guard (proven in the macro/e2e layers).
-        let store = MemStore::default();
-        let resp =
-            handle(&OneHash, &store, &SECRET, request(anon(), 0x1234)).await;
-        assert_eq!(resp, Response::Ok(Reply::Value(Some(vec![0xFF]))));
+    #[test]
+    fn anonymous_reaches_the_engine_as_the_max_user() {
+        wavedb_platform::carrier::block_on(async {
+            // The tier itself passes gate 1; refusing non-public work is the
+            // engine arms' guard (proven in the macro/e2e layers).
+            let store = MemStore::default();
+            let resp =
+                handle(&OneHash, &store, &SECRET, request(anon(), 0x1234))
+                    .await;
+            assert_eq!(resp, Response::Ok(Reply::Value(Some(vec![0xFF]))));
+        });
     }
 
-    #[tokio::test]
-    async fn expired_token_is_unauthorized() {
-        let store = MemStore::default();
-        let auth = Auth::Token(token(42, unix_now() - 1, TokenPurpose::Access));
-        let Response::Err(e) =
-            handle(&OneHash, &store, &SECRET, request(auth, 0x1234)).await
-        else {
-            panic!("must refuse");
-        };
-        assert_eq!(e.kind, NodeErrorKind::Unauthorized);
+    #[test]
+    fn expired_token_is_unauthorized() {
+        wavedb_platform::carrier::block_on(async {
+            let store = MemStore::default();
+            let auth =
+                Auth::Token(token(42, unix_now() - 1, TokenPurpose::Access));
+            let Response::Err(e) =
+                handle(&OneHash, &store, &SECRET, request(auth, 0x1234)).await
+            else {
+                panic!("must refuse");
+            };
+            assert_eq!(e.kind, NodeErrorKind::Unauthorized);
+        });
     }
 
-    #[tokio::test]
-    async fn refresh_token_is_not_an_access_token() {
-        let store = MemStore::default();
-        let auth =
-            Auth::Token(token(42, unix_now() + 60, TokenPurpose::Refresh));
-        let Response::Err(e) =
-            handle(&OneHash, &store, &SECRET, request(auth, 0x1234)).await
-        else {
-            panic!("must refuse");
-        };
-        assert_eq!(e.kind, NodeErrorKind::Unauthorized);
+    #[test]
+    fn refresh_token_is_not_an_access_token() {
+        wavedb_platform::carrier::block_on(async {
+            let store = MemStore::default();
+            let auth =
+                Auth::Token(token(42, unix_now() + 60, TokenPurpose::Refresh));
+            let Response::Err(e) =
+                handle(&OneHash, &store, &SECRET, request(auth, 0x1234)).await
+            else {
+                panic!("must refuse");
+            };
+            assert_eq!(e.kind, NodeErrorKind::Unauthorized);
+        });
     }
 
-    #[tokio::test]
-    async fn foreign_secret_token_is_unauthorized() {
-        let store = MemStore::default();
-        let forged = sign(
-            &[1; 32],
-            &AccessClaims {
-                user: U48::from(42u32),
-                tenant: U48::from(42u32),
-                expires_at: unix_now() + 60,
-                purpose: TokenPurpose::Access,
-                session: 0,
-                nonce: 0,
-            },
-        );
-        let Response::Err(e) = handle(
-            &OneHash,
-            &store,
-            &SECRET,
-            request(Auth::Token(forged), 0x1234),
-        )
-        .await
-        else {
-            panic!("must refuse");
-        };
-        assert_eq!(e.kind, NodeErrorKind::Unauthorized);
+    #[test]
+    fn foreign_secret_token_is_unauthorized() {
+        wavedb_platform::carrier::block_on(async {
+            let store = MemStore::default();
+            let forged = sign(
+                &[1; 32],
+                &AccessClaims {
+                    user: U48::from(42u32),
+                    tenant: U48::from(42u32),
+                    expires_at: unix_now() + 60,
+                    purpose: TokenPurpose::Access,
+                    session: 0,
+                    nonce: 0,
+                },
+            );
+            let Response::Err(e) = handle(
+                &OneHash,
+                &store,
+                &SECRET,
+                request(Auth::Token(forged), 0x1234),
+            )
+            .await
+            else {
+                panic!("must refuse");
+            };
+            assert_eq!(e.kind, NodeErrorKind::Unauthorized);
+        });
     }
 
-    #[tokio::test]
-    async fn unknown_hash_refused_at_the_header_gate() {
-        let store = MemStore::default();
-        let Response::Err(e) =
-            handle(&OneHash, &store, &SECRET, request(anon(), 0x9999)).await
-        else {
-            panic!("must refuse");
-        };
-        assert_eq!(e.kind, NodeErrorKind::UnknownStructHash);
-        assert_eq!(e.struct_hash, 0x9999);
+    #[test]
+    fn unknown_hash_refused_at_the_header_gate() {
+        wavedb_platform::carrier::block_on(async {
+            let store = MemStore::default();
+            let Response::Err(e) =
+                handle(&OneHash, &store, &SECRET, request(anon(), 0x9999))
+                    .await
+            else {
+                panic!("must refuse");
+            };
+            assert_eq!(e.kind, NodeErrorKind::UnknownStructHash);
+            assert_eq!(e.struct_hash, 0x9999);
+        });
     }
 }
