@@ -33,11 +33,7 @@ fn node_process() {
     let Some(dir) = std::env::var_os("WAVEDB_NODE_DIR") else {
         return;
     };
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build runtime");
-    rt.block_on(async move {
+    wavedb_platform::carrier::block_on(async move {
         let bound = wavedb_quick_node::Server::new(REGISTRY)
             .secret(DEMO_SECRET)
             .data_dir(&dir)
@@ -115,79 +111,81 @@ macro_rules! next_event {
     };
 }
 
-#[tokio::test]
-async fn polling_watcher_sees_mutations_and_keeps_the_cache_warm() {
-    let node_dir = tempfile::tempdir().expect("node dir");
-    let cache_dir = tempfile::tempdir().expect("cache dir");
-    let (mut node, addr) = spawn_node(node_dir.path());
-    let tenant = U48::from(TENANT);
+#[test]
+fn polling_watcher_sees_mutations_and_keeps_the_cache_warm() {
+    wavedb_platform::carrier::block_on(async {
+        let node_dir = tempfile::tempdir().expect("node dir");
+        let cache_dir = tempfile::tempdir().expect("cache dir");
+        let (mut node, addr) = spawn_node(node_dir.path());
+        let tenant = U48::from(TENANT);
 
-    // B: the watching client — cache + POLLING watches (no WebSocket).
-    let b = Db::open_at(
-        CLIENT_REGISTRY,
-        addr.to_string(),
-        tenant,
-        tenant,
-        cache_dir.path(),
-    )
-    .await
-    .expect("open the watcher client")
-    .with_access_token(access_token())
-    .watch_via_polling(Duration::from_millis(200));
-    // A: another device of the same tenant, plain transport.
-    let a = Db::connect(addr.to_string(), tenant, tenant)
+        // B: the watching client — cache + POLLING watches (no WebSocket).
+        let b = Db::open_at(
+            CLIENT_REGISTRY,
+            addr.to_string(),
+            tenant,
+            tenant,
+            cache_dir.path(),
+        )
         .await
-        .expect("connect the writer client")
-        .with_access_token(access_token());
+        .expect("open the watcher client")
+        .with_access_token(access_token())
+        .watch_via_polling(Duration::from_millis(200));
+        // A: another device of the same tenant, plain transport.
+        let a = Db::connect(addr.to_string(), tenant, tenant)
+            .await
+            .expect("connect the writer client")
+            .with_access_token(access_token());
 
-    // Bootstrap, then watch — both watches share one poll loop.
-    open_book(&a, "Ada".into()).await.expect("open_book");
-    let book = ContactBook::get(&b).await.expect("get").expect("exists");
-    let mut book_watch =
-        b.watch_unique::<ContactBook>().await.expect("watch anchor");
-    let mut contact_watch = b
-        .watch_collection::<Contact>(book.contacts)
-        .await
-        .expect("watch collection");
+        // Bootstrap, then watch — both watches share one poll loop.
+        open_book(&a, "Ada".into()).await.expect("open_book");
+        let book = ContactBook::get(&b).await.expect("get").expect("exists");
+        let mut book_watch =
+            b.watch_unique::<ContactBook>().await.expect("watch anchor");
+        let mut contact_watch = b
+            .watch_collection::<Contact>(book.contacts)
+            .await
+            .expect("watch collection");
 
-    // A mutates; B's next tick navigates everything past its cursor.
-    let col = Contact::collection(book.contacts);
-    let grace_nyc = contact("Grace", "555-0001", "NYC");
-    let grace_ldn = contact("Grace", "555-0001", "London");
-    let grace_id = col.insert(&a, &grace_nyc).await.expect("insert grace");
-    col.save(&a, grace_id, &grace_ldn)
-        .await
-        .expect("update grace");
-    let renamed = ContactBook {
-        owner: "Ada Lovelace".into(),
-        contacts: book.contacts,
-    };
-    renamed.save(&a).await.expect("save the holder");
+        // A mutates; B's next tick navigates everything past its cursor.
+        let col = Contact::collection(book.contacts);
+        let grace_nyc = contact("Grace", "555-0001", "NYC");
+        let grace_ldn = contact("Grace", "555-0001", "London");
+        let grace_id = col.insert(&a, &grace_nyc).await.expect("insert grace");
+        col.save(&a, grace_id, &grace_ldn)
+            .await
+            .expect("update grace");
+        let renamed = ContactBook {
+            owner: "Ada Lovelace".into(),
+            contacts: book.contacts,
+        };
+        renamed.save(&a).await.expect("save the holder");
 
-    // Both writes usually land inside one tick window and coalesce to the
-    // live state; a tick between them delivers both states. Either way the
-    // watcher converges on London — the guaranteed contract.
-    let mut event = next_event!(contact_watch);
-    if event == WatchEvent::Saved(grace_id, grace_nyc.clone()) {
-        event = next_event!(contact_watch);
-    }
-    assert_eq!(event, WatchEvent::Saved(grace_id, grace_ldn.clone()));
-    let WatchEvent::Saved(_, seen) = next_event!(book_watch) else {
-        panic!("the anchor watcher must see the save");
-    };
-    assert_eq!(seen, renamed);
+        // Both writes usually land inside one tick window and coalesce to the
+        // live state; a tick between them delivers both states. Either way the
+        // watcher converges on London — the guaranteed contract.
+        let mut event = next_event!(contact_watch);
+        if event == WatchEvent::Saved(grace_id, grace_nyc.clone()) {
+            event = next_event!(contact_watch);
+        }
+        assert_eq!(event, WatchEvent::Saved(grace_id, grace_ldn.clone()));
+        let WatchEvent::Saved(_, seen) = next_event!(book_watch) else {
+            panic!("the anchor watcher must see the save");
+        };
+        assert_eq!(seen, renamed);
 
-    // ── Node down: the poll goes silent; the mirrors answer warm ─────────
-    node.kill().expect("kill the node");
-    node.wait().expect("reap the node");
+        // ── Node down: the poll goes silent; the mirrors answer warm ─────────
+        node.kill().expect("kill the node");
+        node.wait().expect("reap the node");
 
-    let warm = ContactBook::get(&b).await.expect("warm unique read");
-    assert_eq!(warm, Some(renamed), "the watched save, not the bootstrap");
-    let warm_walk: Vec<Contact> =
-        col.all(&b).try_collect().await.expect("warm walk");
-    assert_eq!(
-        warm_walk,
-        vec![grace_ldn],
-        "built by poll-watch mirrors alone — B never walked online"
-    );
+        let warm = ContactBook::get(&b).await.expect("warm unique read");
+        assert_eq!(warm, Some(renamed), "the watched save, not the bootstrap");
+        let warm_walk: Vec<Contact> =
+            col.all(&b).try_collect().await.expect("warm walk");
+        assert_eq!(
+            warm_walk,
+            vec![grace_ldn],
+            "built by poll-watch mirrors alone — B never walked online"
+        );
+    });
 }
