@@ -30,9 +30,8 @@ embassy-sync.workspace = true
 embassy-futures.workspace = true
 async-channel.workspace = true
 futures.workspace = true
-# Only `OwnerLocks` (RFC 0067 replaces it); sockets, channels, timers and
-# the executor no longer come from here.
-tokio = { workspace = true, features = ["sync"] }
+# Fixed-capacity tables: a shard's held owners (`shard::lock`).
+heapless.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -58,7 +58,6 @@ wavedb-wire-derive = { path = "crates/wavedb-wire-derive" }
 # `Date.now()`/`fetch`). Everything above it stays target-independent.
 wavedb-platform = { path = "crates/wavedb-platform" }
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["full"] }
 # RFC 0066 — the runtime pieces replacing tokio, one narrow crate each.
 # Protocol code (HTTP tunnel, WebSocket codec) is generic over
 # `embedded-io-async`, so the same code can sit on `embassy-net` someday;
@@ -69,6 +68,7 @@ async-io = "2.6.0"
 # Queues: `embassy-sync` within one thread (no lock at all), lock-free
 # `async-channel` across threads; `embassy-futures` for `select`.
 embassy-sync = "0.8.0"
+heapless = "0.9.3"
 embassy-futures = "0.1.2"
 async-channel = "2.5.0"
 # Timers (`platform::time::sleep`), on its `std` driver natively; the browser

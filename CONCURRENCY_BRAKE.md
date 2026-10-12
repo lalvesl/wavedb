@@ -75,30 +75,34 @@ queue means everything is settled).
 
 `crates/wavedb-quick-node/src/shard/lock.rs` — `OwnerLocks`.
 
-An async mutex per owner, held for the **whole operation** rather than for any
-single read or write. The lock is `tokio`'s because it has to survive the
-operation's awaits, which a `RefCell` cannot do and a blocking mutex would
-deadlock on.
+An async lock per owner, held for the **whole operation** rather than for any
+single read or write. It has to survive the operation's awaits, which a
+`RefCell` borrow cannot do and a blocking mutex would deadlock on.
 
-Uncontended it is a fast path. Contended, it parks the task and the shard runs
-something else, which is the point: **the brake is on one collection, not on the
-shard.**
+Uncontended it is a map insert. Contended, the task joins the owner's **chain**
+of waiters with its `Waker` and leaves the run queue, and the shard runs
+something else, which is the point: **the brake is on one owner, not on the
+shard.** A release hands the owner to the head of the chain and wakes only that
+task, so waiters run in arrival order and none is polled for nothing.
+(`embassy-sync`'s `Mutex` keeps one waker, so its waiters wake each other in a
+loop; it is not used.) The chain's links are slot indices into a fixed array,
+not pointers between futures, so it needs no `unsafe`; the array is sized at
+compile time by the job pool, since every waiter is a job.
 
-### One table for the node, not one per thread
+### One table per thread
 
-The *table* naming the owners is a plain `std` mutex behind an `Arc`, and every
-serving thread holds the same one — the accept loop and every shard worker.
+Only shards execute — a WebSocket `Call` is routed like a POST — and **the
+router keys on exactly this key**, so every operation on one owner lands on one
+shard, and a shard runs on one thread. Two operations on one owner therefore
+always meet on one thread, and a table per thread excludes everything a table
+for the node would, with no atomics and nothing shared. Today a thread carries
+one shard, so the table lives in its worker; under RFC 0067 a thread's shards
+share one. The table is runtime state only and starts empty with the thread.
 
-That is not a detail. Once ingress routing exists, two operations on one owner
-can be picked up by two threads; a per-thread table would hand each its own
-lock and exclude neither, which is the silent loss below with more machinery in
-front of it. Exclusion is a property of the owner, so the table naming owners
-has to be one. Its critical section is a map lookup with no await inside, so
-blocking there costs nanoseconds and cannot deadlock.
-
-**The router keys on exactly this key.** Route one way and brake the other and
-the two locks are different locks. Both narrow to the Pivot together or neither
-does.
+The condition is the routing: route one way and brake the other and the two
+locks are different locks. Both narrow to the Pivot together or neither does,
+and an owner reached from another thread (RFC 0067) needs a lease, not this
+table.
 
 ### Why the key is the type and not the Pivot
 
@@ -125,13 +129,15 @@ already lists as worth doing on its own.
   overwrite.
 - **Wired.** The node runs entirely behind the disk actor: `Server` no longer
   holds a `PageStore`, a POST is routed to a shard worker
-  (`shard::Router`), and `dispatch::handle` takes the lock around the whole
-  operation. `serve_ws`'s `Call` arm takes it too — that path executed
-  unbraked even before routing existed, which was a hole in its own right.
+  (`shard::Router`), and `dispatch::call` takes the lock around the whole
+  operation. A WebSocket `Call` is routed the same way (`Router::call`,
+  carrying the caller bound at `Hello`) and takes the same lock — that path
+  once executed unbraked on the accept thread, which was a hole in its own
+  right.
 - **Only shards cache.** `ShardStore` remembers *absence*, which is sound only
   while one holder reaches a record. Everything that is not a shard — node-side
-  seeding, the accept loop's WebSocket sessions — gets the cacheless
-  `Shards::store()`. A second caching store over one record is how a stale
+  seeding before serving — gets the cacheless `Shards::store()`; the accept
+  thread has no store at all. A second caching store over one record is how a stale
   `None` outlives another holder's insert.
 
 ### Still coarser than it should be
