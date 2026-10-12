@@ -291,93 +291,112 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn masked_roundtrip_across_every_length_form() {
-        // Sizes straddling the 7-bit / 16-bit / 64-bit length encodings.
-        const SIZES: [usize; 6] = [0, 5, 125, 126, 65_535, 65_536];
-        let (mut client, server) = pair().await.unwrap();
-        // Write from a task: the larger payloads exceed the socket buffers, so
-        // the writer must make progress against a concurrent reader.
-        let writer = tokio::spawn(async move {
+    #[test]
+    fn masked_roundtrip_across_every_length_form() {
+        crate::carrier::block_on(async {
+            // Sizes straddling the 7-bit / 16-bit / 64-bit length encodings.
+            const SIZES: [usize; 6] = [0, 5, 125, 126, 65_535, 65_536];
+            let (mut client, server) = pair().await.unwrap();
+            // Write from a task: the larger payloads exceed the socket buffers, so
+            // the writer must make progress against a concurrent reader.
+            let writer = std::thread::spawn(move || {
+                crate::carrier::block_on(async move {
+                    for len in SIZES {
+                        write_message(
+                            &mut client,
+                            OP_BINARY,
+                            &vec![0xA5u8; len],
+                            true,
+                        )
+                        .await
+                        .unwrap();
+                    }
+                });
+            });
+            let mut msgs = Messages::new(server);
             for len in SIZES {
-                write_message(&mut client, OP_BINARY, &vec![0xA5u8; len], true)
-                    .await
-                    .unwrap();
+                let msg = msgs.next(true).await.unwrap().unwrap();
+                assert_eq!(msg, Msg::Binary(vec![0xA5u8; len]));
             }
+            writer.join().unwrap();
         });
-        let mut msgs = Messages::new(server);
-        for len in SIZES {
-            let msg = msgs.next(true).await.unwrap().unwrap();
-            assert_eq!(msg, Msg::Binary(vec![0xA5u8; len]));
-        }
-        writer.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn unmasked_frame_refused_when_masking_is_required() {
-        let (mut client, server) = pair().await.unwrap();
-        write_message(&mut client, OP_BINARY, b"bare", false)
-            .await
-            .unwrap();
-        let mut msgs = Messages::new(server);
-        let err = msgs.next(true).await.unwrap_err();
-        assert!(matches!(err, Error::Http("unmasked client frame")));
+    #[test]
+    fn unmasked_frame_refused_when_masking_is_required() {
+        crate::carrier::block_on(async {
+            let (mut client, server) = pair().await.unwrap();
+            write_message(&mut client, OP_BINARY, b"bare", false)
+                .await
+                .unwrap();
+            let mut msgs = Messages::new(server);
+            let err = msgs.next(true).await.unwrap_err();
+            assert!(matches!(err, Error::Http("unmasked client frame")));
+        });
     }
 
-    #[tokio::test]
-    async fn fragmented_message_reassembles_across_a_ping() {
-        use embedded_io_async::Write;
-        let (mut client, server) = pair().await.unwrap();
-        // Hand-built fragments: binary "he" (no FIN), a ping, then the
-        // final continuation "llo" (FIN) — unmasked for byte clarity.
-        client.write_all(&[0x02, 2, b'h', b'e']).await.unwrap();
-        client.write_all(&[0x89, 1, b'!']).await.unwrap();
-        client
-            .write_all(&[0x80, 3, b'l', b'l', b'o'])
-            .await
-            .unwrap();
-        let mut msgs = Messages::new(server);
-        assert_eq!(
-            msgs.next(false).await.unwrap().unwrap(),
-            Msg::Ping(vec![b'!'])
-        );
-        assert_eq!(
-            msgs.next(false).await.unwrap().unwrap(),
-            Msg::Binary(b"hello".to_vec())
-        );
+    #[test]
+    fn fragmented_message_reassembles_across_a_ping() {
+        crate::carrier::block_on(async {
+            use embedded_io_async::Write;
+            let (mut client, server) = pair().await.unwrap();
+            // Hand-built fragments: binary "he" (no FIN), a ping, then the
+            // final continuation "llo" (FIN) — unmasked for byte clarity.
+            client.write_all(&[0x02, 2, b'h', b'e']).await.unwrap();
+            client.write_all(&[0x89, 1, b'!']).await.unwrap();
+            client
+                .write_all(&[0x80, 3, b'l', b'l', b'o'])
+                .await
+                .unwrap();
+            let mut msgs = Messages::new(server);
+            assert_eq!(
+                msgs.next(false).await.unwrap().unwrap(),
+                Msg::Ping(vec![b'!'])
+            );
+            assert_eq!(
+                msgs.next(false).await.unwrap().unwrap(),
+                Msg::Binary(b"hello".to_vec())
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn oversized_frame_is_capped_before_reading() {
-        use embedded_io_async::Write;
-        let (mut client, server) = pair().await.unwrap();
-        let mut head = vec![0x82u8, 127];
-        let too_big = u64::try_from(MAX_MESSAGE).unwrap() + 1;
-        head.extend_from_slice(&too_big.to_be_bytes());
-        client.write_all(&head).await.unwrap();
-        let mut msgs = Messages::new(server);
-        let err = msgs.next(false).await.unwrap_err();
-        assert!(matches!(err, Error::Http("ws frame too large")));
+    #[test]
+    fn oversized_frame_is_capped_before_reading() {
+        crate::carrier::block_on(async {
+            use embedded_io_async::Write;
+            let (mut client, server) = pair().await.unwrap();
+            let mut head = vec![0x82u8, 127];
+            let too_big = u64::try_from(MAX_MESSAGE).unwrap() + 1;
+            head.extend_from_slice(&too_big.to_be_bytes());
+            client.write_all(&head).await.unwrap();
+            let mut msgs = Messages::new(server);
+            let err = msgs.next(false).await.unwrap_err();
+            assert!(matches!(err, Error::Http("ws frame too large")));
+        });
     }
 
-    #[tokio::test]
-    async fn clean_close_between_frames_reads_as_none() {
-        let (client, server) = pair().await.unwrap();
-        drop(client);
-        let mut msgs = Messages::new(server);
-        assert!(msgs.next(false).await.unwrap().is_none());
+    #[test]
+    fn clean_close_between_frames_reads_as_none() {
+        crate::carrier::block_on(async {
+            let (client, server) = pair().await.unwrap();
+            drop(client);
+            let mut msgs = Messages::new(server);
+            assert!(msgs.next(false).await.unwrap().is_none());
+        });
     }
 
-    #[tokio::test]
-    async fn ping_payload_surfaces_for_the_caller_to_answer() {
-        let (mut client, server) = pair().await.unwrap();
-        write_message(&mut client, OP_PING, b"beat", true)
-            .await
-            .unwrap();
-        let mut msgs = Messages::new(server);
-        assert_eq!(
-            msgs.next(true).await.unwrap().unwrap(),
-            Msg::Ping(b"beat".to_vec())
-        );
+    #[test]
+    fn ping_payload_surfaces_for_the_caller_to_answer() {
+        crate::carrier::block_on(async {
+            let (mut client, server) = pair().await.unwrap();
+            write_message(&mut client, OP_PING, b"beat", true)
+                .await
+                .unwrap();
+            let mut msgs = Messages::new(server);
+            assert_eq!(
+                msgs.next(true).await.unwrap().unwrap(),
+                Msg::Ping(b"beat".to_vec())
+            );
+        });
     }
 }
