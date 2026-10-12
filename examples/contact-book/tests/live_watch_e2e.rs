@@ -30,11 +30,7 @@ fn node_process() {
     let Some(dir) = std::env::var_os("WAVEDB_NODE_DIR") else {
         return;
     };
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build runtime");
-    rt.block_on(async move {
+    wavedb_platform::carrier::block_on(async move {
         let bound = wavedb_quick_node::Server::new(REGISTRY)
             .secret(DEMO_SECRET)
             .data_dir(&dir)
@@ -113,112 +109,117 @@ macro_rules! next_event {
     };
 }
 
-#[tokio::test]
-async fn watcher_sees_remote_mutations_and_keeps_the_cache_warm() {
-    let node_dir = tempfile::tempdir().expect("node dir");
-    let cache_dir = tempfile::tempdir().expect("cache dir");
-    let (mut node, addr) = spawn_node(node_dir.path());
-    let tenant = U48::from(TENANT);
+#[test]
+fn watcher_sees_remote_mutations_and_keeps_the_cache_warm() {
+    wavedb_platform::carrier::block_on(async {
+        let node_dir = tempfile::tempdir().expect("node dir");
+        let cache_dir = tempfile::tempdir().expect("cache dir");
+        let (mut node, addr) = spawn_node(node_dir.path());
+        let tenant = U48::from(TENANT);
 
-    // B: the watching client, with its local cache. A: a plain transport
-    // handle — a different client of the same tenant (another device).
-    let b = Db::open_at(
-        CLIENT_REGISTRY,
-        addr.to_string(),
-        tenant,
-        tenant,
-        cache_dir.path(),
-    )
-    .await
-    .expect("open the watcher client")
-    .with_access_token(access_token());
-    let a = Db::connect(addr.to_string(), tenant, tenant)
+        // B: the watching client, with its local cache. A: a plain transport
+        // handle — a different client of the same tenant (another device).
+        let b = Db::open_at(
+            CLIENT_REGISTRY,
+            addr.to_string(),
+            tenant,
+            tenant,
+            cache_dir.path(),
+        )
         .await
-        .expect("connect the writer client")
+        .expect("open the watcher client")
         .with_access_token(access_token());
-
-    // A watch refuses a token-less handle immediately (the node would
-    // refuse the subscription anyway — this keeps the refusal typed).
-    let anon = Db::connect(addr.to_string(), tenant, tenant)
-        .await
-        .expect("connect anonymous");
-    assert!(matches!(
-        anon.watch_unique::<ContactBook>().await,
-        Err(wavedb::Error::Unauthorized(_))
-    ));
-
-    // Bootstrap: A opens the book; B reads it once to learn the pivot.
-    open_book(&a, "Ada".into()).await.expect("open_book");
-    let book = ContactBook::get(&b).await.expect("get").expect("exists");
-
-    // B's watchers — live from the moment these return (acked subscribe).
-    let mut book_watch =
-        b.watch_unique::<ContactBook>().await.expect("watch anchor");
-    let mut contact_watch = b
-        .watch_collection::<Contact>(book.contacts)
-        .await
-        .expect("watch collection");
-
-    // A mutates: insert, update, insert, remove, and a Unique save.
-    let col = Contact::collection(book.contacts);
-    let grace_nyc = contact("Grace", "555-0001", "NYC");
-    let grace_ldn = contact("Grace", "555-0001", "London");
-    let alan = contact("Alan", "555-0002", "London");
-    let grace_id = col.insert(&a, &grace_nyc).await.expect("insert grace");
-    col.save(&a, grace_id, &grace_ldn)
-        .await
-        .expect("update grace");
-    let alan_id = col.insert(&a, &alan).await.expect("insert alan");
-    assert!(col.remove(&a, alan_id).await.expect("remove alan"));
-    let renamed = ContactBook {
-        owner: "Ada Lovelace".into(),
-        contacts: book.contacts,
-    };
-    renamed.save(&a).await.expect("save the holder");
-
-    // B sees every mutation typed, in order, under the node's own ids.
-    assert_eq!(
-        next_event!(contact_watch),
-        WatchEvent::Saved(grace_id, grace_nyc)
-    );
-    assert_eq!(
-        next_event!(contact_watch),
-        WatchEvent::Saved(grace_id, grace_ldn.clone())
-    );
-    assert_eq!(next_event!(contact_watch), WatchEvent::Saved(alan_id, alan));
-    assert_eq!(next_event!(contact_watch), WatchEvent::Removed(alan_id));
-    let WatchEvent::Saved(_, seen_book) = next_event!(book_watch) else {
-        panic!("the anchor watcher must see the save");
-    };
-    assert_eq!(seen_book, renamed);
-
-    // ── Node down: the watcher's mirrors answer warm ─────────────────────
-    node.kill().expect("kill the node");
-    node.wait().expect("reap the node");
-
-    // The Unique holder: the watcher's mirror superseded B's earlier read.
-    let warm = ContactBook::get(&b).await.expect("warm unique read");
-    assert_eq!(warm, Some(renamed), "the watched save, not the bootstrap");
-
-    // The collection: B NEVER walked it online — everything below was put
-    // into the local engine by watch events alone.
-    let warm_walk: Vec<Contact> =
-        col.all(&b).try_collect().await.expect("warm walk");
-    assert_eq!(warm_walk, vec![grace_ldn.clone()], "insert+update−remove");
-    let warm_grace = col
-        .get(&b, grace_id)
-        .await
-        .expect("warm by-id read")
-        .expect("grace cached");
-    assert_eq!(warm_grace, grace_ldn);
-    // By-id resolution still answers for the removed record — bytes are
-    // never destroyed (remove only moves it to the dead tree, which the
-    // walk above excludes); the mirror preserved the node's semantics.
-    assert!(
-        col.get(&b, alan_id)
+        let a = Db::connect(addr.to_string(), tenant, tenant)
             .await
-            .expect("warm removed read")
-            .is_some(),
-        "a removed record keeps resolving by id (history stays navigable)"
-    );
+            .expect("connect the writer client")
+            .with_access_token(access_token());
+
+        // A watch refuses a token-less handle immediately (the node would
+        // refuse the subscription anyway — this keeps the refusal typed).
+        let anon = Db::connect(addr.to_string(), tenant, tenant)
+            .await
+            .expect("connect anonymous");
+        assert!(matches!(
+            anon.watch_unique::<ContactBook>().await,
+            Err(wavedb::Error::Unauthorized(_))
+        ));
+
+        // Bootstrap: A opens the book; B reads it once to learn the pivot.
+        open_book(&a, "Ada".into()).await.expect("open_book");
+        let book = ContactBook::get(&b).await.expect("get").expect("exists");
+
+        // B's watchers — live from the moment these return (acked subscribe).
+        let mut book_watch =
+            b.watch_unique::<ContactBook>().await.expect("watch anchor");
+        let mut contact_watch = b
+            .watch_collection::<Contact>(book.contacts)
+            .await
+            .expect("watch collection");
+
+        // A mutates: insert, update, insert, remove, and a Unique save.
+        let col = Contact::collection(book.contacts);
+        let grace_nyc = contact("Grace", "555-0001", "NYC");
+        let grace_ldn = contact("Grace", "555-0001", "London");
+        let alan = contact("Alan", "555-0002", "London");
+        let grace_id = col.insert(&a, &grace_nyc).await.expect("insert grace");
+        col.save(&a, grace_id, &grace_ldn)
+            .await
+            .expect("update grace");
+        let alan_id = col.insert(&a, &alan).await.expect("insert alan");
+        assert!(col.remove(&a, alan_id).await.expect("remove alan"));
+        let renamed = ContactBook {
+            owner: "Ada Lovelace".into(),
+            contacts: book.contacts,
+        };
+        renamed.save(&a).await.expect("save the holder");
+
+        // B sees every mutation typed, in order, under the node's own ids.
+        assert_eq!(
+            next_event!(contact_watch),
+            WatchEvent::Saved(grace_id, grace_nyc)
+        );
+        assert_eq!(
+            next_event!(contact_watch),
+            WatchEvent::Saved(grace_id, grace_ldn.clone())
+        );
+        assert_eq!(
+            next_event!(contact_watch),
+            WatchEvent::Saved(alan_id, alan)
+        );
+        assert_eq!(next_event!(contact_watch), WatchEvent::Removed(alan_id));
+        let WatchEvent::Saved(_, seen_book) = next_event!(book_watch) else {
+            panic!("the anchor watcher must see the save");
+        };
+        assert_eq!(seen_book, renamed);
+
+        // ── Node down: the watcher's mirrors answer warm ─────────────────────
+        node.kill().expect("kill the node");
+        node.wait().expect("reap the node");
+
+        // The Unique holder: the watcher's mirror superseded B's earlier read.
+        let warm = ContactBook::get(&b).await.expect("warm unique read");
+        assert_eq!(warm, Some(renamed), "the watched save, not the bootstrap");
+
+        // The collection: B NEVER walked it online — everything below was put
+        // into the local engine by watch events alone.
+        let warm_walk: Vec<Contact> =
+            col.all(&b).try_collect().await.expect("warm walk");
+        assert_eq!(warm_walk, vec![grace_ldn.clone()], "insert+update−remove");
+        let warm_grace = col
+            .get(&b, grace_id)
+            .await
+            .expect("warm by-id read")
+            .expect("grace cached");
+        assert_eq!(warm_grace, grace_ldn);
+        // By-id resolution still answers for the removed record — bytes are
+        // never destroyed (remove only moves it to the dead tree, which the
+        // walk above excludes); the mirror preserved the node's semantics.
+        assert!(
+            col.get(&b, alan_id)
+                .await
+                .expect("warm removed read")
+                .is_some(),
+            "a removed record keeps resolving by id (history stays navigable)"
+        );
+    });
 }
