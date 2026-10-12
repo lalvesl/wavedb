@@ -113,31 +113,39 @@ mod tests {
     /// The inbound policy: a client sending faster than its session handles
     /// stops being read once `WS_INBOUND_DEPTH` messages wait. The rest stay
     /// in the socket — the node does not buffer them for it.
-    #[tokio::test]
-    async fn a_full_inbound_queue_stops_the_reader() {
-        let (server, client) = pair().await.expect("socket pair");
-        let (read, _server_write) = server.split();
-        let (_client_read, mut write) = client.split();
-        let msg = to_wire(&ClientMsg::Unsubscribe(Topic {
-            struct_hash: 1,
-            pivot: None,
-        }));
-        for _ in 0..WS_INBOUND_DEPTH + 4 {
-            codec::write_message(&mut write, OP_BINARY, &msg, true)
-                .await
-                .expect("client write");
-        }
+    #[test]
+    fn a_full_inbound_queue_stops_the_reader() {
+        wavedb_platform::carrier::block_on(async {
+            let (server, client) = pair().await.expect("socket pair");
+            let (read, _server_write) = server.split();
+            let (_client_read, mut write) = client.split();
+            let msg = to_wire(&ClientMsg::Unsubscribe(Topic {
+                struct_hash: 1,
+                pivot: None,
+            }));
+            for _ in 0..WS_INBOUND_DEPTH + 4 {
+                codec::write_message(&mut write, OP_BINARY, &msg, true)
+                    .await
+                    .expect("client write");
+            }
 
-        let inbound = Rc::new(Inbound::new());
-        let reader = read_loop(read, Rc::clone(&inbound));
-        let settle = wavedb_platform::time::sleep(Duration::from_millis(100));
-        let Either::Second(()) = select(reader, settle).await else {
-            panic!("the reader must be waiting on the full queue, not done");
-        };
+            let inbound = Rc::new(Inbound::new());
+            let reader = read_loop(read, Rc::clone(&inbound));
+            let settle =
+                wavedb_platform::time::sleep(Duration::from_millis(100));
+            let Either::Second(()) = select(reader, settle).await else {
+                panic!(
+                    "the reader must be waiting on the full queue, not done"
+                );
+            };
 
-        assert_eq!(inbound.len(), WS_INBOUND_DEPTH);
-        while let Ok(item) = inbound.try_receive() {
-            assert!(matches!(item, FromClient::Msg(_)), "no end: still open");
-        }
+            assert_eq!(inbound.len(), WS_INBOUND_DEPTH);
+            while let Ok(item) = inbound.try_receive() {
+                assert!(
+                    matches!(item, FromClient::Msg(_)),
+                    "no end: still open"
+                );
+            }
+        });
     }
 }
