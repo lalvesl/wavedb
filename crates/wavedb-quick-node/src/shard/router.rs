@@ -219,13 +219,15 @@ mod tests {
 
     /// A dead shard is a backend fault carrying the request's own hash — the
     /// client has to be able to attribute it.
-    #[tokio::test]
-    async fn a_stopped_shard_answers_rather_than_hangs() {
-        let answer = router(2).dispatch(request(1, 0xABCD)).await;
-        let wavedb_net::frame::Response::Err(err) = answer.response else {
-            panic!("a stopped shard must refuse");
-        };
-        assert_eq!(err.kind, wavedb_net::frame::NodeErrorKind::Backend);
-        assert_eq!(err.struct_hash, 0xABCD);
+    #[test]
+    fn a_stopped_shard_answers_rather_than_hangs() {
+        wavedb_platform::carrier::block_on(async {
+            let answer = router(2).dispatch(request(1, 0xABCD)).await;
+            let wavedb_net::frame::Response::Err(err) = answer.response else {
+                panic!("a stopped shard must refuse");
+            };
+            assert_eq!(err.kind, wavedb_net::frame::NodeErrorKind::Backend);
+            assert_eq!(err.struct_hash, 0xABCD);
+        });
     }
 }
