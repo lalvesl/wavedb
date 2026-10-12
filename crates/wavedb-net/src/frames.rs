@@ -106,8 +106,16 @@ mod tests {
         std::thread::spawn(move || {
             wavedb_platform::carrier::block_on(async move {
                 let (mut sock, _) = listener.accept().await.unwrap();
-                let mut sink = [0u8; 1024];
-                let _ = sock.read(&mut sink).await;
+                // Read the whole request (head and its `req` body) before
+                // answering: closing with unread bytes makes the kernel send
+                // a reset, which the client sees as a fault, not an end.
+                let (mut seen, mut sink) = (Vec::new(), [0u8; 1024]);
+                while !seen.ends_with(b"\r\n\r\nreq") {
+                    match sock.read(&mut sink).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => seen.extend_from_slice(&sink[..n]),
+                    }
+                }
                 sock.write_all(b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n")
                     .await
                     .unwrap();

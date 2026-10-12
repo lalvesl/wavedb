@@ -1,7 +1,7 @@
 # RFC 0066 — Embassy executor and async-io: tokio out of the node
 
-- **Status:** In progress — opened 2026-10-08. **Steps 1–3 and both halves
-  of step 4 (node, client) landed 2026-10-08** (see "Progress").
+- **Status:** In progress — opened 2026-10-08. **Steps 1–4 landed
+  2026-10-08**; step 5 waits on `OwnerLocks` (see "Progress").
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the shard
   workers and disk actors this changes the carrier of),
   [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) (the `wavedb/multi`
@@ -468,11 +468,23 @@ manager's code does not branch on target. `platform::task` is now
 cannot exist over static pools. With it went the platform's last runtime
 dependency on tokio. Workspace bar green (504 tests: 2 new), wasm32 clean.
 
-What remains for step 5:
-- `#[tokio::test]` and tokio in dev-dependencies (a `block_on`, step 4's
-  last item);
-- the node's `OwnerLocks` (`tokio::sync`), which RFC 0067 replaces. An
-  interim `async-lock` would let step 5 close first.
+**`block_on` — landed 2026-10-08, closing step 4.** `platform::carrier::block_on`
+runs one future on the calling thread, parking it while the future waits.
+It needs no runtime underneath: sockets wake through `async-io`'s reactor
+and timers through `embassy-time`'s driver. It replaces:
+- all 59 `#[tokio::test]`, turned into plain tests that block on their body;
+- the eleven test-harness runtimes, the threads that run a node;
+- the five `#[tokio::main]` of the examples.
+
+Test servers that were `tokio::spawn`ed now run on threads of their own,
+and `tokio::sync::oneshot`, `tokio::join!` and `yield_now` in tests became
+`futures`' and `embassy-futures`'. No manifest in the workspace lists tokio
+any more except `wavedb-quick-node`, for one thing: `OwnerLocks`
+(`tokio::sync::Mutex`). `cargo tree -i tokio` shows only that path.
+
+What remains for step 5: `OwnerLocks`. RFC 0067 replaces it with
+thread-local locks plus leases; an interim `async-lock` would let step 5
+close first.
 
 **Every step invalidates the benchmark seeds.** `bench-gen` links
 `wavedb-storage`, which links `wavedb-platform`, and `benches/nix/gen.nix`
