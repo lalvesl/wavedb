@@ -57,42 +57,43 @@ fn task(title: &str, status: &str, points: u64) -> Task {
     }
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    let addr = std::env::var("SHOWCASE_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:4780".into());
-    let offline = std::env::args().any(|a| a == "--offline");
-    let poll = std::env::args().any(|a| a == "--poll");
+fn main() {
+    wavedb_platform::carrier::block_on(async {
+        let addr = std::env::var("SHOWCASE_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1:4780".into());
+        let offline = std::env::args().any(|a| a == "--offline");
+        let poll = std::env::args().any(|a| a == "--poll");
 
-    // Db::open_at = connect + the local write-through cache at an explicit
-    // directory (Db::open picks the platform default). The cache survives
-    // this process — that is what the --offline run reads.
-    let cache = std::env::temp_dir().join("wavedb-showcase-cache");
-    let mut db = Db::open_at(
-        CLIENT_REGISTRY,
-        addr.clone(),
-        U48::from(TENANT),
-        U48::from(TENANT),
-        &cache,
-    )
-    .await
-    .expect("open the local cache engine")
-    .with_access_token(access_token());
-    if poll {
-        // Watches ride "anything new?" POST polls instead of a WebSocket —
-        // for clients whose path to the node cannot hold one open.
-        db = db.watch_via_polling(Duration::from_millis(500));
-        println!("watch transport: HTTP polling every 500ms");
-    }
+        // Db::open_at = connect + the local write-through cache at an explicit
+        // directory (Db::open picks the platform default). The cache survives
+        // this process — that is what the --offline run reads.
+        let cache = std::env::temp_dir().join("wavedb-showcase-cache");
+        let mut db = Db::open_at(
+            CLIENT_REGISTRY,
+            addr.clone(),
+            U48::from(TENANT),
+            U48::from(TENANT),
+            &cache,
+        )
+        .await
+        .expect("open the local cache engine")
+        .with_access_token(access_token());
+        if poll {
+            // Watches ride "anything new?" POST polls instead of a WebSocket —
+            // for clients whose path to the node cannot hold one open.
+            db = db.watch_via_polling(Duration::from_millis(500));
+            println!("watch transport: HTTP polling every 500ms");
+        }
 
-    if offline {
-        report::offline_tour(&db).await;
-    } else {
-        online_tour(&db).await;
-        println!();
-        println!("done. now kill the node and run:");
-        println!("  cargo run -p showcase --example client -- --offline");
-    }
+        if offline {
+            report::offline_tour(&db).await;
+        } else {
+            online_tour(&db).await;
+            println!();
+            println!("done. now kill the node and run:");
+            println!("  cargo run -p showcase --example client -- --offline");
+        }
+    });
 }
 
 /// The full online pass: bootstrap, collections, indexes, watches,
