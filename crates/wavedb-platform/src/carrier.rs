@@ -139,6 +139,21 @@ where
     Ok(Finished(finished))
 }
 
+/// Run `future` to completion on the calling thread, parking it while the
+/// future waits — the executor of a `main` and of a test.
+///
+/// No runtime is needed underneath: sockets wake through `async-io`'s own
+/// reactor and timers through `embassy-time`'s driver, both of which wake
+/// any `Waker`. So this is the thread-parking `block_on` and nothing more,
+/// named here so every caller in the workspace reaches for the same one.
+/// It runs one future; to spawn tasks, start a [carrier](spawn) instead.
+///
+/// Like any `block_on`, it must not be called from inside a task: it would
+/// park the thread that task's executor runs on.
+pub fn block_on<F: Future>(future: F) -> F::Output {
+    futures::executor::block_on(future)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
