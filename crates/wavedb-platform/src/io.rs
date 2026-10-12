@@ -8,7 +8,7 @@
 //!
 //! The socket is `async-io`'s: a reactor on the OS's readiness API that wakes
 //! tasks through the standard `Waker`, so it works under whichever executor
-//! polls them — tokio today, the Embassy executor after RFC 0066's step 4.
+//! polls them — the Embassy carriers, or a plain `block_on`.
 //!
 //! [RFC 0066]: ../../../rfcs/0066-embassy-executor-and-async-io-WIP.md
 
@@ -340,60 +340,70 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_pair_carries_bytes_both_ways() {
-        let (mut a, mut b) = pair().await.unwrap();
-        a.write_all(b"ping").await.unwrap();
-        let mut got = [0u8; 4];
-        b.read_exact(&mut got).await.unwrap();
-        assert_eq!(&got, b"ping");
-        b.write_all(b"pong").await.unwrap();
-        a.read_exact(&mut got).await.unwrap();
-        assert_eq!(&got, b"pong");
+    #[test]
+    fn a_pair_carries_bytes_both_ways() {
+        crate::carrier::block_on(async {
+            let (mut a, mut b) = pair().await.unwrap();
+            a.write_all(b"ping").await.unwrap();
+            let mut got = [0u8; 4];
+            b.read_exact(&mut got).await.unwrap();
+            assert_eq!(&got, b"ping");
+            b.write_all(b"pong").await.unwrap();
+            a.read_exact(&mut got).await.unwrap();
+            assert_eq!(&got, b"pong");
+        });
     }
 
     /// The tunnel's response ends when the node drops its write half; the
     /// client must read that as an end of stream while the node's read half
     /// is still alive.
-    #[tokio::test]
-    async fn dropping_the_write_half_ends_the_peers_stream() {
-        let (client, server) = pair().await.unwrap();
-        let (_server_read, mut server_write) = server.split();
-        server_write.write_all(b"bye").await.unwrap();
-        drop(server_write);
-        let (mut client_read, _client_write) = client.split();
-        assert_eq!(read_to_end(&mut client_read).await, b"bye");
+    #[test]
+    fn dropping_the_write_half_ends_the_peers_stream() {
+        crate::carrier::block_on(async {
+            let (client, server) = pair().await.unwrap();
+            let (_server_read, mut server_write) = server.split();
+            server_write.write_all(b"bye").await.unwrap();
+            drop(server_write);
+            let (mut client_read, _client_write) = client.split();
+            assert_eq!(read_to_end(&mut client_read).await, b"bye");
+        });
     }
 
-    #[tokio::test]
-    async fn prefixed_bytes_come_before_the_stream() {
-        let (mut a, b) = pair().await.unwrap();
-        a.write_all(b"world").await.unwrap();
-        drop(a);
-        let mut r = Prefixed::new(b"hello ".to_vec(), b);
-        assert_eq!(read_to_end(&mut r).await, b"hello world");
+    #[test]
+    fn prefixed_bytes_come_before_the_stream() {
+        crate::carrier::block_on(async {
+            let (mut a, b) = pair().await.unwrap();
+            a.write_all(b"world").await.unwrap();
+            drop(a);
+            let mut r = Prefixed::new(b"hello ".to_vec(), b);
+            assert_eq!(read_to_end(&mut r).await, b"hello world");
+        });
     }
 
-    #[tokio::test]
-    async fn a_hostname_resolves_off_the_executor() {
-        let listener = Listener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let host = format!("localhost:{port}");
-        let (connected, accepted) =
-            futures::join!(connect(&host), listener.accept());
-        connected.unwrap();
-        accepted.unwrap();
+    #[test]
+    fn a_hostname_resolves_off_the_executor() {
+        crate::carrier::block_on(async {
+            let listener = Listener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let host = format!("localhost:{port}");
+            let (connected, accepted) =
+                futures::join!(connect(&host), listener.accept());
+            connected.unwrap();
+            accepted.unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn nobody_listening_is_an_io_fault() {
-        // Bind then drop: the port is known and, for a moment, unused.
-        let addr = Listener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .to_string();
-        let err = connect(&addr).await.unwrap_err();
-        assert!(matches!(err, crate::Error::Io(_)), "{err:?}");
+    #[test]
+    fn nobody_listening_is_an_io_fault() {
+        crate::carrier::block_on(async {
+            // Bind then drop: the port is known and, for a moment, unused.
+            let addr = Listener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .to_string();
+            let err = connect(&addr).await.unwrap_err();
+            assert!(matches!(err, crate::Error::Io(_)), "{err:?}");
+        });
     }
 }
