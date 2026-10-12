@@ -35,11 +35,7 @@ fn node_process() {
     };
     let bind = std::env::var("WAVEDB_NODE_BIND")
         .unwrap_or_else(|_| String::from("127.0.0.1:0"));
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build runtime");
-    rt.block_on(async move {
+    wavedb_platform::carrier::block_on(async move {
         let bound = wavedb_quick_node::Server::new(REGISTRY)
             .secret(DEMO_SECRET)
             .data_dir(&dir)
@@ -109,104 +105,106 @@ fn contact(name: &str, phone: &str, city: &str) -> Contact {
     }
 }
 
-#[tokio::test]
-async fn client_survives_node_restart_with_warm_local_reads() {
-    let node_dir = tempfile::tempdir().expect("node dir");
-    let cache_dir = tempfile::tempdir().expect("cache dir");
-    let (mut node, addr) = spawn_node(node_dir.path(), "127.0.0.1:0");
+#[test]
+fn client_survives_node_restart_with_warm_local_reads() {
+    wavedb_platform::carrier::block_on(async {
+        let node_dir = tempfile::tempdir().expect("node dir");
+        let cache_dir = tempfile::tempdir().expect("cache dir");
+        let (mut node, addr) = spawn_node(node_dir.path(), "127.0.0.1:0");
 
-    let db = Db::open_at(
-        CLIENT_REGISTRY,
-        addr.to_string(),
-        U48::from(TENANT),
-        U48::from(TENANT),
-        cache_dir.path(),
-    )
-    .await
-    .expect("open the client with its local cache")
-    .with_access_token(access_token());
+        let db = Db::open_at(
+            CLIENT_REGISTRY,
+            addr.to_string(),
+            U48::from(TENANT),
+            U48::from(TENANT),
+            cache_dir.path(),
+        )
+        .await
+        .expect("open the client with its local cache")
+        .with_access_token(access_token());
 
-    // ── Online: write through, read through ─────────────────────────────
-    open_book(&db, "Ada".into()).await.expect("open_book");
-    let book = ContactBook::get(&db).await.expect("get").expect("exists");
-    let contacts = Contact::collection(book.contacts);
-    let grace = contacts
-        .insert(&db, &contact("Grace", "555-0001", "NYC"))
-        .await
-        .expect("insert grace");
-    let alan = contacts
-        .insert(&db, &contact("Alan", "555-0002", "London"))
-        .await
-        .expect("insert alan");
-    contacts
-        .save(&db, grace, &contact("Grace", "555-0001", "London"))
-        .await
-        .expect("update grace");
-    let walked: Vec<Contact> =
-        contacts.all(&db).try_collect().await.expect("walk");
-    assert_eq!(walked.len(), 2);
-    assert_eq!(
-        contacts_in(&db, "London".into())
+        // ── Online: write through, read through ─────────────────────────────
+        open_book(&db, "Ada".into()).await.expect("open_book");
+        let book = ContactBook::get(&db).await.expect("get").expect("exists");
+        let contacts = Contact::collection(book.contacts);
+        let grace = contacts
+            .insert(&db, &contact("Grace", "555-0001", "NYC"))
             .await
-            .expect("fn call")
-            .len(),
-        2
-    );
-
-    // ── Node down: everything seen answers warm from the local engine ───
-    node.kill().expect("kill the node");
-    node.wait().expect("reap the node");
-
-    let warm_book = ContactBook::get(&db).await.expect("warm unique read");
-    assert_eq!(warm_book, Some(book), "the holder answers from the cache");
-    let warm_grace = contacts
-        .get(&db, grace)
-        .await
-        .expect("warm by-id read")
-        .expect("grace cached");
-    assert_eq!(warm_grace.city, "London", "the mirrored update, not NYC");
-    let warm_walk: Vec<Contact> =
-        contacts.all(&db).try_collect().await.expect("warm walk");
-    assert_eq!(
-        warm_walk
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Grace", "Alan"],
-        "the warm walk reproduces the node's own order"
-    );
-
-    // Writes refuse honestly (write-through, no offline queue)…
-    let refused = contacts
-        .insert(&db, &contact("Edsger", "555-0003", "Austin"))
-        .await;
-    assert!(
-        matches!(refused, Err(wavedb::Error::Transport(_))),
-        "an offline write must surface the transport fault"
-    );
-    // …and so do `#[server]` functions (compute runs on the node only).
-    assert!(matches!(
-        contacts_in(&db, "London".into()).await,
-        Err(wavedb::Error::Transport(_))
-    ));
-
-    // ── Node back (same data, same address): calls reach it again ───────
-    let (mut node, _) = spawn_node(node_dir.path(), &addr.to_string());
-    assert_eq!(
-        contacts_in(&db, "London".into())
+            .expect("insert grace");
+        let alan = contacts
+            .insert(&db, &contact("Alan", "555-0002", "London"))
             .await
-            .expect("fn call after restart")
-            .len(),
-        2,
-        "the node replayed its journal — the data survived the restart"
-    );
-    let edsger = contacts
-        .insert(&db, &contact("Edsger", "555-0003", "Austin"))
-        .await
-        .expect("writes flow again");
-    assert!(contacts.remove(&db, edsger).await.expect("remove"));
-    assert!(contacts.get(&db, alan).await.expect("get").is_some());
+            .expect("insert alan");
+        contacts
+            .save(&db, grace, &contact("Grace", "555-0001", "London"))
+            .await
+            .expect("update grace");
+        let walked: Vec<Contact> =
+            contacts.all(&db).try_collect().await.expect("walk");
+        assert_eq!(walked.len(), 2);
+        assert_eq!(
+            contacts_in(&db, "London".into())
+                .await
+                .expect("fn call")
+                .len(),
+            2
+        );
 
-    node.kill().expect("kill the node");
-    node.wait().expect("reap the node");
+        // ── Node down: everything seen answers warm from the local engine ───
+        node.kill().expect("kill the node");
+        node.wait().expect("reap the node");
+
+        let warm_book = ContactBook::get(&db).await.expect("warm unique read");
+        assert_eq!(warm_book, Some(book), "the holder answers from the cache");
+        let warm_grace = contacts
+            .get(&db, grace)
+            .await
+            .expect("warm by-id read")
+            .expect("grace cached");
+        assert_eq!(warm_grace.city, "London", "the mirrored update, not NYC");
+        let warm_walk: Vec<Contact> =
+            contacts.all(&db).try_collect().await.expect("warm walk");
+        assert_eq!(
+            warm_walk
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Grace", "Alan"],
+            "the warm walk reproduces the node's own order"
+        );
+
+        // Writes refuse honestly (write-through, no offline queue)…
+        let refused = contacts
+            .insert(&db, &contact("Edsger", "555-0003", "Austin"))
+            .await;
+        assert!(
+            matches!(refused, Err(wavedb::Error::Transport(_))),
+            "an offline write must surface the transport fault"
+        );
+        // …and so do `#[server]` functions (compute runs on the node only).
+        assert!(matches!(
+            contacts_in(&db, "London".into()).await,
+            Err(wavedb::Error::Transport(_))
+        ));
+
+        // ── Node back (same data, same address): calls reach it again ───────
+        let (mut node, _) = spawn_node(node_dir.path(), &addr.to_string());
+        assert_eq!(
+            contacts_in(&db, "London".into())
+                .await
+                .expect("fn call after restart")
+                .len(),
+            2,
+            "the node replayed its journal — the data survived the restart"
+        );
+        let edsger = contacts
+            .insert(&db, &contact("Edsger", "555-0003", "Austin"))
+            .await
+            .expect("writes flow again");
+        assert!(contacts.remove(&db, edsger).await.expect("remove"));
+        assert!(contacts.get(&db, alan).await.expect("get").is_some());
+
+        node.kill().expect("kill the node");
+        node.wait().expect("reap the node");
+    });
 }
