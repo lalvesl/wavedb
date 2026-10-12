@@ -76,147 +76,149 @@ fn note(body: &str) -> Note {
     }
 }
 
-#[tokio::test]
-async fn shards_serve_collections_over_one_disk_actor() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = PageStore::open(dir.path(), &REGISTRY.storage_entries())
-        .expect("open engine");
+#[test]
+fn shards_serve_collections_over_one_disk_actor() {
+    wavedb_platform::carrier::block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PageStore::open(dir.path(), &REGISTRY.storage_entries())
+            .expect("open engine");
 
-    // From here the engine is owned by the actor's thread. Nothing in this
-    // test can touch it again except by message — which is the point.
-    let shards = Shards::start(store, 4).expect("start shards");
-    assert_eq!(shards.count(), 4);
+        // From here the engine is owned by the actor's thread. Nothing in this
+        // test can touch it again except by message — which is the point.
+        let shards = Shards::start(store, 4).expect("start shards");
+        assert_eq!(shards.count(), 4);
 
-    // ---- 1. the index layer, unmodified, over a shard ---------------------
-    // A **caching** store, which is what a shard has. `Shards::store` hands
-    // out the cacheless one instead, because only a shard may cache: the
-    // cache remembers absence, and that is sound only while one holder
-    // reaches a record. This test stands in for a shard's thread.
-    let first = Rc::new(ShardStore::new(shards.handle()));
-    let db = LocalHandle::new(&*first, U48::from(TENANT));
+        // ---- 1. the index layer, unmodified, over a shard ---------------------
+        // A **caching** store, which is what a shard has. `Shards::store` hands
+        // out the cacheless one instead, because only a shard may cache: the
+        // cache remembers absence, and that is sound only while one holder
+        // reaches a record. This test stands in for a shard's thread.
+        let first = Rc::new(ShardStore::new(shards.handle()));
+        let db = LocalHandle::new(&*first, U48::from(TENANT));
 
-    let pivot = Note::create_pivot(&db).await.expect("create pivot");
-    let col = Note::collection(pivot);
-    let mut ids = Vec::new();
-    for n in 0..25u32 {
-        ids.push(
-            col.insert(&db, &note(&format!("note {n}")))
-                .await
-                .expect("insert"),
-        );
-    }
-
-    let got = col.get(&db, ids[7]).await.expect("get").expect("present");
-    assert_eq!(got.body, "note 7");
-    assert!(
-        first.cached_len() > 0,
-        "a shard that caches nothing is not a shard"
-    );
-
-    // ---- 2. the write reached the engine, not just the cache -------------
-    // The cacheless store, which is exactly the right probe: it cannot answer
-    // from anything of its own, so whatever it sees came back over the wire
-    // from the engine. (It shares a Pivot with `first`, which routing would
-    // normally forbid — sound here precisely because it caches nothing and
-    // nothing writes through it.)
-    let observer: Rc<ShardStore> = shards.store();
-    assert_eq!(observer.cached_len(), 0, "a bypass store holds nothing");
-
-    let cold_db = LocalHandle::new(&*observer, U48::from(TENANT));
-    let cold = Note::collection(pivot);
-    let seen = cold
-        .get(&cold_db, ids[7])
-        .await
-        .expect("cold get")
-        .expect("the record must have reached the engine");
-    assert_eq!(
-        seen.body, "note 7",
-        "the first shard's cache was answering for a write that never landed"
-    );
-    assert_eq!(
-        observer.cached_bytes(),
-        0,
-        "a bypass store must not memoise — a second cache over one record is \
-         how a stale `None` outlives another holder's insert"
-    );
-
-    // ---- 3. a shard on a thread of its own -------------------------------
-    // The factory is `Send` and captures only the handle; `ShardStore` is
-    // built on the far side, because it must not be movable between threads.
-    let handle = shards.handle();
-    let probe = ids[7];
-    let (done, wait) = std::sync::mpsc::channel::<Result<String, String>>();
-    std::thread::spawn(move || {
-        futures::executor::block_on(async move {
-            let own = Rc::new(ShardStore::new(handle));
-            let db = LocalHandle::new(&*own, U48::from(TENANT));
-            let col = Note::collection(pivot);
-            let answer = match col.get(&db, probe).await {
-                Ok(Some(v)) => Ok(v.body),
-                Ok(None) => Err("absent on the far thread".into()),
-                Err(e) => Err(format!("{e}")),
-            };
-            let _ = done.send(answer);
-        });
-    });
-
-    let from_other_thread = wait
-        .recv_timeout(std::time::Duration::from_secs(30))
-        .expect("the shard thread must answer")
-        .expect("read on the far thread");
-    assert_eq!(from_other_thread, "note 7");
-
-    // ---- routing is a function of the pivot, not of anything ambient -----
-    routing_is_a_pure_function_of_the_pivot(&db, pivot).await;
-
-    for n in 0..40u32 {
-        col.insert(&db, &note(&format!("more {n}")))
-            .await
-            .expect("insert");
-    }
-
-    // ---- 4. the low-priority class reaches the actor and runs ------------
-    // Scope, stated because an earlier version of this claimed more than it
-    // proved: this shows a `Maintenance` hint travelling the second queue and
-    // being executed, observed through `EngineStats` (which has to be a
-    // message — once the actor owns the engine, "is anything unsettled?" is
-    // not answerable by looking).
-    //
-    // It does **not** prove starvation-freedom. Checked by replacing the valve
-    // with strict priority: this still passed, because each `get` completes
-    // and leaves the actor idle, so the maintenance step never has to win a
-    // turn against anything. Real contention here would need many concurrent
-    // reads and would be timing-dependent; the deterministic proof lives in
-    // `priority::tests::maintenance_is_never_starved_under_constant_read_pressure`,
-    // which strict priority fails outright.
-    let before = first.engine_stats().await.expect("stats");
-    assert!(before.pending, "40 inserts must leave a settle queued");
-
-    shards.hint(Maintenance::Checkpoint);
-
-    let mut settled = false;
-    for _ in 0..200 {
-        col.get(&db, ids[3]).await.expect("read");
-        if !first.engine_stats().await.expect("stats").pending {
-            settled = true;
-            break;
+        let pivot = Note::create_pivot(&db).await.expect("create pivot");
+        let col = Note::collection(pivot);
+        let mut ids = Vec::new();
+        for n in 0..25u32 {
+            ids.push(
+                col.insert(&db, &note(&format!("note {n}")))
+                    .await
+                    .expect("insert"),
+            );
         }
-    }
-    assert!(settled, "the maintenance hint never reached the engine");
 
-    // ---- 4b. the *waiting* form of the same work -------------------------
-    maintain_waits(&shards, &first, &db, col).await;
+        let got = col.get(&db, ids[7]).await.expect("get").expect("present");
+        assert_eq!(got.body, "note 7");
+        assert!(
+            first.cached_len() > 0,
+            "a shard that caches nothing is not a shard"
+        );
 
-    // Concurrent operations on one collection are **not** exercised here, and
-    // that is deliberate: `ShardStore` genuinely suspends, so two interleaved
-    // collection ops can lose an index update
-    // (`wavedb-core/tests/concurrent_node_clobber.rs` states the invariant).
-    // What prevents it is `shard::OwnerLocks`, tested at the unit level; a
-    // probe here passed one interleaving and proved nothing, so it is gone
-    // rather than left looking like a guarantee.
+        // ---- 2. the write reached the engine, not just the cache -------------
+        // The cacheless store, which is exactly the right probe: it cannot answer
+        // from anything of its own, so whatever it sees came back over the wire
+        // from the engine. (It shares a Pivot with `first`, which routing would
+        // normally forbid — sound here precisely because it caches nothing and
+        // nothing writes through it.)
+        let observer: Rc<ShardStore> = shards.store();
+        assert_eq!(observer.cached_len(), 0, "a bypass store holds nothing");
 
-    // ---- 5. the ingress path: a wire request, routed and answered --------
-    ingress_routes_to_a_worker(&shards, &observer).await;
+        let cold_db = LocalHandle::new(&*observer, U48::from(TENANT));
+        let cold = Note::collection(pivot);
+        let seen = cold
+            .get(&cold_db, ids[7])
+            .await
+            .expect("cold get")
+            .expect("the record must have reached the engine");
+        assert_eq!(
+            seen.body, "note 7",
+            "the first shard's cache was answering for a write that never landed"
+        );
+        assert_eq!(
+            observer.cached_bytes(),
+            0,
+            "a bypass store must not memoise — a second cache over one record is \
+         how a stale `None` outlives another holder's insert"
+        );
+
+        // ---- 3. a shard on a thread of its own -------------------------------
+        // The factory is `Send` and captures only the handle; `ShardStore` is
+        // built on the far side, because it must not be movable between threads.
+        let handle = shards.handle();
+        let probe = ids[7];
+        let (done, wait) = std::sync::mpsc::channel::<Result<String, String>>();
+        std::thread::spawn(move || {
+            futures::executor::block_on(async move {
+                let own = Rc::new(ShardStore::new(handle));
+                let db = LocalHandle::new(&*own, U48::from(TENANT));
+                let col = Note::collection(pivot);
+                let answer = match col.get(&db, probe).await {
+                    Ok(Some(v)) => Ok(v.body),
+                    Ok(None) => Err("absent on the far thread".into()),
+                    Err(e) => Err(format!("{e}")),
+                };
+                let _ = done.send(answer);
+            });
+        });
+
+        let from_other_thread = wait
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the shard thread must answer")
+            .expect("read on the far thread");
+        assert_eq!(from_other_thread, "note 7");
+
+        // ---- routing is a function of the pivot, not of anything ambient -----
+        routing_is_a_pure_function_of_the_pivot(&db, pivot).await;
+
+        for n in 0..40u32 {
+            col.insert(&db, &note(&format!("more {n}")))
+                .await
+                .expect("insert");
+        }
+
+        // ---- 4. the low-priority class reaches the actor and runs ------------
+        // Scope, stated because an earlier version of this claimed more than it
+        // proved: this shows a `Maintenance` hint travelling the second queue and
+        // being executed, observed through `EngineStats` (which has to be a
+        // message — once the actor owns the engine, "is anything unsettled?" is
+        // not answerable by looking).
+        //
+        // It does **not** prove starvation-freedom. Checked by replacing the valve
+        // with strict priority: this still passed, because each `get` completes
+        // and leaves the actor idle, so the maintenance step never has to win a
+        // turn against anything. Real contention here would need many concurrent
+        // reads and would be timing-dependent; the deterministic proof lives in
+        // `priority::tests::maintenance_is_never_starved_under_constant_read_pressure`,
+        // which strict priority fails outright.
+        let before = first.engine_stats().await.expect("stats");
+        assert!(before.pending, "40 inserts must leave a settle queued");
+
+        shards.hint(Maintenance::Checkpoint);
+
+        let mut settled = false;
+        for _ in 0..200 {
+            col.get(&db, ids[3]).await.expect("read");
+            if !first.engine_stats().await.expect("stats").pending {
+                settled = true;
+                break;
+            }
+        }
+        assert!(settled, "the maintenance hint never reached the engine");
+
+        // ---- 4b. the *waiting* form of the same work -------------------------
+        maintain_waits(&shards, &first, &db, col).await;
+
+        // Concurrent operations on one collection are **not** exercised here, and
+        // that is deliberate: `ShardStore` genuinely suspends, so two interleaved
+        // collection ops can lose an index update
+        // (`wavedb-core/tests/concurrent_node_clobber.rs` states the invariant).
+        // What prevents it is `shard::OwnerLocks`, tested at the unit level; a
+        // probe here passed one interleaving and proved nothing, so it is gone
+        // rather than left looking like a guarantee.
+
+        // ---- 5. the ingress path: a wire request, routed and answered --------
+        ingress_routes_to_a_worker(&shards, &observer).await;
+    });
 }
 
 /// A Pivot's shard is decided by the Pivot and nothing else — no table, no
