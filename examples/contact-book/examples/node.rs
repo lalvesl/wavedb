@@ -12,19 +12,20 @@ use std::io::Write as _;
 use contact_book::{DEMO_SECRET, REGISTRY};
 use wavedb_quick_node::Server;
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    // The store lives for the process only — the demo proves the wire, not
-    // node durability (the native e2e covers reopen).
-    let dir = tempfile::tempdir().expect("create a temp data dir");
-    let bound = Server::new(REGISTRY)
-        .secret(DEMO_SECRET)
-        .data_dir(dir.path())
-        .bind("127.0.0.1:0")
-        .await
-        .expect("open the engine and bind");
-    let addr = bound.local_addr().expect("read the bound address");
-    println!("LISTENING {addr}");
-    std::io::stdout().flush().expect("flush the address line");
-    bound.run().await.expect("serve");
+fn main() {
+    wavedb_platform::carrier::block_on(async {
+        // The store lives for the process only — the demo proves the wire, not
+        // node durability (the native e2e covers reopen).
+        let dir = tempfile::tempdir().expect("create a temp data dir");
+        let bound = Server::new(REGISTRY)
+            .secret(DEMO_SECRET)
+            .data_dir(dir.path())
+            .bind("127.0.0.1:0")
+            .await
+            .expect("open the engine and bind");
+        let addr = bound.local_addr().expect("read the bound address");
+        println!("LISTENING {addr}");
+        std::io::stdout().flush().expect("flush the address line");
+        bound.run().await.expect("serve");
+    });
 }
