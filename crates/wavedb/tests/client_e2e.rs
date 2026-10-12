@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 
+use futures::channel::oneshot;
 use schema_smoke::{AboutUser, Note, NotePivotId, REGISTRY, Row, RowPivotId};
-use tokio::sync::oneshot;
 use wavedb::prelude::*;
 use wavedb_quick_node::{Bound, Server};
 
@@ -62,11 +62,7 @@ fn start(dir: PathBuf) -> Node {
     let (info_tx, info_rx) = mpsc::channel();
     let (stop, stop_rx) = oneshot::channel::<()>();
     let thread = thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build runtime");
-        rt.block_on(async move {
+        wavedb_platform::carrier::block_on(async move {
             let bound: Bound<_> = Server::new(REGISTRY)
                 .secret(SECRET)
                 .data_dir(&dir)
@@ -100,33 +96,38 @@ fn start(dir: PathBuf) -> Node {
     }
 }
 
-#[tokio::test]
-async fn typed_surface_drives_a_live_node() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().to_path_buf();
-    let node = start(path);
+#[test]
+fn typed_surface_drives_a_live_node() {
+    wavedb_platform::carrier::block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        let node = start(path);
 
-    let db = Db::connect(
-        node.addr.to_string(),
-        U48::from(TENANT),
-        U48::from(TENANT),
-    )
-    .await
-    .expect("connect")
-    .with_access_token(access_token());
+        let db = Db::connect(
+            node.addr.to_string(),
+            U48::from(TENANT),
+            U48::from(TENANT),
+        )
+        .await
+        .expect("connect")
+        .with_access_token(access_token());
 
-    unique_phase(&db).await;
-    nonunique_phase(&db, node.pivot).await;
-    list_phase(&db, node.rows).await;
+        unique_phase(&db).await;
+        nonunique_phase(&db, node.pivot).await;
+        list_phase(&db, node.rows).await;
 
-    // ── ops without a wire command refuse uniformly ────────────────────────
-    let err = Note::create_pivot(&db).await.expect_err("must refuse");
-    assert!(
-        matches!(err, Error::Core(wavedb_core::Error::UnknownStructHash(_))),
-        "create_pivot is not wire-reachable: {err}"
-    );
+        // ── ops without a wire command refuse uniformly ────────────────────────
+        let err = Note::create_pivot(&db).await.expect_err("must refuse");
+        assert!(
+            matches!(
+                err,
+                Error::Core(wavedb_core::Error::UnknownStructHash(_))
+            ),
+            "create_pivot is not wire-reachable: {err}"
+        );
 
-    node.shutdown();
+        node.shutdown();
+    });
 }
 
 /// Unique: get (empty) → save → upsert → history over the wire.
