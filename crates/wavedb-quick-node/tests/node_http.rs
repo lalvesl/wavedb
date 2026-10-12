@@ -2,7 +2,7 @@
 //! through the exposure dispatch into a durable `PageStore`, and the data
 //! survives a node restart.
 //!
-//! The node runs on its own thread (its own current-thread runtime + the
+//! The node runs on its own threads (its Embassy carriers + the
 //! process-global engine claim); the test thread is the client. `create_pivot`
 //! is not wire-reachable in M3 (no `#[server]` yet), so the collection's
 //! `Pivot` is seeded node-side before serving — everything else travels as
@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 
+use futures::channel::oneshot;
 use schema_smoke::{AboutUser, Note, REGISTRY};
-use tokio::sync::oneshot;
 use wavedb_core::expose::{Command, Reply};
 use wavedb_core::wire::{from_wire, to_wire};
 use wavedb_core::{LocalId, U48, WaveDbStruct};
@@ -69,11 +69,7 @@ fn start(dir: PathBuf) -> Node {
     let (info_tx, info_rx) = mpsc::channel();
     let (stop, stop_rx) = oneshot::channel::<()>();
     let thread = thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build runtime");
-        rt.block_on(async move {
+        wavedb_platform::carrier::block_on(async move {
             let bound: Bound<_> = Server::new(REGISTRY)
                 .secret(SECRET)
                 .data_dir(&dir)
@@ -109,104 +105,106 @@ fn start(dir: PathBuf) -> Node {
     }
 }
 
-#[tokio::test]
-async fn node_serves_records_over_http_and_survives_restart() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().to_path_buf();
+#[test]
+fn node_serves_records_over_http_and_survives_restart() {
+    wavedb_platform::carrier::block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
 
-    // ── phase 1: write through the live node ──────────────────────────────
-    let node = start(path.clone());
-    let client = NetClient::new(node.addr.to_string());
+        // ── phase 1: write through the live node ──────────────────────────────
+        let node = start(path.clone());
+        let client = NetClient::new(node.addr.to_string());
 
-    // Unique: save is an upsert; get returns the live record.
-    let ada = AboutUser {
-        name: "Ada".into(),
-        city: "London".into(),
-    };
-    assert_eq!(
-        save(&client, AboutUser::STRUCT_HASH, &ada).await,
-        Reply::Done
-    );
-    assert_eq!(get_unique::<AboutUser>(&client).await, Some(ada));
+        // Unique: save is an upsert; get returns the live record.
+        let ada = AboutUser {
+            name: "Ada".into(),
+            city: "London".into(),
+        };
+        assert_eq!(
+            save(&client, AboutUser::STRUCT_HASH, &ada).await,
+            Reply::Done
+        );
+        assert_eq!(get_unique::<AboutUser>(&client).await, Some(ada));
 
-    // A second save chains history; get returns the newest version.
-    let ada2 = AboutUser {
-        name: "Ada".into(),
-        city: "Paris".into(),
-    };
-    save(&client, AboutUser::STRUCT_HASH, &ada2).await;
-    assert_eq!(get_unique::<AboutUser>(&client).await, Some(ada2.clone()));
+        // A second save chains history; get returns the newest version.
+        let ada2 = AboutUser {
+            name: "Ada".into(),
+            city: "Paris".into(),
+        };
+        save(&client, AboutUser::STRUCT_HASH, &ada2).await;
+        assert_eq!(get_unique::<AboutUser>(&client).await, Some(ada2.clone()));
 
-    // NonUnique: insert (mints an Id), get by id, update at that Id — all
-    // over the wire, through the pivot seeded node-side.
-    let item = Note {
-        body: "hi".into(),
-        pinned: false,
-    };
-    let Reply::Inserted(note_id) = client
-        .call_ok(
-            auth(),
-            Note::STRUCT_HASH,
-            Command::Insert,
-            to_wire(&(node.pivot, item.clone())),
-        )
-        .await
-        .expect("insert")
-    else {
-        panic!("insert must mint an id");
-    };
-    assert_eq!(
-        get_by_id(&client, Note::STRUCT_HASH, note_id).await,
-        Some(item)
-    );
+        // NonUnique: insert (mints an Id), get by id, update at that Id — all
+        // over the wire, through the pivot seeded node-side.
+        let item = Note {
+            body: "hi".into(),
+            pinned: false,
+        };
+        let Reply::Inserted(note_id) = client
+            .call_ok(
+                auth(),
+                Note::STRUCT_HASH,
+                Command::Insert,
+                to_wire(&(node.pivot, item.clone())),
+            )
+            .await
+            .expect("insert")
+        else {
+            panic!("insert must mint an id");
+        };
+        assert_eq!(
+            get_by_id(&client, Note::STRUCT_HASH, note_id).await,
+            Some(item)
+        );
 
-    let pinned = Note {
-        body: "hi".into(),
-        pinned: true,
-    };
-    client
-        .call_ok(
-            auth(),
-            Note::STRUCT_HASH,
-            Command::Update,
-            to_wire(&(note_id, pinned.clone())),
-        )
-        .await
-        .expect("update");
-    assert_eq!(
-        get_by_id(&client, Note::STRUCT_HASH, note_id).await,
-        Some(pinned.clone())
-    );
+        let pinned = Note {
+            body: "hi".into(),
+            pinned: true,
+        };
+        client
+            .call_ok(
+                auth(),
+                Note::STRUCT_HASH,
+                Command::Update,
+                to_wire(&(note_id, pinned.clone())),
+            )
+            .await
+            .expect("update");
+        assert_eq!(
+            get_by_id(&client, Note::STRUCT_HASH, note_id).await,
+            Some(pinned.clone())
+        );
 
-    // An unlisted hash is refused as an unknown hash — inside a 200, as a
-    // structured NodeError (the transport did its job).
-    let refusal = client
-        .call(auth(), 0xDEAD_BEEF, Command::Get, Vec::new())
-        .await
-        .expect("transport ok");
-    assert_eq!(
-        refusal.expect_err("must refuse").kind,
-        NodeErrorKind::UnknownStructHash
-    );
+        // An unlisted hash is refused as an unknown hash — inside a 200, as a
+        // structured NodeError (the transport did its job).
+        let refusal = client
+            .call(auth(), 0xDEAD_BEEF, Command::Get, Vec::new())
+            .await
+            .expect("transport ok");
+        assert_eq!(
+            refusal.expect_err("must refuse").kind,
+            NodeErrorKind::UnknownStructHash
+        );
 
-    node.shutdown();
+        node.shutdown();
 
-    // ── phase 2: reopen the same data dir — the journal replays ───────────
-    let node = start(path.clone());
-    let client = NetClient::new(node.addr.to_string());
+        // ── phase 2: reopen the same data dir — the journal replays ───────────
+        let node = start(path.clone());
+        let client = NetClient::new(node.addr.to_string());
 
-    assert_eq!(
-        get_unique::<AboutUser>(&client).await,
-        Some(ada2),
-        "the newest Unique version survives a restart"
-    );
-    assert_eq!(
-        get_by_id(&client, Note::STRUCT_HASH, note_id).await,
-        Some(pinned),
-        "the updated NonUnique record survives a restart"
-    );
+        assert_eq!(
+            get_unique::<AboutUser>(&client).await,
+            Some(ada2),
+            "the newest Unique version survives a restart"
+        );
+        assert_eq!(
+            get_by_id(&client, Note::STRUCT_HASH, note_id).await,
+            Some(pinned),
+            "the updated NonUnique record survives a restart"
+        );
 
-    node.shutdown();
+        node.shutdown();
+    });
 }
 
 /// Save a Unique record and return the node's reply.
