@@ -43,8 +43,10 @@ from here. One that is done is removed too; the commit says so.
 ### Memory per connection
 
 Measured 2026-10-08 with `schema-smoke`'s registry:
-- a connection task is ~6 KB, of which ~5 KB is `Exposure::execute`, whose
-  largest arm is a collection insert;
+- a connection task was ~6 KB, of which ~5 KB was `Exposure::execute`,
+  whose largest arm is a collection insert. Since RFC 0066 step 5 a
+  connection routes every command to a shard, so that part now lives in
+  the job pool, sized by operations in flight rather than connections open;
 - an idle WebSocket connection is ~58 KB.
 
 Fine for a server, and deferred for that reason ("escovação de bit"). In
@@ -54,14 +56,10 @@ order of cost:
    allocates all `WS_OUTBOUND_DEPTH` (256) slots of 192 bytes up front:
    ~51 KB per connection, empty or not. Use an unbounded channel and check
    `len()` against the depth on push; the disconnect policy is unchanged.
-2. **WebSocket `Call`s execute inside the connection task**, so every
-   connection, a POST included, reserves the 5 KB execution future. Routing
-   them through the `Router` like POSTs (RFC 0067 does) moves that into the
-   job pool, sized by operations in flight rather than connections open.
-3. **A size budget test.** It fails when the connection future grows past a
+2. **A size budget test.** It fails when the connection future grows past a
    limit, ratcheting down only, like the 350-line rule. With static pools,
    future size is reserved memory.
-4. **Shrink the insert/save path.** Hold fewer large values across
+3. **Shrink the insert/save path.** Hold fewer large values across
    `.await`, and flatten pass-through layers. `Box::pin` only rare arms
    (the natural-key upsert) last.
 
