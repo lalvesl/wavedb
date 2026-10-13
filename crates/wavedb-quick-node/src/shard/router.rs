@@ -1,14 +1,15 @@
 //! Ingress routing — where a request stops being the accept thread's problem.
 //!
-//! The accept loop reads a socket, decodes a [`Request`], and hands it to the
-//! shard that owns it. It executes nothing itself: no gate, no engine call, no
+//! The accept loop reads a socket, decodes a [`Request`] — or a WebSocket
+//! session's `Call` — and hands it to the shard that owns it. It executes nothing itself: no gate, no engine call, no
 //! `Store` of its own. That is the point of the split — accepting is I/O, and
 //! serving is work, and they should not share a thread.
 //!
 //! ## The routing key is the brake's key, and it has to be
 //!
 //! [`OwnerLocks`](super::OwnerLocks) excludes two operations on one owner from
-//! interleaving, and today its key is `(tenant, STRUCT_HASH)` because `Get`,
+//! interleaving — one table per shard, which is enough only because of this
+//! routing — and today its key is `(tenant, STRUCT_HASH)` because `Get`,
 //! `Update` and `Remove` do not carry a Pivot on the wire (`CONCURRENCY_BRAKE.md`
 //! spells out why a *mixed* granularity would be worse than a coarse one).
 //! Routing uses the **same** key, via
@@ -19,23 +20,29 @@
 //! different locks, which is the silent index loss with routing in front of
 //! it. Both narrow to the Pivot together or neither does.
 //!
-//! ## The cost that is here on purpose
+//! ## Who runs gate 1
 //!
-//! Routing needs the tenant, the tenant comes from the token, so the token is
-//! verified here **and again** by gate 1 on the shard. One extra HMAC per
-//! request. Threading the resolved [`Caller`](wavedb_core::expose::Caller)
-//! through the [`Job`] would remove it, at the price of a `handle` that trusts
-//! its caller to have run gate 1 — a seam worth having only once it is
-//! measured, and it is not.
-
-use std::sync::Arc;
+//! A POST carries its token, so routing it needs the tenant, and the tenant
+//! comes from the token: it is verified here **and again** by gate 1 on the
+//! shard. One extra HMAC per request, kept so the shard trusts nothing about
+//! a POST it did not check itself.
+//!
+//! A WebSocket session ran gate 1 once, at `Hello`, and binds the
+//! [`Caller`] it resolved for the whole connection. Its `Call`s travel with
+//! that caller ([`Router::call`]) and the shard runs gates 2–3 only — the
+//! split the session always had. Only a session holds a `Caller` from gate 1,
+//! so that is the only place one can come from.
 
 use async_channel::Sender;
 use futures::channel::oneshot;
-use wavedb_net::frame::{NodeError, NodeErrorKind, Request, Response};
+use wavedb_core::U48;
+use wavedb_core::expose::Caller;
+use wavedb_net::frame::{
+    CommandFrame, NodeError, NodeErrorKind, Request, Response,
+};
 
-use super::worker::{self, Job};
-use super::{DiskHandle, Owner, OwnerLocks};
+use super::worker::{self, Job, Work};
+use super::{DiskHandle, Owner};
 use crate::__rt::NodeTasks;
 use crate::dispatch::{self, Answer};
 use crate::feed::MutationFeed;
@@ -54,8 +61,6 @@ impl Router {
     /// Start `count` workers over one disk actor and return the router onto
     /// them.
     ///
-    /// `locks` is shared by every worker — one table for the node, which is
-    /// what makes the brake a brake once operations run on several threads.
     /// `publisher` is likewise one channel: every worker's committed mutations
     /// converge on the accept thread that owns the subscription table.
     ///
@@ -64,7 +69,6 @@ impl Router {
     pub fn start<E>(
         registry: E,
         disk: &DiskHandle,
-        locks: &Arc<OwnerLocks>,
         publisher: &MutationFeed,
         secret: [u8; 32],
         count: usize,
@@ -74,13 +78,7 @@ impl Router {
     {
         let workers = (0..count.max(1))
             .map(|_| {
-                worker::start(
-                    registry,
-                    disk.clone(),
-                    Arc::clone(locks),
-                    publisher.clone(),
-                    secret,
-                )
+                worker::start(registry, disk.clone(), publisher.clone(), secret)
             })
             .collect::<wavedb_platform::Result<Vec<_>>>()?;
         Ok(Self { workers, secret })
@@ -98,15 +96,32 @@ impl Router {
     /// [`Response::Err`], because the caller upstream has a socket to answer
     /// and needs bytes for it either way.
     pub async fn dispatch(&self, request: Request) -> Answer {
+        let shard = self.shard_for(&request);
         let struct_hash = request.frame.struct_hash;
-        let Some(worker) = self.workers.get(self.shard_for(&request)) else {
+        self.send(shard, struct_hash, Work::Request(request)).await
+    }
+
+    /// Route one WebSocket `Call` to its owner's shard and wait for the
+    /// response. `caller` is what the session's gate 1 resolved at `Hello`.
+    ///
+    /// Never returns a transport error, as [`dispatch`](Self::dispatch).
+    pub async fn call(&self, caller: Caller, frame: CommandFrame) -> Response {
+        let shard = self.owner_shard(caller.tenant, frame.struct_hash);
+        let struct_hash = frame.struct_hash;
+        self.send(shard, struct_hash, Work::Call { caller, frame })
+            .await
+            .response
+    }
+
+    async fn send(&self, shard: usize, struct_hash: u64, work: Work) -> Answer {
+        let Some(worker) = self.workers.get(shard) else {
             // Unreachable: `start` refuses an empty set and `shard_for` folds
             // onto the length. Said rather than indexed, because a routing
             // function has no business panicking on a request path.
             return refused(struct_hash, "no shard");
         };
         let (answer, wait) = oneshot::channel();
-        if worker.send(Job { request, answer }).await.is_err() {
+        if worker.send(Job { work, answer }).await.is_err() {
             return refused(struct_hash, "shard stopped");
         }
         wait.await
@@ -123,9 +138,15 @@ impl Router {
         let Ok(caller) = dispatch::identify(&request.auth, &self.secret) else {
             return 0;
         };
+        self.owner_shard(caller.tenant, request.frame.struct_hash)
+    }
+
+    /// The shard owning `(tenant, struct_hash)` — the lock's key, so one
+    /// owner is always on one shard, however its work arrived.
+    fn owner_shard(&self, tenant: U48, struct_hash: u64) -> usize {
         Owner::Unique {
-            tenant: caller.tenant,
-            struct_hash: request.frame.struct_hash,
+            tenant,
+            struct_hash,
         }
         .shard(self.workers.len())
     }
