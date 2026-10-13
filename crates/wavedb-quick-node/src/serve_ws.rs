@@ -6,7 +6,8 @@
 //! the connection to a [`Caller`]; every later message executes as it, no
 //! per-message token. Then the loop multiplexes two sources:
 //!
-//! - the **client** — [`Call`](ClientMsg::Call)s (gates 2–3, answered by
+//! - the **client** — [`Call`](ClientMsg::Call)s (routed to the owning
+//!   shard with the bound caller, which runs gates 2–3; answered by
 //!   `Item*`/`End`, FIFO per connection) and
 //!   [`Subscribe`](ClientMsg::Subscribe)/[`Unsubscribe`](ClientMsg::Unsubscribe),
 //!   each acked with a [`TopicOk`](ServerMsg::TopicOk) once applied (FIFO ⇒
@@ -20,6 +21,11 @@
 //! a channel; the loop selects on that channel (cancel-safe) and the event
 //! channel. On disconnect every subscription the connection held is dropped.
 //!
+//! The session executes nothing itself: every command, and the tail a
+//! subscribe acks with, runs on the shard that owns it
+//! ([`Router::call`](crate::shard::Router::call)). This thread holds the
+//! socket and the subscription table, and no store.
+//!
 //! [`NotifyStore`]: crate::subscribe::NotifyStore
 
 use std::cell::RefCell;
@@ -28,10 +34,9 @@ use std::rc::Rc;
 
 use async_channel::Sender;
 use embassy_futures::select::{Either, select};
-use wavedb_core::Store;
-use wavedb_core::expose::{Caller, Exposure, Reply};
+use wavedb_core::expose::{Caller, Change, Command, Reply};
 use wavedb_core::wire::{from_wire, to_wire};
-use wavedb_net::frame::Response;
+use wavedb_net::frame::{CommandFrame, Response};
 use wavedb_net::ws::{ClientMsg, ServerMsg, Topic};
 use wavedb_platform::carrier::Here;
 use wavedb_platform::io::{ReadHalf, WriteHalf};
@@ -39,6 +44,7 @@ use wavedb_platform::ws::codec::{self, OP_BINARY, OP_CLOSE, OP_PONG};
 
 use crate::dispatch;
 use crate::serve::Node;
+use crate::shard::Router;
 use crate::subscribe::SubTable;
 use crate::ws_read::{FromClient, Halt, Inbound, StopReader, reader};
 
@@ -57,19 +63,13 @@ pub const WS_OUTBOUND_DEPTH: usize = 256;
 /// # Errors
 /// A socket write fault while answering (the connection is being torn down
 /// regardless).
-pub async fn serve<E, S>(
+pub async fn serve(
     read: ReadHalf,
     mut write: WriteHalf,
-    registry: &E,
-    node: &Node<S>,
+    node: &Node,
     here: &Here,
-) -> wavedb_net::Result<()>
-where
-    E: Exposure,
-    S: Store,
-{
-    let (store, locks, secret, subs) =
-        (&*node.store, &*node.locks, &node.secret, &node.subs);
+) -> wavedb_net::Result<()> {
+    let (router, secret, subs) = (&node.router, &node.secret, &node.subs);
     let inbound = Rc::new(Inbound::new());
     let halt = Rc::new(Halt::new());
     // However the session ends — returning, or dropped mid-await when the
@@ -108,9 +108,7 @@ where
             Either::First(item) => {
                 if let Err(e) = handle_client(
                     &mut write,
-                    registry,
-                    store,
-                    locks,
+                    router,
                     caller,
                     subs,
                     conn,
@@ -152,22 +150,16 @@ where
 /// Handle one message from the client. The returned `Err` is a socket write
 /// fault only — a *command* refusal is a `Response::Err` sent over the wire.
 #[allow(clippy::too_many_arguments)]
-async fn handle_client<E, S>(
+async fn handle_client(
     write: &mut WriteHalf,
-    registry: &E,
-    store: &S,
-    locks: &crate::shard::OwnerLocks,
+    router: &Router,
     caller: Caller,
     subs: &Rc<RefCell<SubTable>>,
     conn: u64,
     event_tx: &Sender<ServerMsg>,
     topics: &mut HashSet<Topic>,
     item: FromClient,
-) -> wavedb_net::Result<()>
-where
-    E: Exposure,
-    S: Store,
-{
+) -> wavedb_net::Result<()> {
     match item {
         FromClient::Ping(payload) => {
             codec::write_message(write, OP_PONG, &payload, false).await?;
@@ -175,19 +167,8 @@ where
         // Ended by the session loop before it gets here.
         FromClient::End => {}
         FromClient::Msg(ClientMsg::Call(frame)) => {
-            // Under the same brake the routed path takes, against the same
-            // table. Without it a WebSocket write and a POST write on one
-            // owner exclude nothing — and this path never took it at all,
-            // which was a hole even before routing existed.
-            let response = {
-                let _owner = locks
-                    .acquire(crate::shard::OwnerKey::of(
-                        caller.tenant,
-                        frame.struct_hash,
-                    ))
-                    .await;
-                dispatch::execute(registry, store, caller, frame).await
-            };
+            // Awaited before the next message is read: FIFO per connection.
+            let response = router.call(caller, frame).await;
             write_reply(write, response).await?;
         }
         FromClient::Msg(ClientMsg::Subscribe(topic)) => {
@@ -210,7 +191,7 @@ where
             // FIFO ack: once this arrives the subscription is live, so a
             // watcher established before a mutation cannot miss its event.
             // The tail seeds the client's reconnect cursor (W6).
-            let tail = topic_tail(registry, store, caller, topic).await;
+            let tail = topic_tail(router, caller, topic).await;
             send(write, &ServerMsg::TopicOk(topic, tail)).await?;
         }
         FromClient::Msg(ClientMsg::Unsubscribe(topic)) => {
@@ -229,27 +210,17 @@ where
 }
 
 /// The topic's current tail instant — the cursor a fresh subscribe seeds its
-/// reconnect catch-up from (W6). Runs the type's `Changes` step with
-/// `since = None` (registration) through the registry and reads the cursor it
+/// reconnect catch-up from (W6). Runs the type's `Changes` command with
+/// `since = None` (registration) on the owning shard and reads the cursor it
 /// answers; 0 if the topic hash is not served (the subscribe still acks).
-async fn topic_tail<E, S>(
-    registry: &E,
-    store: &S,
-    caller: Caller,
-    topic: Topic,
-) -> u64
-where
-    E: Exposure,
-    S: Store,
-{
-    use wavedb_core::expose::{Change, Command};
-
-    let payload = to_wire(&(topic.pivot, None::<u64>));
-    match registry
-        .execute(store, caller, topic.struct_hash, Command::Changes, &payload)
-        .await
-    {
-        Ok(Reply::Values(entries)) => entries
+async fn topic_tail(router: &Router, caller: Caller, topic: Topic) -> u64 {
+    let frame = CommandFrame {
+        struct_hash: topic.struct_hash,
+        command: Command::Changes,
+        payload: to_wire(&(topic.pivot, None::<u64>)),
+    };
+    match router.call(caller, frame).await {
+        Response::Ok(Reply::Values(entries)) => entries
             .first()
             .and_then(|entry| from_wire::<Change>(entry).ok())
             .map_or(0, |change| match change {
