@@ -15,43 +15,31 @@
 //!
 //! ## What this thread does, and what it hands off
 //!
-//! A POST is **routed**: decoded here, executed on the shard that owns it
-//! ([`Router`](crate::shard::Router)), written back here. This thread runs no
-//! gate and touches no engine on that path.
-//!
-//! A WebSocket session is not routed yet, and it still executes its `Call`s
-//! here — over a **cacheless** store, which is what makes two executors over
-//! one engine sound, and under the same [`OwnerLocks`](crate::shard::OwnerLocks)
-//! table, which is what keeps the brake a brake across both. Routing it too
-//! turns on a question this seam does not get to answer alone: a session binds
-//! its identity once at `Hello`, and routing re-verifies the token per
-//! command, so a long-lived watch would start refusing the moment its token
-//! expired. That is arguably more correct and definitely a behaviour change.
+//! Everything is **routed**: a POST is decoded here, executed on the shard
+//! that owns it ([`Router`](crate::shard::Router)), and written back here; a
+//! WebSocket session's `Call`s go the same way, carrying the caller the
+//! session bound at `Hello`. This thread holds sockets and the subscription
+//! table, and touches no engine: it has no store at all.
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use async_channel::Receiver;
 use embassy_futures::select::{Either, select};
 use embedded_io_async::Write;
 use futures::channel::oneshot;
-use wavedb_core::Store;
-use wavedb_core::expose::{Exposure, Reply};
+use wavedb_core::expose::Reply;
 use wavedb_core::wire::{from_wire, to_wire};
 use wavedb_net::frame::{Request, Response, StreamFrame};
 use wavedb_net::http::{self, Incoming};
 use wavedb_platform::carrier::Here;
 use wavedb_platform::io::{IoError, Listener, Stream};
 
-use crate::__rt::NodeTasks;
-use crate::shard::{OwnerLocks, Router, ShardStore, Shards};
-use crate::subscribe::{NotifyStore, SubTable, Subscriptions};
+use crate::__rt::{MAX_CONNECTIONS, NodeTasks};
+use crate::shard::{Router, Shards};
+use crate::subscribe::SubTable;
 use crate::upkeep::{self, Maintenance};
 use crate::{ServerError, dispatch, feed, serve_ws};
-
-/// The store the accept carrier serves WebSocket sessions through.
-type Serving = NotifyStore<ShardStore, Subscriptions>;
 
 /// What the accept loop is started with. Built on the caller's thread and
 /// moved onto the accept carrier, so every field is `Send`; the node's
@@ -69,10 +57,9 @@ pub struct Accept<E> {
 }
 
 /// One accepted connection, as its task receives it.
-pub struct Connection<E> {
-    registry: E,
+struct Connection {
     sock: Stream,
-    node: Node<Serving>,
+    node: Node,
     halt: Receiver<()>,
 }
 
@@ -110,12 +97,6 @@ async fn serve<E: NodeTasks>(
     stop: &Receiver<()>,
     here: &Here,
 ) -> crate::Result<()> {
-    // One table for the node: the brake that keeps two interleaved
-    // collection ops from losing an index update now that the store
-    // underneath genuinely suspends (`CONCURRENCY_BRAKE.md`). Shared with
-    // every shard worker, which is what makes it exclude anything at all
-    // once operations run on more than this thread.
-    let locks = Arc::new(OwnerLocks::new());
     let subs = Rc::new(RefCell::new(SubTable::default()));
     // Committed mutations come back from the shards as plain data; the
     // subscription table lives here and is fanned out by `feed::publish`.
@@ -123,7 +104,6 @@ async fn serve<E: NodeTasks>(
     let router = Router::start(
         registry,
         &shards.handle(),
-        &locks,
         &mutations,
         secret,
         shards.count(),
@@ -143,28 +123,22 @@ async fn serve<E: NodeTasks>(
         halted.clone(),
         here,
     )?;
-    // The accept thread's own view: cacheless (see `Shards::store`) and
-    // wrapped so a WebSocket `Call` executed here still reaches the
-    // watchers, exactly as a routed one does from its shard.
     let node = Node {
         router,
-        store: Rc::new(NotifyStore::new(shards.store(), Rc::clone(&subs))),
         secret,
-        locks,
         subs,
     };
     let result = loop {
         match select(listener.accept(), stop.recv()).await {
             Either::First(Ok((sock, _))) => {
                 let conn = Connection {
-                    registry,
                     sock,
                     node: node.clone(),
                     halt: halted.clone(),
                 };
                 // A full pool refuses: the connection drops, closing its
                 // socket — an explicit refusal, never a queue.
-                let _ = E::spawn_connection(conn, here.clone());
+                let _ = here.spawn(connection(conn, here.clone()));
             }
             Either::First(Err(e)) => break Err(e.into()),
             // A message or a closed channel: either way, stop.
@@ -176,65 +150,42 @@ async fn serve<E: NodeTasks>(
 }
 
 /// One connection's task: serve it, or stop with the node.
-pub async fn connection<E: NodeTasks>(conn: Connection<E>, here: Here) {
-    let Connection {
-        registry,
-        sock,
-        node,
-        halt,
-    } = conn;
+///
+/// Declared here rather than by `node_tasks!`: a connection routes every
+/// command to a shard and executes nothing, so it does not depend on the
+/// registry, and one pool serves every node in the process.
+#[wavedb_platform::carrier::rt::task(
+    pool_size = MAX_CONNECTIONS,
+    embassy_executor = wavedb_platform::carrier::rt
+)]
+async fn connection(conn: Connection, here: Here) {
+    let Connection { sock, node, halt } = conn;
     // A per-connection fault is dropped: it never takes the node down. (No
     // tracing dep yet — silent.)
-    let _ =
-        select(serve_connection(sock, &registry, &node, &here), halt.recv())
-            .await;
+    let _ = select(serve_connection(sock, &node, &here), halt.recv()).await;
 }
 
-/// Everything a connection needs beyond its socket and the registry.
+/// Everything a connection needs beyond its socket.
 ///
-/// One struct rather than five parameters, because they travel together
-/// everywhere and are cloned together per connection — each field is a
-/// refcount or a key, so a clone is a handful of increments.
-pub struct Node<S> {
-    /// Where a POST goes: the shard that owns it.
+/// Each field is a refcount or a key, so a clone per connection is a handful
+/// of increments.
+#[derive(Clone)]
+pub struct Node {
+    /// Where every command goes: the shard that owns it.
     pub router: Router,
-    /// The accept thread's own cacheless view, for the WebSocket sessions
-    /// that still execute here. See the module note.
-    pub store: Rc<S>,
+    /// Gate 1's key, for a WebSocket session's `Hello`.
     pub secret: [u8; 32],
-    /// Per-owner serialisation — see `CONCURRENCY_BRAKE.md`. One table for
-    /// the whole node, `Arc` because the shard workers hold it too.
-    pub locks: Arc<OwnerLocks>,
     pub subs: Rc<RefCell<SubTable>>,
-}
-
-// Manual: a derive would demand `S: Clone`, and the store is shared by `Rc`
-// rather than cloned.
-impl<S> Clone for Node<S> {
-    fn clone(&self) -> Self {
-        Self {
-            router: self.router.clone(),
-            store: Rc::clone(&self.store),
-            secret: self.secret,
-            locks: Arc::clone(&self.locks),
-            subs: Rc::clone(&self.subs),
-        }
-    }
 }
 
 /// Read one request and answer it: a POST body dispatches + writes the
 /// framed response; a WebSocket upgrade switches protocols and hands the
 /// socket to the [`serve_ws`] session loop.
-async fn serve_connection<E, S>(
+async fn serve_connection(
     sock: Stream,
-    registry: &E,
-    node: &Node<S>,
+    node: &Node,
     here: &Here,
-) -> wavedb_net::Result<()>
-where
-    E: Exposure,
-    S: Store,
-{
+) -> wavedb_net::Result<()> {
     let (mut reader, mut writer) = sock.split();
     match http::read_request(&mut reader).await? {
         None => Ok(()), // peer closed without sending — clean.
@@ -255,7 +206,7 @@ where
         Some(Incoming::Upgrade { key }) => {
             let accept = wavedb_platform::ws::codec::accept_key(&key);
             http::write_switching_head(&mut writer, &accept).await?;
-            serve_ws::serve(reader, writer, registry, node, here).await
+            serve_ws::serve(reader, writer, node, here).await
         }
     }
 }
