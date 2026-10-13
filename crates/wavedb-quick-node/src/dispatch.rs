@@ -127,20 +127,33 @@ where
     // The guard is dropped before the piggyback: that navigation is
     // best-effort and read-only, so holding the owner through it would
     // lengthen the critical section for nothing.
-    let response = {
-        let _owner = locks
-            .acquire(crate::shard::OwnerKey::of(
-                caller.tenant,
-                frame.struct_hash,
-            ))
-            .await;
-        execute(registry, store, caller, frame).await
-    };
+    let response = call(registry, store, locks, caller, frame).await;
     let delta = piggyback(registry, store, caller, &sync).await;
     Answer {
         response,
         sync: delta,
     }
+}
+
+/// Gates 2–3 for an identified [`Caller`], under its owner's lock.
+///
+/// Shared by a POST ([`handle`], after gate 1) and a WebSocket `Call` (caller
+/// bound at `Hello`): one lock on one key, whichever way a write arrives.
+pub async fn call<E, S>(
+    registry: &E,
+    store: &S,
+    locks: &crate::shard::OwnerLocks,
+    caller: Caller,
+    frame: CommandFrame,
+) -> Response
+where
+    E: Exposure,
+    S: Store,
+{
+    let _owner = locks
+        .acquire(crate::shard::OwnerKey::of(caller.tenant, frame.struct_hash))
+        .await;
+    execute(registry, store, caller, frame).await
 }
 
 /// Navigate the W7 piggyback: when the request declared poll topics, run the
@@ -291,13 +304,9 @@ where
     Response::Ok(Reply::Returned(to_wire(&reply)))
 }
 
-/// Gates 2–3 for an already-identified [`Caller`].
-///
-/// The shared tail of the HTTP [`handle`] and the WebSocket session's `Call`
-/// (whose caller was bound once at `Hello`, so gate 1 does not repeat per
-/// message). Never returns a transport error: a refusal or engine fault is
-/// the [`Response::Err`] arm.
-pub async fn execute<E, S>(
+/// Gates 2–3 — [`call`]'s body, once the owner is held. Never returns a
+/// transport error: a refusal or engine fault is the [`Response::Err`] arm.
+async fn execute<E, S>(
     registry: &E,
     store: &S,
     caller: Caller,
