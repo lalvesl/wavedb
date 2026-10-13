@@ -22,7 +22,6 @@
 #![allow(clippy::future_not_send)]
 
 use std::rc::Rc;
-use std::sync::Arc;
 
 use schema_smoke::{AboutUser, Note, REGISTRY};
 
@@ -32,7 +31,7 @@ use wavedb_core::{LocalHandle, LocalId, U48};
 use wavedb_net::auth::{AccessClaims, TokenPurpose, sign};
 use wavedb_net::frame::{Auth, CommandFrame, Request, Response};
 use wavedb_quick_node::shard::{
-    Maintenance, OwnerLocks, Router, ShardStore, Shards, shard_of,
+    Maintenance, Router, ShardStore, Shards, shard_of,
 };
 use wavedb_storage::{PageStore, StorageRegistry};
 
@@ -286,18 +285,11 @@ async fn maintain_waits(
 /// carries.
 async fn ingress_routes_to_a_worker(shards: &Shards, bypass: &ShardStore) {
     wavedb_net::auth::set_node_secret(SECRET);
-    let locks = Arc::new(OwnerLocks::new());
     let (mutations, _drain) =
         wavedb_quick_node::feed::feed(wavedb_quick_node::feed::MUTATION_DEPTH);
-    let router = Router::start(
-        REGISTRY,
-        &shards.handle(),
-        &locks,
-        &mutations,
-        SECRET,
-        4,
-    )
-    .expect("start the shard workers");
+    let router =
+        Router::start(REGISTRY, &shards.handle(), &mutations, SECRET, 4)
+            .expect("start the shard workers");
     assert_eq!(router.count(), 4);
 
     let profile = AboutUser {
