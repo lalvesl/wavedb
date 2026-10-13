@@ -34,18 +34,20 @@ pub mod priority;
 mod route;
 mod router;
 mod store;
+mod waiters;
 mod worker;
 
 pub use disk::{
     DiskHandle, MAINTENANCE_DEPTH, QUEUE_DEPTH, start as start_disk,
 };
-pub use lock::{OwnerKey, OwnerLocks};
+pub use lock::{Acquire, Held, OwnerKey, OwnerLocks};
 pub use msg::{DiskRequest, EngineStats, Maintenance};
 pub use priority::Priority;
 pub use route::{Owner, shard_of};
 pub use router::Router;
 pub use store::{CACHE_BYTES, ShardStore};
-pub use worker::{JOB_DEPTH, Job, JobSlot, ShardCtx, Worker, job, shard};
+pub use waiters::MAX_WAITERS;
+pub use worker::{JOB_DEPTH, Job, JobSlot, ShardCtx, Work, Worker, job, shard};
 
 use std::rc::Rc;
 
@@ -99,8 +101,8 @@ impl Shards {
         shard_of(pivot, self.count)
     }
 
-    /// A **cacheless** store onto the disk actor, for the threads that are not
-    /// shards: node-side seeding, and the accept loop's WebSocket sessions.
+    /// A **cacheless** store onto the disk actor, for code that is not a
+    /// shard: node-side seeding before serving, and tests.
     ///
     /// Cacheless is not a tuning choice, it is the correctness condition.
     /// [`ShardStore`]'s cache remembers absence, and that is sound only while
