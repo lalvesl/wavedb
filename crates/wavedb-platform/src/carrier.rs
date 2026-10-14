@@ -14,7 +14,7 @@
 //! once the last one drops. Stopping a carrier is therefore cooperative —
 //! its tasks watch a stop signal of their own and return.
 //!
-//! [RFC 0066]: ../../../rfcs/0066-embassy-executor-and-async-io-WIP.md
+//! [RFC 0066]: ../../../rfcs/0066-embassy-executor-and-async-io.md
 
 use std::cell::Cell;
 use std::future::Future;
