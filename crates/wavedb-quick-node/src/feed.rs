@@ -24,7 +24,7 @@
 //! signal already raised, and a subscriber can never receive a later event of
 //! a topic without the earlier one — which would move its cursor past the gap.
 //!
-//! [RFC 0066]: ../../../rfcs/0066-embassy-executor-and-async-io-WIP.md
+//! [RFC 0066]: ../../../rfcs/0066-embassy-executor-and-async-io.md
 
 use std::cell::RefCell;
 use std::rc::Rc;
