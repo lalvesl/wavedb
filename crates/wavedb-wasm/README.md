@@ -26,8 +26,8 @@ change shape.
 
 ## Runtime swap
 
-The WASM build replaces the Tokio runtime: futures run via
-`wasm_bindgen_futures`, HTTP goes through the browser `fetch` API, WebSockets
+The WASM build swaps the native runtime (Embassy carriers, RFC 0066): futures
+run via `wasm_bindgen_futures`, HTTP goes through the browser `fetch` API, WebSockets
 through `gloo_net::websocket`, and persistence through IndexedDB.
 
 ## Storage: key→value, not pages, no journal
