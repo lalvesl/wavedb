@@ -16,7 +16,7 @@
 //!
 //! Everything here is `#[doc(hidden)]` plumbing for that one macro.
 //!
-//! [RFC 0066]: ../../../rfcs/0066-embassy-executor-and-async-io-WIP.md
+//! [RFC 0066]: ../../../rfcs/0066-embassy-executor-and-async-io.md
 
 use std::rc::Rc;
 
