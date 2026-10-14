@@ -101,9 +101,8 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   `rand` (`RandomState` keys / `window.crypto`), `http` (the tunnel's **client half**:
   hand-rolled TcpStream POST / `fetch` + streamed body), `ws` (the WebSocket client
   half: hand-rolled RFC 6455 / browser `WebSocket`; `Conn::split()` for reader-task
-  patterns), `task` (`spawn_detached` = dedicated thread w/ current-thread
-  runtime + LocalSet / `wasm_bindgen_futures::spawn_local` — **no tokio in wasm**;
-  the client manager's, until RFC 0066 moves it), `io` (native sockets from
+  patterns), `task` (browser only: `spawn_local` and `spawn_detached`, which runs the
+  client manager there — natively it runs on a carrier), `io` (native sockets from
   `async-io`; protocols are generic over `embedded-io-async`) and `carrier`
   (native: an OS thread running one Embassy executor whose tasks come from
   static pools — the node runs on these).

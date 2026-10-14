@@ -7,7 +7,7 @@
 //! before (the page has one thread and no pools), behind the same functions,
 //! so the manager's code does not branch.
 //!
-//! [RFC 0066]: ../../../../rfcs/0066-embassy-executor-and-async-io-WIP.md
+//! [RFC 0066]: ../../../../rfcs/0066-embassy-executor-and-async-io.md
 
 use std::cell::Cell;
 use std::rc::Rc;
