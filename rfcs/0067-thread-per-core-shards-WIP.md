@@ -3,16 +3,16 @@
 - **Status:** Planned — opened 2026-10-08. Nothing built.
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the owner
   as the unit of concurrency, and `shard_of`),
-  [0066](0066-embassy-executor-and-async-io-WIP.md) (the executor, the reactor
+  [0066](0066-embassy-executor-and-async-io.md) (the executor, the reactor
   and the bounded queues this runs on),
   [0063](0063-engine-yield-map-and-interruptible-engine-PLANNED.md) (the
   interruptible settle the background work needs),
   [0041](0041-single-barrier-checkpoint.md) (the checkpoint that stays atomic
   per shard), [0018](0018-storage-engine.md) (the per-type dictionaries)
 - **Amends:** 0064's single disk actor (one engine per **shard** instead);
-  0018's one-`PageStore`-per-process rule (one per shard); 0066 step 2 (the
-  owner locks become thread-local) and step 4 (three executors per thread,
-  not one)
+  0018's one-`PageStore`-per-process rule (one per shard); 0066 step 4
+  (three executors per thread, not one). The thread-local owner locks this
+  RFC asked for were delivered by 0066 step 5; this RFC adds the leases.
 - **Related:** [0059](0059-object-storage-capacity-tier-PLANNED.md) (object
   storage, which a per-shard prefix makes a per-shard decision)
 - **Crates:** `wavedb-storage` (per-type state out of the statics; one engine
@@ -211,10 +211,15 @@ Business logic is light on CPU but often awaits while holding an owner — a
 Unique `(tenant, type)` or a Pivot — and lets the thread run other tasks in
 the meantime.
 
-- The lock **lives in the owner's thread**, in a thread-local table
-  (`embassy-sync` with `NoopRawMutex`). The engine on that thread runs
-  operations to completion without yielding, as `PageStore` does today, so
-  the table guards held leases, not the engine.
+- The lock **lives in the owner's thread**, in that thread's table —
+  already built by [0066](0066-embassy-executor-and-async-io.md) step 5
+  (`shard::OwnerLocks`): a chain of waiters per owner, a release handing the
+  owner to the next waiter and waking only it, sizes fixed at compile time.
+  (`embassy-sync`'s `Mutex`, first planned here, keeps a single waker and
+  makes its waiters wake each other in a loop.) The shards a thread carries
+  share its one table. The engine on that thread runs operations to
+  completion without yielding, as `PageStore` does today, so the table
+  guards held leases, not the engine.
 - A task on another thread acquires it as a **lease**:
 
   ```text
@@ -226,8 +231,7 @@ the meantime.
 
 - **Several owners:** `lock_many` acquires in `(shard, owner)` order, so two
   tasks cannot hold one each and wait for the other.
-- This replaces 0066 step 2's cross-thread `async-lock` table for
-  `OwnerLocks`.
+- Within one thread nothing changes; the lease is the only new piece.
 
 ### 6. Ingress and coordination
 
@@ -281,7 +285,7 @@ the meantime.
 | one open store per process (`EngineClaim`, `StructStorage` statics) | statics keep compile-time constants; per-type runtime state lives in each shard's engine |
 | one journal, one `data.bin` | 64 of each, under `shards/xx/` |
 | shard workers + disk actor + serve loop on a `LocalSet` | `T` identical threads, three executors each |
-| `OwnerLocks`: process-wide map of async mutexes | thread-local table plus leases |
+| `OwnerLocks`: one table per thread (0066 step 5), local owners only | the same table, plus leases for owners on other threads |
 | `shard_of`: SplitMix64 over packed keys, `% shards`, a thread choice | `seahash(owner bytes) % P`, a frozen on-disk placement |
 
 ## Delivery
@@ -301,8 +305,9 @@ the meantime.
    - the `wavedb/multi` to `wavedb/single` ratio, which must not fall;
    - throughput as `T` grows from 1 to the core count.
 
-0066 steps 2 and 3 (bounded channels, timers) are unaffected, except that
-`OwnerLocks` waits for step 5 here instead of moving to `async-lock`.
+0066 steps 2 and 3 (bounded channels, timers) are unaffected. `OwnerLocks`
+became per-thread in 0066 step 5, once every operation ran on its shard;
+step 5 here adds only the leases.
 
 ## Alternatives
 
