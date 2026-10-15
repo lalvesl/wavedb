@@ -321,6 +321,22 @@ impl<R: Read> Read for Prefixed<R> {
     }
 }
 
+/// Test servers: read a request up to and including `end` before answering.
+///
+/// A canned server that answers after one read and closes can leave request
+/// bytes unread, and closing over unread bytes makes the kernel send a reset
+/// instead of a FIN — the client then sees a fault the test did not stage.
+#[cfg(test)]
+pub(crate) async fn read_request(sock: &mut Stream, end: &[u8]) {
+    let (mut seen, mut buf) = (Vec::new(), [0u8; 1024]);
+    while !seen.ends_with(end) {
+        match Read::read(sock, &mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => seen.extend_from_slice(&buf[..n]),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use embedded_io_async::{Read, Write};
