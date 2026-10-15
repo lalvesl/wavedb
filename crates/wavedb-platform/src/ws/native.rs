@@ -314,8 +314,7 @@ mod tests {
             std::thread::spawn(move || {
                 crate::carrier::block_on(async move {
                     let (mut sock, _) = listener.accept().await.unwrap();
-                    let mut sink = [0u8; 1024];
-                    let _ = sock.read(&mut sink).await;
+                    crate::io::read_request(&mut sock, b"\r\n\r\n").await;
                     sock.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
                         .await
                         .unwrap();
@@ -334,8 +333,7 @@ mod tests {
             std::thread::spawn(move || {
                 crate::carrier::block_on(async move {
                     let (mut sock, _) = listener.accept().await.unwrap();
-                    let mut sink = [0u8; 1024];
-                    let _ = sock.read(&mut sink).await;
+                    crate::io::read_request(&mut sock, b"\r\n\r\n").await;
                     sock.write_all(
                         b"HTTP/1.1 101 Switching Protocols\r\n\
                   sec-websocket-accept: bogus\r\n\r\n",
