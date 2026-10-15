@@ -113,7 +113,7 @@ impl Body {
 
 #[cfg(test)]
 mod tests {
-    use embedded_io_async::{Read, Write};
+    use embedded_io_async::Write;
 
     use super::{Error, post};
     use crate::io::Listener;
@@ -125,8 +125,7 @@ mod tests {
         std::thread::spawn(move || {
             crate::carrier::block_on(async move {
                 let (mut sock, _) = listener.accept().await.unwrap();
-                let mut sink = [0u8; 1024];
-                let _ = sock.read(&mut sink).await;
+                crate::io::read_request(&mut sock, b"\r\n\r\nreq").await;
                 sock.write_all(response).await.unwrap();
             });
         });
