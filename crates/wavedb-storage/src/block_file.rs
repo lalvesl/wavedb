@@ -148,6 +148,7 @@ impl BlockFile {
             .create(true)
             .truncate(false)
             .open(path)?;
+        file.try_lock()?; // one open store per `data.bin`, in any process
 
         let len = file.metadata()?.len();
         if len == 0 {
