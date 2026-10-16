@@ -27,7 +27,7 @@ use crate::directory::Directory;
 use crate::error::StorageResult;
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
-use crate::struct_storage::StructStorage;
+use crate::struct_storage::TypeSlot;
 
 /// Splits one round may perform — a pacing budget on how fast the directory
 /// grows in one checkpoint. Page size is a target, not an invariant: a bucket
@@ -107,7 +107,7 @@ impl PageStore {
         idx: usize,
         ids: &[Id],
     ) -> StorageResult<SlotPlan> {
-        let slot = self.types[idx];
+        let slot = &self.types[idx];
         let mut dir = slot
             .directory()
             .lock()
@@ -169,7 +169,7 @@ impl PageStore {
     /// [RFC 0049]: ../../../rfcs/0049-elastic-pages-and-load-driven-splits.md
     fn plan_splits(
         &self,
-        slot: &'static StructStorage,
+        slot: &TypeSlot,
         dir: &mut Directory,
         dict: &DictState,
         staged: &mut BTreeMap<usize, SlotPage>,
@@ -220,7 +220,7 @@ impl PageStore {
 /// The staged page for `bucket`, read from its settled run on first touch.
 fn staged_page<'a>(
     store: &PageStore,
-    slot: &'static StructStorage,
+    slot: &TypeSlot,
     dir: &Directory,
     dict: &DictState,
     staged: &'a mut BTreeMap<usize, SlotPage>,
