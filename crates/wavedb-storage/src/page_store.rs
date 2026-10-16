@@ -6,11 +6,13 @@
 //!
 //! - [`Journal`](crate::journal::Journal) — the write-ahead log;
 //!   **durability is here** (`apply` fsyncs before it returns).
-//! - one [`StructStorage`] **static per type** — that type's own in-memory
-//!   cache (reads serve from it) and its own [`Directory`] over the shared
-//!   [`BlockFile`]. The statics are `#[wavedb]`-generated and handed in as an
-//!   explicit registry at [`open`](PageStore::open): compile-time state, no
-//!   runtime `STRUCT_HASH → state` map.
+//! - one slot **per registered type** — that type's own in-memory cache
+//!   (reads serve from it) and its own [`Directory`] over the shared
+//!   [`BlockFile`]. The types are the `#[wavedb]`-generated [`StructStorage`]
+//!   declarations handed in as an explicit registry at
+//!   [`open`](PageStore::open): a compile-time list, routed once at open, no
+//!   runtime registration. The slots belong to this store, so several stores
+//!   can be open in one process, each over its own directory.
 //!
 //! ## Locking
 //!
@@ -83,7 +85,7 @@ use crate::block::BlockAllocator;
 use crate::block_file::BlockFile;
 use crate::directory::Directory;
 use crate::error::StorageResult;
-use crate::struct_storage::{BPTREE_NODE_STORAGE, EngineClaim, StructStorage};
+use crate::struct_storage::{BPTREE_NODE_STORAGE, StructStorage, TypeSlot};
 
 /// How many blocks a bucket should hold. It is a **target**, not a limit: a
 /// bucket over it is split when its turn comes round, and simply spans more
@@ -163,9 +165,10 @@ impl Default for StoreOptions {
 
 /// The native, page-backed [`Store`](wavedb_core::Store).
 ///
-/// One instance per process (the node model: one process, one `data.bin`);
-/// state lives in the per-type [`StructStorage`] statics registered at
-/// [`open`](Self::open).
+/// One instance per data directory: the directory's `data.bin` is locked
+/// while it is open. Per-type state lives in the store's own slots, one per
+/// [`StructStorage`] registered at [`open`](Self::open), so stores over
+/// different directories share nothing and can be open side by side.
 #[derive(Debug)]
 pub struct PageStore {
     pub(crate) file: BlockFile,
@@ -180,9 +183,9 @@ pub struct PageStore {
     /// A checkpoint whose `Commit` frame is written but not yet durable —
     /// the retired journal and the protection roll it authorises (RFC 0046).
     pub(crate) retiring: Mutex<Option<crate::retire::Retiring>>,
-    /// The registered slots, sorted by `STRUCT_HASH` (deduped) — a lock-free,
-    /// read-only route table after open.
-    pub(crate) types: Vec<&'static StructStorage>,
+    /// The registered types' state, sorted by `STRUCT_HASH` (deduped) — a
+    /// lock-free, read-only route table after open.
+    pub(crate) types: Vec<TypeSlot>,
     pub(crate) seed: [u64; 4],
     pub(crate) target_blocks_per_bucket: u64,
     /// Touched ids committed to the caches but not yet settled into pages —
@@ -194,22 +197,21 @@ pub struct PageStore {
     /// The record-cache budget this store was opened with — carried, not
     /// applied (see [`StoreOptions::record_cache_bytes`]).
     pub(crate) record_cache_bytes: usize,
-    _claim: EngineClaim,
 }
 
 impl PageStore {
     /// Open (or create) a node store rooted at directory `dir`, holding
     /// `data.bin` and `journal.log`, serving exactly the listed `types` (each
-    /// a `#[wavedb]`-generated static — `T::storage_entries()`). The reserved
-    /// `BpTree`-node slot is always included. Replays the journal to rebuild
-    /// every slot's cache and pages.
+    /// a `#[wavedb]`-generated declaration — `T::storage_entries()`). The
+    /// reserved `BpTree`-node slot is always included. Replays the journal to
+    /// rebuild every slot's cache and pages.
     ///
     /// The registry is an allowlist: a write whose `STRUCT_HASH` has no listed
     /// slot fails with [`StorageError::UnregisteredStructHash`](crate::StorageError::UnregisteredStructHash).
     ///
     /// # Errors
-    /// [`StorageError::EngineBusy`](crate::StorageError::EngineBusy) if this process already has an open store;
-    /// otherwise any filesystem / corruption fault during open or replay.
+    /// [`StorageError::EngineBusy`](crate::StorageError::EngineBusy) if the
+    /// directory is already open, in this process or another; otherwise any filesystem / corruption fault during open or replay.
     pub fn open(
         dir: impl AsRef<Path>,
         types: &[&'static StructStorage],
@@ -227,7 +229,6 @@ impl PageStore {
         types: &[&'static StructStorage],
         options: StoreOptions,
     ) -> StorageResult<Self> {
-        let claim = EngineClaim::acquire()?;
         let dir = dir.as_ref();
         std::fs::create_dir_all(dir)?;
 
@@ -240,13 +241,12 @@ impl PageStore {
 
         // Generated Pivot types of identical shape may share a STRUCT_HASH;
         // they also share pages today, so one slot serves the hash — dedup.
-        let mut types: Vec<&'static StructStorage> = types.to_vec();
-        types.push(&BPTREE_NODE_STORAGE);
-        types.sort_by_key(|s| s.struct_hash());
-        types.dedup_by_key(|s| s.struct_hash());
-        for slot in &types {
-            slot.reset(); // a prior run's state (same process) must not leak in
-        }
+        let mut declared: Vec<&'static StructStorage> = types.to_vec();
+        declared.push(&BPTREE_NODE_STORAGE);
+        declared.sort_by_key(|s| s.struct_hash());
+        declared.dedup_by_key(|s| s.struct_hash());
+        let types: Vec<TypeSlot> =
+            declared.into_iter().map(TypeSlot::new).collect();
 
         // Recover from the journal chain: the newest `Commit` frame roots
         // the directories/dictionaries/allocator (caches stay empty — reads
@@ -267,7 +267,6 @@ impl PageStore {
             pending: Mutex::new(Vec::new()),
             relax_window: options.relax_window,
             record_cache_bytes: options.record_cache_bytes,
-            _claim: claim,
         };
         for batch in &recovered.replay {
             store.route_batch(batch)?; // rebuild caches + pages, no re-journal
@@ -295,7 +294,7 @@ impl PageStore {
     /// Number of live records currently cached across every registered type.
     #[must_use]
     pub fn cache_len(&self) -> usize {
-        self.types.iter().map(|s| s.cached_len()).sum()
+        self.types.iter().map(TypeSlot::cached_len).sum()
     }
 
     /// Bucket count of one type's directory (`0` while nothing settled).
@@ -307,14 +306,11 @@ impl PageStore {
     }
 
     /// The registered slot for `struct_hash`, if listed at open.
-    pub(crate) fn slot_of(
-        &self,
-        struct_hash: u64,
-    ) -> Option<&'static StructStorage> {
+    pub(crate) fn slot_of(&self, struct_hash: u64) -> Option<&TypeSlot> {
         self.types
-            .binary_search_by_key(&struct_hash, |s| s.struct_hash())
+            .binary_search_by_key(&struct_hash, TypeSlot::struct_hash)
             .ok()
-            .map(|i| self.types[i])
+            .and_then(|i| self.types.get(i))
     }
 }
 
@@ -325,7 +321,6 @@ mod tests {
     use crate::error::StorageError;
     use crate::struct_storage::StructStorage;
     use futures::executor::block_on;
-    use parking_lot::{Mutex, MutexGuard};
     use std::time::Duration;
     use wavedb_core::{Id, Store, U48, Write};
 
@@ -336,13 +331,6 @@ mod tests {
     static TEST_SLOT: StructStorage = StructStorage::new(SH);
     /// A second registered type, for the multi-slot paths.
     static OTHER_SLOT: StructStorage = StructStorage::new(SH2);
-
-    /// The per-struct slots are process-global statics, so only one store may
-    /// live at a time — serialise the tests that open one.
-    fn engine_gate() -> MutexGuard<'static, ()> {
-        static GATE: Mutex<()> = Mutex::new(());
-        GATE.lock()
-    }
 
     fn open(path: &std::path::Path) -> PageStore {
         PageStore::open(path, &[&TEST_SLOT]).unwrap()
@@ -376,7 +364,6 @@ mod tests {
     /// the default — a knob is only a knob where it lands.
     #[test]
     fn the_budgets_reach_the_layers_that_spend_them() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         {
             let s = PageStore::open_with(
@@ -407,7 +394,6 @@ mod tests {
     /// callers this budget exists for.
     #[test]
     fn the_store_never_evicts_records_until_asked() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = PageStore::open_with(
             d.path(),
@@ -427,7 +413,10 @@ mod tests {
         });
         s.drain().unwrap();
         let cached = |s: &PageStore| -> usize {
-            s.types.iter().map(|t| t.cached_bytes()).sum()
+            s.types
+                .iter()
+                .map(crate::struct_storage::TypeSlot::cached_bytes)
+                .sum()
         };
         assert!(
             cached(&s) > 1,
@@ -447,7 +436,6 @@ mod tests {
     /// which is why neither field folds into a `STRUCT_HASH`.
     #[test]
     fn a_store_opened_without_caches_writes_the_same_file() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         {
             let s = PageStore::open_with(
@@ -487,7 +475,6 @@ mod tests {
     /// barrier at all (durability is the journal's until a checkpoint).
     #[test]
     fn a_settle_round_is_one_write_and_one_read_per_touched_page() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -529,7 +516,6 @@ mod tests {
     /// which is also one write and one barrier (RFC 0047).
     #[test]
     fn a_checkpoint_is_one_write_and_one_barrier() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -591,7 +577,6 @@ mod tests {
     /// and hand back for reuse — a run that frame still names.
     #[test]
     fn a_settle_after_a_checkpoint_cannot_reuse_its_runs() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -628,7 +613,6 @@ mod tests {
     /// that frame retires — a barrier paid by a checkpoint that had no work.
     #[test]
     fn a_checkpoint_with_no_writes_syncs_the_carrier_before_disposing() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -671,7 +655,6 @@ mod tests {
     /// checkpoint, for every type, forever.
     #[test]
     fn a_commit_frame_tracks_the_log_not_the_directory() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let mut s = open(d.path());
         // One block per bucket: a wide directory for little data, which is
@@ -729,7 +712,6 @@ mod tests {
     #[test]
     fn compaction_bounds_the_log_and_the_chain_still_restores() {
         const ROUNDS: u64 = 120;
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let open2 = |path: &std::path::Path| {
             PageStore::open(path, &[&TEST_SLOT, &OTHER_SLOT]).unwrap()
@@ -781,7 +763,6 @@ mod tests {
     /// caches are gone and every read comes off the moved pages.
     #[test]
     fn defragment_relocates_pages_without_losing_records() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -835,7 +816,6 @@ mod tests {
 
     #[test]
     fn put_get_remove() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -860,7 +840,6 @@ mod tests {
 
     #[test]
     fn batch_is_atomic_multi_record() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -877,7 +856,6 @@ mod tests {
 
     #[test]
     fn survives_reopen() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         block_on(async {
             {
@@ -897,7 +875,6 @@ mod tests {
 
     #[test]
     fn reopen_reflects_removals() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         block_on(async {
             {
@@ -919,7 +896,6 @@ mod tests {
     // typed conflict *before* the durability point.
     #[test]
     fn expect_guard_commits_clean_and_conflicts_before_journaling() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         block_on(async {
             {
@@ -967,7 +943,6 @@ mod tests {
     /// with the schema.
     #[test]
     fn a_guard_costs_the_same_whatever_the_schemas_width() {
-        let _g = engine_gate();
         // The same batch, the same guard, against a one-type registry and a
         // two-type one. Sequential: the slots are process-global statics.
         let narrow = guard_page_reads(&[&TEST_SLOT]);
@@ -1022,7 +997,6 @@ mod tests {
     /// it cannot touch a page (RFC 0063).
     #[test]
     fn a_remove_reads_no_page() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = PageStore::open(d.path(), &[&TEST_SLOT, &OTHER_SLOT]).unwrap();
         block_on(async {
@@ -1051,7 +1025,6 @@ mod tests {
 
     #[test]
     fn unregistered_struct_hash_is_refused_before_journaling() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -1077,7 +1050,6 @@ mod tests {
     /// here and settle all 20 records in one round.
     #[test]
     fn a_bounded_settle_step_leaves_the_rest_queued() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -1108,7 +1080,7 @@ mod tests {
             assert!(!s.has_pending(), "the queue must end empty");
 
             // And the records are all readable from their pages.
-            TEST_SLOT.mem_cache().write().clear();
+            s.slot_of(SH).unwrap().mem_cache().write().clear();
             for n in 1..=20u64 {
                 assert_eq!(
                     s.get_of(SH, nonunique(n)).await.unwrap(),
@@ -1122,7 +1094,6 @@ mod tests {
     /// The step reports `Done` on an empty queue rather than looping.
     #[test]
     fn a_step_on_an_empty_queue_is_done() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         assert_eq!(s.settle_step(usize::MAX).unwrap(), Progress::Done);
@@ -1131,7 +1102,6 @@ mod tests {
 
     #[test]
     fn evicted_records_read_through_from_pages() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -1143,7 +1113,7 @@ mod tests {
             .unwrap();
             s.drain().unwrap(); // settle into pages
             // Simulate eviction: drop the cache; the settled pages must serve.
-            TEST_SLOT.mem_cache().write().clear();
+            s.slot_of(SH).unwrap().mem_cache().write().clear();
             assert_eq!(
                 s.get_of(SH, nonunique(1)).await.unwrap(),
                 Some(rec(SH, b"settled")),
@@ -1162,7 +1132,6 @@ mod tests {
 
     #[test]
     fn remove_of_evicted_record_reaches_its_page() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         block_on(async {
             {
@@ -1172,7 +1141,7 @@ mod tests {
                     .unwrap();
                 s.drain().unwrap();
                 // Evict, then remove: the owner must be found on the page.
-                TEST_SLOT.mem_cache().write().clear();
+                s.slot_of(SH).unwrap().mem_cache().write().clear();
                 s.apply(&[Write::Remove(SH, nonunique(3))]).await.unwrap();
                 // Before the settle lands, the tombstone must hide the
                 // (still-present) page bytes…
@@ -1189,24 +1158,59 @@ mod tests {
         });
     }
 
+    /// One directory, one store: a second open of it is refused while the
+    /// first lives, and allowed once it drops.
     #[test]
-    fn second_open_in_process_is_engine_busy() {
-        let _g = engine_gate();
+    fn a_directory_open_twice_is_engine_busy() {
         let d = tempfile::tempdir().unwrap();
         let first = open(d.path());
-        let d2 = tempfile::tempdir().unwrap();
         assert!(matches!(
-            PageStore::open(d2.path(), &[&TEST_SLOT]).unwrap_err(),
+            PageStore::open(d.path(), &[&TEST_SLOT]).unwrap_err(),
             StorageError::EngineBusy
         ));
         drop(first);
-        // Slot released on drop — opening again succeeds.
         let _second = open(d.path());
+    }
+
+    /// Two stores over two directories, open side by side, share nothing —
+    /// not even for one declared type (RFC 0067: one store per shard).
+    #[test]
+    fn stores_over_two_directories_are_independent() {
+        let (d1, d2) =
+            (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        block_on(async {
+            {
+                let (a, b) = (open(d1.path()), open(d2.path()));
+                a.apply(&[Write::Put(nonunique(1), rec(SH, b"in a"))])
+                    .await
+                    .unwrap();
+                b.apply(&[Write::Put(nonunique(2), rec(SH, b"in b"))])
+                    .await
+                    .unwrap();
+                a.drain().unwrap();
+                assert_eq!(a.get(nonunique(2)).await.unwrap(), None);
+                assert_eq!(b.get(nonunique(1)).await.unwrap(), None);
+                assert_eq!(
+                    b.get(nonunique(2)).await.unwrap(),
+                    Some(rec(SH, b"in b"))
+                );
+            }
+            // And each directory replays only its own.
+            let (a, b) = (open(d1.path()), open(d2.path()));
+            assert_eq!(
+                a.get(nonunique(1)).await.unwrap(),
+                Some(rec(SH, b"in a"))
+            );
+            assert_eq!(a.get(nonunique(2)).await.unwrap(), None);
+            assert_eq!(
+                b.get(nonunique(2)).await.unwrap(),
+                Some(rec(SH, b"in b"))
+            );
+        });
     }
 
     #[test]
     fn unsettled_writes_read_correctly_and_survive_reopen() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         block_on(async {
             {
@@ -1233,7 +1237,6 @@ mod tests {
 
     #[test]
     fn tombstone_hides_stale_page_until_settle() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -1263,7 +1266,6 @@ mod tests {
 
     #[test]
     fn evict_settled_respects_budget_and_pending() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -1295,7 +1297,6 @@ mod tests {
 
     #[test]
     fn commit_retires_the_old_journal_and_reopen_is_cold() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         block_on(async {
             {
@@ -1345,7 +1346,6 @@ mod tests {
 
     #[test]
     fn writes_after_commit_replay_over_it() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         block_on(async {
             {
@@ -1380,7 +1380,6 @@ mod tests {
         // Simulates a crash between the Commit frame and the old journal's
         // delete: the covered journal is still on disk; recovery must skip
         // it (its frames are already in data.bin) and clean it up.
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         block_on(async {
             let (old_path, old_bytes) = {
@@ -1423,7 +1422,6 @@ mod tests {
     /// replays out of it.
     #[test]
     fn a_deferred_commit_that_never_lands_replays_the_retained_journal() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         block_on(async {
             {
@@ -1464,7 +1462,6 @@ mod tests {
         // Simulates a crash mid-Commit-append: the frame is torn (crc
         // fails) and the retired journal was never deleted — recovery must
         // ignore the torn commit and rebuild from the old journal's frames.
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         block_on(async {
             let (old_path, old_bytes) = {
@@ -1499,7 +1496,6 @@ mod tests {
 
     #[test]
     fn missing_journal_with_data_refuses_to_open() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         block_on(async {
             let s = open(d.path());
@@ -1518,7 +1514,6 @@ mod tests {
 
     #[test]
     fn commit_restores_dictionary_compressed_pages() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         // Repetitive bodies → the dictionary warms and pages store Zstd, so
         // reading them back after restore needs the persisted dictionary.
@@ -1605,7 +1600,6 @@ mod tests {
     /// relieving anything.
     #[test]
     fn a_record_larger_than_the_target_does_not_drive_splits() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let mut s = open(d.path());
         s.target_blocks_per_bucket = 1; // 4 KiB
@@ -1635,7 +1629,6 @@ mod tests {
     /// grows the table and every record survives the repartition.
     #[test]
     fn many_records_trigger_split_and_stay_readable() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path());
         block_on(async {
@@ -1674,7 +1667,6 @@ mod tests {
     /// thing a durability window must never quietly change (RFC 0061).
     #[test]
     fn a_zero_window_takes_one_barrier_per_batch() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path()); // StoreOptions::default()
         let before = s.journal.lock().barriers();
@@ -1692,7 +1684,6 @@ mod tests {
     /// and `flush` buys the strong answer back for exactly one.
     #[test]
     fn a_burst_inside_one_window_costs_one_barrier() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         let s = PageStore::open_with(
             d.path(),
@@ -1726,7 +1717,6 @@ mod tests {
     /// platter: a reopen replays it.
     #[test]
     fn an_elapsed_window_syncs_and_the_batch_replays() {
-        let _g = engine_gate();
         let d = tempfile::tempdir().unwrap();
         {
             let s = PageStore::open_with(
