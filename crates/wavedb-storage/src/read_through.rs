@@ -11,7 +11,7 @@ use wavedb_core::Id;
 
 use crate::error::StorageResult;
 use crate::page_store::PageStore;
-use crate::struct_storage::StructStorage;
+use crate::struct_storage::TypeSlot;
 
 impl PageStore {
     /// Read `id` from `slot`'s settled pages — the fallback when the cache
@@ -22,7 +22,7 @@ impl PageStore {
     #[allow(clippy::significant_drop_tightening)]
     pub(crate) fn read_from_pages(
         &self,
-        slot: &'static StructStorage,
+        slot: &TypeSlot,
         id: Id,
     ) -> StorageResult<Option<Vec<u8>>> {
         if slot.is_removed(id) {
