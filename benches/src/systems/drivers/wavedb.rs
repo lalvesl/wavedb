@@ -2,8 +2,8 @@
 //!
 //! ## Why the factory hands over a `PageStore` rather than a built engine
 //!
-//! One store per process: `StructStorage`'s statics are process-global and a
-//! second open is `EngineBusy`. So the factory holds the one store behind a
+//! One store per row: the row opens one data directory, and a directory open
+//! twice is `EngineBusy`. So the factory holds the one store behind a
 //! `Mutex<Option<_>>` and the first `build` **takes** it. That is sound here
 //! because the micro workload runs one consumer — a collection is indivisible,
 //! so `wavedb/multi` is a `shop` row only (RFC 0065 §3) — and a second `build`
@@ -234,8 +234,8 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
 
     /// Settle and release, in that order.
     ///
-    /// Required rather than tidy: the process-wide engine claim has to be free
-    /// before anything opens the same directory again, and a footprint read
+    /// Required rather than tidy: the directory's lock has to be free before
+    /// anything opens the same directory again, and a footprint read
     /// over an undrained settle queue counts a retained journal as stored data.
     fn close(self) -> Result<(), String> {
         self.engine.drain()?;
@@ -249,7 +249,6 @@ impl<E: Engineish> Driver for WavedbDriver<E> {
 mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use wavedb_storage::{PageStore, StoreOptions};
 
@@ -258,17 +257,6 @@ mod tests {
     use crate::harness::{DriverFactory, run};
     use crate::schema::Thing;
     use crate::systems::engine::Sharded;
-
-    /// One `PageStore` per **process**, so these tests may not overlap.
-    /// `StructStorage`'s statics are process-global and a second open is
-    /// `EngineBusy` — the same rule the storage crate's own tests serialise
-    /// against.
-    fn engine_gate() -> MutexGuard<'static, ()> {
-        static GATE: OnceLock<Mutex<()>> = OnceLock::new();
-        GATE.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
 
     struct Scratch(PathBuf);
 
@@ -322,7 +310,6 @@ mod tests {
     /// update, all through the seam.
     #[test]
     fn a_direct_micro_row_runs_through_the_harness() {
-        let _gate = engine_gate();
         let scratch = Scratch::new();
         let phases = run_one::<PageStore>(&scratch);
 
@@ -338,7 +325,6 @@ mod tests {
     /// only exist because `build` runs on the consumer's own thread.
     #[test]
     fn a_sharded_micro_row_runs_on_the_consumers_thread() {
-        let _gate = engine_gate();
         let scratch = Scratch::new();
         let phases = run_one::<Sharded>(&scratch);
 
@@ -351,7 +337,6 @@ mod tests {
     /// for the store must be refused, not quietly handed a share of it.
     #[test]
     fn a_second_build_is_refused_rather_than_sharing_the_store() {
-        let _gate = engine_gate();
         let scratch = Scratch::new();
         let factory: Factory<PageStore> =
             Factory::new(open(&scratch.0), None, 10);
@@ -368,7 +353,6 @@ mod tests {
     /// indivisible — the constraint that makes `wavedb/multi` a `shop` row.
     #[test]
     fn both_engines_ask_for_exactly_one_consumer() {
-        let _gate = engine_gate();
         let scratch = Scratch::new();
         let direct: Factory<PageStore> =
             Factory::new(open(&scratch.0), None, 1);
