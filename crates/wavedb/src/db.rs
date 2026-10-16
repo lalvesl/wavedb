@@ -86,9 +86,8 @@ impl Db {
     ///
     /// # Errors
     /// A cache open/replay fault ([`Error::Core`]); natively also a missing
-    /// platform cache base, or [`EngineBusy`] when this process already runs
-    /// an engine (one per process — a node and an open client cannot share
-    /// one).
+    /// platform cache base, or [`EngineBusy`] when the app's cache directory
+    /// is already open (by another `Db::open`, here or in another process).
     ///
     /// [`EngineBusy`]: wavedb_storage::StorageError::EngineBusy
     #[cfg(not(target_arch = "wasm32"))]
