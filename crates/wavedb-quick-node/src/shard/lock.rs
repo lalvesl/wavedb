@@ -103,10 +103,9 @@ pub struct OwnerKey(u64);
 impl OwnerKey {
     /// The key for `struct_hash` under `tenant`.
     ///
-    /// Concatenated rather than combined, for the reason
-    /// [`Owner`](super::Owner) routing concatenates: 48 + 15 bits fit, so the
-    /// key is injective and two owners can only be confused by the map's own
-    /// hashing.
+    /// The tenant and the type's 15-bit salt, concatenated: 48 + 15 bits fit.
+    /// Two types sharing a salt within a tenant share a key — which can only
+    /// over-serialise them, never let one owner's operations interleave.
     #[must_use]
     pub fn of(tenant: U48, struct_hash: u64) -> Self {
         Self(
