@@ -8,6 +8,7 @@
 
 use crate::error::StorageResult;
 use crate::page_store::{PageStore, Touched};
+use crate::struct_storage::TypeSlot;
 
 /// What one [`settle_step`](PageStore::settle_step) did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,7 +155,7 @@ impl PageStore {
             return;
         }
         let mut total: usize =
-            self.types.iter().map(|s| s.cached_bytes()).sum();
+            self.types.iter().map(TypeSlot::cached_bytes).sum();
         for slot in &self.types {
             if total <= budget_bytes {
                 return;
