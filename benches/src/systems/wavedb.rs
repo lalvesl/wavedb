@@ -6,8 +6,8 @@
 //! [`row::embedded`](crate::row::embedded). Three constraints from the old
 //! file survive as the reason `open` looks the way it does:
 //!
-//! - **One store per process.** Every open is scoped so the `EngineClaim`
-//!   drops before the next one; the cold-read phase depends on it.
+//! - **One store per directory.** Every open is scoped so the directory's
+//!   lock drops before the next open of it; the cold-read phase depends on it.
 //! - **The typed path only.** Reads go through `CollectionHandle::get`, which
 //!   routes by `STRUCT_HASH`. `Store::get` is an untyped fallback that probes
 //!   every slot — a path no generated code takes.
