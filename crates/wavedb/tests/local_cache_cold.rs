@@ -3,8 +3,8 @@
 //! an answer — never an authoritative-looking `None`), while a **warm** one
 //! answers; `db.local()` is the direct typed surface that warms it.
 //!
-//! One test per file: the native cache is the process-global engine
-//! (one open `PageStore` per process).
+//! One test per file: every `Db::open` here opens the same app cache
+//! directory, and a directory has one open `PageStore` at a time.
 
 #![allow(clippy::future_not_send)]
 
