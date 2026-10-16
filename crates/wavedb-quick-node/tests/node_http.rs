@@ -2,8 +2,8 @@
 //! through the exposure dispatch into a durable `PageStore`, and the data
 //! survives a node restart.
 //!
-//! The node runs on its own threads (its Embassy carriers + the
-//! process-global engine claim); the test thread is the client. `create_pivot`
+//! The node runs on its own threads (its Embassy carriers); the test thread
+//! is the client. `create_pivot`
 //! is not wire-reachable in M3 (no `#[server]` yet), so the collection's
 //! `Pivot` is seeded node-side before serving — everything else travels as
 //! ordinary command frames.
