@@ -3,9 +3,8 @@
 //! provisionally (mirrored into the local cache), and when the node returns a
 //! drain flushes it FIFO so the node ends up authoritative.
 //!
-//! Two processes, like `local_cache_e2e`: the engine's per-type state is
-//! process-global, so the client cache owns THIS process's engine slot and the
-//! node runs as a child (this same binary re-executed with
+//! Two processes, like `local_cache_e2e`: the client cache and the node run
+//! as they are deployed — the node as a child (this same binary re-executed with
 //! `--exact node_process`). A cache-less `Db::connect` handle reads the node
 //! **directly** at the end to prove the replay actually reached it, not just
 //! the local mirror.
