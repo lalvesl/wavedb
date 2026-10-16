@@ -99,8 +99,8 @@ pub trait Engineish {
     /// Is a committed batch still waiting for its page write?
     fn has_pending(&self) -> bool;
 
-    /// Release the engine. Required, not tidy: the process-wide `EngineClaim`
-    /// has to be free before the next phase opens the same directory.
+    /// Release the engine. Required, not tidy: the directory's lock has to be
+    /// free before the next phase opens the same directory.
     fn close(self);
 }
 
@@ -246,8 +246,8 @@ impl Engineish for Sharded {
 
     fn close(self) {
         // Not a drop: the actor must *finish* — settle, checkpoint, force the
-        // retirement barrier — and release the `EngineClaim` before the next
-        // phase opens this directory. Dropping the handles would end the actor
+        // retirement barrier — and release the directory's lock before the
+        // next phase opens it. Dropping the handles would end the actor
         // eventually, and "eventually" reopens as `EngineBusy`.
         let (answer, wait) = futures::channel::oneshot::channel();
         let handle = self.shards.handle();
