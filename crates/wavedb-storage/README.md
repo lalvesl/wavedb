@@ -314,7 +314,7 @@ trainer and naturally incremental.
 The dictionary is stored in `data.bin` like a page: a block run handed out by
 the block manager (`[len][to_wire_checked(buf)]`, same framing as everything
 else), tracked by a descriptor in the type's `DictState` — the compression
-slot of its `StructStorage` static (`T::storage_dictionary()`) — and repointed
+slot the open store keeps for the type — and repointed
 with the same crash-safe write-then-free ordering pages use. A compression-off
 type (`#[wavedb(compress = false)]`, or the reserved `BpTree`-node slot) never
 samples and never allocates a run.
@@ -385,25 +385,27 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
 
 On startup the directories and the block allocator rebuild by **journal replay**.
 
-### Per-type state is compile-time — `StructStorage`
+### Per-type routing is compile-time — `StructStorage`
 
 > **Status: in effect.** This replaced the engine's runtime
-> `HashMap<STRUCT_HASH, Directory>` + store-wide mutex.
+> `HashMap<STRUCT_HASH, Directory>` + store-wide mutex. Since RFC 0067 step 1
+> the static is a declaration only, and the state belongs to the open store.
 
-There is no runtime `STRUCT_HASH → state` map and no store-wide state lock.
-Each type's storage state — its cache `RwLock<BTreeMap<u128, Vec<u8>>>`, its
-`Directory` slot, **and its compression state** (`DictState`: zstd policy +
-dictionary + persisted run — per-type by nature, since a page holds one type)
-— is one **`static StructStorage`**, emitted by `#[wavedb]` on the declared
-type itself (native targets only; the wasm expansion omits it):
+There is no runtime registration and no store-wide state lock. Each type is
+declared by one **`static StructStorage`**, emitted by `#[wavedb]` on the type
+itself (native targets only; the wasm expansion omits it): its `STRUCT_HASH`
+and its compression policy, fixed at compile time.
 
 ```rust
-Todo::struct_storage()      // &'static StructStorage — the whole slot
-Todo::storage_mem_cache()   // this type's own cache lock, shared with no other
-Todo::storage_directory()   // this type's own directory lock
-Todo::storage_dictionary()  // this type's own compression slot (policy + dict)
-Todo::storage_entries()     // the slots to register: [Todo's, TodoPivot's]
+Todo::struct_storage()      // &'static StructStorage — hash + compression policy
+Todo::storage_entries()     // the declarations to register: [Todo's, TodoPivot's, …]
 ```
+
+An open `PageStore` builds one slot per registered declaration — that type's
+cache `RwLock<BTreeMap<u128, Vec<u8>>>`, its `Directory`, **and its compression
+state** (`DictState`: dictionary + persisted run — per-type by nature, since a
+page holds one type), each behind its own lock. The slots belong to that store,
+so stores over different directories share nothing (RFC 0067: one per shard).
 
 Compression policy is declared with the type — `#[wavedb(compress = false)]`
 opts a type's pages out of zstd (already-compressed media, hot rewrite
@@ -413,9 +415,10 @@ the `STRUCT_HASH`.
 `PageStore::open(dir, &[…])` takes the slots as an **explicit registry** —
 declared, not discovered, the same allowlist stance as exposure. A write whose
 `STRUCT_HASH` has no listed slot is refused (`UnregisteredStructHash`); the
-reserved `BpTree`-node slot is always included (compression off). Because the
-slots are process-global statics, **one process runs one open `PageStore`**
-(the node model); a second concurrent open fails with `EngineBusy`.
+reserved `BpTree`-node slot is always included (compression off). A data
+directory has **one open `PageStore` at a time**: `data.bin` is locked while
+open, so a second open of the same directory — in this process or another —
+fails with `EngineBusy`. Stores over different directories open side by side.
 
 **Locking.** Reads (`get_of`, routed by the compile-time-known hash) take one
 binary search over the sorted registry plus that type's cache read lock —

@@ -1,6 +1,7 @@
 # RFC 0067 — Thread per core: the shard as a database, the thread as placement
 
-- **Status:** Planned — opened 2026-10-08. Nothing built.
+- **Status:** In progress — opened 2026-10-08. **Step 1 landed 2026-10-08**
+  (per-type state out of the statics); see "Progress".
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the owner
   as the unit of concurrency, and `shard_of`),
   [0066](0066-embassy-executor-and-async-io.md) (the executor, the reactor
@@ -49,8 +50,8 @@ RFC 0064 drew the ownership boundary with **one** disk actor owning the one
 `PageStore`. Its own module docs name the cost (`shard/disk.rs`): the actor
 serves one message at a time, so a read waits behind a whole checkpoint, and
 every shard's page traffic funnels through one thread. The engine's
-compile-time `StructStorage` statics are why there is one: they allow one open
-store per process (`EngineClaim`).
+compile-time `StructStorage` statics were why there is one: they allowed one
+open store per process (`EngineClaim`, removed by step 1).
 
 Two observations close the gap:
 
@@ -308,6 +309,31 @@ the meantime.
 0066 steps 2 and 3 (bounded channels, timers) are unaffected. `OwnerLocks`
 became per-thread in 0066 step 5, once every operation ran on its shard;
 step 5 here adds only the leases.
+
+## Progress
+
+### Step 1 — per-type state out of the statics (landed 2026-10-08)
+
+- **`StructStorage` is a declaration.** The `#[wavedb]` static keeps only
+  what is fixed at compile time: the `STRUCT_HASH` and the compression
+  policy. The macros emit it exactly as before; the three runtime accessors
+  they used to generate (`storage_mem_cache`, `storage_directory`,
+  `storage_dictionary`) are gone, and nothing outside a test called them.
+- **The state belongs to the store.** `PageStore::open` builds one
+  `TypeSlot` per registered declaration — cache, directory, dictionary and
+  removal tombstones, a lock each — and owns them. Routing is unchanged: a
+  sorted table built once at open from the compile-time list.
+- **`EngineClaim` is gone; the directory is locked instead.** `BlockFile`
+  takes an exclusive advisory lock on `data.bin` (`File::try_lock`) for as
+  long as it is open. A second open of the same directory, in this process
+  or another, is `EngineBusy`; stores over different directories open side
+  by side. That is stronger than the old claim, which never stopped a
+  second *process*.
+- **Tests run in parallel.** The storage tests' `engine_gate()` mutexes are
+  gone (the storage suite went from ~9 s to ~5 s), and a new test opens two
+  stores side by side and replays each from its own directory. A node is
+  still one per process — the token secret is process-global — so node
+  tests keep their single-test pattern.
 
 ## Alternatives
 

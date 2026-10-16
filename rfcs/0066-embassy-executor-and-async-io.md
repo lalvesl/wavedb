@@ -203,7 +203,7 @@ with owned guards so a lock can be held across an operation's awaits.
 **Resolved in step 5**, without an interim `async-lock`: once every
 operation runs on its shard, the table is per thread — see "Progress",
 step 5. Leases for an owner on another thread stay
-[RFC 0067](0067-thread-per-core-shards-PLANNED.md)'s.
+[RFC 0067](0067-thread-per-core-shards-WIP.md)'s.
 
 Process-wide pieces that remain, and why each is acceptable:
 
@@ -235,7 +235,7 @@ working. tokio and the new stack coexist until step 5.
 2. **Bounded channels** — `embassy-sync` within a thread, `async-channel`
    across threads; the three full policies above, a test per policy (a slow
    WS client is disconnected; a write never blocks on a lagging publisher).
-   `OwnerLocks` is left to [RFC 0067](0067-thread-per-core-shards-PLANNED.md).
+   `OwnerLocks` is left to [RFC 0067](0067-thread-per-core-shards-WIP.md).
 3. **Timers** — `embassy-time` behind `platform::time`.
 4. **Executor spike, then the switch** — prove `TaskPool` inference on
    `serve_connection<E, S>`; then `platform::task`, the serve loop, the shard
@@ -293,7 +293,7 @@ in the code:
   call site changed beyond the import), and it is what the bench crate
   needed in order to drop tokio entirely.
 - **The outbound event queue is `async-channel`**, although today both ends
-  share a thread. Under [RFC 0067](0067-thread-per-core-shards-PLANNED.md)
+  share a thread. Under [RFC 0067](0067-thread-per-core-shards-WIP.md)
   the owner publishes into a connection on another thread, so this queue
   crosses threads in the target. It also needs `close()`, the publisher's
   way to disconnect a client, which `embassy-sync`'s channel does not have.

@@ -156,9 +156,11 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   journal-first WAL (append + cache commit under the journal lock = the atomic unit;
   one barrier per batch by default, or one per elapsed `StoreOptions::relax_window`
   — RFC 0061, `flush()` forces it),
-  replay on open. Per-type state is compile-time (`StructStorage` statics) —
-  consequence: **one open `PageStore` per process** (`EngineBusy`); tests serialize
-  via an `engine_gate()` mutex and integration tests use a single test function.
+  replay on open. Per-type routing is compile-time (`StructStorage` statics are
+  declarations: hash + compression policy); the per-type state (cache, directory,
+  dictionary) belongs to the open store (RFC 0067 step 1). **One open `PageStore`
+  per data directory** — `data.bin` is locked while open, a second open of it is
+  `EngineBusy` — and stores over different directories coexist in one process.
 - **wavedb-net** — hand-rolled minimal HTTP/1.1 POST as a **dumb tunnel**: no headers,
   cookies, or status semantics as API; the body is a self-contained
   `Request { tenant, CommandFrame { struct_hash, command, payload } }` and a WaveDB
@@ -285,11 +287,15 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
 - Codecs get roundtrip + failure cases asserting the **specific** error variant.
 - Storage changes need a durability angle (reopen-and-replay or kill-during-write).
 - Test names state behaviour (`tampered_payload_is_crc_mismatch`), not the method.
-- Anything touching `PageStore` must respect the one-store-per-process rule (see
-  `engine_gate()` in the page_store tests, and the single-test pattern in
-  `crates/wavedb-quick-node/tests/node_http.rs`). That includes `Db::open`
-  clients: a cache-and-node test needs two processes — re-exec the test binary
-  as the node (`examples/contact-book/tests/local_cache_e2e.rs`).
+- Anything touching `PageStore` opens it over its **own** directory (a tempdir
+  per test); a directory has one open store at a time. Tests over different
+  directories run in parallel — no gate needed.
+- A node is one per process (the token secret is process-global, set at bind),
+  so node tests keep the single-test pattern
+  (`crates/wavedb-quick-node/tests/node_http.rs`). Cache-and-node tests run the
+  node as a child process — re-exec the test binary
+  (`examples/contact-book/tests/local_cache_e2e.rs`) — which is also the real
+  deployment shape.
 
 ## Commits
 

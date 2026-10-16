@@ -1,6 +1,10 @@
 # RFC 0018 — The storage engine
 
-- **Status:** Implemented
+- **Status:** Implemented. **Amended by
+  [0067](0067-thread-per-core-shards-WIP.md) step 1 (2026-10-08):** the
+  `StructStorage` statics became declarations and the per-type state moved
+  into the open store, so the one-store-per-process rule below is now one
+  store per **data directory** (`data.bin` is locked while open).
 - **Crates:** `wavedb-storage`
 - **Code:** `crates/wavedb-storage/src/` (`data.bin`, page directory, `SlotPage`)
 
