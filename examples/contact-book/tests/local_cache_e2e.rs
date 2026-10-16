@@ -4,9 +4,8 @@
 //! seen answers locally (same values, same ids, same order); writes refuse
 //! honestly; when the node returns, calls reach it again.
 //!
-//! Two processes, deliberately: the engine's per-type state is
-//! process-global, so the client cache owns THIS process's engine slot and
-//! the node runs as a child — the deployment shape anyway. The child is this
+//! Two processes, deliberately: the client cache and the node run as they
+//! are deployed — the node as a child. The child is this
 //! same test binary re-executed with `--exact node_process` (no
 //! cargo-in-cargo); `node_process` is a no-op in a normal test run.
 
