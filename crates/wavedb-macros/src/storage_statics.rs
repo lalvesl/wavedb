@@ -1,13 +1,12 @@
-//! The native per-struct storage slot: a `#[cfg(not(target_arch = "wasm32"))]`
-//! `static StructStorage` (plus accessors) emitted on every `#[wavedb]` type
-//! and on each generated `{Name}Pivot`.
+//! The native per-struct storage declaration: a
+//! `#[cfg(not(target_arch = "wasm32"))]` `static StructStorage` emitted on
+//! every `#[wavedb]` type and on each generated `{Name}Pivot`.
 //!
-//! This is what replaces the engine's runtime `STRUCT_HASH → state` map: each
-//! type owns its cache and its page directory as compile-time state, behind
-//! its own locks — `Todo::storage_mem_cache()` touches nothing shared with any
-//! other type. The statics are handed to `PageStore::open` as an explicit
-//! registry (`T::storage_entries()`), the same declared-not-discovered stance
-//! the exposure lists take.
+//! It holds what is fixed at compile time — the `STRUCT_HASH` and the
+//! compression policy — and no state. The statics are handed to
+//! `PageStore::open` as an explicit registry (`T::storage_entries()`), the
+//! same declared-not-discovered stance the exposure lists take, and each open
+//! store keeps the types' caches and directories itself (RFC 0067).
 //!
 //! Consequence for consumers: on non-wasm targets, a crate using `#[wavedb]`
 //! needs `wavedb-storage` as a (target-gated) dependency. The wasm expansion
@@ -34,36 +33,14 @@ pub fn statics_for(
     quote! {
         #[cfg(not(target_arch = "wasm32"))]
         impl #ty {
-            /// This type's own storage slot — its in-memory cache, page
-            /// directory, and compression dictionary, generated at compile
-            /// time. Register it (via `storage_entries()`) when opening the
-            /// node's `PageStore`.
+            /// This type's storage declaration — its `STRUCT_HASH` and
+            /// compression policy, fixed at compile time. Register it (via
+            /// `storage_entries()`) when opening a `PageStore`.
             #[must_use]
             pub fn struct_storage() -> &'static ::wavedb_storage::StructStorage {
                 static SLOT: ::wavedb_storage::StructStorage =
                     ::wavedb_storage::StructStorage::#ctor(#hash_expr);
                 &SLOT
-            }
-
-            /// This type's in-memory cache — its own `RwLock`, shared with no
-            /// other type, so cross-type reads never contend.
-            #[must_use]
-            pub fn storage_mem_cache() -> &'static ::wavedb_storage::StructMemCache {
-                Self::struct_storage().mem_cache()
-            }
-
-            /// This type's page-directory slot — its own `Mutex`, shared with
-            /// no other type.
-            #[must_use]
-            pub fn storage_directory() -> &'static ::wavedb_storage::StructDirectory {
-                Self::struct_storage().directory()
-            }
-
-            /// This type's compression slot — zstd policy + its own
-            /// raw-content dictionary, shared with no other type.
-            #[must_use]
-            pub fn storage_dictionary() -> &'static ::wavedb_storage::StructDictionary {
-                Self::struct_storage().dictionary()
             }
         }
     }
