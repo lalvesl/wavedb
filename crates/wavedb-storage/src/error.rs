@@ -46,14 +46,25 @@ pub enum StorageError {
     /// [`PageStore::open`]: crate::page_store::PageStore::open
     #[error("no StructStorage registered for STRUCT_HASH {0:#018x}")]
     UnregisteredStructHash(u64),
-    /// Another [`PageStore`](crate::page_store::PageStore) is already open in
-    /// this process. The per-struct storage slots are process-global statics,
-    /// so one process drives one store at a time (the node model).
-    #[error("a PageStore is already open in this process")]
+    /// The data directory is already open — by another
+    /// [`PageStore`](crate::page_store::PageStore) in this process or by
+    /// another process. `data.bin` is locked while a store has it open.
+    #[error("the data directory is already open")]
     EngineBusy,
     /// A core/codec fault surfaced inside the engine.
     #[error(transparent)]
     Core(#[from] wavedb_core::Error),
+}
+
+/// A held lock on `data.bin` means another store has the directory open
+/// ([`StorageError::EngineBusy`]); any other failure to lock is I/O.
+impl From<std::fs::TryLockError> for StorageError {
+    fn from(e: std::fs::TryLockError) -> Self {
+        match e {
+            std::fs::TryLockError::WouldBlock => Self::EngineBusy,
+            std::fs::TryLockError::Error(io) => Self::Io(io),
+        }
+    }
 }
 
 /// Shorthand for a `Result` carrying [`StorageError`].
