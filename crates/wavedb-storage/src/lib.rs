@@ -49,16 +49,13 @@ pub use journal::{CommitFrame, Journal, JournalFrame};
 pub use page::SlotPage;
 pub use page_store::{DEFAULT_RECORD_CACHE_BYTES, PageStore, StoreOptions};
 pub use settle::Progress;
-pub use struct_storage::{
-    BPTREE_NODE_STORAGE, StorageRegistry, StructDictionary, StructDirectory,
-    StructMemCache, StructStorage,
-};
+pub use struct_storage::{BPTREE_NODE_STORAGE, StorageRegistry, StructStorage};
 
 /// The engine's thread-safety, **asserted rather than described**.
 ///
 /// `PageStore` is `Send + Sync` and its futures are `Send` today, and nothing
-/// arranges that: it holds `parking_lot` locks and `&'static StructStorage`
-/// slots, and it never awaits, so both properties fall out of how the code
+/// arranges that: it holds `parking_lot` locks and its per-type slots behind
+/// them, and it never awaits, so both properties fall out of how the code
 /// happens to be written. A single `Rc`/`RefCell` field, or one non-`Send`
 /// value held across a future await point, would silently take them away.
 ///
