@@ -9,7 +9,6 @@
 
 use futures::TryStreamExt;
 use futures::executor::block_on;
-use parking_lot::{Mutex, MutexGuard};
 use wavedb_core::{LocalHandle, U48};
 use wavedb_macros::wavedb;
 use wavedb_storage::PageStore;
@@ -32,13 +31,6 @@ pub struct Bookmark {
 
 const TENANT: u32 = 42;
 
-/// The per-struct storage slots are process-global statics, so only one
-/// `PageStore` may live at a time — serialise the tests that open one.
-fn engine_gate() -> MutexGuard<'static, ()> {
-    static GATE: Mutex<()> = Mutex::new(());
-    GATE.lock()
-}
-
 /// Open the durable store serving the derived `Todo` slots (record + Pivot).
 fn open(path: &std::path::Path) -> PageStore {
     PageStore::open(path, &Todo::storage_entries()).unwrap()
@@ -60,7 +52,6 @@ async fn walk(
 
 #[test]
 fn collection_walk_and_durable_reopen() {
-    let _g = engine_gate();
     let dir = tempfile::tempdir().unwrap();
     let tenant = U48::from(TENANT);
     let n = 60usize;
@@ -103,7 +94,6 @@ fn collection_walk_and_durable_reopen() {
 
 #[test]
 fn save_and_remove_survive_reopen() {
-    let _g = engine_gate();
     let dir = tempfile::tempdir().unwrap();
     let tenant = U48::from(TENANT);
 
@@ -167,7 +157,6 @@ async fn tagged(
 
 #[test]
 fn version_history_survives_reopen() {
-    let _g = engine_gate();
     let dir = tempfile::tempdir().unwrap();
     let tenant = U48::from(TENANT);
 
@@ -206,7 +195,6 @@ fn version_history_survives_reopen() {
 
 #[test]
 fn secondary_index_survives_reopen() {
-    let _g = engine_gate();
     let dir = tempfile::tempdir().unwrap();
     let tenant = U48::from(TENANT);
 
