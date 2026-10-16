@@ -1,7 +1,6 @@
 //! RFC 0064, first slice: shards over one disk actor, end to end.
 //!
-//! One test function, because the engine claim is process-global — the same
-//! constraint `node_http.rs` works under.
+//! One test function: the steps share one store and build on each other.
 //!
 //! What is being proven, in order:
 //!
