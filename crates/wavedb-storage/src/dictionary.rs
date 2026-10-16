@@ -201,13 +201,6 @@ impl DictState {
         self.dict = dict;
         self.desc = desc;
     }
-
-    /// Drop the sampled buffer and its run pointer, keeping the policy — the
-    /// open path resets before a journal replay rebuilds the same state.
-    pub(crate) fn reset(&mut self) {
-        self.dict = Dictionary::new();
-        self.desc = BlockDescriptor::EMPTY;
-    }
 }
 
 #[cfg(test)]
