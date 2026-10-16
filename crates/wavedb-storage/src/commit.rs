@@ -53,7 +53,7 @@ use crate::journal::{self, CommitFrame, Journal, JournalFrame};
 use crate::meta_log::MetaLog;
 use crate::page_store::PageStore;
 use crate::retire::Retiring;
-use crate::struct_storage::StructStorage;
+use crate::struct_storage::TypeSlot;
 
 impl PageStore {
     /// Retire the current journal: rotate, settle everything it covers, then
@@ -190,7 +190,7 @@ pub fn restore(
     dir: &Path,
     data_bin_existed: bool,
     file: &BlockFile,
-    types: &[&'static StructStorage],
+    types: &[TypeSlot],
 ) -> StorageResult<Recovered> {
     let found = journal::scan(dir)?;
     journal::require_journal_for(data_bin_existed, &found)?;
@@ -267,7 +267,7 @@ pub fn restore(
 /// [RFC 0048]: ../../../rfcs/0048-chained-addressing-log.md
 fn load_commit(
     file: &BlockFile,
-    types: &[&'static StructStorage],
+    types: &[TypeSlot],
     commit: &CommitFrame,
 ) -> StorageResult<(BlockAllocator, MetaLog)> {
     let mut used = vec![Run::new(0, RESERVED_BLOCKS)];
@@ -314,14 +314,12 @@ fn load_commit(
 
 /// The registered slot for `hash` — a commit naming an unlisted type
 /// refuses, like every other allowlist edge.
-fn slot_of(
-    types: &[&'static StructStorage],
-    hash: u64,
-) -> StorageResult<&'static StructStorage> {
+fn slot_of(types: &[TypeSlot], hash: u64) -> StorageResult<&TypeSlot> {
     types
-        .binary_search_by_key(&hash, |s| s.struct_hash())
-        .map(|i| types[i])
-        .map_err(|_| StorageError::UnregisteredStructHash(hash))
+        .binary_search_by_key(&hash, TypeSlot::struct_hash)
+        .ok()
+        .and_then(|i| types.get(i))
+        .ok_or(StorageError::UnregisteredStructHash(hash))
 }
 
 /// An allocator over a page-less `data.bin` (superblock only).
