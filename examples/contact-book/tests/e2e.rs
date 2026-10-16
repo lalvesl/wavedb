@@ -2,8 +2,8 @@
 //! `#[server]` function, then insert / update (`save`) / remove on the
 //! NonUnique collection whose pivot the Unique `ContactBook` owns.
 //!
-//! One test per process (engine slots are process-global
-//! statics); the node runs on its own thread, like production.
+//! One test per process (one node per process: the token secret is
+//! process-global); the node runs on its own threads, like production.
 
 #![allow(clippy::future_not_send)]
 
