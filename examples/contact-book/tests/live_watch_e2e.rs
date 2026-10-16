@@ -3,8 +3,8 @@
 //! mirrors into B's local cache before it is yielded, B answers warm after
 //! the node dies, for a collection B never once read online.
 //!
-//! Two processes, like `local_cache_e2e`: B's `Db::open` cache owns THIS
-//! process's engine slot, so the node runs as a child (this same test
+//! Two processes, like `local_cache_e2e`: B's `Db::open` cache runs in this
+//! process and the node as a child, as deployed (this same test
 //! binary re-executed; `node_process` is a no-op in a normal run). A is a
 //! transport-only `Db::connect` handle in the test process.
 
