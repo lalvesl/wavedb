@@ -7,7 +7,7 @@
 //! - the engine's locks stop having a second party to contend with;
 //! - two shards wanting the same page produce one read rather than two (the
 //!   de-duplication a shared cache cannot do without a single owner);
-//! - the process-wide `EngineClaim` has exactly one holder by construction
+//! - the data directory's lock has exactly one holder by construction
 //!   instead of by convention.
 //!
 //! ## Two queues
@@ -187,9 +187,9 @@ pub async fn run(
         match next {
             None => {}
             // The engine is **dropped before the answer is sent**, and that
-            // ordering is the whole point: dropping it releases the
-            // process-wide `EngineClaim`, and a caller that resumes first
-            // could re-open before it was free. `Server::run_with_shutdown`
+            // ordering is the whole point: dropping it releases the data
+            // directory's lock, and a caller that resumes first could re-open
+            // before it was free. `Server::run_with_shutdown`
             // does exactly that on a restart, and gets `EngineBusy` if this
             // is the other way round.
             Some(DiskRequest::Shutdown { answer }) => {
