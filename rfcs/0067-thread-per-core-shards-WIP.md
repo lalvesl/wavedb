@@ -1,7 +1,7 @@
 # RFC 0067 — Thread per core: the shard as a database, the thread as placement
 
-- **Status:** In progress — opened 2026-10-08. **Step 1 landed 2026-10-08**
-  (per-type state out of the statics); see "Progress".
+- **Status:** In progress — opened 2026-10-08. **Step 1 landed, step 2 started 2026-10-08**
+  (per-type state out of the statics; the routing function); see "Progress".
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the owner
   as the unit of concurrency, and `shard_of`),
   [0066](0066-embassy-executor-and-async-io.md) (the executor, the reactor
@@ -334,6 +334,21 @@ step 5 here adds only the leases.
   stores side by side and replays each from its own directory. A node is
   still one per process — the token secret is process-global — so node
   tests keep their single-test pattern.
+
+### Step 2 — the routing function (landed 2026-10-08; layout pending)
+
+- **`wavedb_core::placement`**: `Owner` and `shard = seahash(owner bytes)
+  % shards`, over the frozen layouts of §1 — the Pivot's `LocalId` (key 8
+  LE, then `FLAG|SALT` 2 LE) and the tenant (6 LE) followed by the full
+  `STRUCT_HASH` (8 LE). Golden vectors pin both hashes and their shard at
+  `P = 64`; a test reproduces the `key_nanos()` counter pattern and checks
+  every shard is used.
+- **`route.rs` re-exports it**, so the worker an operation runs on and the
+  store that will hold it come from one function. SplitMix64 and the 15-bit
+  salt packing are gone: types sharing their low 15 bits no longer share a
+  shard within a tenant. (The owner-lock key still packs the salt; a shared
+  key can only over-serialise two owners, never interleave one.)
+- **Pending:** `MANIFEST`, `shards/xx/`, open and replay per shard.
 
 ## Alternatives
 
