@@ -53,6 +53,7 @@ mod mint;
 pub mod notify;
 pub mod overlay;
 pub mod permission;
+pub mod placement;
 pub mod record;
 mod record_unique;
 pub mod store;
