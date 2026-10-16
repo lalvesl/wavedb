@@ -18,10 +18,10 @@
 //!   store), database named exactly `app` (the developer chooses the whole
 //!   name — no forced prefix, mirroring the native `<app>` leaf).
 //!
-//! One process, one open native cache: the engine's per-type state lives in
-//! `StructStorage` statics, so a `Db::open` client and an in-process node
-//! cannot coexist (`EngineBusy`) — run the node in its own process, which is
-//! the deployment shape anyway.
+//! One open native cache per app directory: `data.bin` is locked while open,
+//! so a second `Db::open` of the same app is `EngineBusy`. A node opens its
+//! own directory and could share the process; the deployment shape runs it
+//! in its own anyway.
 
 #[cfg(target_arch = "wasm32")]
 mod idb;
