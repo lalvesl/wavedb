@@ -3,9 +3,9 @@
 //! bootstrap), the profile→pivot todo functions on the user tenant, and the
 //! data surviving a node restart.
 //!
-//! One test per process (the engine's storage slots are
-//! process-global statics); the node runs on its own carrier threads,
-//! exactly like production.
+//! One test per process (one node per process: the token secret is
+//! process-global); the node runs on its own carrier threads, exactly like
+//! production.
 
 #![allow(clippy::future_not_send)]
 
