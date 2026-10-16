@@ -81,8 +81,6 @@ async fn observe(
     (total, rows.into_iter().map(|e| e.name).collect())
 }
 
-// One test in the file: the per-struct storage slots are process-global, so a
-// second `PageStore` in this binary would be refused (`EngineBusy`).
 #[test]
 fn a_crash_cannot_leave_the_counts_disagreeing_with_the_segments() {
     let dir = tempfile::tempdir().unwrap();
