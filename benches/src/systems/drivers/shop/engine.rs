@@ -61,8 +61,8 @@ impl ShopEngine for PageStore {
     type Shared = Mutex<Option<Self>>;
     type Store = Self;
 
-    /// One, always. There is exactly one `PageStore` per process, and it
-    /// cannot be in two threads at once.
+    /// One, always. The row opens one `PageStore`, and this engine runs it
+    /// from one thread.
     fn consumers(_asked: usize) -> usize {
         1
     }
