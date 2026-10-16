@@ -39,7 +39,7 @@ use crate::block_file::BlockFile;
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::PageStore;
 use crate::plan::SlotPlan;
-use crate::struct_storage::StructStorage;
+use crate::struct_storage::TypeSlot;
 
 /// Hard cap on chunks between snapshots — bounds a recovery's scattered reads
 /// even when the snapshot is large enough that the ratio alone would not.
@@ -186,7 +186,7 @@ fn planned_edit(
     full: bool,
     dicts: &BTreeMap<usize, BlockDescriptor>,
 ) -> SlotEdit {
-    let slot = store.types[work.idx];
+    let slot = &store.types[work.idx];
     let changed = if full {
         every_bucket(work.dir.slots())
     } else {
@@ -211,7 +211,7 @@ fn planned_edit(
 }
 
 /// A snapshot entry for a type this round did not touch.
-fn resident_edit(slot: &'static StructStorage) -> Option<SlotEdit> {
+fn resident_edit(slot: &TypeSlot) -> Option<SlotEdit> {
     // The directory guard is released before the dictionary's is taken: this
     // is a read of settled state, so it needs no consistent pair.
     let guard = slot.directory().lock();
