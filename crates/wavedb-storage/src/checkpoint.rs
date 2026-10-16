@@ -187,7 +187,7 @@ impl PageStore {
             }
         }
         for work in plans {
-            let slot = self.types[work.idx];
+            let slot = &self.types[work.idx];
             for id in work.cleared {
                 slot.clear_removed(id); // the page now agrees the id is gone
             }
