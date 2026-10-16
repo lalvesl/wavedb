@@ -10,6 +10,7 @@ use wavedb_core::{Id, Result as CoreResult, Store, Write};
 
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::{PageStore, Touched};
+use crate::struct_storage::TypeSlot;
 
 impl PageStore {
     /// Journal first (durable fsync), then commit to the per-type caches and
@@ -184,7 +185,7 @@ impl PageStore {
     /// already accepted.
     fn slot_index(&self, struct_hash: u64) -> usize {
         self.types
-            .binary_search_by_key(&struct_hash, |s| s.struct_hash())
+            .binary_search_by_key(&struct_hash, TypeSlot::struct_hash)
             .expect("route_batch validated registration")
     }
 }
