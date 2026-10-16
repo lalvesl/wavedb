@@ -808,9 +808,9 @@ mod tests {
         }
     }
 
-    // Native targets get compile-time storage: each type carries its own
-    // `StructStorage` static (cache + directory, own locks) plus the
-    // `storage_entries()` registry list — no runtime STRUCT_HASH map.
+    // Native targets get compile-time storage declarations: each type carries
+    // its own `StructStorage` static (hash + compression policy, no state)
+    // plus the `storage_entries()` registry list — no runtime STRUCT_HASH map.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_storage_statics_are_per_type() {
@@ -823,20 +823,6 @@ mod tests {
         assert!(!std::ptr::eq(
             AboutUser::struct_storage(),
             Note::struct_storage()
-        ));
-
-        // The named accessors reach the same static's parts.
-        assert!(std::ptr::eq(
-            Note::storage_mem_cache(),
-            Note::struct_storage().mem_cache()
-        ));
-        assert!(std::ptr::eq(
-            Note::storage_directory(),
-            Note::struct_storage().directory()
-        ));
-        assert!(std::ptr::eq(
-            Note::storage_dictionary(),
-            Note::struct_storage().dictionary()
         ));
 
         // Compression is per-type policy: on by default, opted out at the
