@@ -153,7 +153,7 @@ fn node_serves_records_over_http_and_survives_restart() {
             panic!("insert must mint an id");
         };
         assert_eq!(
-            get_by_id(&client, Note::STRUCT_HASH, note_id).await,
+            get_by_id(&client, Note::STRUCT_HASH, node.pivot, note_id).await,
             Some(item)
         );
 
@@ -166,12 +166,12 @@ fn node_serves_records_over_http_and_survives_restart() {
                 auth(),
                 Note::STRUCT_HASH,
                 Command::Update,
-                to_wire(&(note_id, pinned.clone())),
+                to_wire(&(node.pivot, note_id, pinned.clone())),
             )
             .await
             .expect("update");
         assert_eq!(
-            get_by_id(&client, Note::STRUCT_HASH, note_id).await,
+            get_by_id(&client, Note::STRUCT_HASH, node.pivot, note_id).await,
             Some(pinned.clone())
         );
 
@@ -186,6 +186,8 @@ fn node_serves_records_over_http_and_survives_restart() {
             NodeErrorKind::UnknownStructHash
         );
 
+        // Phase 2 seeds a pivot of its own; the note lives in this one.
+        let pivot = node.pivot;
         node.shutdown();
 
         // ── phase 2: reopen the same data dir — the journal replays ───────────
@@ -198,7 +200,7 @@ fn node_serves_records_over_http_and_survives_restart() {
             "the newest Unique version survives a restart"
         );
         assert_eq!(
-            get_by_id(&client, Note::STRUCT_HASH, note_id).await,
+            get_by_id(&client, Note::STRUCT_HASH, pivot, note_id).await,
             Some(pinned),
             "the updated NonUnique record survives a restart"
         );
@@ -231,17 +233,18 @@ where
     decode_value(&reply)
 }
 
-/// Get a record by its `Id` (the `Get` payload for the NonUnique shape).
+/// Get a record by `(pivot, id)` (the `Get` payload for the NonUnique shape).
 async fn get_by_id<T>(
     client: &NetClient,
     struct_hash: u64,
+    pivot: LocalId,
     id: wavedb_core::Id,
 ) -> Option<T>
 where
     T: wavedb_core::WaveWire,
 {
     let reply = client
-        .call_ok(auth(), struct_hash, Command::Get, to_wire(&id))
+        .call_ok(auth(), struct_hash, Command::Get, to_wire(&(pivot, id)))
         .await
         .expect("get by id");
     decode_value(&reply)
