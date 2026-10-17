@@ -1,9 +1,9 @@
-//! Ingress routing — where a request stops being the accept thread's problem.
+//! Routing — where each piece of work goes, and how it gets there.
 //!
-//! The accept loop reads a socket, decodes a [`Request`] — or a WebSocket
-//! session's `Call` — and hands it to the shard that owns it. It executes nothing itself: no gate, no engine call, no
-//! `Store` of its own. That is the point of the split — accepting is I/O, and
-//! serving is work, and they should not share a thread.
+//! The accept thread reads a socket, decodes a [`Request`] — or a WebSocket
+//! session's `Call` — and runs the edge ([`crate::edge`]): gate 1, then every
+//! operation at its owner. It owns no store. Accepting and coordinating are
+//! I/O; executing is work, and it belongs to the shard that owns the data.
 //!
 //! ## The routing key is the brake's key, and it has to be
 //!
@@ -11,41 +11,35 @@
 //! interleaving — one table per shard, which is enough only because of this
 //! routing. Both use the same [`Owner`]: a collection command's Pivot, read
 //! off the front of its payload, or a Unique type under the caller's tenant
-//! ([`Owner::of_command`]). The registry says which a hash is
+//! ([`Owner::of_command`]); a node operation's owner comes from the operation
+//! itself ([`NodeOp::owner`]). The registry says how a hash is addressed
 //! ([`Exposure::addressing`]), which is why the router holds it. Route one way
 //! and brake another and two operations on one owner could be picked up by
 //! two shards holding two different locks — the silent index loss, with
 //! routing in front of it.
 //!
-//! A `#[server]` function has no owner of its own. Until its body routes each
-//! operation it runs to that operation's owner (RFC 0067 step 2), it is placed
-//! like a Unique type keyed by the function's hash.
+//! A `#[server]` function has no owner: it runs at the edge, and each
+//! operation it performs is routed here on its own ([`Route`]).
 //!
-//! ## Who runs gate 1
+//! ## Gate 1 runs once
 //!
-//! A POST carries its token, so routing it needs the tenant, and the tenant
-//! comes from the token: it is verified here **and again** by gate 1 on the
-//! shard. One extra HMAC per request, kept so the shard trusts nothing about
-//! a POST it did not check itself.
-//!
-//! A WebSocket session ran gate 1 once, at `Hello`, and binds the
-//! [`Caller`] it resolved for the whole connection. Its `Call`s travel with
-//! that caller ([`Router::call`]) and the shard runs gates 2–3 only — the
-//! split the session always had. Only a session holds a `Caller` from gate 1,
-//! so that is the only place one can come from.
+//! A POST's token is verified at the edge, and the [`Caller`] it resolves
+//! travels with the work, exactly as a WebSocket session's does from its
+//! `Hello`. A shard runs gates 2–3 only.
 
 use async_channel::Sender;
 use futures::channel::oneshot;
-use wavedb_core::U48;
 use wavedb_core::expose::{Caller, Exposure};
+use wavedb_core::{NodeOp, NodeReply, Route, U48};
 use wavedb_net::frame::{
     CommandFrame, NodeError, NodeErrorKind, Request, Response,
 };
 
-use super::worker::{self, Job, Work};
+use super::worker::{self, Job};
 use super::{DiskHandle, Owner};
 use crate::__rt::NodeTasks;
-use crate::dispatch::{self, Answer};
+use crate::dispatch::Answer;
+use crate::edge::{self, Exec};
 use crate::feed::MutationFeed;
 
 /// The fan-out onto the shard workers.
@@ -76,9 +70,7 @@ impl<E: NodeTasks> Router<E> {
         count: usize,
     ) -> wavedb_platform::Result<Self> {
         let workers = (0..count.max(1))
-            .map(|_| {
-                worker::start(registry, disk.clone(), publisher.clone(), secret)
-            })
+            .map(|_| worker::start(registry, disk.clone(), publisher.clone()))
             .collect::<wavedb_platform::Result<Vec<_>>>()?;
         Ok(Self {
             registry,
@@ -95,54 +87,31 @@ impl<E: Exposure> Router<E> {
         self.workers.len()
     }
 
-    /// Route one request to its owner's shard and wait for the answer.
+    /// Serve one request: gate 1, then its work at its owners.
     ///
     /// Never returns a transport error: a worker that is gone becomes a
     /// [`Response::Err`], because the caller upstream has a socket to answer
     /// and needs bytes for it either way.
     pub async fn dispatch(&self, request: Request) -> Answer {
-        let owner = self.owner_for(&request);
-        let struct_hash = request.frame.struct_hash;
-        self.send(owner, struct_hash, Work::Request(request)).await
+        edge::handle(&self.registry, self, &self.secret, request).await
     }
 
-    /// Route one WebSocket `Call` to its owner's shard and wait for the
-    /// response. `caller` is what the session's gate 1 resolved at `Hello`.
+    /// Serve one WebSocket `Call`. `caller` is what the session's gate 1
+    /// resolved at `Hello`.
     ///
     /// Never returns a transport error, as [`dispatch`](Self::dispatch).
     pub async fn call(&self, caller: Caller, frame: CommandFrame) -> Response {
-        let owner = self.owner(caller.tenant, &frame);
-        let struct_hash = frame.struct_hash;
-        self.send(owner, struct_hash, Work::Call { caller, frame })
-            .await
-            .response
+        edge::command(&self.registry, self, caller, frame).await
     }
 
-    async fn send(&self, owner: Owner, struct_hash: u64, work: Work) -> Answer {
+    /// Queue `job` on `owner`'s shard.
+    async fn post(&self, owner: Owner, job: Job) -> Result<(), &'static str> {
         let shard = owner.shard(self.workers.len());
-        let Some(worker) = self.workers.get(shard) else {
-            // Unreachable: `start` refuses an empty set and `Owner::shard` folds
-            // onto the length. Said rather than indexed, because a routing
-            // function has no business panicking on a request path.
-            return refused(struct_hash, "no shard");
-        };
-        let (answer, wait) = oneshot::channel();
-        if worker.send(Job { work, answer }).await.is_err() {
-            return refused(struct_hash, "shard stopped");
-        }
-        wait.await
-            .unwrap_or_else(|_| refused(struct_hash, "shard dropped the job"))
-    }
-
-    /// The owner of `request` — see the module note.
-    ///
-    /// A request whose identity does not verify is placed by the hash alone.
-    /// It is about to be refused by gate 1 wherever it lands, so the only
-    /// thing that matters is that placing it costs nothing extra.
-    fn owner_for(&self, request: &Request) -> Owner {
-        let tenant = dispatch::identify(&request.auth, &self.secret)
-            .map_or(U48::MAX, |caller| caller.tenant);
-        self.owner(tenant, &request.frame)
+        // Unreachable: `start` refuses an empty set and `Owner::shard` folds
+        // onto the length. Said rather than indexed, because a routing
+        // function has no business panicking on a request path.
+        let worker = self.workers.get(shard).ok_or("no shard")?;
+        worker.send(job).await.map_err(|_| "shard stopped")
     }
 
     /// The owner of `frame` reached under `tenant` — the lock's key, so one
@@ -158,17 +127,56 @@ impl<E: Exposure> Router<E> {
     }
 }
 
+impl<E: Exposure> Exec for Router<E> {
+    async fn owned(&self, caller: Caller, frame: CommandFrame) -> Response {
+        let owner = self.owner(caller.tenant, &frame);
+        let h = frame.struct_hash;
+        let (answer, wait) = oneshot::channel();
+        let job = Job::Call {
+            caller,
+            frame,
+            answer,
+        };
+        if let Err(why) = self.post(owner, job).await {
+            return refused(h, why);
+        }
+        wait.await
+            .unwrap_or_else(|_| refused(h, "shard dropped the job"))
+    }
+}
+
+impl<E: Exposure> Route for Router<E> {
+    async fn run(
+        &self,
+        tenant: U48,
+        struct_hash: u64,
+        op: NodeOp,
+    ) -> wavedb_core::Result<NodeReply> {
+        let owner = op.owner(tenant, struct_hash);
+        let (answer, wait) = oneshot::channel();
+        let job = Job::Node {
+            tenant,
+            struct_hash,
+            op,
+            answer,
+        };
+        let unreachable = |why: &str| {
+            wavedb_core::Error::Backend(format!("shard router: {why}"))
+        };
+        self.post(owner, job).await.map_err(unreachable)?;
+        wait.await
+            .unwrap_or_else(|_| Err(unreachable("shard dropped the job")))
+    }
+}
+
 /// The node could not reach a shard. A backend fault, not a refusal of the
 /// request: nothing about the request was wrong.
-fn refused(struct_hash: u64, why: &str) -> Answer {
-    Answer {
-        response: Response::Err(NodeError {
-            kind: NodeErrorKind::Backend,
-            struct_hash,
-            message: format!("shard router: {why}"),
-        }),
-        sync: None,
-    }
+fn refused(struct_hash: u64, why: &str) -> Response {
+    Response::Err(NodeError {
+        kind: NodeErrorKind::Backend,
+        struct_hash,
+        message: format!("shard router: {why}"),
+    })
 }
 
 #[cfg(test)]
@@ -235,7 +243,11 @@ mod tests {
     }
 
     fn shard_for(router: &Router<Registry>, request: &Request) -> usize {
-        router.owner_for(request).shard(router.count())
+        let tenant = match request.auth {
+            Auth::Anonymous { tenant } => tenant,
+            Auth::Token(_) => U48::MAX,
+        };
+        router.owner(tenant, &request.frame).shard(router.count())
     }
 
     fn on_pivot(command: Command, pivot: u64, payload: &[u8]) -> Request {
