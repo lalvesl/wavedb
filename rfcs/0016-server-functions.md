@@ -33,7 +33,9 @@ dispatch, and exposure machinery unchanged.
   functions). The mixer is a documented `const` SplitMix64 fold (not seahash —
   it must run in `const` context from other crates' consts).
 - **Body retyped onto `ServerDb`.** The macro rewrites `&Db` → `&ServerDb<S>` so
-  the same body text executes node-side against the local store; auth/permission
+  the same body text executes node-side against the local store (since
+  [RFC 0067](0067-thread-per-core-shards-WIP.md) step 2: `&ServerDb<R>` over a
+  `Route`, the body at the edge and each operation at its owner); auth/permission
   checks live **inside the body**, not the match ([RFC 0026](0026-auth-tokens.md)).
 - **Client stub.** Same signature, sends the frame, decodes the reply.
 - **Auth tiers.** A plain `#[server]` is login-required — the macro injects a

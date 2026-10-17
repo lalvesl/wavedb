@@ -2,7 +2,7 @@
 
 - **Status:** In progress — opened 2026-10-08. **Step 1 landed, step 2 in progress**
   (per-type state out of the statics; the routing function; the Pivot on
-  the wire); see "Progress".
+  the wire; server bodies at the edge); see "Progress".
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the owner
   as the unit of concurrency, and `shard_of`),
   [0066](0066-embassy-executor-and-async-io.md) (the executor, the reactor
@@ -361,9 +361,25 @@ step 5 here adds only the leases.
   (`expose::member_value` / `check_member`): through another Pivot a record
   is absent and cannot be changed, since it would be changed outside its own
   owner's lock — and once shards are directories it would not be there.
-- **Pending:** a `#[server]` body routes each operation to its owner (2c —
-  until then a function is placed and locked by its own hash); `MANIFEST`,
-  `shards/xx/`, open and replay per shard (2d).
+- **A server body coordinates; its operations run at their owners (2c,
+  landed 2026-10-09).** A `#[server]` function runs at the edge — the
+  request's own thread — and never on a shard, so it can never wait on the
+  shard it occupies. Its `ServerDb` is generic over a `Route`; each operation
+  is a `NodeOp` (plain data, bodies as wire bytes) that hops to its owner's
+  shard as `Job::Node`, runs under the owner's lock through the registry's
+  `run_node` match — which serves `store` types too, with no client gate —
+  and comes back as a `NodeReply`. `create_pivot` mints the id at the edge
+  (`Collection::mint_pivot`) and creates the collection where the id places
+  it. Gate 1 runs once, at the edge, for a POST as for a WebSocket session;
+  the sync poll and the piggyback navigate each topic at its owner
+  (`edge.rs`). A function is called (`call_fn`), never executed: `execute`
+  has no function arms, so no shard future embeds a server body — embedding
+  them through `LocalRoute` overflowed rustdoc's layout depth on the shard
+  task pool. In process, `LocalRoute` runs a body's operations on one store.
+  `server_fn_e2e` runs eight concurrent bodies inserting into one collection
+  on four shards; without the `Job::Node` lock 35 of their 40 inserts are
+  lost.
+- **Pending:** `MANIFEST`, `shards/xx/`, open and replay per shard (2d).
 
 ## Alternatives
 

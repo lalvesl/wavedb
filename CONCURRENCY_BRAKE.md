@@ -121,9 +121,11 @@ the original bug with extra steps. That is why the key stayed
 (`expose::check_member`): reaching it through a foreign Pivot would change it
 outside its own owner's lock.
 
-A `#[server]` function still locks its own hash, so the operations its body
-runs do not take their owners' locks. RFC 0067 step 2 routes each of them to
-its owner instead.
+A `#[server]` function has no owner. Its body runs at the edge — the
+request's own thread — and only coordinates: each operation it performs is a
+`NodeOp` that hops to its owner's shard and runs under that owner's lock (RFC
+0067 step 2). Remove that lock and `server_fn_e2e`'s eight concurrent bodies
+keep 5 of their 40 inserts.
 
 ## State
 
@@ -132,12 +134,13 @@ its owner instead.
   exact interleaving in which one op reads the node another is about to
   overwrite.
 - **Wired.** The node runs entirely behind the disk actor: `Server` no longer
-  holds a `PageStore`, a POST is routed to a shard worker
-  (`shard::Router`), and `dispatch::call` takes the lock around the whole
-  operation. A WebSocket `Call` is routed the same way (`Router::call`,
-  carrying the caller bound at `Hello`) and takes the same lock — that path
-  once executed unbraked on the accept thread, which was a hole in its own
-  right.
+  holds a `PageStore`. A POST passes gate 1 at the edge (`edge::handle`) and
+  its command is routed to its owner's shard (`shard::Router`), where
+  `dispatch::call` takes the lock around the whole operation. A WebSocket
+  `Call` takes the same path (`Router::call`, carrying the caller bound at
+  `Hello`) — that path once executed unbraked on the accept thread, which was
+  a hole in its own right — and so does every operation of a `#[server]`
+  body (`Route for Router`, `Job::Node`).
 - **Only shards cache.** `ShardStore` remembers *absence*, which is sound only
   while one holder reaches a record. Everything that is not a shard — node-side
   seeding before serving — gets the cacheless `Shards::store()`; the accept
