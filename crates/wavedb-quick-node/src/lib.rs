@@ -165,8 +165,8 @@ where
     /// request is routed to the shard owning it. **Raising this only buys
     /// throughput where the owners differ**: two operations on one owner
     /// serialise on the brake wherever they land (`CONCURRENCY_BRAKE.md`), and
-    /// the brake's key is `(tenant, STRUCT_HASH)` today — so one type under
-    /// one tenant is one owner however many shards there are. It costs a
+    /// the brake's key is the owner — one collection, or one Unique type under
+    /// one tenant — however many shards there are. It costs a
     /// thread and a cache each, and `ShardStore::CACHE_BYTES` is *per shard*.
     ///
     /// Zero is clamped to one: no shards is not a degraded node, it is a node
