@@ -34,7 +34,7 @@ use std::rc::Rc;
 
 use async_channel::Sender;
 use embassy_futures::select::{Either, select};
-use wavedb_core::expose::{Caller, Change, Command, Reply};
+use wavedb_core::expose::{Caller, Change, Command, Exposure, Reply};
 use wavedb_core::wire::{from_wire, to_wire};
 use wavedb_net::frame::{CommandFrame, Response};
 use wavedb_net::ws::{ClientMsg, ServerMsg, Topic};
@@ -63,10 +63,10 @@ pub const WS_OUTBOUND_DEPTH: usize = 256;
 /// # Errors
 /// A socket write fault while answering (the connection is being torn down
 /// regardless).
-pub async fn serve(
+pub async fn serve<E: Exposure>(
     read: ReadHalf,
     mut write: WriteHalf,
-    node: &Node,
+    node: &Node<E>,
     here: &Here,
 ) -> wavedb_net::Result<()> {
     let (router, secret, subs) = (&node.router, &node.secret, &node.subs);
@@ -150,9 +150,9 @@ pub async fn serve(
 /// Handle one message from the client. The returned `Err` is a socket write
 /// fault only — a *command* refusal is a `Response::Err` sent over the wire.
 #[allow(clippy::too_many_arguments)]
-async fn handle_client(
+async fn handle_client<E: Exposure>(
     write: &mut WriteHalf,
-    router: &Router,
+    router: &Router<E>,
     caller: Caller,
     subs: &Rc<RefCell<SubTable>>,
     conn: u64,
@@ -213,7 +213,11 @@ async fn handle_client(
 /// reconnect catch-up from (W6). Runs the type's `Changes` command with
 /// `since = None` (registration) on the owning shard and reads the cursor it
 /// answers; 0 if the topic hash is not served (the subscribe still acks).
-async fn topic_tail(router: &Router, caller: Caller, topic: Topic) -> u64 {
+async fn topic_tail<E: Exposure>(
+    router: &Router<E>,
+    caller: Caller,
+    topic: Topic,
+) -> u64 {
     let frame = CommandFrame {
         struct_hash: topic.struct_hash,
         command: Command::Changes,
