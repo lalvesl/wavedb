@@ -17,16 +17,16 @@
 //!
 //! 1. the benchmark issues one operation at a time (`block_on` per op, each
 //!    timed alone), so a second shard would never have a second operation;
-//! 2. the brake serialises per owner and its key is `(tenant, STRUCT_HASH)`
-//!    today, so this workload — one type, one tenant — is **one owner**
+//! 2. the brake serialises per owner — one collection, or one Unique type
+//!    under one tenant — so this workload's one collection is **one owner**
 //!    however many shards exist, even under a concurrent client;
 //! 3. there is only one shard here anyway: the per-shard worker threads belong
 //!    to the node's `Router`, and a benchmark driving `Store` directly builds
 //!    none. This thread is the shard.
 //!
 //! So the axis is honestly named "what does the actor cost". The concurrency it
-//! exists to enable needs a concurrent client *and* the Pivot-grained brake
-//! before it can be measured at all.
+//! exists to enable needs a concurrent client over many collections before it
+//! can be measured at all.
 //!
 //! No `dyn`: the seam is a trait bound and each row monomorphises to its own
 //! concrete engine, the same rule the workspace holds itself to.
