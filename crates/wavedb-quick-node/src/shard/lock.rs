@@ -25,20 +25,20 @@
 //! Declaring a `#[wavedb::list]` makes it worse, not better — one more shared
 //! structure to lose the update on.
 //!
-//! ## Why the key is the type, not the Pivot
+//! ## The key is the owner
 //!
-//! Ownership is per Pivot ([RFC 0064]), so a Pivot-grained lock is what this
-//! wants to be. It cannot be yet: `Get`, `Update` and `Remove` carry only an
-//! `Id` on the wire, so their Pivot is not known at the point the lock has to
-//! be taken. A **mixed** granularity would be worse than a coarse one — an
-//! `Insert` holding a Pivot key and an `Update` holding a type key do not
-//! exclude each other, which is the bug with extra steps.
+//! Ownership is per Pivot ([RFC 0064]), and every collection command names
+//! its Pivot on the wire, so the key is the operation's
+//! [`Owner`](super::Owner): a collection's Pivot, or a Unique type under a
+//! tenant — the same value the router places it by. Two collections of one
+//! type do not wait for each other; two commands on one collection always
+//! do, whichever commands they are. A **mixed** granularity — an `Insert`
+//! keyed by its Pivot and an `Update` keyed by its type — would exclude
+//! nothing, so there is one key for every command.
 //!
-//! So the key is `(tenant, STRUCT_HASH)`: coarser than ownership, uniform, and
-//! safe. Two collections of one type serialise where they need not; different
-//! types and different tenants do not. It narrows to the Pivot the moment
-//! those three commands carry one, which RFC 0064 already lists as separable
-//! work worth doing on its own.
+//! The tenant the owner is reached under is part of the key as well. Pivot
+//! ids are minted by the node and never repeat across tenants, so this costs
+//! nothing and makes it a question nobody has to ask.
 //!
 //! ## Why one table per thread
 //!
@@ -94,24 +94,21 @@ use std::task::{Context, Poll};
 
 use wavedb_core::U48;
 
+use super::Owner;
 use super::waiters::{Asked, Link, Table};
 
-/// The unit operations serialise on.
+/// The unit operations serialise on: an owner, under the tenant reaching it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct OwnerKey(u64);
+pub struct OwnerKey {
+    tenant: U48,
+    owner: Owner,
+}
 
 impl OwnerKey {
-    /// The key for `struct_hash` under `tenant`.
-    ///
-    /// The tenant and the type's 15-bit salt, concatenated: 48 + 15 bits fit.
-    /// Two types sharing a salt within a tenant share a key — which can only
-    /// over-serialise them, never let one owner's operations interleave.
+    /// The key for `owner` reached under `tenant`.
     #[must_use]
-    pub fn of(tenant: U48, struct_hash: u64) -> Self {
-        Self(
-            (tenant.get() << 15)
-                | u64::from(wavedb_core::type_salt(struct_hash)),
-        )
+    pub const fn new(tenant: U48, owner: Owner) -> Self {
+        Self { tenant, owner }
     }
 }
 
@@ -237,20 +234,38 @@ impl Drop for Held<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OwnerKey, OwnerLocks};
+    use super::{Owner, OwnerKey, OwnerLocks};
     use std::cell::RefCell;
 
-    use wavedb_core::U48;
+    use wavedb_core::{LocalId, U48};
 
+    /// A Unique owner: enough for the chain mechanics, which do not care
+    /// what the key names.
     fn key(tenant: u32, hash: u64) -> OwnerKey {
-        OwnerKey::of(U48::from(tenant), hash)
+        let tenant = U48::from(tenant);
+        OwnerKey::new(
+            tenant,
+            Owner::Unique {
+                tenant,
+                struct_hash: hash,
+            },
+        )
+    }
+
+    fn collection(tenant: u32, pivot: u64) -> OwnerKey {
+        OwnerKey::new(
+            U48::from(tenant),
+            Owner::Collection(LocalId::new(pivot, false, 1)),
+        )
     }
 
     #[test]
-    fn the_key_separates_tenants_and_types() {
+    fn the_key_separates_owners_and_tenants() {
         assert_ne!(key(1, 0xAA), key(2, 0xAA), "tenant must matter");
         assert_ne!(key(1, 0xAA), key(1, 0xBB), "type must matter");
         assert_eq!(key(7, 0xCC), key(7, 0xCC), "and be stable");
+        assert_ne!(collection(1, 5), collection(1, 6), "two collections");
+        assert_ne!(collection(1, 5), collection(2, 5), "tenant, again");
     }
 
     /// One operation: take the lock, do two steps with a yield between them.
