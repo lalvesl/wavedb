@@ -35,7 +35,7 @@ use wavedb_net::http::{self, Incoming};
 use wavedb_platform::carrier::Here;
 use wavedb_platform::io::{IoError, Listener, Stream};
 
-use crate::__rt::{MAX_CONNECTIONS, NodeTasks};
+use crate::__rt::NodeTasks;
 use crate::shard::{Router, Shards};
 use crate::subscribe::SubTable;
 use crate::upkeep::{self, Maintenance};
@@ -57,9 +57,9 @@ pub struct Accept<E> {
 }
 
 /// One accepted connection, as its task receives it.
-struct Connection {
+pub struct Connection<E> {
     sock: Stream,
-    node: Node,
+    node: Node<E>,
     halt: Receiver<()>,
 }
 
@@ -138,7 +138,7 @@ async fn serve<E: NodeTasks>(
                 };
                 // A full pool refuses: the connection drops, closing its
                 // socket — an explicit refusal, never a queue.
-                let _ = here.spawn(connection(conn, here.clone()));
+                let _ = E::spawn_connection(conn, here.clone());
             }
             Either::First(Err(e)) => break Err(e.into()),
             // A message or a closed channel: either way, stop.
@@ -149,16 +149,10 @@ async fn serve<E: NodeTasks>(
     result
 }
 
-/// One connection's task: serve it, or stop with the node.
-///
-/// Declared here rather than by `node_tasks!`: a connection routes every
-/// command to a shard and executes nothing, so it does not depend on the
-/// registry, and one pool serves every node in the process.
-#[wavedb_platform::carrier::rt::task(
-    pool_size = MAX_CONNECTIONS,
-    embassy_executor = wavedb_platform::carrier::rt
-)]
-async fn connection(conn: Connection, here: Here) {
+/// One connection's task: serve it, or stop with the node. Made concrete per
+/// registry by [`node_tasks!`](crate::node_tasks): routing asks the registry
+/// how each hash is addressed.
+pub async fn connection<E: NodeTasks>(conn: Connection<E>, here: Here) {
     let Connection { sock, node, halt } = conn;
     // A per-connection fault is dropped: it never takes the node down. (No
     // tracing dep yet — silent.)
@@ -170,9 +164,9 @@ async fn connection(conn: Connection, here: Here) {
 /// Each field is a refcount or a key, so a clone per connection is a handful
 /// of increments.
 #[derive(Clone)]
-pub struct Node {
+pub struct Node<E> {
     /// Where every command goes: the shard that owns it.
-    pub router: Router,
+    pub router: Router<E>,
     /// Gate 1's key, for a WebSocket session's `Hello`.
     pub secret: [u8; 32],
     pub subs: Rc<RefCell<SubTable>>,
@@ -181,9 +175,9 @@ pub struct Node {
 /// Read one request and answer it: a POST body dispatches + writes the
 /// framed response; a WebSocket upgrade switches protocols and hands the
 /// socket to the [`serve_ws`] session loop.
-async fn serve_connection(
+async fn serve_connection<E: NodeTasks>(
     sock: Stream,
-    node: &Node,
+    node: &Node<E>,
     here: &Here,
 ) -> wavedb_net::Result<()> {
     let (mut reader, mut writer) = sock.split();
