@@ -36,20 +36,32 @@ pub use crate::expose_changes::{Change, collection_changes, unique_changes};
 // Likewise the declared-list reads (`Listed` / `ListLen`).
 pub use crate::expose_lists::{list_len_value, listed_values};
 
+// And collection membership (the `Get` / `Update` / `Remove` guard).
+pub use crate::expose_member::{check_member, member_value};
+
 /// The wire command set: `Get`/`Save` for a `Unique` type,
 /// `Insert`/`Update`/`Remove`/`Get` for a NonUnique one. A `#[server]`
 /// function (M4) ignores it — its hash *is* the operation.
+///
+/// Every NonUnique command's payload **opens with the collection's Pivot**
+/// (`Changes` with an `Option` of it): the Pivot owns the operation, so the
+/// node places and serialises it by the Pivot before it knows the type
+/// ([`crate::placement::Owner::of_command`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, WaveWire)]
 pub enum Command {
-    /// Unique: the anchor record. NonUnique: the record at the payload `Id`.
+    /// Unique: the anchor record (empty payload). NonUnique: the record at
+    /// `id` in the collection (payload = `(LocalId pivot, Id)`); a record of
+    /// another collection answers as absent.
     Get,
     /// Unique upsert (payload = the record body).
     Save,
     /// NonUnique insert (payload = `(PivotId's LocalId, body)`).
     Insert,
-    /// NonUnique update at a stable `Id` (payload = `(Id, body)`).
+    /// NonUnique update at a stable `Id` (payload = `(LocalId pivot, Id,
+    /// body)`); the record must belong to that collection.
     Update,
-    /// NonUnique move to the dead tree (payload = the `Id`).
+    /// NonUnique move to the dead tree (payload = `(LocalId pivot, Id)`);
+    /// the record must belong to that collection.
     Remove,
     /// NonUnique collection walk, most recently written first (payload = the
     /// collection's `Pivot` `LocalId`). Buffered for now — streaming frames
@@ -137,6 +149,19 @@ impl Caller {
     }
 }
 
+/// How a registry addresses a hash it serves — what an operation on it
+/// belongs to, which is where it executes ([`crate::placement::Owner`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Addressing {
+    /// A `Unique` type: owned by the type under the caller's tenant.
+    Unique,
+    /// A NonUnique type: owned by the collection its commands name.
+    Collection,
+    /// A `#[server]` function: owned by nothing; it coordinates operations
+    /// that each have an owner of their own.
+    Function,
+}
+
 /// The declared registry surface.
 ///
 /// Implemented by the zero-sized types `expose_server!` / `expose_client!`
@@ -146,6 +171,13 @@ pub trait Exposure {
     /// Is `struct_hash` a declared item on this side? Unlisted ⇒ the wire
     /// cannot name it.
     fn knows(&self, struct_hash: u64) -> bool;
+
+    /// How `struct_hash` is addressed, or `None` when this side does not
+    /// serve it (the client registry serves nothing).
+    fn addressing(&self, struct_hash: u64) -> Option<Addressing> {
+        let _ = struct_hash;
+        None
+    }
 
     /// Decode-check `bytes` as the declared type's body — the wire gate that
     /// runs before any engine work.
@@ -286,27 +318,6 @@ where
             .await?;
     let entries = versions.into_iter().map(|pair| to_wire(&pair)).collect();
     Ok(Reply::Values(entries))
-}
-
-/// The owning `Pivot` back-link stamped in the record at `id`'s metadata —
-/// how a handle-less `Update`/`Remove` reaches the collection's tree roots.
-///
-/// # Errors
-/// [`Error::RecordMissing`] when `id` resolves to nothing;
-/// [`Error::PivotMissing`] when the record carries no back-link (not a
-/// collection record).
-pub async fn record_pivot<T, S>(store: &S, id: Id) -> Result<LocalId>
-where
-    T: WaveDbStruct,
-    S: Store,
-{
-    let bytes = store
-        .get_of(T::STRUCT_HASH, id)
-        .await?
-        .ok_or(Error::RecordMissing(id))?;
-    let (meta, _) = record::split_record(T::STRUCT_HASH, &bytes)?;
-    meta.pivot_id
-        .ok_or_else(|| Error::PivotMissing(LocalId::default()))
 }
 
 #[cfg(test)]
