@@ -3,16 +3,14 @@
 //!
 //! Embassy keeps tasks in **static pools**, and a `static` needs a concrete
 //! type. The node's accept, shard and job tasks are generic over the
-//! registry `E`, which only the schema crate knows. So the schema crate
-//! declares them: `expose_server!` emits [`node_tasks!`](crate::node_tasks)`(ServerRegistry)`,
-//! which defines three concrete `#[task]` functions and implements
+//! registry `E`, which only the schema crate knows — and so is a connection's,
+//! because routing asks the registry how each hash is addressed. So the
+//! schema crate declares them: `expose_server!` emits
+//! [`node_tasks!`](crate::node_tasks)`(ServerRegistry)`, which defines four
+//! concrete `#[task]` functions and implements
 //! [`NodeTasks`] for the registry by calling them. The node only ever calls
 //! `E::spawn_*` — resolved at compile time, no `dyn`, nothing registered at
 //! runtime.
-//!
-//! A connection executes nothing — it routes every command to a shard — so
-//! its task does not depend on the registry and is declared once, here
-//! (`serve::connection`).
 //!
 //! Everything here is `#[doc(hidden)]` plumbing for that one macro.
 //!
@@ -22,7 +20,7 @@ use std::rc::Rc;
 
 pub use wavedb_platform::carrier::{Here, SpawnError, rt};
 
-pub use crate::serve::{Accept, accept};
+pub use crate::serve::{Accept, Connection, accept, connection};
 pub use crate::shard::{JobSlot, ShardCtx, Worker, job, shard};
 
 /// Connections served at once, across the whole process. One more is
@@ -42,7 +40,7 @@ pub const MAX_SHARDS: usize = 256;
 /// still winding down while the next starts.
 pub const MAX_NODES: usize = 4;
 
-/// A registry the node can run: the three generic tasks, made concrete by
+/// A registry the node can run: the four generic tasks, made concrete by
 /// [`node_tasks!`](crate::node_tasks) in the crate that owns the registry type.
 ///
 /// Each `spawn_*` either places the task on the carrier `here` names or
@@ -56,6 +54,16 @@ pub trait NodeTasks:
     /// # Errors
     /// [`MAX_NODES`] accept loops already running.
     fn spawn_accept(ctx: Accept<Self>, here: Here) -> Result<(), SpawnError>;
+
+    /// One accepted connection, on the accept carrier.
+    ///
+    /// # Errors
+    /// [`MAX_CONNECTIONS`] connections already open: the caller drops the
+    /// connection, which closes its socket.
+    fn spawn_connection(
+        conn: Connection<Self>,
+        here: Here,
+    ) -> Result<(), SpawnError>;
 
     /// A shard worker: the root task of a shard carrier.
     ///
@@ -89,7 +97,8 @@ macro_rules! node_tasks {
         const _: () = {
             use ::std::rc::Rc;
             use $crate::__rt::{
-                Accept, Here, JobSlot, NodeTasks, ShardCtx, SpawnError, Worker,
+                Accept, Connection, Here, JobSlot, NodeTasks, ShardCtx,
+                SpawnError, Worker,
             };
 
             #[$crate::__rt::rt::task(
@@ -98,6 +107,14 @@ macro_rules! node_tasks {
                                     )]
             async fn accept(ctx: Accept<$registry>, here: Here) {
                 $crate::__rt::accept(ctx, here).await;
+            }
+
+            #[$crate::__rt::rt::task(
+                                        pool_size = $crate::__rt::MAX_CONNECTIONS,
+                                        embassy_executor = $crate::__rt::rt
+                                    )]
+            async fn connection(conn: Connection<$registry>, here: Here) {
+                $crate::__rt::connection(conn, here).await;
             }
 
             #[$crate::__rt::rt::task(
@@ -126,6 +143,13 @@ macro_rules! node_tasks {
                     here: Here,
                 ) -> ::core::result::Result<(), SpawnError> {
                     here.spawn(accept(ctx, here.clone()))
+                }
+
+                fn spawn_connection(
+                    conn: Connection<Self>,
+                    here: Here,
+                ) -> ::core::result::Result<(), SpawnError> {
+                    here.spawn(connection(conn, here.clone()))
                 }
 
                 fn spawn_shard(
