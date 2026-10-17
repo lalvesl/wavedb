@@ -41,6 +41,7 @@ mod expose_changes;
 mod expose_lists;
 mod expose_member;
 mod expose_salt;
+mod expose_walks;
 pub mod fn_identity;
 pub mod fuzzy;
 pub mod handle;
@@ -51,6 +52,7 @@ pub mod local_handle;
 pub mod local_id;
 pub mod metadata;
 mod mint;
+pub mod node_op;
 pub mod notify;
 pub mod overlay;
 pub mod permission;
@@ -69,6 +71,7 @@ pub use expose::Caller;
 pub use fn_identity::FnArgTag;
 pub use handle::DbHandle;
 pub use local_handle::LocalHandle;
+pub use node_op::{LocalRoute, NodeOp, NodeReply, Route};
 // Generated `by_<field>` lookups return `impl Stream`, and a
 // stream-returning `#[server]` dispatch collects with `TryStreamExt`;
 // re-exported so macro expansions can name them without adding a `futures`
