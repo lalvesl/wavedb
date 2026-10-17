@@ -80,18 +80,10 @@ pub fn addressing_arm(entry: &Entry) -> TokenStream {
 }
 
 /// One `execute` arm: a struct dispatches `match command` over its (possibly
-/// overridden) steps; a function runs its uniform dispatch.
+/// overridden) steps. Functions have none — they run through `call_fn`, at
+/// the edge, so a shard's future never embeds a server body.
 pub fn execute_arm(entry: &Entry) -> TokenStream {
-    let path = &entry.path;
     let h = hash_expr(entry);
-    if entry.kind == Kind::Fn {
-        return quote! {
-            h if h == #h => {
-                #path::__wavedb_dispatch(store, caller, command, payload)
-                    .await
-            }
-        };
-    }
     let ops = OPS.iter().map(|op| {
         let variant = format_ident!("{}", crate::expose_parse::variant(op));
         let call = op_call(entry, op);
@@ -104,4 +96,78 @@ pub fn execute_arm(entry: &Entry) -> TokenStream {
             }
         }
     }
+}
+
+/// One `run_node` arm: every declared struct, `store` entries included —
+/// node code reaches what the wire cannot.
+pub fn node_arm(path: &syn::Path) -> TokenStream {
+    quote! {
+        h if h == <#path as ::wavedb_core::WaveDbStruct>::STRUCT_HASH => {
+            #path::__wavedb_node(store, tenant, op).await
+        }
+    }
+}
+
+/// One `call_fn` arm: a declared `#[server]` function, its body's operations
+/// running through `route`.
+pub fn fn_arm(entry: &Entry) -> TokenStream {
+    let path = &entry.path;
+    quote! {
+        h if h == #path::STRUCT_HASH => {
+            #path::__wavedb_dispatch(route, caller, payload).await
+        }
+    }
+}
+
+/// The server registry's node half: `run_node` over every declared struct
+/// (`store` entries included) and `call_fn` over the declared functions.
+pub fn node_methods(structs: &[&syn::Path], wire: &[&Entry]) -> TokenStream {
+    let node_arms = structs.iter().copied().map(node_arm);
+    let fn_arms = wire
+        .iter()
+        .copied()
+        .filter(|e| e.kind == Kind::Fn)
+        .map(fn_arm);
+    quote! {
+        #[allow(clippy::future_not_send)]
+        async fn run_node<S: ::wavedb_core::Store>(
+            &self,
+            store: &S,
+            tenant: ::wavedb_core::U48,
+            struct_hash: u64,
+            op: ::wavedb_core::NodeOp,
+        ) -> ::wavedb_core::Result<::wavedb_core::NodeReply> {
+            match struct_hash {
+                #(#node_arms)*
+                other => ::core::result::Result::Err(
+                    ::wavedb_core::Error::UnknownStructHash(other),
+                ),
+            }
+        }
+
+        #[allow(clippy::future_not_send)]
+        async fn call_fn<R: ::wavedb_core::Route>(
+            &self,
+            route: &R,
+            caller: ::wavedb_core::Caller,
+            struct_hash: u64,
+            payload: &[u8],
+        ) -> ::wavedb_core::Result<::wavedb_core::expose::Reply> {
+            match struct_hash {
+                #(#fn_arms)*
+                other => ::core::result::Result::Err(
+                    ::wavedb_core::Error::UnknownStructHash(other),
+                ),
+            }
+        }
+    }
+}
+
+/// The `execute` arms: the wire structs only (see [`execute_arm`]).
+pub fn execute_arms(wire: &[&Entry]) -> Vec<TokenStream> {
+    wire.iter()
+        .copied()
+        .filter(|e| e.kind != Kind::Fn)
+        .map(execute_arm)
+        .collect()
 }
