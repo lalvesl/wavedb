@@ -72,6 +72,24 @@ fn op_fn(op: &str, body: &TokenStream) -> TokenStream {
     }
 }
 
+/// The node-operation step (`__wavedb_node`): the trusted path a
+/// `#[server]` body's operations take, typed back from the `STRUCT_HASH` by
+/// the registry's match. No client gate — node code is the authority — and
+/// emitted for every type, so `store` entries are served too.
+fn node_step(run: &TokenStream) -> TokenStream {
+    quote! {
+        #[doc(hidden)]
+        #[allow(clippy::future_not_send)]
+        pub async fn __wavedb_node<S: ::wavedb_core::Store>(
+            store: &S,
+            tenant: ::wavedb_core::U48,
+            op: ::wavedb_core::NodeOp,
+        ) -> ::wavedb_core::Result<::wavedb_core::NodeReply> {
+            #run::<Self, S>(store, tenant, op).await
+        }
+    }
+}
+
 /// The `Unique` shape's execution steps: `get` / `save` real, the NonUnique
 /// commands refuse.
 pub fn unique_ops(name: &Ident) -> TokenStream {
@@ -136,10 +154,12 @@ pub fn unique_ops(name: &Ident) -> TokenStream {
         "list_len",
         &quote!(let _ = (store, caller, payload); #refuse),
     );
+    let node = node_step(&quote!(::wavedb_core::node_op::run_unique));
     quote! {
         impl #name {
             #get
             #save
+            #node
             #insert
             #update
             #remove
@@ -286,10 +306,12 @@ pub fn nonunique_ops(name: &Ident) -> TokenStream {
     );
     let changes = nonunique_changes_step(name);
     let (listed, list_len) = nonunique_list_steps(name);
+    let node = node_step(&quote!(::wavedb_core::node_op::run_nonunique));
     quote! {
         impl #name {
             #get
             #insert
+            #node
             #update
             #remove
             #save
