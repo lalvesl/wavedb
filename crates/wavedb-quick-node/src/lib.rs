@@ -35,6 +35,7 @@
 #[path = "rt.rs"]
 pub mod __rt;
 pub mod dispatch;
+pub mod edge;
 pub mod error;
 pub mod feed;
 mod serve;
