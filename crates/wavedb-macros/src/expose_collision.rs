@@ -26,7 +26,7 @@ use proc_macro2::TokenStream;
 use quote::{quote, quote_spanned};
 use syn::spanned::Spanned as _;
 
-use crate::expose::hash_expr;
+use crate::expose_arms::hash_expr;
 use crate::expose_parse::{Entry, Kind};
 
 /// Emit the compile-time guards for `entries` (see the module docs).
