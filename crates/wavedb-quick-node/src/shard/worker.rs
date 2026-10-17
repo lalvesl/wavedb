@@ -24,9 +24,9 @@
 //!
 //! ## What crosses, and what does not
 //!
-//! Into the worker: [`Work`] — a POST's [`Request`], or a WebSocket session's
-//! `Call` with the caller it bound at `Hello` — and a `oneshot` for its
-//! [`Answer`]. Plain data. Out of it: a [`Mutation`](wavedb_core::notify::Mutation) per
+//! Into the worker: a [`Job`] — a client command with the caller gate 1
+//! resolved at the edge, or a `#[server]` body's [`NodeOp`] — and a
+//! `oneshot` for its answer. Plain data. Out of it: a [`Mutation`](wavedb_core::notify::Mutation) per
 //! committed write, handed to the accept thread's publisher through the
 //! [`Publish`](crate::subscribe::Publish) seam, because the WebSocket
 //! subscription table lives there and must not be touched from here. The
@@ -39,12 +39,13 @@ use std::rc::Rc;
 use async_channel::{Receiver, Sender};
 use futures::channel::oneshot;
 use wavedb_core::expose::Caller;
-use wavedb_net::frame::{CommandFrame, Request};
+use wavedb_core::{NodeOp, NodeReply, U48};
+use wavedb_net::frame::{CommandFrame, Response};
 use wavedb_platform::carrier::{self, Here};
 
-use super::{DiskHandle, OwnerLocks, ShardStore};
+use super::{DiskHandle, OwnerKey, OwnerLocks, ShardStore};
 use crate::__rt::NodeTasks;
-use crate::dispatch::{self, Answer};
+use crate::dispatch;
 use crate::feed::MutationFeed;
 use crate::subscribe::NotifyStore;
 
@@ -55,23 +56,24 @@ use crate::subscribe::NotifyStore;
 /// backpressure that reaches the socket.
 pub const JOB_DEPTH: usize = 512;
 
-/// What a shard is asked to run.
-pub enum Work {
-    /// A POST: the decoded request, gates and all still to run on the shard.
-    Request(Request),
-    /// A WebSocket session's command. Gate 1 already ran, once, at the
-    /// session's `Hello`, and `caller` is what it resolved to; the shard runs
-    /// gates 2–3 only.
-    Call { caller: Caller, frame: CommandFrame },
-}
-
 /// One piece of work routed to the shard that owns it, plus where its answer
-/// goes.
-pub struct Job {
-    pub work: Work,
-    /// The routing caller's return channel. Dropped without a send only if the
-    /// worker is torn down mid-flight, which the router reports as a refusal.
-    pub answer: oneshot::Sender<Answer>,
+/// goes. An answer channel dropped without a send — the worker torn down
+/// mid-flight — is reported by the router as a refusal.
+pub enum Job {
+    /// A client command. Gate 1 ran at the edge and `caller` is what it
+    /// resolved; the shard runs gates 2–3 under the owner's lock.
+    Call {
+        caller: Caller,
+        frame: CommandFrame,
+        answer: oneshot::Sender<Response>,
+    },
+    /// One operation of a `#[server]` body, under its owner's lock.
+    Node {
+        tenant: U48,
+        struct_hash: u64,
+        op: NodeOp,
+        answer: oneshot::Sender<wavedb_core::Result<NodeReply>>,
+    },
 }
 
 /// A job on its way into a task, recoverable if the task never starts.
@@ -87,7 +89,6 @@ pub struct ShardCtx<E> {
     registry: E,
     disk: DiskHandle,
     publisher: MutationFeed,
-    secret: [u8; 32],
     jobs: Receiver<Job>,
 }
 
@@ -96,7 +97,6 @@ pub struct Worker<E> {
     registry: E,
     store: Rc<WorkerStore>,
     locks: OwnerLocks,
-    secret: [u8; 32],
 }
 
 /// Start a worker and return the channel that reaches it.
@@ -113,14 +113,12 @@ pub fn start<E: NodeTasks>(
     registry: E,
     disk: DiskHandle,
     publisher: MutationFeed,
-    secret: [u8; 32],
 ) -> wavedb_platform::Result<Sender<Job>> {
     let (jobs, rx) = async_channel::bounded(JOB_DEPTH);
     let ctx = ShardCtx {
         registry,
         disk,
         publisher,
-        secret,
         jobs: rx,
     };
     // The carrier ends by itself once the router's senders are gone and the
@@ -137,7 +135,6 @@ pub async fn shard<E: NodeTasks>(ctx: ShardCtx<E>, here: Here) {
         registry,
         disk,
         publisher,
-        secret,
         jobs,
     } = ctx;
     // Built here, on the shard's own thread: `ShardStore` holds an `Rc` and
@@ -149,7 +146,6 @@ pub async fn shard<E: NodeTasks>(ctx: ShardCtx<E>, here: Here) {
             publisher,
         )),
         locks: OwnerLocks::new(),
-        secret,
     });
     while let Ok(job) = jobs.recv().await {
         let slot: JobSlot = Rc::new(RefCell::new(Some(job)));
@@ -177,23 +173,34 @@ pub async fn job<E: NodeTasks>(
     drop(here); // held to the end: the carrier waits for this job
 }
 
-async fn serve<E: NodeTasks>(worker: &Worker<E>, Job { work, answer }: Job) {
+async fn serve<E: NodeTasks>(worker: &Worker<E>, job: Job) {
     let (registry, store, locks) =
         (&worker.registry, &*worker.store, &worker.locks);
-    let served = match work {
-        Work::Request(request) => {
-            dispatch::handle(registry, store, locks, &worker.secret, request)
-                .await
-        }
-        Work::Call { caller, frame } => dispatch::Answer {
-            response: dispatch::call(registry, store, locks, caller, frame)
-                .await,
-            sync: None,
-        },
-    };
     // A caller that gave up between routing and here: the answer has
     // nowhere to go, and that is not this shard's problem.
-    let _ = answer.send(served);
+    match job {
+        Job::Call {
+            caller,
+            frame,
+            answer,
+        } => {
+            let response =
+                dispatch::call(registry, store, locks, caller, frame).await;
+            let _ = answer.send(response);
+        }
+        Job::Node {
+            tenant,
+            struct_hash,
+            op,
+            answer,
+        } => {
+            let key = OwnerKey::new(tenant, op.owner(tenant, struct_hash));
+            let held = locks.acquire(key).await;
+            let reply = registry.run_node(store, tenant, struct_hash, op).await;
+            drop(held);
+            let _ = answer.send(reply);
+        }
+    }
 }
 
 /// What a job carries has to cross a thread; what a worker holds must not.
