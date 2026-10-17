@@ -207,10 +207,11 @@ fn nonunique_changes_step(name: &Ident) -> TokenStream {
     )
 }
 
-/// The `NonUnique` shape's execution steps: the collection ops real (a
-/// handle-less `update`/`remove` reaches the collection through the record's
-/// `Metadata.pivot_id` back-link), `save` refuses (NonUnique updates ride
-/// `Update`).
+/// The `NonUnique` shape's execution steps: the collection ops real, `save`
+/// refuses (NonUnique updates ride `Update`). Every command names its
+/// collection's Pivot first, and `get`/`update`/`remove` act only on a record
+/// that belongs to it — the command runs where that Pivot lives and under its
+/// lock, so it may not reach into another collection.
 ///
 /// The steps drive the engine-facing `Collection` directly (`Store` in hand)
 /// — never the generated `DbHandle`-based wrappers, so the wrappers' shape
@@ -221,9 +222,10 @@ pub fn nonunique_ops(name: &Ident) -> TokenStream {
         "get",
         &quote! {
             let _ = caller;
-            let id: ::wavedb_core::Id =
+            let (pivot, id): (::wavedb_core::LocalId, ::wavedb_core::Id) =
                 ::wavedb_core::wire::from_wire(payload)?;
-            ::wavedb_core::expose::get_value::<#name, S>(store, id).await
+            ::wavedb_core::expose::member_value::<#name, S>(store, pivot, id)
+                .await
         },
     );
     let insert = op_fn(
@@ -242,11 +244,10 @@ pub fn nonunique_ops(name: &Ident) -> TokenStream {
     let update = op_fn(
         "update",
         &quote! {
-            let (id, value): (::wavedb_core::Id, #name) =
+            let (pivot, id, value): (::wavedb_core::LocalId, ::wavedb_core::Id, #name) =
                 ::wavedb_core::wire::from_wire(payload)?;
-            let pivot =
-                ::wavedb_core::expose::record_pivot::<#name, S>(store, id)
-                    .await?;
+            ::wavedb_core::expose::check_member::<#name, S>(store, pivot, id)
+                .await?;
             let col = ::wavedb_core::Collection::<#name>::at(pivot, caller.tenant)
                 .stamped_by(caller.user);
             col.save(store, id, &value).await?;
@@ -256,11 +257,10 @@ pub fn nonunique_ops(name: &Ident) -> TokenStream {
     let remove = op_fn(
         "remove",
         &quote! {
-            let id: ::wavedb_core::Id =
+            let (pivot, id): (::wavedb_core::LocalId, ::wavedb_core::Id) =
                 ::wavedb_core::wire::from_wire(payload)?;
-            let pivot =
-                ::wavedb_core::expose::record_pivot::<#name, S>(store, id)
-                    .await?;
+            ::wavedb_core::expose::check_member::<#name, S>(store, pivot, id)
+                .await?;
             let col = ::wavedb_core::Collection::<#name>::at(pivot, caller.tenant)
                 .stamped_by(caller.user);
             let removed = col.remove(store, id).await?;
