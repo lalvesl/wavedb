@@ -20,6 +20,8 @@
 //!
 //! [RFC 0067]: ../../../rfcs/0067-thread-per-core-shards-WIP.md
 
+use crate::expose::{Addressing, Command};
+use crate::wire::from_wire;
 use crate::{LocalId, U48};
 
 /// Shards a database is created with unless told otherwise (RFC 0067).
@@ -34,7 +36,7 @@ pub const DEFAULT_SHARDS: usize = 64;
 /// which `hash(id)` would split across two shards with no owner to be atomic
 /// in. A collection is the same: its B+tree nodes and chain segments carry
 /// ids of their own, and they belong to the Pivot because the operation does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Owner {
     /// A NonUnique collection, named by its Pivot.
     Collection(LocalId),
@@ -45,6 +47,53 @@ pub enum Owner {
 }
 
 impl Owner {
+    /// The owner of one wire command on `struct_hash` under `tenant`, given
+    /// how the registry addresses that hash.
+    ///
+    /// A collection command names its Pivot first in the payload — every
+    /// one of them — and a `LocalId` is all stack, so the Pivot is read off
+    /// the front without knowing the type. `Changes` carries it as an
+    /// `Option`, whose value sits in the heap, so its fixed payload is read
+    /// whole. A Unique type is its own
+    /// owner under the tenant. Anything else — a function, an unknown hash,
+    /// a payload that does not decode — is placed as if it were a Unique
+    /// type: the shard it lands on refuses or serves it either way, and
+    /// placing it costs nothing.
+    #[must_use]
+    pub fn of_command(
+        addressing: Option<Addressing>,
+        tenant: U48,
+        struct_hash: u64,
+        command: Command,
+        payload: &[u8],
+    ) -> Self {
+        let pivot = match (addressing, command) {
+            (Some(Addressing::Collection), Command::Changes) => {
+                from_wire::<(Option<LocalId>, Option<u64>)>(payload)
+                    .ok()
+                    .and_then(|(pivot, _)| pivot)
+            }
+            (
+                Some(Addressing::Collection),
+                Command::Get
+                | Command::Insert
+                | Command::Update
+                | Command::Remove
+                | Command::All
+                | Command::Listed
+                | Command::ListLen,
+            ) => from_wire::<LocalId>(payload).ok(),
+            _ => None,
+        };
+        pivot.map_or(
+            Self::Unique {
+                tenant,
+                struct_hash,
+            },
+            Self::Collection,
+        )
+    }
+
     /// The shard this owner lives in, out of `shards`. `shards` of 0 or 1 is
     /// one shard.
     #[must_use]
@@ -200,5 +249,55 @@ mod tests {
         let (lo, hi) =
             (*counts.iter().min().unwrap(), *counts.iter().max().unwrap());
         assert!(lo > 800 && hi < 1200, "{counts:?}");
+    }
+
+    /// Every collection command names its Pivot first, so the owner is read
+    /// off the payload without knowing the type; a Unique type, a function
+    /// and an undecodable payload all fall back to the `(tenant, hash)` owner.
+    #[test]
+    fn a_command_is_owned_by_the_pivot_it_names() {
+        use crate::Id;
+        use crate::expose::{Addressing, Command};
+        use crate::wire::{to_wire, to_wire_pair};
+
+        let (p, tenant) = (pivot(42), U48::from(9u32));
+        let id = Id::new(77, tenant, false, 3);
+        let col = Some(Addressing::Collection);
+        let of = |a, c, payload: &[u8]| {
+            Owner::of_command(a, tenant, 0xAB, c, payload)
+        };
+        let fallback = unique(9, 0xAB);
+
+        let body = String::from("a value with a heap");
+        let payloads = [
+            (Command::Get, to_wire(&(p, id))),
+            (Command::Insert, to_wire_pair(&p, &body)),
+            (Command::Update, to_wire(&(p, id, body.clone()))),
+            (Command::Remove, to_wire(&(p, id))),
+            (Command::All, to_wire(&p)),
+            (Command::Listed, to_wire(&(p, 0u32, 0u64, 10u32))),
+            (Command::ListLen, to_wire(&(p, 0u32))),
+            (Command::Changes, to_wire(&(Some(p), Some(5u64)))),
+        ];
+        for (command, payload) in &payloads {
+            assert_eq!(
+                of(col, *command, payload),
+                Owner::Collection(p),
+                "{command:?}"
+            );
+            assert_eq!(
+                of(Some(Addressing::Unique), *command, payload),
+                fallback
+            );
+            assert_eq!(
+                of(Some(Addressing::Function), *command, payload),
+                fallback
+            );
+            assert_eq!(of(None, *command, payload), fallback);
+        }
+        let no_pivot = to_wire(&(None::<LocalId>, None::<u64>));
+        assert_eq!(of(col, Command::Changes, &no_pivot), fallback);
+        assert_eq!(of(col, Command::Get, &[1, 2]), fallback, "short payload");
+        assert_eq!(of(col, Command::Save, &to_wire(&p)), fallback);
     }
 }
