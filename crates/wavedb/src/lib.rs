@@ -25,7 +25,8 @@
 //! generated one — `T::get(&db)` / `value.save(&db)` for Unique,
 //! `T::collection(pivot)` + `col.insert(&db, v)` for NonUnique — resolved
 //! through the [`DbHandle`](wavedb_core::DbHandle) this crate implements for
-//! [`Db`] (command frames) and [`ServerDb`] (node-local store). Walk-shaped
+//! [`Db`] (command frames) and [`ServerDb`] (node operations, each run at its
+//! owner). Walk-shaped
 //! reads are buffered under the hood; streaming frames are a transport
 //! refinement that won't change the call sites.
 
@@ -45,6 +46,7 @@ mod error;
 mod offline_queue;
 mod reply;
 mod server_db;
+mod server_reply;
 pub mod watch;
 
 pub use auth::TokenPair;
