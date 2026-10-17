@@ -52,8 +52,8 @@ pub fn notes(seeded: bool, engine: Engine) -> Vec<String> {
              single/multi-thread axis, and it measures the cost of that \
              boundary — NOT parallelism. This benchmark issues one operation \
              at a time, so only one shard ever has work; and the brake keys \
-             on (tenant, STRUCT_HASH), so one type under one tenant would be \
-             one owner even under a concurrent client."
+             on the owner, so this one collection would be one owner even \
+             under a concurrent client."
                 .into(),
         );
         notes.push(
