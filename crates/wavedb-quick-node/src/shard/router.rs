@@ -9,16 +9,17 @@
 //!
 //! [`OwnerLocks`](super::OwnerLocks) excludes two operations on one owner from
 //! interleaving — one table per shard, which is enough only because of this
-//! routing — and today its key is `(tenant, STRUCT_HASH)` because `Get`,
-//! `Update` and `Remove` do not carry a Pivot on the wire (`CONCURRENCY_BRAKE.md`
-//! spells out why a *mixed* granularity would be worse than a coarse one).
-//! Routing uses the **same** key, via
-//! [`Owner::Unique`](super::Owner::Unique) — including for collection
-//! commands, whose Pivot-grained [`Owner::Collection`] arm is right for the
-//! target and wrong for today. Route one way and brake the other and two
-//! operations on one owner can be picked up by two shards holding two
-//! different locks, which is the silent index loss with routing in front of
-//! it. Both narrow to the Pivot together or neither does.
+//! routing. Both use the same [`Owner`]: a collection command's Pivot, read
+//! off the front of its payload, or a Unique type under the caller's tenant
+//! ([`Owner::of_command`]). The registry says which a hash is
+//! ([`Exposure::addressing`]), which is why the router holds it. Route one way
+//! and brake another and two operations on one owner could be picked up by
+//! two shards holding two different locks — the silent index loss, with
+//! routing in front of it.
+//!
+//! A `#[server]` function has no owner of its own. Until its body routes each
+//! operation it runs to that operation's owner (RFC 0067 step 2), it is placed
+//! like a Unique type keyed by the function's hash.
 //!
 //! ## Who runs gate 1
 //!
@@ -36,7 +37,7 @@
 use async_channel::Sender;
 use futures::channel::oneshot;
 use wavedb_core::U48;
-use wavedb_core::expose::Caller;
+use wavedb_core::expose::{Caller, Exposure};
 use wavedb_net::frame::{
     CommandFrame, NodeError, NodeErrorKind, Request, Response,
 };
@@ -49,15 +50,16 @@ use crate::feed::MutationFeed;
 
 /// The fan-out onto the shard workers.
 ///
-/// Cheap to clone (a `Vec` of channel senders and a key) and `Send`, so every
-/// connection task can hold one.
+/// Cheap to clone (the registry is a zero-sized value, then a `Vec` of channel
+/// senders and a key) and `Send`, so every connection task can hold one.
 #[derive(Clone)]
-pub struct Router {
+pub struct Router<E> {
+    registry: E,
     workers: Vec<Sender<Job>>,
     secret: [u8; 32],
 }
 
-impl Router {
+impl<E: NodeTasks> Router<E> {
     /// Start `count` workers over one disk actor and return the router onto
     /// them.
     ///
@@ -66,24 +68,27 @@ impl Router {
     ///
     /// # Errors
     /// A worker thread failing to spawn.
-    pub fn start<E>(
+    pub fn start(
         registry: E,
         disk: &DiskHandle,
         publisher: &MutationFeed,
         secret: [u8; 32],
         count: usize,
-    ) -> wavedb_platform::Result<Self>
-    where
-        E: NodeTasks,
-    {
+    ) -> wavedb_platform::Result<Self> {
         let workers = (0..count.max(1))
             .map(|_| {
                 worker::start(registry, disk.clone(), publisher.clone(), secret)
             })
             .collect::<wavedb_platform::Result<Vec<_>>>()?;
-        Ok(Self { workers, secret })
+        Ok(Self {
+            registry,
+            workers,
+            secret,
+        })
     }
+}
 
+impl<E: Exposure> Router<E> {
     /// How many shards this router fans out to.
     #[must_use]
     pub const fn count(&self) -> usize {
@@ -96,9 +101,9 @@ impl Router {
     /// [`Response::Err`], because the caller upstream has a socket to answer
     /// and needs bytes for it either way.
     pub async fn dispatch(&self, request: Request) -> Answer {
-        let shard = self.shard_for(&request);
+        let owner = self.owner_for(&request);
         let struct_hash = request.frame.struct_hash;
-        self.send(shard, struct_hash, Work::Request(request)).await
+        self.send(owner, struct_hash, Work::Request(request)).await
     }
 
     /// Route one WebSocket `Call` to its owner's shard and wait for the
@@ -106,16 +111,17 @@ impl Router {
     ///
     /// Never returns a transport error, as [`dispatch`](Self::dispatch).
     pub async fn call(&self, caller: Caller, frame: CommandFrame) -> Response {
-        let shard = self.owner_shard(caller.tenant, frame.struct_hash);
+        let owner = self.owner(caller.tenant, &frame);
         let struct_hash = frame.struct_hash;
-        self.send(shard, struct_hash, Work::Call { caller, frame })
+        self.send(owner, struct_hash, Work::Call { caller, frame })
             .await
             .response
     }
 
-    async fn send(&self, shard: usize, struct_hash: u64, work: Work) -> Answer {
+    async fn send(&self, owner: Owner, struct_hash: u64, work: Work) -> Answer {
+        let shard = owner.shard(self.workers.len());
         let Some(worker) = self.workers.get(shard) else {
-            // Unreachable: `start` refuses an empty set and `shard_for` folds
+            // Unreachable: `start` refuses an empty set and `Owner::shard` folds
             // onto the length. Said rather than indexed, because a routing
             // function has no business panicking on a request path.
             return refused(struct_hash, "no shard");
@@ -128,27 +134,27 @@ impl Router {
             .unwrap_or_else(|_| refused(struct_hash, "shard dropped the job"))
     }
 
-    /// The shard owning `request` — see the module note on why this is the
-    /// type key rather than the Pivot.
+    /// The owner of `request` — see the module note.
     ///
-    /// A request whose identity does not verify routes to shard 0. It is about
-    /// to be refused by gate 1 wherever it lands, so the only thing that
-    /// matters is that resolving it costs nothing extra.
-    fn shard_for(&self, request: &Request) -> usize {
-        let Ok(caller) = dispatch::identify(&request.auth, &self.secret) else {
-            return 0;
-        };
-        self.owner_shard(caller.tenant, request.frame.struct_hash)
+    /// A request whose identity does not verify is placed by the hash alone.
+    /// It is about to be refused by gate 1 wherever it lands, so the only
+    /// thing that matters is that placing it costs nothing extra.
+    fn owner_for(&self, request: &Request) -> Owner {
+        let tenant = dispatch::identify(&request.auth, &self.secret)
+            .map_or(U48::MAX, |caller| caller.tenant);
+        self.owner(tenant, &request.frame)
     }
 
-    /// The shard owning `(tenant, struct_hash)` — the lock's key, so one
+    /// The owner of `frame` reached under `tenant` — the lock's key, so one
     /// owner is always on one shard, however its work arrived.
-    fn owner_shard(&self, tenant: U48, struct_hash: u64) -> usize {
-        Owner::Unique {
+    fn owner(&self, tenant: U48, frame: &CommandFrame) -> Owner {
+        Owner::of_command(
+            self.registry.addressing(frame.struct_hash),
             tenant,
-            struct_hash,
-        }
-        .shard(self.workers.len())
+            frame.struct_hash,
+            frame.command,
+            &frame.payload,
+        )
     }
 }
 
@@ -165,18 +171,12 @@ fn refused(struct_hash: u64, why: &str) -> Answer {
     }
 }
 
-/// Every connection task holds one, and connection tasks are not all on one
-/// thread once the accept loop stops being the only executor.
-const _: fn() = || {
-    const fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<Router>();
-};
-
 #[cfg(test)]
 mod tests {
     use super::Router;
-    use wavedb_core::U48;
-    use wavedb_core::expose::Command;
+    use wavedb_core::expose::{Addressing, Command, Exposure};
+    use wavedb_core::wire::to_wire;
+    use wavedb_core::{Error, Id, LocalId, U48};
     use wavedb_net::frame::{Auth, CommandFrame, Request};
 
     fn request(tenant: u32, struct_hash: u64) -> Request {
@@ -196,21 +196,88 @@ mod tests {
     /// A router with no live workers: the senders are dropped immediately, so
     /// every dispatch takes the "shard stopped" path. Enough to pin routing,
     /// which is the pure part.
-    fn router(count: usize) -> Router {
+    fn router(count: usize) -> Router<Registry> {
         let workers = (0..count).map(|_| async_channel::bounded(1).0).collect();
         Router {
+            registry: Registry,
             workers,
             secret: [0u8; 32],
         }
+    }
+
+    /// Serves one collection type, [`COLLECTION`]; every other hash is a
+    /// Unique type.
+    #[derive(Clone, Copy)]
+    struct Registry;
+
+    const COLLECTION: u64 = 0xC011;
+
+    impl Exposure for Registry {
+        fn knows(&self, _: u64) -> bool {
+            true
+        }
+
+        fn decode_check(
+            &self,
+            struct_hash: u64,
+            _: &[u8],
+        ) -> wavedb_core::Result<()> {
+            Err(Error::UnknownStructHash(struct_hash))
+        }
+
+        fn addressing(&self, struct_hash: u64) -> Option<Addressing> {
+            Some(if struct_hash == COLLECTION {
+                Addressing::Collection
+            } else {
+                Addressing::Unique
+            })
+        }
+    }
+
+    fn shard_for(router: &Router<Registry>, request: &Request) -> usize {
+        router.owner_for(request).shard(router.count())
+    }
+
+    fn on_pivot(command: Command, pivot: u64, payload: &[u8]) -> Request {
+        let mut r = request(7, COLLECTION);
+        r.frame.command = command;
+        let mut bytes = to_wire(&LocalId::new(pivot, false, 9));
+        bytes.extend_from_slice(payload);
+        r.frame.payload = bytes;
+        r
+    }
+
+    /// Every command on one collection lands on one shard, and two
+    /// collections of one type do not have to share one.
+    #[test]
+    fn a_collection_routes_by_its_pivot() {
+        let router = router(64);
+        let id = to_wire(&Id::new(5, U48::from(7u32), false, 9));
+        let shards: std::collections::HashSet<usize> = [
+            on_pivot(Command::Insert, 11, &[]),
+            on_pivot(Command::Get, 11, &id),
+            on_pivot(Command::Update, 11, &id),
+            on_pivot(Command::Remove, 11, &id),
+            on_pivot(Command::All, 11, &[]),
+        ]
+        .iter()
+        .map(|r| shard_for(&router, r))
+        .collect();
+        assert_eq!(shards.len(), 1, "one collection, one shard");
+
+        let spread: std::collections::HashSet<usize> = (0..64u64)
+            .map(|p| shard_for(&router, &on_pivot(Command::All, p, &[])))
+            .collect();
+        assert!(spread.len() > 16, "pivots of one type barely spread");
     }
 
     /// The property the brake depends on: one owner, one shard, always.
     #[test]
     fn one_owner_always_routes_to_one_shard() {
         let router = router(8);
-        let first = router.shard_for(&request(7, 0xDEAD_BEEF));
+        let first = shard_for(&router, &request(7, 0xDEAD_BEEF));
         for _ in 0..100 {
-            assert_eq!(router.shard_for(&request(7, 0xDEAD_BEEF)), first);
+            assert_eq!(shard_for(&router, &request(7, 0xDEAD_BEEF)), first);
         }
     }
 
@@ -221,11 +288,11 @@ mod tests {
     fn tenants_and_types_spread_across_shards() {
         let router = router(8);
         let by_tenant: std::collections::HashSet<usize> = (0..64u32)
-            .map(|t| router.shard_for(&request(t, 9)))
+            .map(|t| shard_for(&router, &request(t, 9)))
             .collect();
         assert!(by_tenant.len() > 4, "the tenant barely moved the route");
         let by_type: std::collections::HashSet<usize> = (0..64u64)
-            .map(|h| router.shard_for(&request(3, h)))
+            .map(|h| shard_for(&router, &request(3, h)))
             .collect();
         assert!(by_type.len() > 4, "the type barely moved the route");
     }
@@ -234,7 +301,7 @@ mod tests {
     fn one_shard_owns_every_request() {
         let router = router(1);
         for t in 0..32u32 {
-            assert_eq!(router.shard_for(&request(t, u64::from(t))), 0);
+            assert_eq!(shard_for(&router, &request(t, u64::from(t))), 0);
         }
     }
 
