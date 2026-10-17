@@ -1113,8 +1113,8 @@ mod tests {
     }
 
     // The NonUnique command set through the dispatch: Insert mints, Get
-    // resolves, Update re-keys through the record's Metadata pivot back-link
-    // (no handle in the payload), Remove moves to dead.
+    // resolves, Update re-keys, Remove moves to dead — each naming the
+    // collection's Pivot first.
     #[test]
     fn exposure_nonunique_commands_drive_the_collection() {
         use futures::TryStreamExt;
@@ -1153,7 +1153,7 @@ mod tests {
                 panic!("insert must mint an id")
             };
 
-            // Get by id.
+            // Get by `(pivot, id)`.
             assert_eq!(
                 REGISTRY
                     .execute(
@@ -1161,15 +1161,14 @@ mod tests {
                         caller,
                         Note::STRUCT_HASH,
                         Command::Get,
-                        &to_wire(&id),
+                        &to_wire(&(pivot.local_id(), id)),
                     )
                     .await
                     .unwrap(),
                 Reply::Value(Some(to_wire(&note)))
             );
 
-            // Update rides the Metadata pivot back-link — and re-keys the
-            // `pinned` secondary index.
+            // Update re-keys the `pinned` secondary index.
             let pinned_now = Note {
                 body: "hi".into(),
                 pinned: true,
@@ -1180,7 +1179,7 @@ mod tests {
                     caller,
                     Note::STRUCT_HASH,
                     Command::Update,
-                    &to_wire(&(id, pinned_now)),
+                    &to_wire(&(pivot.local_id(), id, pinned_now)),
                 )
                 .await
                 .unwrap();
@@ -1200,7 +1199,7 @@ mod tests {
                         caller,
                         Note::STRUCT_HASH,
                         Command::Remove,
-                        &to_wire(&id),
+                        &to_wire(&(pivot.local_id(), id)),
                     )
                     .await
                     .unwrap(),
@@ -1208,6 +1207,58 @@ mod tests {
             );
             let live: Vec<Note> = col.all(&db).try_collect().await.unwrap();
             assert!(live.is_empty());
+        });
+    }
+
+    // A command names its collection: through another Pivot a record is
+    // absent, and it cannot be changed or removed.
+    #[test]
+    fn a_command_through_another_pivot_cannot_reach_the_record() {
+        use futures::executor::block_on;
+        use wavedb_core::expose::{Command, Exposure as _, Reply};
+        use wavedb_core::wire::to_wire;
+        use wavedb_core::{Error, LocalId, U48};
+
+        use super::REGISTRY;
+
+        block_on(async {
+            let store = mem::MemStore::default();
+            let tenant = U48::from(11u32);
+            let caller = wavedb_core::Caller::tenant_owned(tenant);
+            let db = wavedb_core::LocalHandle::new(&store, tenant);
+            let pivot = Note::create_pivot(&db).await.unwrap();
+            let note = Note {
+                body: "hi".into(),
+                pinned: false,
+            };
+            let id = Note::collection(pivot).insert(&db, &note).await.unwrap();
+            let store = &store;
+            let run = |command, payload: Vec<u8>| async move {
+                REGISTRY
+                    .execute(
+                        store,
+                        caller,
+                        Note::STRUCT_HASH,
+                        command,
+                        &payload,
+                    )
+                    .await
+            };
+
+            let elsewhere = LocalId::new(1, false, 0);
+            let get = run(Command::Get, to_wire(&(elsewhere, id))).await;
+            assert_eq!(get.unwrap(), Reply::Value(None));
+            let update =
+                run(Command::Update, to_wire(&(elsewhere, id, note.clone())));
+            assert!(
+                matches!(update.await, Err(Error::RecordMissing(m)) if m == id)
+            );
+            let remove = run(Command::Remove, to_wire(&(elsewhere, id))).await;
+            assert!(matches!(remove, Err(Error::RecordMissing(m)) if m == id));
+
+            // Through its own Pivot it is all still there.
+            let get = run(Command::Get, to_wire(&(pivot.local_id(), id))).await;
+            assert_eq!(get.unwrap(), Reply::Value(Some(to_wire(&note))));
         });
     }
 
