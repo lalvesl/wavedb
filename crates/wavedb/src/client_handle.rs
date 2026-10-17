@@ -161,7 +161,7 @@ impl DbHandle for Db {
         // (history stays navigable), and adopting one would resurrect it
         // into the cached living set. Walks and writes warm the cache.
         match self
-            .command(T::STRUCT_HASH, Command::Get, to_wire(&id))
+            .command(T::STRUCT_HASH, Command::Get, to_wire(&(pivot, id)))
             .await
         {
             Ok(r) => reply::value(r),
@@ -178,9 +178,10 @@ impl DbHandle for Db {
         id: Id,
         value: &T,
     ) -> Result<()> {
-        // The node reaches the collection through the record's
-        // `Metadata.pivot_id` back-link — the handle's pivot never travels.
-        let payload = to_wire_pair(&id, value);
+        // The pivot leads: it owns the operation, so the node places and
+        // serialises the update by it (and refuses a record of another
+        // collection). Byte-identical to the triple `(pivot, id, value)`.
+        let payload = to_wire_pair(&(pivot, id), value);
         let r = self
             .command(T::STRUCT_HASH, Command::Update, payload)
             .await?;
@@ -195,7 +196,7 @@ impl DbHandle for Db {
         id: Id,
     ) -> Result<bool> {
         let r = self
-            .command(T::STRUCT_HASH, Command::Remove, to_wire(&id))
+            .command(T::STRUCT_HASH, Command::Remove, to_wire(&(pivot, id)))
             .await?;
         let removed = reply::removed(&r)?;
         if removed {
