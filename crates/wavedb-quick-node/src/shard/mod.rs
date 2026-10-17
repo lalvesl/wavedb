@@ -47,7 +47,7 @@ pub use route::{Owner, shard_of};
 pub use router::Router;
 pub use store::{CACHE_BYTES, ShardStore};
 pub use waiters::MAX_WAITERS;
-pub use worker::{JOB_DEPTH, Job, JobSlot, ShardCtx, Work, Worker, job, shard};
+pub use worker::{JOB_DEPTH, Job, JobSlot, ShardCtx, Worker, job, shard};
 
 use std::rc::Rc;
 
