@@ -39,6 +39,7 @@ pub mod error;
 pub mod expose;
 mod expose_changes;
 mod expose_lists;
+mod expose_member;
 mod expose_salt;
 pub mod fn_identity;
 pub mod fuzzy;
