@@ -6,8 +6,9 @@
 //! - a **fn-type** `struct name {}` (type namespace) carrying the function's
 //!   `STRUCT_HASH` and a `__wavedb_dispatch` step — how the node registry
 //!   routes an incoming call;
-//! - the **server body** as a generic `__name_body<S: Store>(db: &ServerDb…)`
-//!   — the user's body with `db` retyped to the node-side context;
+//! - the **server body** as a generic `__name_body<R: Route>(db: &ServerDb…)`
+//!   — the user's body with `db` retyped to the node-side context, whose
+//!   operations each run at their owner through the route (RFC 0067);
 //! - the **client stub** `fn name(db: &Db, args…)` (value namespace) that
 //!   ships the args over the wire and decodes the return.
 //!
@@ -284,8 +285,8 @@ pub fn expand(
         // parses these tokens into code.
         #[cfg(feature = "server-side")]
         #[allow(clippy::future_not_send, non_snake_case)]
-        async fn #body_fn<S: ::wavedb_core::Store>(
-            #db_pat: &::wavedb::ServerDb<'_, S>,
+        async fn #body_fn<R: ::wavedb_core::Route>(
+            #db_pat: &::wavedb::ServerDb<'_, R>,
             #(#arg_sig),*
         ) #output {
             #[allow(unused_imports)]
@@ -307,18 +308,17 @@ pub fn expand(
         #[cfg(feature = "server-side")]
         impl #name {
             /// Decode args, run the body against a node context, wire the
-            /// return. A function ignores the frame command.
+            /// return. Its operations run through `route`, each at its owner.
             #[doc(hidden)]
             #[allow(clippy::future_not_send)]
-            pub async fn __wavedb_dispatch<S: ::wavedb_core::Store>(
-                store: &S,
+            pub async fn __wavedb_dispatch<R: ::wavedb_core::Route>(
+                route: &R,
                 caller: ::wavedb_core::Caller,
-                _command: ::wavedb_core::expose::Command,
                 payload: &[u8],
             ) -> ::wavedb_core::Result<::wavedb_core::expose::Reply> {
                 #auth_guard
                 #decode
-                let db = ::wavedb::ServerDb::for_caller(store, caller);
+                let db = ::wavedb::ServerDb::for_caller(route, caller);
                 match #body_fn(&db, #(#forward),*).await {
                     ::core::result::Result::Ok(value) => {
                         ::core::result::Result::Ok(
