@@ -100,26 +100,30 @@ one shard, so the table lives in its worker; under RFC 0067 a thread's shards
 share one. The table is runtime state only and starts empty with the thread.
 
 The condition is the routing: route one way and brake the other and the two
-locks are different locks. Both narrow to the Pivot together or neither does,
-and an owner reached from another thread (RFC 0067) needs a lease, not this
+locks are different locks. Both use one key, and an owner reached from another thread (RFC 0067) needs a lease, not this
 table.
 
-### Why the key is the type and not the Pivot
+### The key is the owner
 
 Ownership is per Pivot ([RFC 0064](rfcs/0064-pivot-owned-concurrency-PLANNED.md)),
-so a Pivot-grained key is what this wants to be. It cannot be yet: `Get`,
-`Update` and `Remove` carry only an `Id` on the wire, so their Pivot is not
-known where the lock must be taken.
+and every collection command names its Pivot on the wire — `Get`, `Update` and
+`Remove` included, since RFC 0067 step 2 — so the key is the operation's
+`Owner`: a collection's Pivot, or a Unique type under a tenant
+(`Owner::of_command`), together with the tenant reaching it. The router places
+by the same value. Two collections of one type no longer serialise; two
+commands on one collection always do.
 
 A **mixed** granularity would be worse than a coarse one — an `Insert` holding a
 Pivot key and an `Update` holding a type key do not exclude each other, which is
-the original bug with extra steps.
+the original bug with extra steps. That is why the key stayed
+`(tenant, STRUCT_HASH)` until all three commands carried the Pivot, and why
+`Update`/`Remove` now refuse a record of another collection
+(`expose::check_member`): reaching it through a foreign Pivot would change it
+outside its own owner's lock.
 
-So the key is `(tenant, STRUCT_HASH)`, concatenated as `(tenant << 15) |
-type_salt`: uniform, injective, safe. Two collections of one type serialise
-where they need not; different types and different tenants do not. It narrows to
-the Pivot the moment those three commands carry one — separable work RFC 0064
-already lists as worth doing on its own.
+A `#[server]` function still locks its own hash, so the operations its body
+runs do not take their owners' locks. RFC 0067 step 2 routes each of them to
+its owner instead.
 
 ## State
 

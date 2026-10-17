@@ -1,7 +1,8 @@
 # RFC 0067 — Thread per core: the shard as a database, the thread as placement
 
-- **Status:** In progress — opened 2026-10-08. **Step 1 landed, step 2 started 2026-10-08**
-  (per-type state out of the statics; the routing function); see "Progress".
+- **Status:** In progress — opened 2026-10-08. **Step 1 landed, step 2 in progress**
+  (per-type state out of the statics; the routing function; the Pivot on
+  the wire); see "Progress".
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the owner
   as the unit of concurrency, and `shard_of`),
   [0066](0066-embassy-executor-and-async-io.md) (the executor, the reactor
@@ -335,7 +336,7 @@ step 5 here adds only the leases.
   still one per process — the token secret is process-global — so node
   tests keep their single-test pattern.
 
-### Step 2 — the routing function (landed 2026-10-08; layout pending)
+### Step 2 — routing by owner (in progress)
 
 - **`wavedb_core::placement`**: `Owner` and `shard = seahash(owner bytes)
   % shards`, over the frozen layouts of §1 — the Pivot's `LocalId` (key 8
@@ -346,9 +347,23 @@ step 5 here adds only the leases.
 - **`route.rs` re-exports it**, so the worker an operation runs on and the
   store that will hold it come from one function. SplitMix64 and the 15-bit
   salt packing are gone: types sharing their low 15 bits no longer share a
-  shard within a tenant. (The owner-lock key still packs the salt; a shared
-  key can only over-serialise two owners, never interleave one.)
-- **Pending:** `MANIFEST`, `shards/xx/`, open and replay per shard.
+  shard within a tenant.
+- **The Pivot is on the wire (2b, landed 2026-10-09).** `Get`, `Update`
+  and `Remove` now open their payload with the collection's Pivot, like
+  every other collection command, so `Owner::of_command` reads the owner off
+  the front of any command without knowing the type (`Changes` decodes its
+  fixed `(Option<LocalId>, Option<u64>)` whole — an `Option`'s value sits in
+  the heap). The registry says how each hash is addressed
+  (`Exposure::addressing`: Unique, collection or function), so the router
+  holds the registry and the connection task is one of `node_tasks!` again.
+  The owner-lock key is `(tenant, Owner)`: two collections of one type no
+  longer serialise. The steps act only on a record of the named collection
+  (`expose::member_value` / `check_member`): through another Pivot a record
+  is absent and cannot be changed, since it would be changed outside its own
+  owner's lock — and once shards are directories it would not be there.
+- **Pending:** a `#[server]` body routes each operation to its owner (2c —
+  until then a function is placed and locked by its own hash); `MANIFEST`,
+  `shards/xx/`, open and replay per shard (2d).
 
 ## Alternatives
 

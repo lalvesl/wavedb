@@ -141,10 +141,10 @@ the seam (`systems::engine`); nothing above `Store` knows the difference.
 parallelism**, and the reason is structural twice over. The harness issues one
 operation at a time (`block_on` per op, each timed alone), so a second shard
 never has a second operation to run. And the brake that keeps two operations on
-one owner from interleaving keys on `(tenant, STRUCT_HASH)` today, while this
-workload is one type under one tenant — so it would still be *one owner* even
-under a concurrent client. Measuring the concurrency the shards exist for needs
-both a concurrent client here and the Pivot-grained brake there.
+one owner from interleaving keys on the owner — a collection's Pivot — while
+this workload is one collection, so it would still be *one owner* even under a
+concurrent client. Measuring the concurrency the shards exist for needs a
+concurrent client over many collections.
 
 One column is **not** comparable across the pair: `read_cold`. `ShardStore`
 memoises on read, and the engine's per-type cache is a write cache that reads

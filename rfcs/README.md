@@ -323,7 +323,8 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   moved I/O off the core, it was never one thread doing everything). Routing is
   verified against `Command`: `Insert`/`All`/`Listed`/`ListLen`/`Changes` carry
   the pivot, Unique ops route by `(tenant, STRUCT_HASH)`, and `Get`/`Update`/
-  `Remove` carry only an `Id`, and **must change to carry the pivot**. Resolving
+  `Remove` carried only an `Id`, and **had to change to carry the pivot** (done
+  in [0067](0067-thread-per-core-shards-WIP.md) step 2). Resolving
   it node-side is impossible, not merely slower: cache and tombstones are
   shard-owned and only the settled page is the page actor's, so a page actor
   answering alone misses an unsettled write, serves stale bytes past a newer
