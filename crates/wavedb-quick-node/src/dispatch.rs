@@ -14,8 +14,8 @@
 //!    ([`Exposure::knows`]); unlisted / excluded / unknown all refuse
 //!    uniformly as [`UnknownStructHash`](wavedb_core::Error::UnknownStructHash).
 //! 3. **Decode + engine** — [`Exposure::execute`] decodes the payload for the
-//!    command (a `Get`/`Remove` payload is an `Id`, a `Save`/`Insert`/`Update`
-//!    payload a body) and drives the storage engine.
+//!    command (a collection command opens with its Pivot) and drives the
+//!    storage engine.
 //!
 //! Gates 5–6 (`validate` / `preprocess`) are still a later seam; gate 4's
 //! record-level `Metadata.permission` grants ride with the cross-tenant
@@ -116,13 +116,9 @@ where
     }
 
     // Gate 1.5 — serialise the operation against others on the same owner.
-    //
-    // Required, not defensive: a collection op is a read-modify-write across
-    // several structures, and it is atomic today only because `PageStore`
-    // never suspends. Under any store that does — `ShardStore`, IndexedDB,
-    // anything network-backed — two interleaved ops silently lose an index
-    // update, leaving a record live at its anchor and reachable from nothing.
-    // See `CONCURRENCY_BRAKE.md` and `wavedb-core/tests/concurrent_node_clobber.rs`.
+    // Required, not defensive: under a store that suspends (`ShardStore`),
+    // two interleaved collection ops silently lose an index update
+    // (`CONCURRENCY_BRAKE.md`, `wavedb-core/tests/concurrent_node_clobber.rs`).
     //
     // The guard is dropped before the piggyback: that navigation is
     // best-effort and read-only, so holding the owner through it would
@@ -139,6 +135,8 @@ where
 ///
 /// Shared by a POST ([`handle`], after gate 1) and a WebSocket `Call` (caller
 /// bound at `Hello`): one lock on one key, whichever way a write arrives.
+/// The key is the command's [`Owner`](crate::shard::Owner), derived here as the
+/// router placed it: the shard trusts no routing field it did not compute.
 pub async fn call<E, S>(
     registry: &E,
     store: &S,
@@ -150,8 +148,15 @@ where
     E: Exposure,
     S: Store,
 {
-    let _owner = locks
-        .acquire(crate::shard::OwnerKey::of(caller.tenant, frame.struct_hash))
+    let owner = crate::shard::Owner::of_command(
+        registry.addressing(frame.struct_hash),
+        caller.tenant,
+        frame.struct_hash,
+        frame.command,
+        &frame.payload,
+    );
+    let _held = locks
+        .acquire(crate::shard::OwnerKey::new(caller.tenant, owner))
         .await;
     execute(registry, store, caller, frame).await
 }
