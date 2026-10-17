@@ -17,6 +17,7 @@ mod args;
 mod declarations;
 mod exec_ops;
 mod expose;
+mod expose_arms;
 mod expose_collision;
 mod expose_parse;
 mod fuzzy;
