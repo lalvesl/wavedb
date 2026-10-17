@@ -1,8 +1,9 @@
-//! The node-side gate + dispatch: turn one decoded [`Request`] into a
-//! [`Response`].
+//! The node-side gates: turn one identified command into a [`Response`].
 //!
 //! The gates run **before** the engine, in the order
-//! [`wavedb-quick-node` README] documents:
+//! [`wavedb-quick-node` README] documents. Gate 1 runs at the edge, on the
+//! request's own thread ([`crate::edge`]); gates 2–3 run on the owner's shard,
+//! under the owner's lock ([`call`]):
 //!
 //! 1. **Identity** — [`Auth::Token`] verifies against the node secret
 //!    (HMAC, expiry, `Access` purpose); `user`/`tenant` come from the
@@ -24,16 +25,15 @@
 //!
 //! [`wavedb-quick-node` README]: https://docs.rs/wavedb-quick-node
 
-use wavedb_core::expose::{Caller, Exposure, Reply};
+use wavedb_core::expose::{Caller, Exposure};
 use wavedb_core::{Error, Store};
 use wavedb_net::auth::{self, TokenPurpose};
 use wavedb_net::frame::{
-    Auth, CommandFrame, NodeError, NodeErrorKind, Request, Response,
+    Auth, CommandFrame, NodeError, NodeErrorKind, Response,
 };
-use wavedb_net::sync::TopicCursor;
 
 /// The uniform identity refusal — which check failed stays server-side.
-fn unauthorized(struct_hash: u64) -> Response {
+pub(crate) fn unauthorized(struct_hash: u64) -> Response {
     Response::Err(NodeError {
         kind: NodeErrorKind::Unauthorized,
         struct_hash,
@@ -79,61 +79,9 @@ pub struct Answer {
     pub sync: Option<Vec<u8>>,
 }
 
-/// Run the gates and the engine for one request, producing the wire answer.
-///
-/// Never returns a transport error — a refusal or engine fault is the
-/// [`Response::Err`] arm, so the caller always has bytes to send back.
-pub async fn handle<E, S>(
-    registry: &E,
-    store: &S,
-    locks: &crate::shard::OwnerLocks,
-    secret: &[u8; 32],
-    request: Request,
-) -> Answer
-where
-    E: Exposure,
-    S: Store,
-{
-    let Request { auth, frame, sync } = request;
-
-    // Gate 1 — identity.
-    let Ok(caller) = identify(&auth, secret) else {
-        return Answer {
-            response: unauthorized(frame.struct_hash),
-            sync: None,
-        };
-    };
-
-    // The reserved sync exchange (HTTP-poll watch) routes before the
-    // registry — no schema hash can reach it, and it can shadow none. It
-    // carries its own topics, so it never also piggybacks.
-    if frame.struct_hash == wavedb_net::sync::SYNC_STRUCT_HASH {
-        let response = sync_poll(registry, store, caller, &frame.payload).await;
-        return Answer {
-            response,
-            sync: None,
-        };
-    }
-
-    // Gate 1.5 — serialise the operation against others on the same owner.
-    // Required, not defensive: under a store that suspends (`ShardStore`),
-    // two interleaved collection ops silently lose an index update
-    // (`CONCURRENCY_BRAKE.md`, `wavedb-core/tests/concurrent_node_clobber.rs`).
-    //
-    // The guard is dropped before the piggyback: that navigation is
-    // best-effort and read-only, so holding the owner through it would
-    // lengthen the critical section for nothing.
-    let response = call(registry, store, locks, caller, frame).await;
-    let delta = piggyback(registry, store, caller, &sync).await;
-    Answer {
-        response,
-        sync: delta,
-    }
-}
-
 /// Gates 2–3 for an identified [`Caller`], under its owner's lock.
 ///
-/// Shared by a POST ([`handle`], after gate 1) and a WebSocket `Call` (caller
+/// Shared by a POST ([`crate::edge::handle`], after gate 1) and a WebSocket `Call` (caller
 /// bound at `Hello`): one lock on one key, whichever way a write arrives.
 /// The key is the command's [`Owner`](crate::shard::Owner), derived here as the
 /// router placed it: the shard trusts no routing field it did not compute.
@@ -159,154 +107,6 @@ where
         .acquire(crate::shard::OwnerKey::new(caller.tenant, owner))
         .await;
     execute(registry, store, caller, frame).await
-}
-
-/// Navigate the W7 piggyback: when the request declared poll topics, run the
-/// same stateless `Changes` navigation as [`sync_poll`] and wire-encode the
-/// [`SyncReply`](wavedb_net::sync::SyncReply) for a `StreamFrame::Sync` riding
-/// the command reply. `None` when none were declared — or when the navigation
-/// refused: the delta is best-effort (the command's own reply is
-/// authoritative, and a skipped delta is picked up by the next ordinary poll).
-async fn piggyback<E, S>(
-    registry: &E,
-    store: &S,
-    caller: Caller,
-    topics: &[TopicCursor],
-) -> Option<Vec<u8>>
-where
-    E: Exposure,
-    S: Store,
-{
-    if topics.is_empty() {
-        return None;
-    }
-    match navigate(registry, store, caller, topics).await {
-        Response::Ok(Reply::Returned(bytes)) => Some(bytes),
-        _ => None,
-    }
-}
-
-/// The "anything new?" answer — **stateless**: each declared topic rides
-/// the caller's cursor, and the node answers by navigating the disk (the
-/// type's `Changes` step through the registry match), so nothing is
-/// buffered node-side and nothing can be missed or expire. Requires an
-/// authenticated identity, matching the WebSocket subscribe; an unlisted
-/// topic hash refuses the whole sync exactly like a command would.
-async fn sync_poll<E, S>(
-    registry: &E,
-    store: &S,
-    caller: Caller,
-    payload: &[u8],
-) -> Response
-where
-    E: Exposure,
-    S: Store,
-{
-    use wavedb_core::wire::from_wire;
-    use wavedb_net::sync::{SYNC_STRUCT_HASH, SyncRequest};
-
-    if caller.is_anonymous() {
-        return unauthorized(SYNC_STRUCT_HASH);
-    }
-    let request: SyncRequest = match from_wire(payload) {
-        Ok(request) => request,
-        Err(e) => {
-            return Response::Err(NodeError::from_core(
-                SYNC_STRUCT_HASH,
-                &Error::from(e),
-            ));
-        }
-    };
-    navigate(registry, store, caller, &request.topics).await
-}
-
-/// The stateless "what changed?" navigation shared by the HTTP-poll exchange
-/// ([`sync_poll`]) and the W7 command piggyback ([`piggyback`]): each declared
-/// topic rides the caller's cursor and the node answers by navigating the disk
-/// (the type's `Changes` step through the registry match), holding no session
-/// state. The wire-`SyncReply` comes back inside `Reply::Returned`, or a
-/// `Response::Err` if a topic's navigation refused.
-async fn navigate<E, S>(
-    registry: &E,
-    store: &S,
-    caller: Caller,
-    topics: &[TopicCursor],
-) -> Response
-where
-    E: Exposure,
-    S: Store,
-{
-    use wavedb_core::expose::{Change, Command};
-    use wavedb_core::wire::{from_wire, to_wire};
-    use wavedb_net::sync::SyncReply;
-    use wavedb_net::ws::{EventKind, RecordEvent};
-
-    let mut reply = SyncReply {
-        events: Vec::new(),
-        cursors: Vec::new(),
-    };
-    for declared in topics {
-        let topic = declared.topic;
-        let changes = to_wire(&(topic.pivot, declared.since));
-        let outcome = registry
-            .execute(
-                store,
-                caller,
-                topic.struct_hash,
-                Command::Changes,
-                &changes,
-            )
-            .await;
-        let entries = match outcome {
-            Ok(Reply::Values(entries)) => entries,
-            Ok(_) => {
-                return Response::Err(NodeError::from_core(
-                    topic.struct_hash,
-                    &Error::Backend(
-                        "changes answered with a non-values reply".into(),
-                    ),
-                ));
-            }
-            Err(err) => {
-                return Response::Err(NodeError::from_core(
-                    topic.struct_hash,
-                    &err,
-                ));
-            }
-        };
-        for entry in entries {
-            match from_wire::<Change>(&entry) {
-                Ok(Change::Cursor(cursor)) => {
-                    reply.cursors.push((topic, cursor));
-                }
-                Ok(Change::Saved(id, meta, body)) => {
-                    reply.events.push(RecordEvent {
-                        topic,
-                        id,
-                        kind: EventKind::Saved,
-                        meta: Some(meta),
-                        body,
-                    });
-                }
-                Ok(Change::Removed(id, at)) => {
-                    reply.events.push(RecordEvent {
-                        topic,
-                        id,
-                        kind: EventKind::Removed(at),
-                        meta: None,
-                        body: Vec::new(),
-                    });
-                }
-                Err(e) => {
-                    return Response::Err(NodeError::from_core(
-                        topic.struct_hash,
-                        &Error::from(e),
-                    ));
-                }
-            }
-        }
-    }
-    Response::Ok(Reply::Returned(to_wire(&reply)))
 }
 
 /// Gates 2–3 — [`call`]'s body, once the owner is held. Never returns a
@@ -360,25 +160,31 @@ mod tests {
         Auth, CommandFrame, NodeErrorKind, Request, Response,
     };
 
-    /// Test shim: the HTTP [`handle`](super::handle) reduced to its command
-    /// [`Response`], so the existing gate tests read unchanged. The W7
-    /// piggyback delta is asserted through `super::handle` directly (see
-    /// `a_command_piggybacks_the_sync_delta_for_declared_topics`).
+    /// The edge's whole request path over one store in hand.
+    async fn answer<E: Exposure, S: Store>(
+        registry: &E,
+        store: &S,
+        secret: &[u8; 32],
+        request: Request,
+    ) -> crate::dispatch::Answer {
+        let exec = crate::edge::Direct {
+            registry,
+            store,
+            locks: crate::shard::OwnerLocks::new(),
+        };
+        crate::edge::handle(registry, &exec, secret, request).await
+    }
+
+    /// Test shim: [`answer`] reduced to its command [`Response`], so the gate
+    /// tests read unchanged. The W7 piggyback delta is asserted through
+    /// [`answer`] (see `a_command_piggybacks_the_sync_delta_for_declared_topics`).
     async fn handle<E: Exposure, S: Store>(
         registry: &E,
         store: &S,
         secret: &[u8; 32],
         request: Request,
     ) -> Response {
-        super::handle(
-            registry,
-            store,
-            &crate::shard::OwnerLocks::new(),
-            secret,
-            request,
-        )
-        .await
-        .response
+        answer(registry, store, secret, request).await.response
     }
 
     const SECRET: [u8; 32] = [9; 32];
@@ -589,10 +395,9 @@ mod tests {
                 Auth::Token(token(42, unix_now() + 60, TokenPurpose::Access));
 
             // A plain command with no declared topics: the reply alone, no delta.
-            let plain = super::handle(
+            let plain = answer(
                 &OneHash,
                 &store,
-                &crate::shard::OwnerLocks::new(),
                 &SECRET,
                 request(auth.clone(), 0x1234),
             )
@@ -613,14 +418,7 @@ mod tests {
                 },
                 since: Some(40),
             }];
-            let answer = super::handle(
-                &OneHash,
-                &store,
-                &crate::shard::OwnerLocks::new(),
-                &SECRET,
-                req,
-            )
-            .await;
+            let answer = answer(&OneHash, &store, &SECRET, req).await;
             assert_eq!(
                 answer.response,
                 Response::Ok(Reply::Value(Some(vec![42]))),
