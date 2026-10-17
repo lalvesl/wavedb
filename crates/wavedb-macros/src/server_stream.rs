@@ -44,8 +44,8 @@ pub fn expand(
         // the schema crate's `server-side` feature (see `crate::server`).
         #[cfg(feature = "server-side")]
         #[allow(clippy::future_not_send, non_snake_case)]
-        fn #body_fn<S: ::wavedb_core::Store>(
-            #db_pat: &::wavedb::ServerDb<'_, S>,
+        fn #body_fn<R: ::wavedb_core::Route>(
+            #db_pat: &::wavedb::ServerDb<'_, R>,
             #(#arg_sig),*
         ) #output {
             #[allow(unused_imports)]
@@ -70,16 +70,15 @@ pub fn expand(
             /// client already stream frame-by-frame.
             #[doc(hidden)]
             #[allow(clippy::future_not_send)]
-            pub async fn __wavedb_dispatch<S: ::wavedb_core::Store>(
-                store: &S,
+            pub async fn __wavedb_dispatch<R: ::wavedb_core::Route>(
+                route: &R,
                 caller: ::wavedb_core::Caller,
-                _command: ::wavedb_core::expose::Command,
                 payload: &[u8],
             ) -> ::wavedb_core::Result<::wavedb_core::expose::Reply> {
                 use ::wavedb_core::TryStreamExt as _;
                 #auth_guard
                 #decode
-                let db = ::wavedb::ServerDb::for_caller(store, caller);
+                let db = ::wavedb::ServerDb::for_caller(route, caller);
                 let items = #body_fn(&db, #(#forward),*);
                 let collected: ::std::vec::Vec<#item_ty> =
                     match items.try_collect().await {
