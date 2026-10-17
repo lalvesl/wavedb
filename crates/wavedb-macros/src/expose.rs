@@ -37,7 +37,9 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::Path;
 
-use crate::expose_arms::{addressing_arm, decode_arm, execute_arm, hash_expr};
+use crate::expose_arms::{
+    addressing_arm, decode_arm, execute_arms, hash_expr, node_methods,
+};
 use crate::expose_parse::{Declaration, Entry, Kind};
 
 /// The `StorageRegistry` impl for a registry type — native only, flattening
@@ -96,8 +98,9 @@ pub fn expand_server(input: TokenStream) -> syn::Result<TokenStream> {
         "server-side",
     );
     let decode_arms = wire_entries.iter().copied().map(decode_arm);
-    let execute_arms = wire_entries.iter().copied().map(execute_arm);
+    let execute_arms = execute_arms(&wire_entries);
     let addressing_arms = wire_entries.iter().copied().map(addressing_arm);
+    let node_methods = node_methods(&struct_paths, &wire_entries);
     let collision_guard =
         crate::expose_collision::collision_guard(&decl.entries);
 
@@ -173,6 +176,8 @@ pub fn expand_server(input: TokenStream) -> syn::Result<TokenStream> {
                     ),
                 }
             }
+
+            #node_methods
         }
 
         #storage_impl
