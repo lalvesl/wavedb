@@ -179,13 +179,33 @@ impl<T: NonUniqueStruct> Collection<T> {
     /// # Errors
     /// Propagates a [`Store`] failure.
     pub async fn create<S: Store>(store: &S, tenant: U48) -> Result<LocalId> {
-        let pivot_id = mint_floored_id(
+        let pivot = Self::mint_pivot(tenant);
+        Self::create_at(store, tenant, pivot).await?;
+        Ok(pivot)
+    }
+
+    /// The id a new collection of this type gets — [`create`](Self::create)'s
+    /// half that needs no store. A node mints it where a request arrived and
+    /// creates the collection where that id places it (RFC 0067).
+    #[must_use]
+    pub fn mint_pivot(tenant: U48) -> LocalId {
+        LocalId::from_id(mint_floored_id(
             tenant,
             <T::Pivot as Pivot>::STRUCT_HASH,
             0, // a pivot's id is pure addressing — no cursor scans it
-        );
-        Self::create_rooted(store, tenant, pivot_id).await?;
-        Ok(LocalId::from_id(pivot_id))
+        ))
+    }
+
+    /// [`create`](Self::create) at a pivot from [`mint_pivot`](Self::mint_pivot).
+    ///
+    /// # Errors
+    /// Propagates a [`Store`] failure.
+    pub async fn create_at<S: Store>(
+        store: &S,
+        tenant: U48,
+        pivot: LocalId,
+    ) -> Result<()> {
+        Self::create_rooted(store, tenant, pivot.to_id(tenant)).await
     }
 
     /// [`create`](Self::create)'s body with the pivot's identity supplied
