@@ -2,9 +2,11 @@
 //! the engine, as a droppable hint or for a caller who waits.
 //!
 //! Split from `disk` by layer: that module is the actor — its queues and
-//! its loop; this one is the work the loop dispatches to.
+//! its loop; this one is the work the loop dispatches to. Every unit covers
+//! every shard the actor owns (RFC 0067); a settle steps one shard at a
+//! time, round-robin, so a round stays one bounded slice.
 
-use wavedb_storage::{PageStore, Progress};
+use wavedb_storage::PageStore;
 
 use super::msg::Maintenance;
 
@@ -25,25 +27,36 @@ pub const SETTLE_BUDGET_IDS: usize = 4096;
 /// Faults are reported, never propagated: nobody asked, so there is nobody to
 /// return to. Nothing acknowledged is at risk either way — the journal still
 /// holds every unsettled batch, and the next round or the reopen retries.
-pub(super) fn maintain(store: &PageStore, work: &Maintenance) -> bool {
+pub(super) fn maintain(
+    stores: &[PageStore],
+    work: &Maintenance,
+    cursor: &mut usize,
+) -> bool {
     match work {
-        Maintenance::Settle => return step(store),
+        Maintenance::Settle => return step(stores, cursor),
         // A checkpoint is deliberately **not** stepped: it drains, syncs
         // `data.bin` and frames the journal as one thing, and a partial
         // checkpoint is not a checkpoint. It is the one maintenance unit
         // that must run to completion, and therefore the one that bounds
         // read latency — see the module note on RFC 0063.
         Maintenance::Checkpoint => {
-            if let Err(e) = store.commit_journal() {
-                eprintln!("disk actor: checkpoint failed: {e}");
+            for store in stores {
+                if let Err(e) = store.commit_journal() {
+                    eprintln!("disk actor: checkpoint failed: {e}");
+                }
             }
         }
         Maintenance::Evict { budget_bytes } => {
-            store.evict_settled(*budget_bytes);
+            let share = budget_bytes / stores.len().max(1);
+            for store in stores {
+                store.evict_settled(share);
+            }
         }
         Maintenance::Defragment { budget_blocks } => {
-            if let Err(e) = store.defragment(*budget_blocks) {
-                eprintln!("disk actor: defragment failed: {e}");
+            for store in stores {
+                if let Err(e) = store.defragment(*budget_blocks) {
+                    eprintln!("disk actor: defragment failed: {e}");
+                }
             }
         }
     }
@@ -58,27 +71,37 @@ pub(super) fn maintain(store: &PageStore, work: &Maintenance) -> bool {
 /// `Settle` **drains** rather than taking one bounded step: a caller that asked
 /// to settle and was told "done" after 4096 ids would have been misled.
 pub(super) fn run_now(
-    store: &PageStore,
+    stores: &[PageStore],
     work: &Maintenance,
 ) -> Result<(), wavedb_storage::StorageError> {
-    match work {
+    let share = |budget: usize| budget / stores.len().max(1);
+    stores.iter().try_for_each(|store| match work {
         Maintenance::Settle => store.drain(),
         Maintenance::Checkpoint => store.commit_journal(),
         Maintenance::Evict { budget_bytes } => {
-            store.evict_settled(*budget_bytes);
+            store.evict_settled(share(*budget_bytes));
             Ok(())
         }
         Maintenance::Defragment { budget_blocks } => {
             store.defragment(*budget_blocks).map(|_| ())
         }
-    }
+    })
 }
 
-/// One settle round. `true` if more remain.
-pub(super) fn step(store: &PageStore) -> bool {
+/// One settle round, on the next shard from `cursor` with anything pending.
+/// `true` if any shard still owes a settle.
+pub(super) fn step(stores: &[PageStore], cursor: &mut usize) -> bool {
+    let n = stores.len();
+    let next = (0..n)
+        .map(|k| (*cursor + k) % n)
+        .find(|&i| stores.get(i).is_some_and(PageStore::has_pending));
+    let Some((i, store)) = next.and_then(|i| stores.get(i).map(|s| (i, s)))
+    else {
+        return false;
+    };
+    *cursor = (i + 1) % n;
     match store.settle_step(SETTLE_BUDGET_IDS) {
-        Ok(Progress::Settled) => true,
-        Ok(Progress::Done) => false,
+        Ok(_) => stores.iter().any(PageStore::has_pending),
         Err(e) => {
             eprintln!("disk actor: settle failed: {e}");
             // The round went back on the queue. Stop claiming to owe a settle
