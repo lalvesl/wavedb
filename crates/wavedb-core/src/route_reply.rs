@@ -1,23 +1,23 @@
-//! Reading a [`NodeReply`] back into types — [`ServerDb`](crate::ServerDb)'s
-//! half of a node operation.
+//! Reading a [`NodeReply`] back into types — [`RouteHandle`]'s half of a
+//! node operation.
+//!
+//! [`RouteHandle`]: crate::route_handle::RouteHandle
 
 use std::future::Future;
 
-use futures::{Stream, StreamExt};
-use wavedb_core::wire::{WaveWire, from_wire};
-use wavedb_core::{Metadata, NodeReply};
-
 use crate::error::{Error, Result};
+use crate::metadata::Metadata;
+use crate::node_op::NodeReply;
+use crate::wire::{WaveWire, from_wire};
+use futures::{Stream, StreamExt};
 
 /// A reply of the wrong kind: the node's own fault, never the caller's.
 pub fn mismatch() -> Error {
-    Error::Core(wavedb_core::Error::Backend(
-        "node operation answered with the wrong reply kind".into(),
-    ))
+    Error::Backend("node operation answered with the wrong reply kind".into())
 }
 
 pub fn decode<T: WaveWire>(bytes: &[u8]) -> Result<T> {
-    Ok(from_wire(bytes).map_err(wavedb_core::Error::from)?)
+    Ok(from_wire(bytes)?)
 }
 
 pub fn value<T: WaveWire>(reply: NodeReply) -> Result<Option<T>> {
