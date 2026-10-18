@@ -4,6 +4,7 @@ resolver = "2"
 # still under construction (empty or bin-only targets) sit in `exclude` so the
 # workspace resolves. Move a crate from `exclude` to `members` once it builds.
 members = [
+  "crates/seahash",
   "crates/wavedb-wire",
   "crates/wavedb-wire-derive",
   "crates/wavedb-platform",
@@ -86,7 +87,7 @@ byteorder = "1.5.0"
 # SeaHash is portable across arch/endianness for a given seed. PINNED EXACTLY:
 # STRUCT_HASH identity is load-bearing, so a version bump that changed the
 # algorithm would invalidate every stored record's type hash — never loosen `=`.
-seahash = "=4.1.0"
+seahash = { path = "crates/seahash", version = "=4.1.0" }
 parking_lot = "0.12.5"
 proptest = "1.11.0"
 criterion = { version = "0.8.2", features = ["async_tokio"] }
