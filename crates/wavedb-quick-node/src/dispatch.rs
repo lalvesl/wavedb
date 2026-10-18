@@ -79,30 +79,40 @@ pub struct Answer {
     pub sync: Option<Vec<u8>>,
 }
 
+/// The owner of `frame` reached under `tenant`: what it is placed, locked and
+/// stored by.
+pub fn owner_of<E: Exposure>(
+    registry: &E,
+    tenant: wavedb_core::U48,
+    frame: &CommandFrame,
+) -> crate::shard::Owner {
+    crate::shard::Owner::of_command(
+        registry.addressing(frame.struct_hash),
+        tenant,
+        frame.struct_hash,
+        frame.command,
+        &frame.payload,
+    )
+}
+
 /// Gates 2–3 for an identified [`Caller`], under its owner's lock.
 ///
 /// Shared by a POST ([`crate::edge::handle`], after gate 1) and a WebSocket `Call` (caller
 /// bound at `Hello`): one lock on one key, whichever way a write arrives.
-/// The key is the command's [`Owner`](crate::shard::Owner), derived here as the
-/// router placed it: the shard trusts no routing field it did not compute.
+/// The key is the command's `owner` ([`owner_of`]), which the worker derives
+/// itself, as the router placed it — and picks `store` by.
 pub async fn call<E, S>(
     registry: &E,
     store: &S,
     locks: &crate::shard::OwnerLocks,
     caller: Caller,
+    owner: crate::shard::Owner,
     frame: CommandFrame,
 ) -> Response
 where
     E: Exposure,
     S: Store,
 {
-    let owner = crate::shard::Owner::of_command(
-        registry.addressing(frame.struct_hash),
-        caller.tenant,
-        frame.struct_hash,
-        frame.command,
-        &frame.payload,
-    );
     let _held = locks
         .acquire(crate::shard::OwnerKey::new(caller.tenant, owner))
         .await;
