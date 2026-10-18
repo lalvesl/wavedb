@@ -140,9 +140,8 @@ pub type Subscriptions = Rc<RefCell<SubTable>>;
 
 /// The engine store wrapped so committed mutations reach subscribers.
 ///
-/// Forwards every [`Store`] read/write to the inner engine (a shared
-/// `Rc<PageStore>` — the node's maintenance loop and final commit drive the
-/// same engine directly) and overrides
+/// Forwards every [`Store`] read/write to the inner store (on the node, a
+/// worker's view of one data shard, built per operation) and overrides
 /// [`note_mutation`](Store::note_mutation) to push to the WebSocket
 /// subscribers. (HTTP poll-watches need no publish half: each sync
 /// navigates the disk from the client's cursor.) The node serves
@@ -151,7 +150,7 @@ pub type Subscriptions = Rc<RefCell<SubTable>>;
 /// live watchers; node-side seeding (which touches the raw engine before
 /// serving) does not, and neither do cache mirrors (a different store).
 pub struct NotifyStore<S, P = Subscriptions> {
-    inner: Rc<S>,
+    inner: S,
     subs: P,
 }
 
@@ -168,6 +167,14 @@ pub trait Publish {
     fn publish(&self, mutation: &Mutation);
 }
 
+/// A borrowed publisher publishes like the one it borrows: a worker lends its
+/// feed to each operation's store.
+impl<P: Publish> Publish for &P {
+    fn publish(&self, mutation: &Mutation) {
+        (*self).publish(mutation);
+    }
+}
+
 /// Same thread as the table: fan out directly. Today's node, and the tests.
 impl Publish for Subscriptions {
     fn publish(&self, mutation: &Mutation) {
@@ -176,8 +183,8 @@ impl Publish for Subscriptions {
 }
 
 impl<S, P> NotifyStore<S, P> {
-    /// Wrap a shared engine handle, publishing mutations through `subs`.
-    pub const fn new(inner: Rc<S>, subs: P) -> Self {
+    /// Wrap a store, publishing mutations through `subs`.
+    pub const fn new(inner: S, subs: P) -> Self {
         Self { inner, subs }
     }
 }
