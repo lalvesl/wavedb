@@ -4,8 +4,8 @@
 //! crate's `expose_server!` output (`REGISTRY`) — which carries both halves
 //! it needs: the dispatch surface ([`Exposure`]) and the storage surface
 //! ([`StorageRegistry`], the [`StructStorage`] slots to open the engine with)
-//! — binds an HTTP POST socket, and serves records straight out of
-//! [`PageStore`].
+//! — binds an HTTP POST socket, and serves records out of its sharded
+//! database (`MANIFEST` + `shards/xx`, one `PageStore` each — RFC 0067).
 //!
 //! ```no_run
 //! # async fn run<E>(registry: E) -> wavedb_quick_node::Result<()>
@@ -48,12 +48,11 @@ mod ws_read;
 use std::future::{Future, pending};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::time::Duration;
 
 use embassy_futures::select::{Either, select};
 use wavedb_platform::io::Listener;
-use wavedb_storage::{PageStore, StorageRegistry, StoreOptions};
+use wavedb_storage::{StorageRegistry, StoreOptions};
 
 pub use error::{Result, ServerError};
 
@@ -76,7 +75,7 @@ pub struct Server<E> {
     secret: Option<[u8; 32]>,
     store: StoreOptions,
     /// Shard workers to serve on — see [`Server::shards`].
-    shard_count: usize,
+    threads: usize,
 }
 
 /// A node that has opened its engine and bound its socket — ready to
@@ -107,7 +106,7 @@ where
             maintenance: Maintenance::default(),
             secret: None,
             store: StoreOptions::default(),
-            shard_count: 1,
+            threads: 1,
         }
     }
 
@@ -160,21 +159,23 @@ where
         self
     }
 
-    /// How many shard workers serve requests (RFC 0064). Default 1.
+    /// How many worker threads serve the database's shards (RFC 0067).
+    /// Default 1.
     ///
-    /// Each shard is a thread with its own runtime and its own cache, and a
-    /// request is routed to the shard owning it. **Raising this only buys
-    /// throughput where the owners differ**: two operations on one owner
-    /// serialise on the brake wherever they land (`CONCURRENCY_BRAKE.md`), and
-    /// the brake's key is the owner — one collection, or one Unique type under
-    /// one tenant — however many shards there are. It costs a
-    /// thread and a cache each, and `ShardStore::CACHE_BYTES` is *per shard*.
+    /// The database has a fixed number of data shards — 64, recorded in its
+    /// `MANIFEST` at creation — and each worker serves a contiguous range of
+    /// them, so the thread count can change between runs without touching a
+    /// byte. **Raising this only buys throughput where the owners differ**:
+    /// two operations on one owner serialise on the brake wherever they land
+    /// (`CONCURRENCY_BRAKE.md`), and the brake's key is the owner — one
+    /// collection, or one Unique type under one tenant. Each worker costs a
+    /// thread and a cache, and `ShardStore::CACHE_BYTES` is *per worker*.
     ///
-    /// Zero is clamped to one: no shards is not a degraded node, it is a node
-    /// that serves nothing.
+    /// Clamped to `1..=` the shard count: no worker is not a degraded node, it
+    /// is a node that serves nothing.
     #[must_use]
-    pub const fn shards(mut self, count: usize) -> Self {
-        self.shard_count = count;
+    pub const fn threads(mut self, count: usize) -> Self {
+        self.threads = count;
         self
     }
 
@@ -189,10 +190,11 @@ where
     // callers should not change signature twice (RFC 0066).
     #[allow(clippy::unused_async)]
     pub async fn bind(self, addr: &str) -> Result<Bound<E>> {
-        let store = PageStore::open_with(
+        let stores = wavedb_storage::open_shards(
             &self.data_dir,
             &self.registry.storage_entries(),
             self.store,
+            wavedb_core::placement::DEFAULT_SHARDS,
         )?;
         let listener = Listener::bind(addr)?;
         // Publish for the token-minting helpers (`wavedb::auth`) — one node
@@ -207,10 +209,9 @@ where
         Ok(Bound {
             registry: self.registry,
             listener,
-            shards: crate::shard::Shards::start(store, self.shard_count)
-                .map_err(|e| {
-                    ServerError::Io(std::io::Error::other(e.to_string()))
-                })?,
+            shards: crate::shard::Shards::start(stores, self.threads).map_err(
+                |e| ServerError::Io(std::io::Error::other(e.to_string())),
+            )?,
             maintenance: self.maintenance,
             secret,
         })
@@ -237,14 +238,20 @@ where
         Ok(self.listener.local_addr()?)
     }
 
-    /// The opened engine — direct access for node-side seeding (e.g. creating
-    /// a collection `Pivot` before serving, or admin tooling). Ordinary
-    /// requests never touch this; they route through [`run`](Self::run).
-    /// Seeding writes bypass the notify wrapper, so they raise no live
-    /// events — subscriptions predate serving anyway.
+    /// A route onto the opened database for node-side seeding (e.g. creating
+    /// a collection `Pivot` before serving, or admin tooling): wrap it in a
+    /// [`RouteHandle`](wavedb_core::RouteHandle) and each typed operation
+    /// runs on its owner's data shard. Ordinary requests never touch this;
+    /// they route through [`run`](Self::run). Seeding writes bypass the
+    /// notify wrapper, so they raise no live events — subscriptions predate
+    /// serving anyway.
     #[must_use]
-    pub fn store(&self) -> Rc<shard::ShardStore> {
-        self.shards.store()
+    pub fn route(&self) -> shard::Seeder<E> {
+        shard::Seeder::new(
+            self.registry,
+            shard::ShardStore::with_budget(self.shards.handle(), 0),
+            self.shards.shards(),
+        )
     }
 
     /// Accept and serve connections until the listener faults (runs forever
