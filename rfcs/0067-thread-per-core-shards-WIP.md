@@ -1,8 +1,8 @@
 # RFC 0067 — Thread per core: the shard as a database, the thread as placement
 
-- **Status:** In progress — opened 2026-10-08. **Step 1 landed, step 2 in progress**
+- **Status:** In progress — opened 2026-10-08. **Steps 1 and 2 landed**
   (per-type state out of the statics; the routing function; the Pivot on
-  the wire; server bodies at the edge); see "Progress".
+  the wire; server bodies at the edge; the shard layout); see "Progress".
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the owner
   as the unit of concurrency, and `shard_of`),
   [0066](0066-embassy-executor-and-async-io.md) (the executor, the reactor
@@ -336,7 +336,7 @@ step 5 here adds only the leases.
   still one per process — the token secret is process-global — so node
   tests keep their single-test pattern.
 
-### Step 2 — routing by owner (in progress)
+### Step 2 — routing by owner and the shard layout (landed 2026-10-09)
 
 - **`wavedb_core::placement`**: `Owner` and `shard = seahash(owner bytes)
   % shards`, over the frozen layouts of §1 — the Pivot's `LocalId` (key 8
@@ -379,7 +379,22 @@ step 5 here adds only the leases.
   `server_fn_e2e` runs eight concurrent bodies inserting into one collection
   on four shards; without the `Job::Node` lock 35 of their 40 inserts are
   lost.
-- **Pending:** `MANIFEST`, `shards/xx/`, open and replay per shard (2d).
+- **The layout (2d, landed 2026-10-09).** `wavedb_storage::open_shards`
+  opens `MANIFEST` + `shards/00..xx/`, each a whole `PageStore`; the
+  `MANIFEST` (checked wire, written last and atomically) fixes `P` at
+  creation — 64 for a node — and a reopen keeps it whatever the caller asks.
+  An unsharded directory is refused rather than shadowed. The page-cache and
+  record-cache budgets are the database's, shared equally by the shards.
+  The disk actor holds every shard until step 4: a request names its shard
+  (`DiskRequest::{Get, GetOf, Apply}.shard`), stats sum the journals and take
+  the most fragmented shard's free extent, a settle steps one shard at a time
+  round-robin, and checkpoint, eviction (budget split), defragmentation and
+  the shutdown commit cover them all. A worker keeps one cache and runs each
+  operation on a `ShardView` of its owner's data shard; worker `w` serves the
+  contiguous shards `p` with `p·T/P = w`. `Server::shards(n)` is now
+  `Server::threads(n)` (clamped to `1..=P`). Node-side seeding uses
+  `Bound::route()` — a `Seeder` placing each operation like a served one —
+  under a `RouteHandle`.
 
 ## Alternatives
 
