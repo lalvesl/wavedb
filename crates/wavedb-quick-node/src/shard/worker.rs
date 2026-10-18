@@ -43,7 +43,7 @@ use wavedb_core::{NodeOp, NodeReply, U48};
 use wavedb_net::frame::{CommandFrame, Response};
 use wavedb_platform::carrier::{self, Here};
 
-use super::{DiskHandle, OwnerKey, OwnerLocks, ShardStore};
+use super::{DiskHandle, Owner, OwnerKey, OwnerLocks, ShardStore, ShardView};
 use crate::__rt::NodeTasks;
 use crate::dispatch;
 use crate::feed::MutationFeed;
@@ -79,9 +79,10 @@ pub enum Job {
 /// A job on its way into a task, recoverable if the task never starts.
 pub type JobSlot = Rc<RefCell<Option<Job>>>;
 
-/// The store a worker serves through: its own cache in front of the disk
-/// actor, wrapped so committed mutations reach the accept thread's publisher.
-type WorkerStore = NotifyStore<ShardStore, MutationFeed>;
+/// The store one operation runs on: the worker's cache in front of its
+/// owner's data shard, wrapped so committed mutations reach the accept
+/// thread's publisher.
+type OpStore<'a> = NotifyStore<ShardView<'a>, &'a MutationFeed>;
 
 /// What a shard's root task is started with. Built on the routing thread and
 /// moved onto the shard's carrier, so every field is `Send`.
@@ -89,14 +90,28 @@ pub struct ShardCtx<E> {
     registry: E,
     disk: DiskHandle,
     publisher: MutationFeed,
+    /// Data shards in the database — where an owner's records live.
+    shards: usize,
     jobs: Receiver<Job>,
 }
 
 /// One shard's serving state, shared by its job tasks.
 pub struct Worker<E> {
     registry: E,
-    store: Rc<WorkerStore>,
+    store: ShardStore,
+    publisher: MutationFeed,
+    shards: usize,
     locks: OwnerLocks,
+}
+
+impl<E> Worker<E> {
+    /// The store an operation on `owner` runs on.
+    fn store(&self, owner: Owner) -> OpStore<'_> {
+        NotifyStore::new(
+            self.store.at(owner.shard(self.shards)),
+            &self.publisher,
+        )
+    }
 }
 
 /// Start a worker and return the channel that reaches it.
@@ -113,12 +128,14 @@ pub fn start<E: NodeTasks>(
     registry: E,
     disk: DiskHandle,
     publisher: MutationFeed,
+    shards: usize,
 ) -> wavedb_platform::Result<Sender<Job>> {
     let (jobs, rx) = async_channel::bounded(JOB_DEPTH);
     let ctx = ShardCtx {
         registry,
         disk,
         publisher,
+        shards,
         jobs: rx,
     };
     // The carrier ends by itself once the router's senders are gone and the
@@ -135,16 +152,16 @@ pub async fn shard<E: NodeTasks>(ctx: ShardCtx<E>, here: Here) {
         registry,
         disk,
         publisher,
+        shards,
         jobs,
     } = ctx;
     // Built here, on the shard's own thread: `ShardStore` holds an `Rc` and
     // must never be constructed anywhere it could be moved from.
     let worker = Rc::new(Worker {
         registry,
-        store: Rc::new(NotifyStore::new(
-            Rc::new(ShardStore::new(disk)),
-            publisher,
-        )),
+        store: ShardStore::new(disk),
+        publisher,
+        shards,
         locks: OwnerLocks::new(),
     });
     while let Ok(job) = jobs.recv().await {
@@ -174,8 +191,7 @@ pub async fn job<E: NodeTasks>(
 }
 
 async fn serve<E: NodeTasks>(worker: &Worker<E>, job: Job) {
-    let (registry, store, locks) =
-        (&worker.registry, &*worker.store, &worker.locks);
+    let (registry, locks) = (&worker.registry, &worker.locks);
     // A caller that gave up between routing and here: the answer has
     // nowhere to go, and that is not this shard's problem.
     match job {
@@ -184,8 +200,11 @@ async fn serve<E: NodeTasks>(worker: &Worker<E>, job: Job) {
             frame,
             answer,
         } => {
+            let owner = dispatch::owner_of(registry, caller.tenant, &frame);
+            let store = worker.store(owner);
             let response =
-                dispatch::call(registry, store, locks, caller, frame).await;
+                dispatch::call(registry, &store, locks, caller, owner, frame)
+                    .await;
             let _ = answer.send(response);
         }
         Job::Node {
@@ -194,9 +213,11 @@ async fn serve<E: NodeTasks>(worker: &Worker<E>, job: Job) {
             op,
             answer,
         } => {
-            let key = OwnerKey::new(tenant, op.owner(tenant, struct_hash));
-            let held = locks.acquire(key).await;
-            let reply = registry.run_node(store, tenant, struct_hash, op).await;
+            let owner = op.owner(tenant, struct_hash);
+            let store = worker.store(owner);
+            let held = locks.acquire(OwnerKey::new(tenant, owner)).await;
+            let reply =
+                registry.run_node(&store, tenant, struct_hash, op).await;
             drop(held);
             let _ = answer.send(reply);
         }
