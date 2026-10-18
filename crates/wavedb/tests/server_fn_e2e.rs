@@ -140,7 +140,7 @@ fn start(dir: PathBuf) -> Node {
         wavedb_platform::carrier::block_on(async move {
             let bound: Bound<_> = Server::new(REGISTRY)
                 .secret(SECRET)
-                .shards(4)
+                .threads(4)
                 .data_dir(&dir)
                 .bind("127.0.0.1:0")
                 .await
