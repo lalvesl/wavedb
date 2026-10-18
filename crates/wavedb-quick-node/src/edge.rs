@@ -234,7 +234,15 @@ impl<E: Exposure, S: wavedb_core::Store> wavedb_core::Route
 #[cfg(test)]
 impl<E: Exposure, S: wavedb_core::Store> Exec for Direct<'_, E, S> {
     async fn owned(&self, caller: Caller, frame: CommandFrame) -> Response {
-        dispatch::call(self.registry, self.store, &self.locks, caller, frame)
-            .await
+        let owner = dispatch::owner_of(self.registry, caller.tenant, &frame);
+        dispatch::call(
+            self.registry,
+            self.store,
+            &self.locks,
+            caller,
+            owner,
+            frame,
+        )
+        .await
     }
 }
