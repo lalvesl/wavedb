@@ -34,7 +34,7 @@
 use std::rc::Rc;
 
 use futures::executor::block_on;
-use wavedb_core::Store;
+use wavedb_core::{Id, Store, Write};
 use wavedb_quick_node::shard::{DiskRequest, Maintenance, ShardStore, Shards};
 use wavedb_storage::PageStore;
 
@@ -144,9 +144,34 @@ impl Engineish for PageStore {
 }
 
 /// The engine behind its actor, plus this thread's shard.
+/// A one-shard database's store: a [`ShardStore`] reached at shard 0.
+///
+/// The benchmark's database is a single `PageStore` handed to the actor as
+/// a one-shard set, so every owner lives in shard 0; this is that one view,
+/// owned, so a row can hold it as its `Store`.
+pub struct OneShard(pub ShardStore);
+
+impl Store for OneShard {
+    async fn get(&self, id: Id) -> wavedb_core::Result<Option<Vec<u8>>> {
+        self.0.at(0).get(id).await
+    }
+
+    async fn get_of(
+        &self,
+        struct_hash: u64,
+        id: Id,
+    ) -> wavedb_core::Result<Option<Vec<u8>>> {
+        self.0.at(0).get_of(struct_hash, id).await
+    }
+
+    async fn apply(&self, batch: &[Write]) -> wavedb_core::Result<()> {
+        self.0.at(0).apply(batch).await
+    }
+}
+
 pub struct Sharded {
     shards: Shards,
-    store: Rc<ShardStore>,
+    store: Rc<OneShard>,
 }
 
 /// Bytes of records this thread's shard caches — `ShardStore`'s **shipped
@@ -182,12 +207,12 @@ impl Sharded {
     /// `Store` directly has no requests to route. Passing `N` here would spawn
     /// nothing and describe a configuration that is not running.
     pub fn new(store: PageStore) -> Result<Self, String> {
-        let shards = Shards::start(store, 1)
+        let shards = Shards::start(vec![store], 1)
             .map_err(|e| format!("start shards: {e}"))?;
-        let store = Rc::new(ShardStore::with_budget(
+        let store = Rc::new(OneShard(ShardStore::with_budget(
             shards.handle(),
             SHARD_CACHE_BYTES,
-        ));
+        )));
         Ok(Self { shards, store })
     }
 
@@ -199,9 +224,9 @@ impl Sharded {
 }
 
 impl Engineish for Sharded {
-    type Store = ShardStore;
+    type Store = OneShard;
 
-    fn store(&self) -> &ShardStore {
+    fn store(&self) -> &OneShard {
         &self.store
     }
 
