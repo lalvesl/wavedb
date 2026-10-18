@@ -1,6 +1,5 @@
-//! RFC 0064, first slice: shards over one disk actor, end to end.
-//!
-//! One test function: the steps share one store and build on each other.
+//! RFC 0064/0067: data shards over one disk actor, end to end. One test
+//! function: the steps share one database and build on each other.
 //!
 //! What is being proven, in order:
 //!
@@ -30,9 +29,9 @@ use wavedb_core::{LocalHandle, LocalId, U48};
 use wavedb_net::auth::{AccessClaims, TokenPurpose, sign};
 use wavedb_net::frame::{Auth, CommandFrame, Request, Response};
 use wavedb_quick_node::shard::{
-    Maintenance, Router, ShardStore, Shards, shard_of,
+    Maintenance, Owner, Router, ShardStore, ShardView, Shards, shard_of,
 };
-use wavedb_storage::{PageStore, StorageRegistry};
+use wavedb_storage::{StorageRegistry, StoreOptions, open_shards};
 
 const TENANT: u32 = 7;
 const SECRET: [u8; 32] = [9; 32];
@@ -74,25 +73,40 @@ fn note(body: &str) -> Note {
     }
 }
 
+/// Four data shards behind one disk actor, four workers' worth of threads.
+fn start(dir: &std::path::Path) -> Shards {
+    let stores = open_shards(
+        dir,
+        &REGISTRY.storage_entries(),
+        StoreOptions::default(),
+        4,
+    )
+    .expect("open engine");
+    let shards = Shards::start(stores, 4).expect("start shards");
+    assert_eq!((shards.threads(), shards.shards()), (4, 4));
+    shards
+}
+
 #[test]
 fn shards_serve_collections_over_one_disk_actor() {
     wavedb_platform::carrier::block_on(async {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = PageStore::open(dir.path(), &REGISTRY.storage_entries())
-            .expect("open engine");
-
         // From here the engine is owned by the actor's thread. Nothing in this
         // test can touch it again except by message — which is the point.
-        let shards = Shards::start(store, 4).expect("start shards");
-        assert_eq!(shards.count(), 4);
+        let shards = start(dir.path());
 
         // ---- 1. the index layer, unmodified, over a shard ---------------------
         // A **caching** store, which is what a shard has. `Shards::store` hands
         // out the cacheless one instead, because only a shard may cache: the
         // cache remembers absence, and that is sound only while one holder
         // reaches a record. This test stands in for a shard's thread.
+        //
+        // Everything below lives in data shard 0: what is under test is the
+        // actor, the cache and the thread boundary, not placement (which the
+        // ingress step and the router's unit tests cover).
         let first = Rc::new(ShardStore::new(shards.handle()));
-        let db = LocalHandle::new(&*first, U48::from(TENANT));
+        let first_view = first.at(0);
+        let db = LocalHandle::new(&first_view, U48::from(TENANT));
 
         let pivot = Note::create_pivot(&db).await.expect("create pivot");
         let col = Note::collection(pivot);
@@ -121,7 +135,8 @@ fn shards_serve_collections_over_one_disk_actor() {
         let observer: Rc<ShardStore> = shards.store();
         assert_eq!(observer.cached_len(), 0, "a bypass store holds nothing");
 
-        let cold_db = LocalHandle::new(&*observer, U48::from(TENANT));
+        let observer_view = observer.at(0);
+        let cold_db = LocalHandle::new(&observer_view, U48::from(TENANT));
         let cold = Note::collection(pivot);
         let seen = cold
             .get(&cold_db, ids[7])
@@ -148,7 +163,8 @@ fn shards_serve_collections_over_one_disk_actor() {
         std::thread::spawn(move || {
             futures::executor::block_on(async move {
                 let own = Rc::new(ShardStore::new(handle));
-                let db = LocalHandle::new(&*own, U48::from(TENANT));
+                let view = own.at(0);
+                let db = LocalHandle::new(&view, U48::from(TENANT));
                 let col = Note::collection(pivot);
                 let answer = match col.get(&db, probe).await {
                     Ok(Some(v)) => Ok(v.body),
@@ -175,19 +191,10 @@ fn shards_serve_collections_over_one_disk_actor() {
         }
 
         // ---- 4. the low-priority class reaches the actor and runs ------------
-        // Scope, stated because an earlier version of this claimed more than it
-        // proved: this shows a `Maintenance` hint travelling the second queue and
-        // being executed, observed through `EngineStats` (which has to be a
-        // message — once the actor owns the engine, "is anything unsettled?" is
-        // not answerable by looking).
-        //
-        // It does **not** prove starvation-freedom. Checked by replacing the valve
-        // with strict priority: this still passed, because each `get` completes
-        // and leaves the actor idle, so the maintenance step never has to win a
-        // turn against anything. Real contention here would need many concurrent
-        // reads and would be timing-dependent; the deterministic proof lives in
-        // `priority::tests::maintenance_is_never_starved_under_constant_read_pressure`,
-        // which strict priority fails outright.
+        // Scope: this shows a `Maintenance` hint travelling the second queue and
+        // running, observed through `EngineStats`. It does **not** prove
+        // starvation-freedom (strict priority passes it too); that proof is
+        // `priority::tests::maintenance_is_never_starved_under_constant_read_pressure`.
         let before = first.engine_stats().await.expect("stats");
         assert!(before.pending, "40 inserts must leave a settle queued");
 
@@ -206,13 +213,9 @@ fn shards_serve_collections_over_one_disk_actor() {
         // ---- 4b. the *waiting* form of the same work -------------------------
         maintain_waits(&shards, &first, &db, col).await;
 
-        // Concurrent operations on one collection are **not** exercised here, and
-        // that is deliberate: `ShardStore` genuinely suspends, so two interleaved
-        // collection ops can lose an index update
-        // (`wavedb-core/tests/concurrent_node_clobber.rs` states the invariant).
-        // What prevents it is `shard::OwnerLocks`, tested at the unit level; a
-        // probe here passed one interleaving and proved nothing, so it is gone
-        // rather than left looking like a guarantee.
+        // Concurrent operations on one collection are not exercised here: the
+        // owner lock that makes them safe is proven by `server_fn_e2e` and the
+        // lock's unit tests.
 
         // ---- 5. the ingress path: a wire request, routed and answered --------
         ingress_routes_to_a_worker(&shards, &observer).await;
@@ -223,7 +226,7 @@ fn shards_serve_collections_over_one_disk_actor() {
 /// ambient state, no balancer. Two collections of one type are separate owners,
 /// which is the premise the whole model rests on.
 async fn routing_is_a_pure_function_of_the_pivot(
-    db: &LocalHandle<'_, ShardStore>,
+    db: &LocalHandle<'_, ShardView<'_>>,
     pivot: schema_smoke::NotePivotId,
 ) {
     assert_eq!(shard_of(pivot.0, 4), shard_of(pivot.0, 4));
@@ -248,7 +251,7 @@ async fn routing_is_a_pure_function_of_the_pivot(
 async fn maintain_waits(
     shards: &Shards,
     store: &ShardStore,
-    db: &LocalHandle<'_, ShardStore>,
+    db: &LocalHandle<'_, ShardView<'_>>,
     col: wavedb_core::CollectionHandle<Note>,
 ) {
     for n in 0..40u32 {
@@ -286,9 +289,15 @@ async fn ingress_routes_to_a_worker(shards: &Shards, bypass: &ShardStore) {
     wavedb_net::auth::set_node_secret(SECRET);
     let (mutations, _drain) =
         wavedb_quick_node::feed::feed(wavedb_quick_node::feed::MUTATION_DEPTH);
-    let router =
-        Router::start(REGISTRY, &shards.handle(), &mutations, SECRET, 4)
-            .expect("start the shard workers");
+    let router = Router::start(
+        REGISTRY,
+        &shards.handle(),
+        &mutations,
+        SECRET,
+        4,
+        shards.shards(),
+    )
+    .expect("start the shard workers");
     assert_eq!(router.count(), 4);
 
     let profile = AboutUser {
@@ -327,7 +336,13 @@ async fn ingress_routes_to_a_worker(shards: &Shards, bypass: &ShardStore) {
 
     // And it really landed in the engine, not just in that worker's cache —
     // read through the cacheless bypass store, which can answer from nothing.
-    let direct = AboutUser::get(&LocalHandle::new(bypass, U48::from(TENANT)))
+    // The profile lives in its owner's data shard.
+    let owner = Owner::Unique {
+        tenant: U48::from(TENANT),
+        struct_hash: AboutUser::STRUCT_HASH,
+    };
+    let view = bypass.at(owner.shard(shards.shards()));
+    let direct = AboutUser::get(&LocalHandle::new(&view, U48::from(TENANT)))
         .await
         .expect("bypass read")
         .expect("the routed save must have reached the engine");
