@@ -31,19 +31,23 @@ use super::msg::{DiskRequest, EngineStats};
 /// Per shard, so a process running N shards budgets N times this.
 pub const CACHE_BYTES: usize = 64 << 20;
 
-/// One shard's store: its own cache in front of the shared disk actor.
+/// One worker's store: its own cache in front of the shared disk actor,
+/// reached per data shard through [`at`](Self::at).
 ///
 /// ## The invariant this rests on
 ///
 /// The cache remembers **absence** as well as presence, which is only sound
-/// because a record is reached by exactly one shard: routing sends a Pivot's
-/// every operation to `shard_of(pivot)`, and a record's tree nodes are minted
-/// by the tree that owns it. Nothing else writes what this cache holds, so
-/// nothing can invalidate it behind its back.
+/// because a record is reached by exactly one worker: routing sends an
+/// owner's every operation to the worker holding its data shard, and a
+/// record's tree nodes are minted by the tree that owns it. Nothing else
+/// writes what this cache holds, so nothing can invalidate it behind its
+/// back. Ids never repeat across data shards, so one cache serves all of a
+/// worker's shards.
 ///
-/// Break that — hand two shards the same Pivot — and a cached `None` outlives
-/// the other shard's insert. The routing function is what keeps it true, and
-/// it is the reason the routing is a *function* rather than a policy.
+/// Break that — hand two workers the same Pivot — and a cached `None`
+/// outlives the other worker's insert. The routing function is what keeps it
+/// true, and it is the reason the routing is a *function* rather than a
+/// policy.
 pub struct ShardStore {
     disk: DiskHandle,
     /// `Id::raw()` → the record's bytes, or `None` for "known absent".
@@ -155,13 +159,35 @@ impl ShardStore {
     }
 }
 
-impl Store for ShardStore {
+impl ShardStore {
+    /// The store of data shard `shard`: this cache, in front of that shard's
+    /// engine.
+    #[must_use]
+    pub fn at(&self, shard: usize) -> ShardView<'_> {
+        // Past `u16` is no shard at all; the disk actor answers it as such.
+        let shard = u16::try_from(shard).unwrap_or(u16::MAX);
+        ShardView { store: self, shard }
+    }
+}
+
+/// One data shard, as a [`Store`]: the worker's cache in front of that
+/// shard's engine.
+#[derive(Clone, Copy)]
+pub struct ShardView<'a> {
+    store: &'a ShardStore,
+    shard: u16,
+}
+
+impl Store for ShardView<'_> {
     async fn get(&self, id: Id) -> Result<Option<Vec<u8>>> {
-        if let Some(hit) = self.cache.borrow().get(&id.raw()) {
+        let (store, shard) = (self.store, self.shard);
+        if let Some(hit) = store.cache.borrow().get(&id.raw()) {
             return Ok(hit.clone());
         }
-        let value = self.ask(|answer| DiskRequest::Get { id, answer }).await?;
-        self.memoise(id, value.clone());
+        let value = store
+            .ask(|answer| DiskRequest::Get { shard, id, answer })
+            .await?;
+        store.memoise(id, value.clone());
         Ok(value)
     }
 
@@ -170,28 +196,33 @@ impl Store for ShardStore {
         struct_hash: u64,
         id: Id,
     ) -> Result<Option<Vec<u8>>> {
-        if let Some(hit) = self.cache.borrow().get(&id.raw()) {
+        let (store, shard) = (self.store, self.shard);
+        if let Some(hit) = store.cache.borrow().get(&id.raw()) {
             return Ok(hit.clone());
         }
-        let value = self
+        let value = store
             .ask(|answer| DiskRequest::GetOf {
+                shard,
                 struct_hash,
                 id,
                 answer,
             })
             .await?;
-        self.memoise(id, value.clone());
+        store.memoise(id, value.clone());
         Ok(value)
     }
 
     async fn apply(&self, batch: &[Write]) -> Result<()> {
+        let (store, shard) = (self.store, self.shard);
         let owned = batch.to_vec();
-        self.ask(|answer| DiskRequest::Apply {
-            batch: owned,
-            answer,
-        })
-        .await?;
-        self.adopt(batch);
+        store
+            .ask(|answer| DiskRequest::Apply {
+                shard,
+                batch: owned,
+                answer,
+            })
+            .await?;
+        store.adopt(batch);
         Ok(())
     }
 }
