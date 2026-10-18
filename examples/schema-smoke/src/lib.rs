@@ -1262,6 +1262,57 @@ mod tests {
         });
     }
 
+    // A route handle runs every typed operation through the registry's
+    // `run_node` match — `store`-only types included, which the wire cannot
+    // name — and gives back what the engine-local handle would.
+    #[test]
+    fn a_route_handle_runs_every_operation_through_the_registry() {
+        use futures::TryStreamExt;
+        use futures::executor::block_on;
+        use wavedb_core::{LocalRoute, RouteHandle, U48};
+
+        use super::{Attachment, REGISTRY};
+
+        block_on(async {
+            let store = mem::MemStore::default();
+            let route = LocalRoute::new(&store, &REGISTRY);
+            let db = RouteHandle::new(&route, U48::from(5u32));
+
+            // Unique, `store`-only: unreachable over the wire, served here.
+            let media = Attachment { media: vec![1, 2] };
+            media.save(&db).await.unwrap();
+            Attachment { media: vec![3] }.save(&db).await.unwrap();
+            assert_eq!(
+                Attachment::get(&db).await.unwrap(),
+                Some(Attachment { media: vec![3] })
+            );
+            let versions: Vec<_> =
+                Attachment::history(&db).try_collect().await.unwrap();
+            assert_eq!(versions.len(), 2);
+
+            // NonUnique: create (minted by the caller), insert, read, update,
+            // walk, remove.
+            let pivot = Note::create_pivot(&db).await.unwrap();
+            let col = Note::collection(pivot);
+            let note = Note {
+                body: "a".into(),
+                pinned: false,
+            };
+            let id = col.insert(&db, &note).await.unwrap();
+            assert_eq!(col.get(&db, id).await.unwrap(), Some(note));
+            let pinned = Note {
+                body: "a".into(),
+                pinned: true,
+            };
+            col.save(&db, id, &pinned).await.unwrap();
+            let all: Vec<Note> = col.all(&db).try_collect().await.unwrap();
+            assert_eq!(all, vec![pinned]);
+            assert!(col.remove(&db, id).await.unwrap());
+            let all: Vec<Note> = col.all(&db).try_collect().await.unwrap();
+            assert!(all.is_empty());
+        });
+    }
+
     // The derived Unique surface keeps the timeline: `save` archives the
     // superseded version, the generated `history` walks it newest-first.
     #[test]
