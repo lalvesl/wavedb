@@ -34,11 +34,13 @@ pub enum DiskRequest {
     /// Untyped read — the id alone names no type, so the engine probes every
     /// registered slot. Typed callers use [`DiskRequest::GetOf`].
     Get {
+        shard: u16,
         id: Id,
         answer: Answer<Option<Vec<u8>>>,
     },
     /// Type-directed read: one routed lookup instead of a scan.
     GetOf {
+        shard: u16,
         struct_hash: u64,
         id: Id,
         answer: Answer<Option<Vec<u8>>>,
@@ -52,6 +54,7 @@ pub enum DiskRequest {
     /// caller is blocked on the `Expect` guard's verdict, so de-prioritising it
     /// would be de-prioritising a request with someone on the other end.
     Apply {
+        shard: u16,
         batch: Vec<Write>,
         answer: Answer<()>,
     },
@@ -81,7 +84,7 @@ pub enum DiskRequest {
     Shutdown { answer: Answer<()> },
 }
 
-/// What the engine will say about itself.
+/// What the engine will say about itself, summed over its shards.
 ///
 /// Introspection has to be a message like anything else: once the actor owns
 /// the `PageStore`, "is anything unsettled?" is not a question the outside can
@@ -89,12 +92,13 @@ pub enum DiskRequest {
 /// valve both need it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EngineStats {
-    /// A committed batch is waiting for its page write.
+    /// A committed batch is waiting for its page write, in some shard.
     pub pending: bool,
-    /// Committed journal bytes — what the valve weighs, and what grows without
-    /// bound if maintenance never runs.
+    /// Committed journal bytes across the shards — what the valve weighs, and
+    /// what grows without bound if maintenance never runs.
     pub journal_bytes: u64,
-    /// Blocks in the largest free extent — the defragmenter's trigger.
+    /// Blocks in the largest free extent of the **most fragmented** shard —
+    /// the defragmenter's trigger.
     pub largest_free_extent: u64,
 }
 
@@ -109,7 +113,8 @@ pub enum Maintenance {
     Settle,
     /// Settle, then checkpoint: `data.bin` synced, the journal framed.
     Checkpoint,
-    /// Drop settled cache entries down to `budget_bytes`.
+    /// Drop settled cache entries down to `budget_bytes`, shared equally by
+    /// the shards.
     Evict { budget_bytes: usize },
     /// Relocate stranded live pages so free space coalesces (RFC 0042).
     Defragment { budget_blocks: u64 },
