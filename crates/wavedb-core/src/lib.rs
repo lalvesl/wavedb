@@ -59,6 +59,8 @@ pub mod permission;
 pub mod placement;
 pub mod record;
 mod record_unique;
+pub mod route_handle;
+mod route_reply;
 pub mod store;
 pub mod traits;
 pub mod u48;
@@ -72,6 +74,7 @@ pub use fn_identity::FnArgTag;
 pub use handle::DbHandle;
 pub use local_handle::LocalHandle;
 pub use node_op::{LocalRoute, NodeOp, NodeReply, Route};
+pub use route_handle::RouteHandle;
 // Generated `by_<field>` lookups return `impl Stream`, and a
 // stream-returning `#[server]` dispatch collects with `TryStreamExt`;
 // re-exported so macro expansions can name them without adding a `futures`
