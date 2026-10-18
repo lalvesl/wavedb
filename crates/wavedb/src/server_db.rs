@@ -1,37 +1,50 @@
 //! `ServerDb` — the node-side execution context a `#[server]` function body
 //! runs against.
 //!
-//! It implements [`DbHandle`] over the node's local [`Store`], so the same
-//! generated spelling a client uses — `T::get(db)`, `T::collection(pivot)`,
-//! `col.insert(db, v)` — resolves inside a server body without touching the
-//! network. The `#[server]` macro retypes a body's `db: &Db` parameter to
-//! `db: &ServerDb<S>`, so one body source drives both sides.
+//! It implements [`DbHandle`], so the same generated spelling a client uses
+//! — `T::get(db)`, `T::collection(pivot)`, `col.insert(db, v)` — resolves
+//! inside a server body. The `#[server]` macro retypes a body's `db: &Db`
+//! parameter to `db: &ServerDb<R>`, so one body source drives both sides.
 //!
-//! Every op delegates to core's [`LocalHandle`], re-wrapping the error into
-//! the client-facing [`Error`](crate::Error) so a body's `?` and the typed
-//! helpers (`Error::not_found`, …) compose.
+//! A body **coordinates; it does not execute**. Each operation belongs to an
+//! owner — a collection's Pivot, or a Unique type under the tenant — and runs
+//! where that owner lives and under its lock (RFC 0067): the context hands it
+//! to its [`Route`] as a [`NodeOp`] and decodes the [`NodeReply`]. On a node
+//! the route is the shard router, so most operations hop to another thread;
+//! in process it is a [`LocalRoute`](wavedb_core::LocalRoute) over one store.
+//! Each operation is atomic on its own; nothing spans two of them.
+//!
+//! Walk-shaped operations come back whole and are yielded as a stream, like
+//! the client's.
 
-use futures::{Stream, TryStreamExt};
+use futures::Stream;
+use wavedb_core::fuzzy::{Fuzzy, Scored};
+use wavedb_core::wire::to_wire;
 use wavedb_core::{
-    Bound, DbHandle, Id, LocalHandle, LocalId, Metadata, NonUniqueStruct,
-    Store, U48, UniqueStruct,
+    Bound, Collection, DbHandle, Id, LocalId, Metadata, NodeOp, NodeReply,
+    NonUniqueStruct, Route, U48, UniqueStruct,
 };
 
 use crate::error::{Error, Result};
+use crate::server_reply::{
+    buffered, decode, done, mismatch, value, values, versions,
+};
 
-/// A node-side handle: a borrowed [`Store`] plus the bound identity. Cheap
+/// A node-side handle: a borrowed [`Route`] plus the bound identity. Cheap
 /// to re-scope with [`as_tenant`](DbHandle::as_tenant).
-pub struct ServerDb<'a, S> {
-    local: LocalHandle<'a, S>,
+pub struct ServerDb<'a, R> {
+    route: &'a R,
+    tenant: U48,
     user: U48,
 }
 
-impl<'a, S: Store> ServerDb<'a, S> {
-    /// Wrap a store + tenant as an execution context (`user = tenant` — the
+impl<'a, R: Route> ServerDb<'a, R> {
+    /// Wrap a route + tenant as an execution context (`user = tenant` — the
     /// engine-local/B2C identity).
-    pub const fn new(store: &'a S, tenant: U48) -> Self {
+    pub const fn new(route: &'a R, tenant: U48) -> Self {
         Self {
-            local: LocalHandle::new(store, tenant),
+            route,
+            tenant,
             user: tenant,
         }
     }
@@ -40,9 +53,10 @@ impl<'a, S: Store> ServerDb<'a, S> {
     /// `#[server]` dispatch builds from gate 1's [`Caller`].
     ///
     /// [`Caller`]: wavedb_core::Caller
-    pub const fn for_caller(store: &'a S, caller: wavedb_core::Caller) -> Self {
+    pub const fn for_caller(route: &'a R, caller: wavedb_core::Caller) -> Self {
         Self {
-            local: LocalHandle::new(store, caller.tenant),
+            route,
+            tenant: caller.tenant,
             user: caller.user,
         }
     }
@@ -70,44 +84,58 @@ impl<'a, S: Store> ServerDb<'a, S> {
     /// authority over identity, so this is deliberately absent from
     /// [`DbHandle`] and reachable only server-side.
     #[must_use]
-    pub fn as_identity(&self, user: U48, tenant: U48) -> Self {
+    pub const fn as_identity(&self, user: U48, tenant: U48) -> Self {
         Self {
-            local: self.local.as_tenant(tenant),
+            route: self.route,
+            tenant,
             user,
         }
     }
+
+    /// Run `op` on `T`'s owner.
+    async fn run(&self, struct_hash: u64, op: NodeOp) -> Result<NodeReply> {
+        Ok(self.route.run(self.tenant, struct_hash, op).await?)
+    }
 }
 
-impl<S: Store> DbHandle for ServerDb<'_, S> {
+impl<R: Route> DbHandle for ServerDb<'_, R> {
     type Error = Error;
 
     fn tenant(&self) -> U48 {
-        self.local.tenant()
+        self.tenant
     }
 
     fn as_tenant(&self, tenant: U48) -> Self {
         Self {
+            route: self.route,
+            tenant,
             user: self.user,
-            local: self.local.as_tenant(tenant),
         }
     }
 
     async fn get_unique<T: UniqueStruct>(&self) -> Result<Option<T>> {
-        Ok(self.local.get_unique().await?)
+        value(self.run(T::STRUCT_HASH, NodeOp::GetUnique).await?)
     }
 
     async fn save_unique<T: UniqueStruct>(&self, value: &T) -> Result<()> {
-        Ok(self.local.save_unique(value).await?)
+        let op = NodeOp::SaveUnique(to_wire(value));
+        done(&self.run(T::STRUCT_HASH, op).await?)
     }
 
     fn unique_history<T: UniqueStruct + 'static>(
         &self,
     ) -> impl Stream<Item = Result<(Metadata, T)>> {
-        self.local.unique_history().map_err(Error::from)
+        buffered(async move {
+            versions(self.run(T::STRUCT_HASH, NodeOp::UniqueHistory).await?)
+        })
     }
 
     async fn create_pivot<T: NonUniqueStruct>(&self) -> Result<LocalId> {
-        Ok(self.local.create_pivot::<T>().await?)
+        // Minted here, created where the id places it: the owner of a new
+        // collection is known before the collection exists.
+        let pivot = Collection::<T>::mint_pivot(self.tenant);
+        done(&self.run(T::STRUCT_HASH, NodeOp::CreatePivot(pivot)).await?)?;
+        Ok(pivot)
     }
 
     async fn insert<T: NonUniqueStruct>(
@@ -115,7 +143,14 @@ impl<S: Store> DbHandle for ServerDb<'_, S> {
         pivot: LocalId,
         value: &T,
     ) -> Result<Id> {
-        Ok(self.local.insert(pivot, value).await?)
+        let body = to_wire(value);
+        match self
+            .run(T::STRUCT_HASH, NodeOp::Insert { pivot, body })
+            .await?
+        {
+            NodeReply::Inserted(id) => Ok(id),
+            _ => Err(mismatch()),
+        }
     }
 
     async fn get_record<T: NonUniqueStruct>(
@@ -123,7 +158,10 @@ impl<S: Store> DbHandle for ServerDb<'_, S> {
         pivot: LocalId,
         id: Id,
     ) -> Result<Option<T>> {
-        Ok(self.local.get_record(pivot, id).await?)
+        value(
+            self.run(T::STRUCT_HASH, NodeOp::GetRecord { pivot, id })
+                .await?,
+        )
     }
 
     async fn update<T: NonUniqueStruct>(
@@ -132,7 +170,9 @@ impl<S: Store> DbHandle for ServerDb<'_, S> {
         id: Id,
         value: &T,
     ) -> Result<()> {
-        Ok(self.local.update(pivot, id, value).await?)
+        let body = to_wire(value);
+        let op = NodeOp::Update { pivot, id, body };
+        done(&self.run(T::STRUCT_HASH, op).await?)
     }
 
     async fn remove<T: NonUniqueStruct>(
@@ -140,14 +180,22 @@ impl<S: Store> DbHandle for ServerDb<'_, S> {
         pivot: LocalId,
         id: Id,
     ) -> Result<bool> {
-        Ok(self.local.remove::<T>(pivot, id).await?)
+        match self
+            .run(T::STRUCT_HASH, NodeOp::Remove { pivot, id })
+            .await?
+        {
+            NodeReply::Removed(removed) => Ok(removed),
+            _ => Err(mismatch()),
+        }
     }
 
     fn all<T: NonUniqueStruct + 'static>(
         &self,
         pivot: LocalId,
     ) -> impl Stream<Item = Result<T>> {
-        self.local.all(pivot).map_err(Error::from)
+        buffered(async move {
+            values(self.run(T::STRUCT_HASH, NodeOp::All { pivot }).await?)
+        })
     }
 
     fn listed<T: NonUniqueStruct + 'static>(
@@ -156,7 +204,13 @@ impl<S: Store> DbHandle for ServerDb<'_, S> {
         index: usize,
         offset: u64,
     ) -> impl Stream<Item = Result<T>> {
-        self.local.listed(pivot, index, offset).map_err(Error::from)
+        let op = NodeOp::Listed {
+            pivot,
+            index,
+            offset,
+            limit: None,
+        };
+        buffered(async move { values(self.run(T::STRUCT_HASH, op).await?) })
     }
 
     fn listed_page<T: NonUniqueStruct + 'static>(
@@ -166,9 +220,13 @@ impl<S: Store> DbHandle for ServerDb<'_, S> {
         offset: u64,
         limit: u32,
     ) -> impl Stream<Item = Result<T>> {
-        self.local
-            .listed_page(pivot, index, offset, limit)
-            .map_err(Error::from)
+        let op = NodeOp::Listed {
+            pivot,
+            index,
+            offset,
+            limit: Some(limit),
+        };
+        buffered(async move { values(self.run(T::STRUCT_HASH, op).await?) })
     }
 
     async fn list_len<T: NonUniqueStruct + 'static>(
@@ -176,10 +234,11 @@ impl<S: Store> DbHandle for ServerDb<'_, S> {
         pivot: LocalId,
         index: usize,
     ) -> Result<u64> {
-        self.local
-            .list_len::<T>(pivot, index)
-            .await
-            .map_err(Error::from)
+        let op = NodeOp::ListLen { pivot, index };
+        match self.run(T::STRUCT_HASH, op).await? {
+            NodeReply::Count(len) => Ok(len),
+            _ => Err(mismatch()),
+        }
     }
 
     async fn fuzzy_search<T: NonUniqueStruct + 'static>(
@@ -187,13 +246,29 @@ impl<S: Store> DbHandle for ServerDb<'_, S> {
         pivot: LocalId,
         index: usize,
         query: &str,
-        mode: wavedb_core::fuzzy::Fuzzy,
+        mode: Fuzzy,
         limit: usize,
-    ) -> Result<Vec<wavedb_core::fuzzy::Scored<(wavedb_core::Id, T)>>> {
-        self.local
-            .fuzzy_search::<T>(pivot, index, query, mode, limit)
-            .await
-            .map_err(Error::from)
+    ) -> Result<Vec<Scored<(Id, T)>>> {
+        let op = NodeOp::Fuzzy {
+            pivot,
+            index,
+            query: query.to_owned(),
+            mode,
+            limit,
+        };
+        let NodeReply::Scored(hits) = self.run(T::STRUCT_HASH, op).await?
+        else {
+            return Err(mismatch());
+        };
+        hits.into_iter()
+            .map(|hit| {
+                Ok(Scored {
+                    item: (hit.item.0, decode(&hit.item.1)?),
+                    score: hit.score,
+                    rank: hit.rank,
+                })
+            })
+            .collect()
     }
 
     fn search_by<T: NonUniqueStruct + 'static>(
@@ -202,9 +277,12 @@ impl<S: Store> DbHandle for ServerDb<'_, S> {
         index: usize,
         bound: Bound,
     ) -> impl Stream<Item = Result<T>> {
-        self.local
-            .search_by(pivot, index, bound)
-            .map_err(Error::from)
+        let op = NodeOp::SearchBy {
+            pivot,
+            index,
+            bound,
+        };
+        buffered(async move { values(self.run(T::STRUCT_HASH, op).await?) })
     }
 
     fn record_history<T: NonUniqueStruct + 'static>(
@@ -212,6 +290,7 @@ impl<S: Store> DbHandle for ServerDb<'_, S> {
         pivot: LocalId,
         id: Id,
     ) -> impl Stream<Item = Result<(Metadata, T)>> {
-        self.local.record_history(pivot, id).map_err(Error::from)
+        let op = NodeOp::RecordHistory { pivot, id };
+        buffered(async move { versions(self.run(T::STRUCT_HASH, op).await?) })
     }
 }
