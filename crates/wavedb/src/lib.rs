@@ -46,7 +46,6 @@ mod error;
 mod offline_queue;
 mod reply;
 mod server_db;
-mod server_reply;
 pub mod watch;
 
 pub use auth::TokenPair;
