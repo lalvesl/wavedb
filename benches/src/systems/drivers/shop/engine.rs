@@ -17,6 +17,8 @@ use std::sync::{Arc, Mutex};
 use futures::executor::block_on;
 use wavedb_core::Store;
 use wavedb_quick_node::shard::{ShardStore, Shards};
+
+use crate::systems::engine::OneShard;
 use wavedb_storage::PageStore;
 
 /// What a consumer's engine must offer. Deliberately smaller than
@@ -105,7 +107,7 @@ impl ShopEngine for PageStore {
 /// The sharded seam: one disk actor owning the engine, N caching shards over
 /// it — one per consumer, each on its own thread.
 pub struct ShopShard {
-    store: Rc<ShardStore>,
+    store: Rc<OneShard>,
     disk: wavedb_quick_node::shard::DiskHandle,
 }
 
@@ -113,7 +115,7 @@ impl ShopEngine for ShopShard {
     /// `Arc` because every consumer needs the handle **and** the row needs to
     /// outlive them to shut the actor down.
     type Shared = Arc<Shards>;
-    type Store = ShardStore;
+    type Store = OneShard;
 
     /// Whatever was asked. This is the seam the consumer count exists for.
     fn consumers(asked: usize) -> usize {
@@ -124,11 +126,11 @@ impl ShopEngine for ShopShard {
         store: PageStore,
         consumers: usize,
     ) -> Result<Self::Shared, String> {
-        // `count` is the routing width the node would use. It is passed
-        // through rather than fixed at 1 (which is what the `micro` row does)
-        // because here the consumers really are shards: each holds its own
-        // cache over a disjoint set of tenants.
-        Shards::start(store, consumers)
+        // A one-shard database: `Shards::start` spawns only the disk actor
+        // (the thread count clamps to the one shard and names no running
+        // thread). The consumers are the shards here — each builds its own
+        // cache over a disjoint set of tenants in `build`.
+        Shards::start(vec![store], consumers)
             .map(Arc::new)
             .map_err(|e| format!("start shards: {e}"))
     }
@@ -138,15 +140,15 @@ impl ShopEngine for ShopShard {
         Ok(Self {
             // Its own cache, which is the whole point: a cacheless store
             // would make every read a round trip and measure the channel.
-            store: Rc::new(ShardStore::with_budget(
+            store: Rc::new(OneShard(ShardStore::with_budget(
                 disk.clone(),
                 wavedb_quick_node::shard::CACHE_BYTES,
-            )),
+            ))),
             disk,
         })
     }
 
-    fn store(&self) -> &ShardStore {
+    fn store(&self) -> &OneShard {
         &self.store
     }
 
