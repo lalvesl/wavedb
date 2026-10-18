@@ -130,9 +130,10 @@ impl DiskHandle {
     }
 }
 
-/// Own `store` and serve both queues until every handle is dropped.
+/// Own the shards' stores and serve both queues until every handle is
+/// dropped. A request names its shard; maintenance covers all of them.
 pub async fn run(
-    store: PageStore,
+    stores: Vec<PageStore>,
     requests: Receiver<DiskRequest>,
     maintenance: Receiver<Maintenance>,
 ) {
@@ -141,6 +142,8 @@ pub async fn run(
     // owes itself, so it counts as queued even when the channel is empty —
     // otherwise a half-settled queue would wait for the next external hint.
     let mut settling = false;
+    // Where the round-robin settle picks up next.
+    let mut cursor = 0usize;
     loop {
         let avail = Available {
             reads: !requests.is_empty(),
@@ -149,17 +152,18 @@ pub async fn run(
         // One funnel for requests, so the `Shutdown` handoff below has exactly
         // one place to happen — it needs to *consume* the store, which a
         // second serving site could not do.
-        let next = match priority.next(avail, store.journal_len()) {
+        let journal: u64 = stores.iter().map(PageStore::journal_len).sum();
+        let next = match priority.next(avail, journal) {
             Some(Class::Read) => requests.try_recv().ok(),
             // Owed work first: finishing a settle already begun beats
             // starting another.
             Some(Class::Maintenance) if settling => {
-                settling = step(&store);
+                settling = step(&stores, &mut cursor);
                 None
             }
             Some(Class::Maintenance) => {
                 if let Ok(work) = maintenance.try_recv() {
-                    settling = maintain(&store, &work);
+                    settling = maintain(&stores, &work, &mut cursor);
                 }
                 None
             }
@@ -178,7 +182,7 @@ pub async fn run(
                 Either::First(Ok(request)) => Some(request),
                 Either::First(Err(_)) => break,
                 Either::Second(Ok(work)) => {
-                    settling = maintain(&store, &work);
+                    settling = maintain(&stores, &work, &mut cursor);
                     None
                 }
                 Either::Second(Err(_)) => None,
@@ -193,52 +197,86 @@ pub async fn run(
             // does exactly that on a restart, and gets `EngineBusy` if this
             // is the other way round.
             Some(DiskRequest::Shutdown { answer }) => {
-                let outcome = store
-                    .commit_journal()
-                    .and_then(|()| store.force_retirement())
+                let outcome = stores
+                    .iter()
+                    .try_for_each(|store| {
+                        store.commit_journal()?;
+                        store.force_retirement()
+                    })
                     .map_err(|e| {
                         wavedb_core::Error::Backend(format!("shutdown: {e}"))
                     });
-                drop(store);
+                drop(stores);
                 let _ = answer.send(outcome);
                 return;
             }
-            Some(request) => serve(&store, request).await,
+            Some(request) => serve(&stores, request).await,
         }
     }
     // Handles all dropped without an explicit stop — nothing can ask for
     // anything again. A failure is reported and not propagated: there is no
     // caller left to receive it, and the journal still holds anything
     // unsettled for the next open to replay.
-    if let Err(e) = store.commit_journal() {
-        eprintln!("disk actor: final checkpoint failed: {e}");
+    for store in &stores {
+        if let Err(e) = store.commit_journal() {
+            eprintln!("disk actor: final checkpoint failed: {e}");
+        }
     }
 }
 
-async fn serve(store: &PageStore, request: DiskRequest) {
+/// The store of `shard`, or the fault a request naming no shard gets.
+fn shard(stores: &[PageStore], shard: u16) -> wavedb_core::Result<&PageStore> {
+    stores.get(usize::from(shard)).ok_or_else(|| {
+        wavedb_core::Error::Backend(format!("disk actor: no shard {shard}"))
+    })
+}
+
+async fn serve(stores: &[PageStore], request: DiskRequest) {
     match request {
-        DiskRequest::Get { id, answer } => {
-            let _ = answer.send(store.get(id).await);
+        DiskRequest::Get {
+            shard: s,
+            id,
+            answer,
+        } => {
+            let _ = match shard(stores, s) {
+                Ok(store) => answer.send(store.get(id).await),
+                Err(e) => answer.send(Err(e)),
+            };
         }
         DiskRequest::GetOf {
+            shard: s,
             struct_hash,
             id,
             answer,
         } => {
-            let _ = answer.send(store.get_of(struct_hash, id).await);
+            let _ = match shard(stores, s) {
+                Ok(store) => answer.send(store.get_of(struct_hash, id).await),
+                Err(e) => answer.send(Err(e)),
+            };
         }
-        DiskRequest::Apply { batch, answer } => {
-            let _ = answer.send(store.apply(&batch).await);
+        DiskRequest::Apply {
+            shard: s,
+            batch,
+            answer,
+        } => {
+            let _ = match shard(stores, s) {
+                Ok(store) => answer.send(store.apply(&batch).await),
+                Err(e) => answer.send(Err(e)),
+            };
         }
         DiskRequest::Stats { answer } => {
             let _ = answer.send(Ok(EngineStats {
-                pending: store.has_pending(),
-                journal_bytes: store.journal_len(),
-                largest_free_extent: store.largest_free_extent(),
+                pending: stores.iter().any(PageStore::has_pending),
+                journal_bytes: stores.iter().map(PageStore::journal_len).sum(),
+                largest_free_extent: stores
+                    .iter()
+                    .map(PageStore::largest_free_extent)
+                    .min()
+                    .unwrap_or(0),
             }));
         }
         DiskRequest::Maintain { work, answer } => {
-            let _ = answer.send(run_now(store, &work).map_err(|e| {
+            let _ = answer.send(run_now(stores, &work).map_err(|e| {
                 wavedb_core::Error::Backend(format!("maintain: {e}"))
             }));
         }
@@ -259,31 +297,32 @@ const ACTORS: usize = 4;
     embassy_executor = wavedb_platform::carrier::rt
 )]
 async fn actor(
-    store: PageStore,
+    stores: Vec<PageStore>,
     requests: Receiver<DiskRequest>,
     maintenance: Receiver<Maintenance>,
     here: Here,
 ) {
-    run(store, requests, maintenance).await;
+    run(stores, requests, maintenance).await;
     drop(here);
 }
 
-/// Start the actor on a thread of its own and return the handle shards use.
+/// Start the actor over the database's shards, on a thread of its own, and
+/// return the handle workers use.
 ///
-/// The `PageStore` is **moved onto** the actor's thread, which is only legal
+/// The `PageStore`s are **moved onto** the actor's thread, which is only legal
 /// because the engine is `Send + Sync` — asserted in `wavedb-storage`'s
 /// `thread_safety` module rather than assumed here.
 ///
 /// # Errors
 /// The carrier thread failing to spawn.
-pub fn start(store: PageStore) -> wavedb_platform::Result<DiskHandle> {
+pub fn start(stores: Vec<PageStore>) -> wavedb_platform::Result<DiskHandle> {
     let (requests, rx) = async_channel::bounded(QUEUE_DEPTH);
     let (maintenance, mrx) = async_channel::bounded(MAINTENANCE_DEPTH);
     // The carrier ends with the actor: when every handle is gone, or after a
     // `Shutdown`. The caller learns of either through the handle, so the
     // `Finished` is not kept.
     drop(carrier::spawn("wavedb-disk", move |here| {
-        if here.spawn(actor(store, rx, mrx, here.clone())).is_err() {
+        if here.spawn(actor(stores, rx, mrx, here.clone())).is_err() {
             // The store drops here, so every handle sees the actor gone.
             eprintln!("disk actor: no free slot, engine closed");
         }
@@ -308,6 +347,7 @@ mod tests {
     fn a_refused_request_reports_a_cause() {
         let (answer, rx) = oneshot::channel();
         DiskRequest::Get {
+            shard: 0,
             id: Id::from_raw(7),
             answer,
         }
@@ -329,6 +369,7 @@ mod tests {
         for _ in 0..QUEUE_DEPTH {
             let (answer, _) = oneshot::channel();
             tx.try_send(DiskRequest::Get {
+                shard: 0,
                 id: Id::from_raw(1),
                 answer,
             })
@@ -337,6 +378,7 @@ mod tests {
         let (answer, _) = oneshot::channel();
         assert!(
             tx.try_send(DiskRequest::Get {
+                shard: 0,
                 id: Id::from_raw(1),
                 answer,
             })
