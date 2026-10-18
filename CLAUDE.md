@@ -161,6 +161,10 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   dictionary) belongs to the open store (RFC 0067 step 1). **One open `PageStore`
   per data directory** — `data.bin` is locked while open, a second open of it is
   `EngineBusy` — and stores over different directories coexist in one process.
+  A node's database is **sharded** (RFC 0067): `MANIFEST` (the shard count `P`,
+  64, fixed at creation) + `shards/00..3f/`, each a whole `PageStore`
+  (`open_shards`); a record lives in shard `seahash(owner bytes) % P`
+  (`core::placement`).
 - **wavedb-net** — hand-rolled minimal HTTP/1.1 POST as a **dumb tunnel**: no headers,
   cookies, or status semantics as API; the body is a self-contained
   `Request { tenant, CommandFrame { struct_hash, command, payload } }` and a WaveDB
@@ -177,7 +181,10 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   the recency/dead logs or the Unique chain (`Command::Changes`) — no per-session
   node state, an outage or restart loses nothing; same-record writes within one tick
   coalesce to the live state).
-- **wavedb-quick-node** — library (no bin): `Server::new(REGISTRY).data_dir(d).serve(addr)`.
+- **wavedb-quick-node** — library (no bin): `Server::new(REGISTRY).data_dir(d).serve(addr)`;
+  `.threads(n)` workers each serve a contiguous range of the data shards, behind
+  one disk actor until RFC 0067 step 4. Node-side seeding goes through
+  `RouteHandle::new(&bound.route(), tenant)` — each op on its owner's shard.
   `expose_server!` also emits `StorageRegistry`, so `.registry(REGISTRY)` alone opens
   the `PageStore`. Gates 4–6 (permission/validate/preprocess) are an M8 seam.
 - **wavedb (client)** — `Db::connect(addr, user, tenant)` (transport-only) and the

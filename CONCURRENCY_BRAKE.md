@@ -143,7 +143,8 @@ keep 5 of their 40 inserts.
   body (`Route for Router`, `Job::Node`).
 - **Only shards cache.** `ShardStore` remembers *absence*, which is sound only
   while one holder reaches a record. Everything that is not a shard — node-side
-  seeding before serving — gets the cacheless `Shards::store()`; the accept
+  seeding before serving — gets the cacheless `Shards::store()` (through
+  `Bound::route()`, which picks each owner's data shard); the accept
   thread has no store at all. A second caching store over one record is how a stale
   `None` outlives another holder's insert.
 
