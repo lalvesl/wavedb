@@ -50,12 +50,15 @@ use crate::feed::MutationFeed;
 pub struct Router<E> {
     registry: E,
     workers: Vec<Sender<Job>>,
+    /// Data shards in the database; each worker serves a contiguous range.
+    shards: usize,
     secret: [u8; 32],
 }
 
 impl<E: NodeTasks> Router<E> {
-    /// Start `count` workers over one disk actor and return the router onto
-    /// them.
+    /// Start `threads` workers over the disk actor's `shards` data shards and
+    /// return the router onto them. Worker `w` serves the contiguous range
+    /// of shards `p` with `p · threads / shards = w`.
     ///
     /// `publisher` is likewise one channel: every worker's committed mutations
     /// converge on the accept thread that owns the subscription table.
@@ -67,14 +70,19 @@ impl<E: NodeTasks> Router<E> {
         disk: &DiskHandle,
         publisher: &MutationFeed,
         secret: [u8; 32],
-        count: usize,
+        threads: usize,
+        shards: usize,
     ) -> wavedb_platform::Result<Self> {
-        let workers = (0..count.max(1))
-            .map(|_| worker::start(registry, disk.clone(), publisher.clone()))
+        let shards = shards.max(1);
+        let workers = (0..threads.clamp(1, shards))
+            .map(|_| {
+                worker::start(registry, disk.clone(), publisher.clone(), shards)
+            })
             .collect::<wavedb_platform::Result<Vec<_>>>()?;
         Ok(Self {
             registry,
             workers,
+            shards,
             secret,
         })
     }
@@ -104,14 +112,19 @@ impl<E: Exposure> Router<E> {
         edge::command(&self.registry, self, caller, frame).await
     }
 
-    /// Queue `job` on `owner`'s shard.
+    /// Queue `job` on the worker serving `owner`'s data shard.
     async fn post(&self, owner: Owner, job: Job) -> Result<(), &'static str> {
-        let shard = owner.shard(self.workers.len());
-        // Unreachable: `start` refuses an empty set and `Owner::shard` folds
-        // onto the length. Said rather than indexed, because a routing
+        // Unreachable: `start` refuses an empty set and the range arithmetic
+        // stays below the length. Said rather than indexed, because a routing
         // function has no business panicking on a request path.
-        let worker = self.workers.get(shard).ok_or("no shard")?;
+        let worker =
+            self.workers.get(self.worker_of(owner)).ok_or("no shard")?;
         worker.send(job).await.map_err(|_| "shard stopped")
+    }
+
+    /// The worker serving `owner`'s data shard.
+    fn worker_of(&self, owner: Owner) -> usize {
+        owner.shard(self.shards) * self.workers.len() / self.shards
     }
 
     /// The owner of `frame` reached under `tenant` — the lock's key, so one
@@ -208,6 +221,7 @@ mod tests {
         let workers = (0..count).map(|_| async_channel::bounded(1).0).collect();
         Router {
             registry: Registry,
+            shards: 64,
             workers,
             secret: [0u8; 32],
         }
@@ -247,7 +261,7 @@ mod tests {
             Auth::Anonymous { tenant } => tenant,
             Auth::Token(_) => U48::MAX,
         };
-        router.owner(tenant, &request.frame).shard(router.count())
+        router.worker_of(router.owner(tenant, &request.frame))
     }
 
     fn on_pivot(command: Command, pivot: u64, payload: &[u8]) -> Request {
