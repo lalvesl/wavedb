@@ -4,6 +4,12 @@
 //! `set_city` / `get_city` take + return `WaveWire` values; their bodies use
 //! the **unified generated spelling** (`Profile::get(db)` / `me.save(db)`) —
 //! the same call sites a client or an engine test writes.
+//!
+//! The visit log proves where a body runs (RFC 0067 step 2): on a node with
+//! four shards, a body coordinates at the edge and each operation hops to its
+//! owner's shard and runs under the owner's lock — so concurrent bodies
+//! inserting into one collection lose nothing, and a `store`-only type, which
+//! the wire cannot name, is reachable from a body.
 
 #![allow(clippy::future_not_send)]
 
@@ -41,10 +47,58 @@ pub async fn get_city(db: &Db) -> Result<String> {
     Ok(me.city)
 }
 
+/// One visit. `store`-only: no wire command can reach it, only node code.
+#[wavedb(NonUnique)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Visit {
+    pub n: u32,
+}
+
+/// Open a new, empty visit log and return its Pivot.
+#[server]
+pub async fn open_log(db: &Db) -> Result<LocalId> {
+    Ok(Visit::create_pivot(db).await?.0)
+}
+
+/// Insert `count` visits into `log`, each one its own operation.
+#[server]
+pub async fn add_visits(db: &Db, log: LocalId, count: u32) -> Result<u32> {
+    let col = Visit::collection(VisitPivotId(log));
+    for n in 0..count {
+        col.insert(db, &Visit { n }).await?;
+    }
+    Ok(count)
+}
+
+/// How many visits `log` lists.
+#[server]
+pub async fn count_visits(db: &Db, log: LocalId) -> Result<u64> {
+    use futures::TryStreamExt as _;
+    let all: Vec<Visit> = Visit::collection(VisitPivotId(log))
+        .all(db)
+        .try_collect()
+        .await?;
+    Ok(all.len() as u64)
+}
+
 // Profile is listed (so its storage slot registers); the functions ride the
 // same list as `fn` entries.
-wavedb::expose_server! { Profile, fn set_city, fn get_city }
-wavedb::expose_client! { fn set_city, fn get_city }
+wavedb::expose_server! {
+    Profile,
+    store Visit,
+    fn set_city,
+    fn get_city,
+    fn open_log,
+    fn add_visits,
+    fn count_visits,
+}
+wavedb::expose_client! {
+    fn set_city,
+    fn get_city,
+    fn open_log,
+    fn add_visits,
+    fn count_visits,
+}
 
 const TENANT: u32 = 5;
 const SECRET: [u8; 32] = [3; 32];
@@ -86,6 +140,7 @@ fn start(dir: PathBuf) -> Node {
         wavedb_platform::carrier::block_on(async move {
             let bound: Bound<_> = Server::new(REGISTRY)
                 .secret(SECRET)
+                .shards(4)
                 .data_dir(&dir)
                 .bind("127.0.0.1:0")
                 .await
@@ -128,6 +183,22 @@ fn server_function_runs_on_the_node() {
 
         // A fresh call sees the persisted state.
         assert_eq!(get_city(&db).await.expect("get_city"), "Lisbon");
+
+        // Eight bodies at once, all inserting into one collection: each insert
+        // hops to the log's shard and waits for its owner there, so every one
+        // of them lands in the index.
+        let log = open_log(&db).await.expect("open_log");
+        let calls = (0..8).map(|_| add_visits(&db, log, 5));
+        for added in futures::future::join_all(calls).await {
+            assert_eq!(added.expect("add_visits"), 5);
+        }
+        assert_eq!(count_visits(&db, log).await.expect("count"), 40);
+
+        // A second log is another owner, wherever it was placed.
+        let other = open_log(&db).await.expect("open_log");
+        add_visits(&db, other, 3).await.expect("add_visits");
+        assert_eq!(count_visits(&db, other).await.expect("count"), 3);
+        assert_eq!(count_visits(&db, log).await.expect("count"), 40);
 
         node.shutdown();
     });
