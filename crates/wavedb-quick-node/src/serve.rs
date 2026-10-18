@@ -106,7 +106,8 @@ async fn serve<E: NodeTasks>(
         &shards.handle(),
         &mutations,
         secret,
-        shards.count(),
+        shards.threads(),
+        shards.shards(),
     )
     .map_err(|e| ServerError::Io(std::io::Error::other(e.to_string())))?;
     // Ours goes; the workers hold the live clones, so the publisher ends when
