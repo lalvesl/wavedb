@@ -30,8 +30,10 @@ dispatch, and exposure machinery unchanged.
   argument tags as its own `STRUCT_HASH`, so a schema change to an argument type
   *transitively* renames every function carrying it. A stream return composes
   under `STREAM_KIND` (a scalar and a stream of the same item are different
-  functions). The mixer is a documented `const` SplitMix64 fold (not seahash —
-  it must run in `const` context from other crates' consts).
+  functions). The fold must run in `const` context from other crates' consts;
+  it was a SplitMix64 mixer while the `seahash` crate was not `const`, and is
+  SeaHash itself since WaveDB vendored it as `const fn` (`crates/seahash`,
+  2026-10-09) — one identity hash for types and functions.
 - **Body retyped onto `ServerDb`.** The macro rewrites `&Db` → `&ServerDb<S>` so
   the same body text executes node-side against the local store (since
   [RFC 0067](0067-thread-per-core-shards-WIP.md) step 2: `&ServerDb<R>` over a

@@ -11,11 +11,11 @@
 //!   argument/return. `#[wavedb]` structs tag as their `STRUCT_HASH`
 //!   (schema evolution propagates); builtins carry fixed tags; containers
 //!   compose their element's.
-//! - [`compose`] — a `const fn` mixer (SplitMix64 folds). **Not SeaHash**:
-//!   the hash must be computable in `const` context from other crates'
-//!   `STRUCT_HASH` consts, and the `seahash` crate is not `const`. The
-//!   mixer is identity-load-bearing all the same — it is fixed arithmetic,
-//!   portable by construction, and pre-release layout policy applies (a
+//! - [`compose`] — SeaHash over the little-endian words
+//!   `[FN_DOMAIN, seed, parts…]`, computed in `const` context: the hash must
+//!   be derivable from other crates' `STRUCT_HASH` consts, which is why the
+//!   vendored `seahash` (`crates/seahash`) is `const fn`. One identity hash
+//!   for types and functions alike; pre-release layout policy applies (a
 //!   change renames every function, caught at the boundary, no migration).
 
 use crate::id::Id;
@@ -28,12 +28,30 @@ use crate::u48::U48;
 /// name-string hash by construction.
 const FN_DOMAIN: u64 = 0xF7A5_11D3_0C4B_9E21;
 
-/// SplitMix64's finalizer — the standard 64-bit avalanche.
-const fn mix(mut z: u64) -> u64 {
-    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
+/// Domain separator for container tags, so `container(k, e)` and
+/// `compose(k, &[e])` never meet.
+const CONTAINER_DOMAIN: u64 = 0xC017_A1E5_5D0C_7A9B;
+
+/// SeaHash's published default seeds, so a fold equals `seahash::hash` of
+/// its words' little-endian bytes (pinned by a test below).
+const SEEDS: [u64; 4] = [
+    0x16f1_1fe8_9b0d_677c,
+    0xb480_a793_d8e6_c86c,
+    0x6fe2_e5aa_f078_ebc9,
+    0x14f9_94a4_c525_9381,
+];
+
+/// SeaHash over the words `[domain, seed, parts…]`, in `const` context.
+const fn fold(domain: u64, seed: u64, parts: &[u64]) -> u64 {
+    let mut state = seahash::State::new(SEEDS[0], SEEDS[1], SEEDS[2], SEEDS[3]);
+    state.push(domain);
+    state.push(seed);
+    let mut i = 0;
+    while i < parts.len() {
+        state.push(parts[i]);
+        i += 1;
+    }
+    state.finalize()
 }
 
 /// Fold `parts` (argument tags in order, then the return tag) into `seed`
@@ -41,21 +59,14 @@ const fn mix(mut z: u64) -> u64 {
 /// yields a different identity.
 #[must_use]
 pub const fn compose(seed: u64, parts: &[u64]) -> u64 {
-    let mut h = mix(seed ^ FN_DOMAIN);
-    let mut i = 0;
-    while i < parts.len() {
-        // Position folds in via the running state, not an index term.
-        h = mix(h ^ parts[i]);
-        i += 1;
-    }
-    h
+    fold(FN_DOMAIN, seed, parts)
 }
 
 /// Tag a container's element under a kind marker (`Vec<T>` ≠ `Option<T>` of
 /// the same `T`).
 #[must_use]
 pub const fn container(kind: u64, element: u64) -> u64 {
-    mix(mix(kind ^ FN_DOMAIN) ^ element)
+    fold(CONTAINER_DOMAIN, kind, &[element])
 }
 
 /// The `const` identity of a type in a `#[server]` signature.
@@ -158,6 +169,16 @@ mod tests {
         assert_ne!(<Vec<u64>>::TAG, <Vec<u32>>::TAG);
         assert_ne!(<Vec<Vec<u64>>>::TAG, <Vec<u64>>::TAG, "nesting folds in");
         assert_eq!(container(1, 2), container(1, 2));
+    }
+
+    /// A fold is SeaHash itself: the words' little-endian bytes, hashed.
+    #[test]
+    fn compose_is_seahash_over_its_words() {
+        let words = [super::FN_DOMAIN, 7, 10, 20];
+        let bytes: Vec<u8> =
+            words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert_eq!(compose(7, &[10, 20]), seahash::hash(&bytes));
+        assert_ne!(container(7, 10), compose(7, &[10]), "domains separate");
     }
 
     #[test]
