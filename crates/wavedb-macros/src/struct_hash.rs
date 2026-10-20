@@ -28,7 +28,7 @@ const STRUCT_SEED: [u64; 4] = [
 ];
 
 /// Portable SeaHash over `bytes` under the fixed `STRUCT_SEED`.
-fn seahash(bytes: &[u8]) -> u64 {
+const fn seahash(bytes: &[u8]) -> u64 {
     hash_seeded(
         bytes,
         STRUCT_SEED[0],

@@ -65,6 +65,9 @@ Full rationale in `docs/development_standards.md`. The load-bearing ones:
 - **No serde.** Byte layouts are the `WaveWire` codec (`docs/wire_format.md`):
   `[STACK fixed-size][HEAP variable]`, little-endian, `usize`/`isize` never encodable.
 - **`seahash` is pinned `=4.1.0`** — STRUCT_HASH identity is load-bearing; never loosen.
+  It is vendored in `crates/seahash` (safe, `const fn`, edition 2024 — thanks to Redox OS);
+  `tests/golden.rs` there pins its output to the published 4.1.0 bit for bit, and a
+  change to the algorithm is a change to every stored identity.
 - **Everything that reaches stored bytes folds into `STRUCT_HASH`.** Fields, shape,
   `#[wavedb::key]`, `compress`, `page = N`, and every `#[wavedb::list]`
   declaration **including their order** (RFCs 0051/0052) — as a synthetic `#name`
