@@ -28,7 +28,7 @@ use seahash::hash_seeded;
 /// little-endian bytes; the per-database `seed` randomises bucket placement so
 /// collisions can't be precomputed.
 #[must_use]
-pub fn hash_of(id: u128, seed: [u64; 4]) -> u64 {
+pub const fn hash_of(id: u128, seed: [u64; 4]) -> u64 {
     hash_seeded(&id.to_le_bytes(), seed[0], seed[1], seed[2], seed[3])
 }
 
@@ -113,7 +113,7 @@ impl Directory {
 
     /// Hash an `Id` (its raw `u128`) under this directory's seed.
     #[must_use]
-    pub fn hash(&self, id: u128) -> u64 {
+    pub const fn hash(&self, id: u128) -> u64 {
         hash_of(id, self.seed)
     }
 
