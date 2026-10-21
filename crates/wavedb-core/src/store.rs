@@ -160,6 +160,8 @@ mod tests {
     #[derive(Default)]
     struct MemStore(Mutex<BTreeMap<u128, Vec<u8>>>);
 
+    // A test double, written in the trait's own (async) shape.
+    #[allow(clippy::unused_async_trait_impl)]
     impl Store for MemStore {
         async fn get(&self, id: Id) -> Result<Option<Vec<u8>>> {
             Ok(self.0.lock().unwrap().get(&id.raw()).cloned())
