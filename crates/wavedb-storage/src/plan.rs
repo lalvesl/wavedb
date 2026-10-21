@@ -183,13 +183,10 @@ impl PageStore {
             {
                 return Ok(());
             }
-            let page = match staged_page(self, slot, dir, dict, staged, source)
-            {
-                Ok(page) => {
-                    std::mem::replace(page, SlotPage::new(slot.struct_hash()))
-                }
-                Err(e) => return Err(e),
-            };
+            let page = std::mem::replace(
+                staged_page(self, slot, dir, dict, staged, source)?,
+                SlotPage::new(slot.struct_hash()),
+            );
 
             let mut keep = SlotPage::new(slot.struct_hash());
             let mut moved = SlotPage::new(slot.struct_hash());
