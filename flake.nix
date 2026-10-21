@@ -57,7 +57,7 @@
           buildInputs = [
             pkgs.openssl
           ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
             pkgs.darwin.apple_sdk.frameworks.Security
           ];
         };
@@ -152,8 +152,8 @@
               # come from `flake.lock` like every other measured system.
               sqlite
             ]
-            ++ lib.optionals stdenv.isLinux guiLibs
-            ++ lib.optionals stdenv.isDarwin [
+            ++ lib.optionals stdenv.hostPlatform.isLinux guiLibs
+            ++ lib.optionals stdenv.hostPlatform.isDarwin [
               darwin.apple_sdk.frameworks.SystemConfiguration
               darwin.apple_sdk.frameworks.CoreFoundation
               darwin.apple_sdk.frameworks.Security
@@ -161,7 +161,7 @@
 
           shellHook = ''
             export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig:${pkgs.sqlite.dev}/lib/pkgconfig"
-            ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
               export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath guiLibs}:$LD_LIBRARY_PATH"
             ''}
           '';

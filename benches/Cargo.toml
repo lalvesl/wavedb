@@ -2,7 +2,7 @@
 name = "wavedb-bench"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.99"
 publish = false
 
 # Deliberately OUTSIDE the workspace (`workspace.exclude` in the root

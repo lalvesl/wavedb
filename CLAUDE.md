@@ -52,7 +52,7 @@ scripts/registry_size.sh   # per-struct wasm cost of the exposure match
                            # (examples/registry-size at widths 1/16/64)
 ```
 
-Toolchain is pinned by `rust-toolchain.toml` (1.96.0, edition 2024, includes
+Toolchain is pinned by `rust-toolchain.toml` (1.99.0, edition 2024, includes
 wasm32-unknown-unknown). Never build against anything else.
 
 ## Hard rules (breaking one is an architecture change)

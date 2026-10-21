@@ -2,7 +2,7 @@
 name = "wavedb-bench-gen"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.99"
 publish = false
 
 # Its own workspace, and its own lock, for the same reason it is its own crate:

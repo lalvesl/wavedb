@@ -16,7 +16,7 @@ cargo test --workspace                   # all green
 
 ## Toolchain
 
-- **Pinned toolchain**: `rust-toolchain.toml` (currently `1.96.0`, with
+- **Pinned toolchain**: `rust-toolchain.toml` (currently `1.99.0`, with
   `wasm32-unknown-unknown`). Never build against "whatever is installed";
   `rust-version` in `[workspace.package]` must match the pin.
 - **Edition 2024** for every crate, via `edition.workspace = true`.
