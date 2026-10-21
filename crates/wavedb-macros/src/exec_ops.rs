@@ -47,6 +47,9 @@ fn op_fn(op: &str, body: &TokenStream) -> TokenStream {
     quote! {
         #[doc(hidden)]
         #[allow(clippy::future_not_send)]
+        // One exposure-op shape for every command: a step that only refuses
+        // has nothing to await, and keeps the shape all the same.
+        #[allow(clippy::unused_async_trait_impl)]
         pub async fn #ident<S: ::wavedb_core::Store>(
             store: &S,
             caller: ::wavedb_core::Caller,
