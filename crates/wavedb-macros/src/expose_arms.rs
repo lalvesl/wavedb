@@ -129,7 +129,9 @@ pub fn node_methods(structs: &[&syn::Path], wire: &[&Entry]) -> TokenStream {
         .filter(|e| e.kind == Kind::Fn)
         .map(fn_arm);
     quote! {
-        #[allow(clippy::future_not_send)]
+        // A registry with no arm of a kind has nothing to await; the method
+        // keeps the trait's async shape all the same.
+        #[allow(clippy::future_not_send, clippy::unused_async_trait_impl)]
         async fn run_node<S: ::wavedb_core::Store>(
             &self,
             store: &S,
@@ -145,7 +147,7 @@ pub fn node_methods(structs: &[&syn::Path], wire: &[&Entry]) -> TokenStream {
             }
         }
 
-        #[allow(clippy::future_not_send)]
+        #[allow(clippy::future_not_send, clippy::unused_async_trait_impl)]
         async fn call_fn<R: ::wavedb_core::Route>(
             &self,
             route: &R,
