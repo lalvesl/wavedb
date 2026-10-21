@@ -65,8 +65,10 @@ impl<S: Store> Store for Overlay<'_, S> {
         }
     }
 
-    async fn apply(&self, _batch: &[Write]) -> Result<()> {
+    fn apply(&self, _batch: &[Write]) -> impl Future<Output = Result<()>> {
         // Plans only read; the real batch commits through the inner store.
-        Err(Error::Backend("overlay store is read-only".into()))
+        std::future::ready(Err(Error::Backend(
+            "overlay store is read-only".into(),
+        )))
     }
 }
