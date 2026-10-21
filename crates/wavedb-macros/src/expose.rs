@@ -160,7 +160,7 @@ pub fn expand_server(input: TokenStream) -> syn::Result<TokenStream> {
 
             // Store-generic seam — Send only when the backing store is,
             // the same stance the core traits take.
-            #[allow(clippy::future_not_send)]
+            #[allow(clippy::future_not_send, clippy::unused_async_trait_impl)]
             async fn execute<S: ::wavedb_core::Store>(
                 &self,
                 store: &S,
