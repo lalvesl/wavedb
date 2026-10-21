@@ -45,6 +45,8 @@ mod tests {
     // A type that overrides `fallback_not_found` to supply a default.
     #[derive(Debug, PartialEq, Eq)]
     struct WithFallback(u32);
+    // A test double, written in the trait's own (async) shape.
+    #[allow(clippy::unused_async_trait_impl)]
     impl LookupHooks<DummyDb> for WithFallback {
         async fn fallback_not_found(_db: &DummyDb) -> Result<Option<Self>> {
             Ok(Some(Self(42)))
