@@ -399,7 +399,7 @@ mod tests {
         let ts: Vec<u64> = found.iter().map(|(t, _)| *t).collect();
         assert_eq!(ts, vec![10, 20, 30]);
         assert!(next_ts(30) > 30);
-        assert!(next_ts(u64::MAX - 1) == u64::MAX);
+        assert_eq!(next_ts(u64::MAX - 1), u64::MAX);
         Ok(())
     }
 
@@ -456,7 +456,8 @@ mod tests {
             f.write_all_at(&b, len - 1)?;
         }
         let mut j = Journal::open(&path, ts)?;
-        assert!(j.replay()?.is_empty());
+        let observed = j.replay()?;
+        assert!(observed.is_empty(), "{observed:?}");
         Ok(())
     }
 
@@ -466,7 +467,8 @@ mod tests {
         Journal::create(d.path(), 5)?;
         let (ts, path) = scan(d.path())?.pop().unwrap();
         Journal::open(&path, ts)?.delete()?;
-        assert!(scan(d.path())?.is_empty());
+        let observed = scan(d.path())?;
+        assert!(observed.is_empty(), "{observed:?}");
         Ok(())
     }
 }
