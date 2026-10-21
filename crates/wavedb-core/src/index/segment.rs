@@ -497,7 +497,8 @@ mod tests {
     #[test]
     fn a_split_past_the_end_moves_nothing() {
         let mut seg = filled(&[10, 20]);
-        assert!(seg.split_off(2).is_empty());
+        let observed = seg.split_off(2);
+        assert!(observed.is_empty(), "{observed:?}");
         assert_eq!(seg.len(), 2, "the segment must be left intact");
     }
 
