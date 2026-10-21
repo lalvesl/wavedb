@@ -710,7 +710,7 @@ mod tests {
                 .try_collect()
                 .await
                 .unwrap();
-            assert!(none.is_empty());
+            assert!(none.is_empty(), "{none:?}");
         });
     }
 
@@ -778,6 +778,8 @@ mod tests {
             }
         }
 
+        // A test double, written in the trait's own (async) shape.
+        #[allow(clippy::unused_async_trait_impl)]
         impl Store for MemStore {
             async fn get(&self, id: Id) -> Result<Option<Vec<u8>>> {
                 Ok(self.0.lock().unwrap().get(&id.raw()).cloned())
@@ -1206,7 +1208,7 @@ mod tests {
                 Reply::Removed(true)
             );
             let live: Vec<Note> = col.all(&db).try_collect().await.unwrap();
-            assert!(live.is_empty());
+            assert!(live.is_empty(), "{live:?}");
         });
     }
 
@@ -1309,7 +1311,7 @@ mod tests {
             assert_eq!(all, vec![pinned]);
             assert!(col.remove(&db, id).await.unwrap());
             let all: Vec<Note> = col.all(&db).try_collect().await.unwrap();
-            assert!(all.is_empty());
+            assert!(all.is_empty(), "{all:?}");
         });
     }
 
@@ -1597,7 +1599,11 @@ mod lane_tests {
             "the guard's lane list drifted from the engine's"
         );
         // A Unique type owns no collection, so it reserves no lane.
-        assert!(super::AboutUser::LANE_HASHES.is_empty());
+        assert!(
+            super::AboutUser::LANE_HASHES.is_empty(),
+            "{:?}",
+            super::AboutUser::LANE_HASHES
+        );
     }
 
     #[test]
