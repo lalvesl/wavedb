@@ -248,6 +248,8 @@ mod tests {
     /// A store that records nothing — the inner engine stand-in.
     #[derive(Default)]
     struct NullStore;
+    // A test double, written in the trait's own (async) shape.
+    #[allow(clippy::unused_async_trait_impl)]
     impl Store for NullStore {
         async fn get(&self, _: Id) -> wavedb_core::Result<Option<Vec<u8>>> {
             Ok(None)
