@@ -48,7 +48,7 @@ pub fn mint_instant(floor: u64) -> u64 {
     let mut minted = 0;
     // The closure always returns `Some`, so the update cannot fail; on a
     // contended retry it re-derives from the fresher `last`.
-    let _ = LAST.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+    let _ = LAST.try_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
         minted = wavedb_platform::time::key_nanos()
             .max(floor.saturating_add(1))
             .max(last.saturating_add(1));
