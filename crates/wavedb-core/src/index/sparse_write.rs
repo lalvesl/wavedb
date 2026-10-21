@@ -609,7 +609,8 @@ mod tests {
                 );
             }
             assert_eq!(tree.total(&store).await.unwrap(), 0);
-            assert!(walk(&store, &tree).await.is_empty());
+            let observed = walk(&store, &tree).await;
+            assert!(observed.is_empty(), "{observed:?}");
         });
     }
 
