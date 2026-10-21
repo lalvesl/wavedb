@@ -115,7 +115,7 @@ impl Conn {
     /// [`Error::Js`] when the browser refuses the send (closing socket).
     // `async` for parity with the native half (which awaits its write); the
     // browser `WebSocket.send` is fire-and-forget.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn send(&mut self, bytes: &[u8]) -> Result<()> {
         self.ws
             .send_with_u8_array(bytes)
@@ -136,7 +136,7 @@ impl Conn {
     /// # Errors
     /// [`Error::Js`] when the browser refuses (already closing is fine).
     // `async` for parity with the native half; the browser call is sync.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn close(&mut self) -> Result<()> {
         self.ws.close().map_err(|e| js("WebSocket::close", &e))
     }
@@ -180,7 +180,7 @@ impl SendHalf {
     ///
     /// # Errors
     /// [`Error::Js`] when the browser refuses the send (closing socket).
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn send(&mut self, bytes: &[u8]) -> Result<()> {
         self.ws
             .send_with_u8_array(bytes)
@@ -192,7 +192,7 @@ impl SendHalf {
     ///
     /// # Errors
     /// None in the browser.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn pong(&mut self, _payload: &[u8]) -> Result<()> {
         Ok(())
     }
@@ -201,7 +201,7 @@ impl SendHalf {
     ///
     /// # Errors
     /// [`Error::Js`] when the browser refuses (already closing is fine).
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn close(&mut self) -> Result<()> {
         self.ws.close().map_err(|e| js("WebSocket::close", &e))
     }
