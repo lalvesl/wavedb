@@ -129,11 +129,15 @@ impl DbHandle for Db {
         streamed(self, T::STRUCT_HASH, Command::History, Vec::new())
     }
 
-    async fn create_pivot<T: NonUniqueStruct>(&self) -> Result<LocalId> {
+    fn create_pivot<T: NonUniqueStruct>(
+        &self,
+    ) -> impl Future<Output = Result<LocalId>> {
         // Not wire-reachable: a collection is bootstrapped node-side (inside
         // a `#[server]` body via `ServerDb`), never by a raw client command.
-        Err(Error::Core(wavedb_core::Error::UnknownStructHash(
-            <T::Pivot as wavedb_core::Pivot>::STRUCT_HASH,
+        std::future::ready(Err(Error::Core(
+            wavedb_core::Error::UnknownStructHash(
+                <T::Pivot as wavedb_core::Pivot>::STRUCT_HASH,
+            ),
         )))
     }
 
@@ -259,21 +263,23 @@ impl DbHandle for Db {
         crate::client_lists::cached_list_len::<T>(self, pivot, index).await
     }
 
-    async fn fuzzy_search<T: NonUniqueStruct + 'static>(
+    fn fuzzy_search<T: NonUniqueStruct + 'static>(
         &self,
         _pivot: LocalId,
         _index: usize,
         _query: &str,
         _mode: wavedb_core::fuzzy::Fuzzy,
         _limit: usize,
-    ) -> Result<Vec<wavedb_core::fuzzy::Scored<(wavedb_core::Id, T)>>> {
+    ) -> impl Future<
+        Output = Result<Vec<wavedb_core::fuzzy::Scored<(wavedb_core::Id, T)>>>,
+    > {
         // No wire command yet (RFC 0056 leaves it open). Unlike `listed`,
         // this one has a natural home without one: the todo-app shape —
         // every struct storage-only, the whole API `#[server]` functions —
         // reaches it node-side, where a search can also decide what a hit
         // should even look like to the app.
-        Err(Error::Core(wavedb_core::Error::UnknownStructHash(
-            T::STRUCT_HASH,
+        std::future::ready(Err(Error::Core(
+            wavedb_core::Error::UnknownStructHash(T::STRUCT_HASH),
         )))
     }
 
