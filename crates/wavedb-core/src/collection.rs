@@ -413,7 +413,7 @@ mod tests {
             }
             let empty: Vec<(crate::id::Id, Doc)> =
                 reopened.all(&store).try_collect().await.unwrap();
-            assert!(empty.is_empty());
+            assert!(empty.is_empty(), "{empty:?}");
         });
     }
 
@@ -485,7 +485,7 @@ mod tests {
                     .try_collect()
                     .await
                     .unwrap();
-            assert!(none.is_empty());
+            assert!(none.is_empty(), "{none:?}");
 
             for volume in [1u64, 2, 3] {
                 save_unique(&store, tenant(), &Settings { volume })
@@ -505,7 +505,7 @@ mod tests {
                 versions.iter().map(|(_, s)| s.volume).collect::<Vec<_>>(),
                 vec![3, 2, 1]
             );
-            assert!(versions[0].1.volume == 3);
+            assert_eq!(versions[0].1.volume, 3);
             assert!(versions.last().unwrap().0.previous.is_none());
         });
     }
@@ -710,20 +710,11 @@ mod tests {
             // Something must actually have happened, or the assertions above
             // were comparing two empty structures.
             let pivot = col.load_pivot(&store).await.unwrap();
-            assert!(
-                !col.recency_chain(&pivot)
-                    .collect(&store)
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
-            assert!(
-                !col.dead_log(&pivot)
-                    .collect(&store)
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
+            let recency =
+                col.recency_chain(&pivot).collect(&store).await.unwrap();
+            assert!(!recency.is_empty(), "{recency:?}");
+            let dead = col.dead_log(&pivot).collect(&store).await.unwrap();
+            assert!(!dead.is_empty(), "{dead:?}");
         });
     }
 
