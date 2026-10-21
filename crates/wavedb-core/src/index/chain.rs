@@ -765,7 +765,8 @@ mod tests {
             let store = MemStore::default();
             let chain = fresh(&store).await;
             assert_eq!(chain.head(), chain.tail());
-            assert!(check(&store, &chain).await.is_empty());
+            let observed = check(&store, &chain).await;
+            assert!(observed.is_empty(), "{observed:?}");
         });
     }
 
@@ -954,7 +955,8 @@ mod tests {
                 remove(&store, &mut chain, v).await;
                 check(&store, &chain).await;
             }
-            assert!(check(&store, &chain).await.is_empty());
+            let observed = check(&store, &chain).await;
+            assert!(observed.is_empty(), "{observed:?}");
             assert_eq!(segments(&store, &chain).await, 1, "shell not kept");
             assert_eq!(chain.head(), chain.tail());
             let index = chain.index().expect("an indexed chain");
@@ -976,7 +978,8 @@ mod tests {
                 remove(&store, &mut chain, v).await;
                 check(&store, &chain).await;
             }
-            assert!(check(&store, &chain).await.is_empty());
+            let observed = check(&store, &chain).await;
+            assert!(observed.is_empty(), "{observed:?}");
             assert_eq!(segments(&store, &chain).await, 1);
         });
     }
