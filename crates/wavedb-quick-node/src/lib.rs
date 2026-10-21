@@ -188,7 +188,7 @@ where
     // synchronous. It stays `async` because bringing a network up is not
     // synchronous everywhere — on `embassy-net` it waits for the link — and
     // callers should not change signature twice (RFC 0066).
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn bind(self, addr: &str) -> Result<Bound<E>> {
         let stores = wavedb_storage::open_shards(
             &self.data_dir,
