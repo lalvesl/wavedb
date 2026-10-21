@@ -132,9 +132,11 @@ fn node_serves_declared_list_pages_over_http() {
         // the caller chose the limit.
         assert_eq!(listed(&client, node.rows, 8, 0, 4).await, vec![8, 9]);
         // Past the end yields nothing rather than refusing.
-        assert!(listed(&client, node.rows, 99, 0, 4).await.is_empty());
+        let observed = listed(&client, node.rows, 99, 0, 4).await;
+        assert!(observed.is_empty(), "{observed:?}");
         // A zero limit is a legitimate empty page.
-        assert!(listed(&client, node.rows, 0, 0, 0).await.is_empty());
+        let observed = listed(&client, node.rows, 0, 0, 0).await;
+        assert!(observed.is_empty(), "{observed:?}");
 
         // An undeclared ordering on a type that *has* lists is a typed refusal —
         // the caller asked for something specific and wrong, and an empty page
