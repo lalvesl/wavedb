@@ -54,7 +54,7 @@ impl Db {
     ///
     /// # Errors
     /// None today; the signature is fallible for the future transports.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn connect(
         addr: impl Into<String>,
         user: U48,
