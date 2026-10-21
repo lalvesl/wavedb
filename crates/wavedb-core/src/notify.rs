@@ -203,7 +203,7 @@ mod tests {
                 "the removal instant lands past every earlier mutation — \
                  a catch-up cursor advanced to it misses nothing"
             );
-            assert!(noted[2].body.is_empty());
+            assert!(noted[2].body.is_empty(), "{:?}", noted[2].body);
             // Saved events carry the new live metadata; a removal rewrites
             // no record, so it carries none.
             assert!(noted[0].meta.is_some() && noted[1].meta.is_some());
@@ -243,11 +243,20 @@ mod tests {
             #[derive(Default)]
             struct Refusing(RefCell<Vec<Mutation>>);
             impl Store for Refusing {
-                async fn get(&self, _: Id) -> Result<Option<Vec<u8>>> {
-                    Ok(None)
+                fn get(
+                    &self,
+                    _: Id,
+                ) -> impl Future<Output = Result<Option<Vec<u8>>>>
+                {
+                    std::future::ready(Ok(None))
                 }
-                async fn apply(&self, _: &[Write]) -> Result<()> {
-                    Err(crate::error::Error::Backend("full".into()))
+                fn apply(
+                    &self,
+                    _: &[Write],
+                ) -> impl Future<Output = Result<()>> {
+                    std::future::ready(Err(crate::error::Error::Backend(
+                        "full".into(),
+                    )))
                 }
                 fn note_mutation(&self, mutation: impl FnOnce() -> Mutation) {
                     self.0.borrow_mut().push(mutation());
