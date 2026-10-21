@@ -395,7 +395,7 @@ mod tests {
             }
 
             let keys = check_invariants(&tree, &store, tenant).await;
-            assert!(keys.is_empty());
+            assert!(keys.is_empty(), "{keys:?}");
             assert_eq!(store.len(), 1, "empty tree = exactly one root leaf");
             assert_ne!(tree.root(), peak_root, "root never collapsed");
         });
