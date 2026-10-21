@@ -202,6 +202,8 @@ mod tests {
     #[derive(Default)]
     struct MemStore(Mutex<BTreeMap<u128, Vec<u8>>>);
 
+    // A test double, written in the trait's own (async) shape.
+    #[allow(clippy::unused_async_trait_impl)]
     impl Store for MemStore {
         async fn get(&self, id: Id) -> Result<Option<Vec<u8>>> {
             Ok(self.0.lock().unwrap().get(&id.raw()).cloned())
@@ -238,6 +240,8 @@ mod tests {
     #[derive(Clone, Copy)]
     struct OneHash;
 
+    // A test double, written in the trait's own (async) shape.
+    #[allow(clippy::unused_async_trait_impl)]
     impl Exposure for OneHash {
         fn knows(&self, struct_hash: u64) -> bool {
             struct_hash == 0x1234
@@ -370,7 +374,7 @@ mod tests {
             };
             let reply: SyncReply =
                 wavedb_core::wire::from_wire(&bytes).unwrap();
-            assert!(reply.events.is_empty());
+            assert!(reply.events.is_empty(), "{:?}", reply.events);
             assert_eq!(reply.cursors.first().map(|(_, c)| *c), Some(40));
 
             // A cursored sync navigates: the canned step answers one saved and
