@@ -162,7 +162,7 @@ mod tests {
         let g = grams("ab");
         assert_eq!(g.len(), 4);
         // Without padding "ab" would produce no trigram at all.
-        assert!(!g.is_empty());
+        assert!(!g.is_empty(), "{g:?}");
     }
 
     #[test]
