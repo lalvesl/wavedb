@@ -178,13 +178,10 @@ pub fn load_wavedb_sidecar(
     if raw.len() % 16 != 0 {
         return Err("ids.bin is not a whole number of 128-bit ids".into());
     }
-    let ids = raw
-        .chunks_exact(16)
-        .map(|c| {
-            let mut b = [0u8; 16];
-            b.copy_from_slice(c);
-            Id::from_raw(u128::from_le_bytes(b))
-        })
+    let (whole, _) = raw.as_chunks::<16>();
+    let ids = whole
+        .iter()
+        .map(|c| Id::from_raw(u128::from_le_bytes(*c)))
         .collect();
     let pivot_bytes = std::fs::read(dir.join("pivot.bin"))
         .map_err(|e| format!("read pivot: {e}"))?;
