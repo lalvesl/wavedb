@@ -273,7 +273,8 @@ mod tests {
                 by_tag(col, &store, "new").await,
                 vec![(a, cred("ada", "new"))]
             );
-            assert!(by_tag(col, &store, "old").await.is_empty());
+            let observed = by_tag(col, &store, "old").await;
+            assert!(observed.is_empty(), "{observed:?}");
 
             // A different key value is a different record.
             let c = col.insert(&store, &cred("bob", "x")).await.unwrap();
@@ -414,7 +415,8 @@ mod tests {
                 by_tag(col, &store, "v2").await,
                 vec![(id, cred("ada", "v2"))]
             );
-            assert!(by_tag(col, &store, "v1").await.is_empty());
+            let observed = by_tag(col, &store, "v1").await;
+            assert!(observed.is_empty(), "{observed:?}");
 
             // Catch-up from before the removal replays the removal *then*
             // the revival (the dead log keeps history; instants order the
