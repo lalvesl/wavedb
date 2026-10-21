@@ -36,11 +36,18 @@ impl MemStore {
 }
 
 impl Store for MemStore {
-    async fn get(&self, id: Id) -> Result<Option<Vec<u8>>> {
-        Ok(self.0.lock().unwrap().get(&id.raw()).cloned())
+    fn get(&self, id: Id) -> impl Future<Output = Result<Option<Vec<u8>>>> {
+        std::future::ready(Ok(self.0.lock().unwrap().get(&id.raw()).cloned()))
     }
 
-    async fn apply(&self, batch: &[Write]) -> Result<()> {
+    fn apply(&self, batch: &[Write]) -> impl Future<Output = Result<()>> {
+        std::future::ready(self.apply_now(batch))
+    }
+}
+
+impl MemStore {
+    /// The batch, applied synchronously.
+    fn apply_now(&self, batch: &[Write]) -> Result<()> {
         let mut m = self.0.lock().unwrap();
         // Guards validate against the pre-batch state; any mismatch refuses
         // the whole batch before a single write lands.
