@@ -525,7 +525,8 @@ mod tests {
             let store = MemStore::default();
             let tree: BpTree =
                 BpTree::create(&store, U48::from(TENANT)).await.unwrap();
-            assert!(all_keys(&tree, &store).await.is_empty());
+            let observed = all_keys(&tree, &store).await;
+            assert!(observed.is_empty(), "{observed:?}");
         });
     }
 
