@@ -190,28 +190,31 @@ impl PageStore {
     }
 }
 
+// Every method is synchronous and its future is `Ready`: the engine never
+// suspends, which is what lets a collection op run read-to-apply without
+// interleaving on a current-thread executor (`concurrent_node_clobber.rs`).
 impl Store for PageStore {
-    async fn get(&self, id: Id) -> CoreResult<Option<Vec<u8>>> {
+    fn get(&self, id: Id) -> impl Future<Output = CoreResult<Option<Vec<u8>>>> {
         // Untyped fallback: the id alone names no type, so probe every slot —
         // caches first (cheap), then settled pages. Typed callers use
         // `get_of` and skip this scan entirely.
-        Ok(self.read_any(id)?)
+        std::future::ready(self.read_any(id).map_err(Into::into))
     }
 
-    async fn get_of(
+    fn get_of(
         &self,
         struct_hash: u64,
         id: Id,
-    ) -> CoreResult<Option<Vec<u8>>> {
+    ) -> impl Future<Output = CoreResult<Option<Vec<u8>>>> {
         // One binary search on the route table, then this type's own cache
         // read lock — a cached read of one type never contends with another
         // type's. A miss reads through to the settled page.
-        Ok(self.read_of(struct_hash, id)?)
+        std::future::ready(self.read_of(struct_hash, id).map_err(Into::into))
     }
 
-    async fn apply(&self, batch: &[Write]) -> CoreResult<()> {
-        self.apply_inner(batch)?; // StorageError → core::Error (typed seam)
-        Ok(())
+    fn apply(&self, batch: &[Write]) -> impl Future<Output = CoreResult<()>> {
+        // StorageError → core::Error (typed seam)
+        std::future::ready(self.apply_inner(batch).map_err(Into::into))
     }
 }
 
