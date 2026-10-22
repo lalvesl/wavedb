@@ -28,6 +28,7 @@ with pkgs;
   postgresql_18 # postgres, initdb, pg_ctl
   mysql84 # mysqld, mysqladmin
   mongodb-ce # mongod
+  valkey # valkey-server, valkey-cli
 
   # The cage (see ./cage.nix).
   bubblewrap
