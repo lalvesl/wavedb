@@ -247,7 +247,7 @@ pub fn mongodb(run: &RowRun, d: Durability) -> Result<RowRecord, String> {
 /// Run the harness, taking the `hot` point in the one window where it means
 /// anything â after the last phase, before any driver closes and before the
 /// server is shut down.
-fn drive<F, W>(
+pub(super) fn drive<F, W>(
     factory: &F,
     workload: W,
     points: &mut Points,
@@ -263,7 +263,7 @@ where
     })
 }
 
-fn share(server: Server) -> Arc<Mutex<Option<Server>>> {
+pub(super) fn share(server: Server) -> Arc<Mutex<Option<Server>>> {
     Arc::new(Mutex::new(Some(server)))
 }
 
@@ -272,7 +272,10 @@ fn share(server: Server) -> Arc<Mutex<Option<Server>>> {
 /// It is taken rather than borrowed because `Server::stop` consumes the value,
 /// and it is read from the slot rather than remembered because a phase
 /// boundary may have replaced it with a different process.
-fn stop<F>(held: &Arc<Mutex<Option<Server>>>, how: F) -> Result<(), String>
+pub(super) fn stop<F>(
+    held: &Arc<Mutex<Option<Server>>>,
+    how: F,
+) -> Result<(), String>
 where
     F: FnOnce(Server) -> Result<(), String>,
 {
