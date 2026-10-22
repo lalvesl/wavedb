@@ -253,7 +253,7 @@ fn compact_mongo(port: u16) -> Result<(), String> {
 
 /// Run the harness, taking the `hot` point after the last phase and before any
 /// driver closes.
-fn drive<F>(
+pub(super) fn drive<F>(
     factory: &F,
     cfg: &crate::systems::shop::ShopCfg,
     points: &mut Points,
