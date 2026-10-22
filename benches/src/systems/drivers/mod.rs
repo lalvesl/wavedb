@@ -22,6 +22,12 @@ pub mod mysql;
 pub mod mysql_server;
 #[cfg(feature = "servers")]
 pub mod postgres;
+#[cfg(feature = "servers")]
+pub mod resp;
 pub mod shop;
 pub mod sqlite;
+#[cfg(feature = "servers")]
+pub mod valkey;
+#[cfg(feature = "servers")]
+pub mod valkey_server;
 pub mod wavedb;
