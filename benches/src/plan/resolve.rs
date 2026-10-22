@@ -26,13 +26,14 @@ use crate::corpus::{Corpus, RowKey, RowRecord, Unreadable};
 
 /// The systems in report order. `wavedb` twice, because its two engine seams
 /// are two rows rather than one row with a footnote.
-pub const SYSTEMS: [(&str, &str); 6] = [
+pub const SYSTEMS: [(&str, &str); 7] = [
     ("wavedb", "single"),
     ("wavedb", "multi"),
     ("sqlite", "-"),
     ("postgres", "-"),
     ("mysql", "-"),
     ("mongodb", "-"),
+    ("valkey", "-"),
 ];
 
 pub const DURABILITIES: [&str; 2] = ["durable", "relaxed"];
@@ -286,6 +287,7 @@ mod tests {
             ("postgres", "18.1"),
             ("mysql", "8.4.0"),
             ("mongodb", "8.0.4"),
+            ("valkey", "9.1.2"),
         ] {
             versions.insert(s.to_string(), v.to_string());
         }
@@ -330,17 +332,17 @@ mod tests {
         resolve(req, &Corpus::at(&scratch.0)).expect("resolve")
     }
 
-    /// 10 micro rows + 12 shop rows. The asymmetry is `wavedb/multi`, which
+    /// 12 micro rows + 14 shop rows. The asymmetry is `wavedb/multi`, which
     /// exists on `shop` only.
     #[test]
-    fn the_full_matrix_is_twenty_two_rows() {
+    fn the_full_matrix_is_twenty_six_rows() {
         let scratch = Scratch::new();
         let plan = plan_of(&request(), &scratch);
-        assert_eq!(plan.measure.len(), 22);
+        assert_eq!(plan.measure.len(), 26);
         assert!(plan.reuse.is_empty());
 
         let micro = plan.measure.iter().filter(|k| k.workload == "micro");
-        assert_eq!(micro.count(), 10);
+        assert_eq!(micro.count(), 12);
     }
 
     /// The constraint from `MicroOp::partition_key`, enforced where rows are
@@ -407,7 +409,7 @@ mod tests {
 
         assert_eq!(plan.reused(), 4, "postgres should have been reused");
         assert!(!plan.measure.iter().any(|k| k.system == "postgres"));
-        assert_eq!(plan.measure.len(), 18);
+        assert_eq!(plan.measure.len(), 22);
     }
 
     /// And the other half: a WaveDB row is *not* reusable across commits.
@@ -459,7 +461,7 @@ mod tests {
         let mut forced = request();
         forced.refresh = Refresh::All;
         let plan = plan_of(&forced, &scratch);
-        assert_eq!(plan.measure.len(), 22);
+        assert_eq!(plan.measure.len(), 26);
         assert_eq!(plan.reused(), 0);
     }
 
@@ -477,7 +479,7 @@ mod tests {
 
         assert_eq!(plan.measure.len(), 4, "mysql: 2 workloads × 2 rows");
         assert!(plan.measure.iter().all(|k| k.system == "mysql"));
-        assert_eq!(plan.reused(), 18);
+        assert_eq!(plan.reused(), 22);
     }
 
     #[test]
