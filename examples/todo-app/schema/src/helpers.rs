@@ -37,8 +37,16 @@ pub async fn get_profile<D: DbHandle<Error = Error>>(
 
 #[cfg(feature = "server-side")]
 pub fn hash_password(password: &str) -> String {
+    use std::fmt::Write as _;
+
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::new().chain_update(password).finalize())
+    let digest = Sha256::new().chain_update(password).finalize();
+    digest
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
 }
 
 /// The identity that owns the **global username registry**
