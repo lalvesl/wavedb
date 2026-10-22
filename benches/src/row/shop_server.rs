@@ -147,7 +147,10 @@ pub fn mysql(run: &RowRun, d: Durability) -> Result<RowRecord, String> {
                 ("innodb_buffer_pool_size".into(), CACHE_MYSQL.into()),
                 ("tenancy".into(), "user_id column + index".into()),
                 ("transaction".into(), "one per checkout".into()),
-            ],
+            ]
+            .into_iter()
+            .chain(drivers::mysql_server::lean_settings())
+            .collect(),
             compression: "none",
             retains_history: false,
             notes: vec![
