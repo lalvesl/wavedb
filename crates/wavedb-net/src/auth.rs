@@ -14,7 +14,7 @@
 //! record (`session` = the record's raw `Id`) so rotation and revocation are
 //! one record write (`wavedb::auth`).
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use wavedb_core::U48;
 use wavedb_wire::WaveWire;
@@ -93,7 +93,7 @@ pub enum TokenError {
 
 fn mac(secret: &[u8; 32], claims_wire: &[u8]) -> [u8; MAC_LEN] {
     // HMAC accepts any key length; a 32-byte secret never errors.
-    let mut m = <Hmac<Sha256> as Mac>::new_from_slice(secret)
+    let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(secret)
         .unwrap_or_else(|_| unreachable!("32-byte HMAC key is always valid"));
     m.update(claims_wire);
     m.finalize().into_bytes().into()
@@ -127,7 +127,7 @@ pub fn verify(
         .checked_sub(MAC_LEN)
         .ok_or(TokenError::Malformed)?;
     let (claims_wire, tag) = token.split_at(split);
-    let mut m = <Hmac<Sha256> as Mac>::new_from_slice(secret)
+    let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(secret)
         .unwrap_or_else(|_| unreachable!("32-byte HMAC key is always valid"));
     m.update(claims_wire);
     m.verify_slice(tag).map_err(|_| TokenError::BadSignature)?;
