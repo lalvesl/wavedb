@@ -64,6 +64,14 @@ more than a smaller one, so the least-adjustable server sets the number for all
 three. Only one server runs at a time, so the cgroup holds one server plus the
 benchmark process.
 
+The cache is the only budget that is equalised; MySQL needs three more
+settings to fit at all. With `mysqld` 8.4's defaults the cgroup's OOM killer
+took it in every row (504 MB anonymous), so it runs with
+`performance_schema = OFF` (telemetry), `innodb_log_buffer_size = 16M` (the
+pre-8.0.28 default) and `log_bin = OFF` — the binary log is replication's, no
+peer runs a replica, and it would add a second fsync to every commit even in
+the relaxed row. Each row records them in its `settings`.
+
 The budget is part of the **host key**, so a caged run and an uncaged one on the
 same hardware are different lanes. Both budgets are read back from the kernel
 (`Cpus_allowed_list`, the cgroup's `memory.max`) rather than assumed, so a
