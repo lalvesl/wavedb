@@ -66,8 +66,10 @@ pub fn measure(
         "mysql" => super::shop_server::mysql(run, d).map(Some),
         #[cfg(feature = "servers")]
         "mongodb" => super::shop_server::mongodb(run, d).map(Some),
+        #[cfg(feature = "servers")]
+        "valkey" => super::valkey::shop(run, d).map(Some),
         #[cfg(not(feature = "servers"))]
-        "postgres" | "mysql" | "mongodb" => Err(format!(
+        "postgres" | "mysql" | "mongodb" | "valkey" => Err(format!(
             "{}: built without the `servers` feature",
             run.key.system
         )),
