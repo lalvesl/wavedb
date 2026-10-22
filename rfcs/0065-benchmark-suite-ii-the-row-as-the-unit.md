@@ -492,6 +492,19 @@ Stated explicitly so the deprecation does not read as a repudiation:
   concurrency prediction ("the gap should open with the client count") is the
   one this RFC finally makes testable.
 
+### 10. Valkey, the in-memory peer (added 2026-10-09)
+
+A fourth server row, for the question "what does a key-value store answer a
+point read in". It has **no cache budget** — every key is resident, so the
+256 MB pin does not apply and the 500 MB cage is its only bound — and its only
+copy on disk is the AOF (`appendfsync always` durable, `everysec` relaxed, RDB
+snapshots off, rewritten only by the row's compaction). A restart replays the
+AOF, so `read_cold` reads a resident dataset; the restart still happens, so
+the phase boundary is the one every row crosses. The tag index (micro) and
+the two shop indexes are sets / sorted sets the client keeps, and a checkout
+is one pipelined `MULTI … EXEC`. The client is hand-rolled RESP2. The matrix
+grows to 26 rows.
+
 ## Alternatives
 
 - **Keep the run as the unit and add a peer-result cache beside it.** Rejected:
