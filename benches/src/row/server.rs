@@ -156,7 +156,10 @@ pub fn mysql(run: &RowRun, d: Durability) -> Result<RowRecord, String> {
                 ("innodb_buffer_pool_size".into(), CACHE_MYSQL.into()),
                 ("transport".into(), "unix socket".into()),
                 ("statements".into(), "server-side prepared".into()),
-            ],
+            ]
+            .into_iter()
+            .chain(drivers::mysql_server::lean_settings())
+            .collect(),
             compression: "none",
             retains_history: false,
             notes: vec![
