@@ -117,6 +117,7 @@ in
       --user="$(id -un)" --log-error="$TMPDIR/init.log"
     mysqld --datadir="$out/data" --socket="$TMPDIR/mysql.sock" \
       --skip-networking --log-error="$TMPDIR/run.log" \
+      --performance-schema=OFF --innodb-log-buffer-size=16M --disable-log-bin \
       --local-infile=1 &
     for _ in $(seq 1 60); do
       mysqladmin --socket="$TMPDIR/mysql.sock" -u root ping \
