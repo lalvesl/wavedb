@@ -14,6 +14,11 @@
 with pkgs;
 [
   rustToolchain
+  # The linker. `cargo` links through whatever `cc` is first on PATH, so
+  # without this the build picks up the caller's — a stale direnv shell
+  # links a newer `libsqlite3` against an older glibc and fails
+  # (`sinh@GLIBC_2.44`). The C toolchain is pinned like the Rust one.
+  stdenv.cc
   pkg-config
   git
   coreutils
