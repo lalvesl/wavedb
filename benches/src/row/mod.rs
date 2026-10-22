@@ -31,6 +31,8 @@ pub mod server;
 pub mod shop;
 #[cfg(feature = "servers")]
 pub mod shop_server;
+#[cfg(feature = "servers")]
+pub mod valkey;
 
 use crate::corpus::{RowKey, RowRecord};
 use crate::systems::{Cfg, Durability};
