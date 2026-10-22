@@ -139,13 +139,20 @@ pub fn mongodb_is_log(path: &Path) -> bool {
     })
 }
 
+/// Valkey: nothing. The append-only file is its only copy on disk — there
+/// is no data file beside it for a log to be the *other* part of.
+#[must_use]
+pub const fn valkey_is_log(_path: &Path) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use super::{
         Points, mongodb_is_log, mysql_is_log, postgres_is_log, sqlite_is_log,
-        wavedb_is_log,
+        valkey_is_log, wavedb_is_log,
     };
     use crate::footprint::Point;
 
@@ -188,6 +195,17 @@ mod tests {
         assert!(mongodb_is_log(Path::new("/d/journal/WiredTigerLog.0001")));
         assert!(mongodb_is_log(Path::new("/d/diagnostic.data/metrics")));
         assert!(!mongodb_is_log(Path::new("/d/collection-0-123.wt")));
+    }
+
+    #[test]
+    fn valkey_counts_its_whole_aof_as_data() {
+        for p in [
+            "/d/appendonlydir/appendonly.aof.1.base.rdb",
+            "/d/appendonlydir/appendonly.aof.1.incr.aof",
+            "/d/appendonlydir/appendonly.aof.manifest",
+        ] {
+            assert!(!valkey_is_log(Path::new(p)), "{p}");
+        }
     }
 
     /// The names are what a reader's tooling keys on, and they arrive in the
