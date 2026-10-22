@@ -183,7 +183,8 @@ fn full_client_flow_and_restart() {
         assert_eq!(found(&db, "mlk").await, vec!["Buy milk"]);
         // Something genuinely unrelated shares no grams at all, so it comes back
         // empty rather than ranked-but-wrong.
-        assert!(found(&db, "quantum chromodynamics").await.is_empty());
+        let observed = found(&db, "quantum chromodynamics").await;
+        assert!(observed.is_empty(), "{observed:?}");
 
         complete_todo(&db, id_milk).await.expect("complete");
         delete_todo(&db, id_docs).await.expect("delete");
