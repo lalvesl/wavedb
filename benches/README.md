@@ -6,7 +6,8 @@ for. Design, methodology and the reasoning behind every choice live in
 how to run it.
 
 **Both brackets are implemented**: the WaveDB engine in-process against SQLite
-(embedded), and MongoDB, PostgreSQL and MySQL over a local connection (server).
+(embedded), and MongoDB, PostgreSQL, MySQL and Valkey over a local connection
+(server).
 Nine rows, since every competitor carries a durable and a relaxed one and
 WaveDB has only durable to offer.
 
@@ -187,6 +188,14 @@ those may reach the shipped dependency graph or `cargo deny check`. SQLite comes
 from the system library pinned by `flake.lock`, never `rusqlite`'s bundled copy
 — that pinning is why the suite runs under Nix.
 
+Valkey has no driver crate: RESP2 is five reply types, so the client is
+`systems/drivers/resp.rs`, hand-rolled like the workspace's own HTTP and
+WebSocket halves, and pipelined — a checkout is one `MULTI … EXEC` round trip.
+It is the one peer with **no cache budget**: every key is resident, the AOF is
+its only copy on disk (`appendfsync always` durable, `everysec` relaxed, no RDB
+snapshots, rewritten only by the row), and a restart replays the AOF, so its
+`read_cold` reads a resident dataset. Each row says so in its notes.
+
 The three server drivers sit behind a `servers` feature, on by default. It
 exists for `bench-gen`, which fills WaveDB and writes a TSV and needs no
 database client: it is a build input of *every* seed, so without the gate each
@@ -206,7 +215,7 @@ Five things the numbers do not mean without their context:
 
 - **Embedded and server rows are different brackets.** A server row carries a
   connection round trip per operation that an in-process row does not. Compare
-  WaveDB to SQLite, or MongoDB to PostgreSQL to MySQL — never across.
+  WaveDB to SQLite, or MongoDB to PostgreSQL to MySQL to Valkey — never across.
 - **The shop table's `checkout` is not a like-for-like race either.** The other
   four commit the order and its line items in one transaction, one barrier;
   WaveDB has no multi-record transaction, so it is one batch and one barrier per
