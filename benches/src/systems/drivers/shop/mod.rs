@@ -33,6 +33,8 @@ pub mod mysql;
 #[cfg(feature = "servers")]
 pub mod postgres;
 pub mod sqlite;
+#[cfg(feature = "servers")]
+pub mod valkey;
 pub mod wavedb;
 
 /// The phase after which every system quiesces and empties its read cache.
