@@ -23,6 +23,8 @@ pub mod mysql;
 #[cfg(feature = "servers")]
 pub mod postgres;
 pub mod sqlite;
+#[cfg(feature = "servers")]
+pub mod valkey;
 pub mod wavedb;
 
 use std::path::PathBuf;
