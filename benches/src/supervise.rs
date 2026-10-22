@@ -19,10 +19,11 @@ use crate::corpus::RowKey;
 /// `sqlite` is absent because `rusqlite::version()` answers in-process — it
 /// links the library, so spawning `sqlite3` would ask a *different* binary
 /// than the one being measured.
-const PROBES: [(&str, &str); 3] = [
+const PROBES: [(&str, &str); 4] = [
     ("postgres", "postgres"),
     ("mysql", "mysqld"),
     ("mongodb", "mongod"),
+    ("valkey", "valkey-server"),
 ];
 
 /// A version, or why the system cannot be measured here.
@@ -68,9 +69,9 @@ fn probe_one(binary: &str) -> Probe {
 
 /// The first dotted number in a `--version` line.
 ///
-/// The three servers announce themselves in three shapes —
+/// The servers announce themselves in four shapes —
 /// `postgres (PostgreSQL) 18.1`, `mysqld  Ver 8.4.0 for Linux on x86_64`,
-/// `db version v8.0.4` — and the whole line is not usable as an identity
+/// `db version v8.0.4`, `Valkey server v=9.1.2 sha=…` — and the whole line is not usable as an identity
 /// because `mysqld` prints its own **store path**, which changes on rebuilds
 /// that do not change the version.
 ///
@@ -237,7 +238,7 @@ mod tests {
     /// cosmetic — the version is in the digest, so it would retire or
     /// resurrect every peer row on the machine.
     #[test]
-    fn the_three_servers_version_lines_parse() {
+    fn the_server_version_lines_parse() {
         assert_eq!(
             version_from("postgres (PostgreSQL) 18.1").as_deref(),
             Some("18.1")
@@ -248,6 +249,15 @@ mod tests {
             Some("8.4.0")
         );
         assert_eq!(version_from("db version v8.0.4").as_deref(), Some("8.0.4"));
+        // The `sha=00000000:0` after it must not win: the first dotted
+        // number is the version.
+        assert_eq!(
+            version_from(
+                "Valkey server v=9.1.2 sha=00000000:0 malloc=jemalloc-5.3.1"
+            )
+            .as_deref(),
+            Some("9.1.2")
+        );
     }
 
     /// `mysqld` prints its own store path, whose hash changes on rebuilds
