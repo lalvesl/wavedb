@@ -27,6 +27,10 @@ pub struct Host {
     pub filesystem: String,
     pub rotational: Option<bool>,
     pub virtualised: bool,
+    /// The CPU's frequency ceiling in MHz (cpufreq's `scaling_max_freq`), or
+    /// `None` where the kernel exposes no cpufreq. A clock pinned lower runs
+    /// every CPU-bound row slower, so it is a lane like the budgets are.
+    pub clock_mhz: Option<u64>,
     /// `data_dir`'s btrfs allocation state, or `None` off btrfs. Deliberately
     /// **not** in the host key: it changes between runs on one machine, so it
     /// is a guard and a recorded fact, not a lane.
@@ -36,10 +40,11 @@ pub struct Host {
     /// wherever this is displayed or recorded; the first version of this probe
     /// failed exactly that way and the guard never fired.
     pub btrfs: Option<BtrfsSpace>,
-    /// `<cpu-slug>-<budget>c-<budget>g-<fs>-<hash4>` — the lane identity. The
-    /// budgets are in it on purpose: a caged run and an uncaged one on the same
-    /// machine are different lanes, because they are different machines as far
-    /// as any number here is concerned.
+    /// `<cpu-slug>-<budget>c-<clock>mhz-<budget>m-<fs>-<hash4>` — the lane
+    /// identity. The budgets and the clock are in it on purpose: a caged run
+    /// and an uncaged one on the same machine, or one at 2.0 GHz and one at
+    /// 2.3 GHz, are different lanes, because they are different machines as
+    /// far as any number here is concerned.
     pub key: String,
 }
 
@@ -80,19 +85,22 @@ impl Host {
         let filesystem = fs_type(data_dir);
         let rotational = rotational(data_dir);
         let virtualised = cpu_flag("hypervisor");
+        let clock_mhz = clock_mhz();
         // Megabytes, not gigabytes: the cage is 500 MB and integer-dividing
         // that by a GiB spelled the lane `-0g-`, which is both meaningless and
         // a collision — every sub-gigabyte budget would share one key. The
         // fingerprint below would still separate them, but a key a human
         // cannot read is a key nobody checks.
+        let clock =
+            clock_mhz.map_or_else(String::new, |mhz| format!("-{mhz}mhz"));
         let mut key = format!(
-            "{}-{cpu_budget}c-{}m-{filesystem}",
+            "{}-{cpu_budget}c{clock}-{}m-{filesystem}",
             slug(&cpu),
             mem_budget / (1 << 20)
         );
         let fingerprint = format!(
             "{cpu}|{cores}|{cpu_budget}|{mem_bytes}|{mem_budget}|{kernel}|\
-             {filesystem}|{rotational:?}|{virtualised}"
+             {filesystem}|{rotational:?}|{virtualised}|{clock_mhz:?}"
         );
         let _ = write!(key, "-{:04x}", fnv1a(fingerprint.as_bytes()) & 0xffff);
         Self {
@@ -105,6 +113,7 @@ impl Host {
             filesystem,
             rotational,
             virtualised,
+            clock_mhz,
             btrfs: btrfs_space(data_dir),
             key,
         }
@@ -137,6 +146,17 @@ fn cpu_flag(flag: &str) -> bool {
         .lines()
         .find(|l| l.starts_with("flags"))
         .is_some_and(|l| l.split_whitespace().any(|f| f == flag))
+}
+
+/// The frequency ceiling of CPU 0 in MHz. A clock pinned for benchmarking is
+/// pinned on every CPU, so one of them speaks for all; the cage's CPUs are
+/// a subset of the same package.
+fn clock_mhz() -> Option<u64> {
+    let khz: u64 =
+        read_trim("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq")
+            .parse()
+            .ok()?;
+    (khz > 0).then_some(khz / 1000)
 }
 
 fn num_cpus() -> u64 {

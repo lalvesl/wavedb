@@ -67,7 +67,11 @@ benchmark process.
 The budget is part of the **host key**, so a caged run and an uncaged one on the
 same hardware are different lanes. Both budgets are read back from the kernel
 (`Cpus_allowed_list`, the cgroup's `memory.max`) rather than assumed, so a
-recorded row states what it really ran under.
+recorded row states what it really ran under. The CPU's frequency ceiling
+(cpufreq's `scaling_max_freq`) is in the key for the same reason: this host has
+been measured pinned at 2.3 GHz and at 2.0 GHz, and a lower clock is a slower
+machine for every CPU-bound row, so the two are lanes
+(`…-4c-2300mhz-500m-btrfs-…`), never a trend.
 
 ### One configuration, no exceptions
 

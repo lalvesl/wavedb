@@ -121,7 +121,7 @@ digest = fnv1a(
     system, system_version, variant, durability,
     workload, tier, dataset_revision, generator_seed,
     consumers,                       // N
-    host_key,                        // cpu model · cpu budget · mem budget · fs
+    host_key,                        // cpu model · cpu budget · clock · mem budget · fs
     cage_revision,                   // the cgroup/affinity/namespace recipe
     wavedb_git_sha,                  // ← only present for system == wavedb
 )
