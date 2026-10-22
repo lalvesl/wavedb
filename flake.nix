@@ -44,14 +44,14 @@
         # wasm-bindgen-cli built at the exact version used by the crate in Cargo.lock.
         wasmBindgenCli = pkgs.rustPlatform.buildRustPackage rec {
           pname = "wasm-bindgen-cli";
-          version = "0.2.121";
+          version = "0.2.129";
 
           src = pkgs.fetchCrate {
             inherit pname version;
-            hash = "sha256-ZOMgFNOcGkO66Jz/Z83eoIu+DIzo3Z/vq6Z5g6BDY/w=";
+            hash = "sha256-pcecKQd7E8Opw6bkFoE569epUi7gh5qpQF1e5PJY6V8=";
           };
 
-          cargoHash = "sha256-DPdCDPTAPBrbqLUqnCwQu1dePs9lGg85JCJOCIr9qjU=";
+          cargoHash = "sha256-vmUrWVU7kPJJxO5qIVeAkwQyWDELO1Z4Z5gitz2kco8=";
 
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [
