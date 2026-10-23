@@ -30,6 +30,8 @@
 //! settled" check can't race a commit); `pending → dir → cache(read) →
 //! alloc` on the settle drain; `dir → dict` on the read-through path. No
 //! path takes them in a conflicting order, so the graph is acyclic.
+//! `checkpoint` comes before all of them: only a checkpoint step takes it,
+//! and it holds it for the whole step.
 //!
 //! The commit path takes no directory at all since RFC 0063: every write
 //! carries the STRUCT_HASH it routes by, so committing a batch is memory
@@ -189,8 +191,14 @@ pub struct PageStore {
     pub(crate) seed: [u64; 4],
     pub(crate) target_blocks_per_bucket: u64,
     /// Touched ids committed to the caches but not yet settled into pages —
-    /// what [`drain`](Self::drain) consumes.
-    pub(crate) pending: Mutex<Touched>,
+    /// what [`drain`](Self::drain) consumes — split by the checkpoint that
+    /// owes them ([`crate::pending`]).
+    pub(crate) pending: Mutex<crate::pending::Pending>,
+    /// The open checkpoint's rotated-out journal, from its rotation until its
+    /// `Commit` frame is appended (RFC 0067 step 3). Outermost in the lock
+    /// order: a checkpoint step holds it across everything it does, and
+    /// nothing else takes it.
+    pub(crate) checkpoint: Mutex<Option<crate::journal::Journal>>,
     /// The durability window this store was opened with (RFC 0061); zero is
     /// one barrier per batch.
     pub(crate) relax_window: Duration,
@@ -264,7 +272,8 @@ impl PageStore {
             types,
             seed,
             target_blocks_per_bucket: DEFAULT_TARGET_BLOCKS_PER_BUCKET,
-            pending: Mutex::new(Vec::new()),
+            pending: Mutex::new(crate::pending::Pending::default()),
+            checkpoint: Mutex::new(None),
             relax_window: options.relax_window,
             record_cache_bytes: options.record_cache_bytes,
         };
