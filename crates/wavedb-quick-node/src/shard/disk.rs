@@ -18,12 +18,13 @@
 //! (including why strict priority would be an out-of-memory rather than an
 //! unfairness) is in [`super::priority`].
 //!
-//! **The valve bounds waiting, not latency.** Because the actor serves one
-//! message at a time, a read arriving while a long checkpoint runs waits for
-//! that whole checkpoint — priority between *queued* items says nothing about
-//! the item *executing*. Bounding read latency needs the maintenance work
-//! itself to become interruptible, which is [RFC 0063]'s re-entrant `drain`.
-//! That makes 0063 a prerequisite of this scheme rather than a parallel item.
+//! **The valve bounds waiting; the steps bound latency.** The actor serves one
+//! message at a time, so priority between *queued* items says nothing about
+//! the item *executing* — a read arriving mid-maintenance waits for that unit.
+//! What keeps the unit short is that every long one is stepped: a settle is
+//! one round of at most `SETTLE_BUDGET_IDS` ids, and a checkpoint is opened
+//! (bounded) and then settled and closed in such rounds ([RFC 0063] part 3,
+//! RFC 0067 step 3), so the longest wait is one round or one close's sync.
 //!
 //! ## Not split in two yet
 //!
