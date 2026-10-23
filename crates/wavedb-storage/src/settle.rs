@@ -7,7 +7,7 @@
 //! retries, and when a settled entry may leave the cache.
 
 use crate::error::StorageResult;
-use crate::page_store::{PageStore, Touched};
+use crate::page_store::PageStore;
 use crate::struct_storage::TypeSlot;
 
 /// What one [`settle_step`](PageStore::settle_step) did.
@@ -81,53 +81,26 @@ impl PageStore {
     ///
     /// [RFC 0063]: ../../../rfcs/0063-engine-yield-map-and-interruptible-engine-PLANNED.md
     pub fn settle_step(&self, budget: usize) -> StorageResult<Progress> {
-        let round = self.take_round(budget);
+        // One observation draws the round: what is taken and what stays
+        // queued are decided together, so a write landing meanwhile cannot
+        // be split across the boundary.
+        let round = self.pending.lock().take(budget);
         if round.is_empty() {
             return Ok(Progress::Done);
         }
-        if let Err(e) = self.settle(&round) {
-            // Put the round back: ids may be partially settled, but settling
-            // writes cache state, so re-settling is idempotent.
-            requeue(&mut self.pending.lock(), round);
-            return Err(e);
-        }
-        Ok(Progress::Settled)
-    }
-
-    /// Take up to `budget` ids off the pending queue.
-    ///
-    /// Whatever is not taken stays queued, which is what keeps I2 true at the
-    /// boundary: the queue always holds exactly the ids that are committed and
-    /// not yet in a page.
-    // The guard spans the whole selection: what is taken and what is left
-    // behind have to be decided in one observation, or a write landing in the
-    // middle could be split across the boundary the round is drawing.
-    #[allow(clippy::significant_drop_tightening)]
-    fn take_round(&self, budget: usize) -> Touched {
-        let mut pending = self.pending.lock();
-        if budget == usize::MAX {
-            return std::mem::take(&mut *pending);
-        }
-        let mut round = Touched::new();
-        let mut room = budget;
-        while room > 0 {
-            let Some((idx, ids)) = pending.last_mut() else {
-                break;
-            };
-            if ids.len() <= room {
-                room -= ids.len();
-                let whole = (*idx, std::mem::take(ids));
-                round.push(whole);
-                pending.pop();
-            } else {
-                // Take the tail, leave the head queued.
-                let keep = ids.len() - room;
-                let part = (*idx, ids.split_off(keep));
-                round.push(part);
-                room = 0;
+        match self.settle(&round.ids) {
+            Ok(()) => {
+                self.pending.lock().settled(&round);
+                Ok(Progress::Settled)
+            }
+            Err(e) => {
+                // Put the round back where it came from: ids may be partly
+                // settled, but settling writes cache state, so re-settling
+                // is idempotent.
+                self.pending.lock().requeue(round);
+                Err(e)
             }
         }
-        round
     }
 
     /// Whether any committed batch still awaits its page write.
@@ -181,16 +154,5 @@ impl PageStore {
     /// number, so a caller stops having to remember one.
     pub fn evict_to_budget(&self) {
         self.evict_settled(self.record_cache_bytes);
-    }
-}
-
-/// Merge a failed round back into the pending queue (slot-grouped; ids may
-/// duplicate what landed meanwhile — settling twice is idempotent).
-pub fn requeue(pending: &mut Touched, round: Touched) {
-    for (idx, ids) in round {
-        match pending.iter_mut().find(|(i, _)| *i == idx) {
-            Some((_, existing)) => existing.extend(ids),
-            None => pending.push((idx, ids)),
-        }
     }
 }
