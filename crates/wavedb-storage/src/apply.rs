@@ -10,6 +10,7 @@ use wavedb_core::{Id, Result as CoreResult, Store, Write};
 
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::{PageStore, Touched};
+use crate::pending::note_touched;
 use crate::struct_storage::TypeSlot;
 
 impl PageStore {
@@ -71,7 +72,7 @@ impl PageStore {
         }
         // Commit under the journal lock: cache order == journal order.
         let touched = self.commit_to_caches(&effective);
-        merge_touched(&mut self.pending.lock(), touched);
+        self.pending.lock().note(touched);
         // The append's fsync flushed the whole file, so a checkpoint's deferred
         // `Commit` frame is now durable too — for free, and with nothing to do
         // about it here. Acting on it (deleting the retired journal, rolling
@@ -215,23 +216,6 @@ impl Store for PageStore {
     fn apply(&self, batch: &[Write]) -> impl Future<Output = CoreResult<()>> {
         // StorageError → core::Error (typed seam)
         std::future::ready(self.apply_inner(batch).map_err(Into::into))
-    }
-}
-
-/// Record `id` as touched under slot `idx`.
-fn note_touched(touched: &mut Touched, idx: usize, id: Id) {
-    match touched.iter_mut().find(|(i, _)| *i == idx) {
-        Some((_, ids)) => ids.push(id),
-        None => touched.push((idx, vec![id])),
-    }
-}
-
-/// Merge one batch's touched ids into the pending queue (slot-grouped).
-fn merge_touched(pending: &mut Touched, touched: Touched) {
-    for (idx, ids) in touched {
-        for id in ids {
-            note_touched(pending, idx, id);
-        }
     }
 }
 
