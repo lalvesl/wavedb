@@ -1,8 +1,9 @@
 # RFC 0067 — Thread per core: the shard as a database, the thread as placement
 
-- **Status:** In progress — opened 2026-10-08. **Steps 1 and 2 landed**
+- **Status:** In progress — opened 2026-10-08. **Steps 1–3 landed**
   (per-type state out of the statics; the routing function; the Pivot on
-  the wire; server bodies at the edge; the shard layout); see "Progress".
+  the wire; server bodies at the edge; the shard layout; the stepped
+  checkpoint); see "Progress".
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the owner
   as the unit of concurrency, and `shard_of`),
   [0066](0066-embassy-executor-and-async-io.md) (the executor, the reactor
@@ -395,6 +396,40 @@ step 5 here adds only the leases.
   `Server::threads(n)` (clamped to `1..=P`). Node-side seeding uses
   `Bound::route()` — a `Seeder` placing each operation like a served one —
   under a `RouteHandle`.
+
+### Step 3 — the checkpoint is stepped (landed 2026-10-09)
+
+The settle was already a bounded step (`settle_step(budget)`, RFC 0063
+part 3); the checkpoint was not — `commit_journal` rotated and then
+`drain`ed the whole old journal in one call, and the disk actor ran that for
+all 64 shards back to back, so every request queued behind it waited for
+all of it.
+
+- **The pending queue has two halves** (`wavedb_storage::pending`): *owed*,
+  the ids committed into the journal an open checkpoint rotated out, and
+  *fresh*, everything since. The rotation moves fresh to owed under the
+  journal lock the commit path also queues under, so the owed set is exactly
+  the old journal's. Rounds draw owed first and remember their half; a
+  failed round goes back to it, and a round still being written keeps the
+  checkpoint open.
+- **A checkpoint opens, steps and closes** (`commit_steps`):
+  `begin_checkpoint` claims, rotates and retires (bounded);
+  `checkpoint_step(budget)` settles one owed round, or — nothing owed —
+  syncs `data.bin` and appends the `Commit` frame. Writes between steps go
+  to the new journal and are not owed, so a steady write stream cannot keep
+  a checkpoint from closing. `commit_journal` is now "close any open one,
+  then run one whole" — the shutdown and `run_now` contract.
+- **The disk actor only opens** a checkpoint on the hint; the rounds and the
+  close are owed work stepped round-robin between requests like a settle,
+  so the longest a request waits behind maintenance is one round of
+  `SETTLE_BUDGET_IDS` ids or one close's sync.
+- Tests (`commit_steps`, `pending`): bounded rounds with the journal
+  covered and cleaned on reopen; writes between steps not owed and replayed;
+  a store dropped mid-checkpoint replays the old journal; `commit_journal`
+  closing an open checkpoint before covering the live journal.
+
+The yield between `plan_slot` calls inside one round, which RFC 0063 left
+undecided, is not used: steps break only at round boundaries.
 
 ## Alternatives
 

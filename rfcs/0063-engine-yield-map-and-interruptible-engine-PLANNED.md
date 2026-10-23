@@ -1,8 +1,10 @@
 # RFC 0063 — The yield map, and an interruptible engine
 
 - **Status:** Planned — opened 2026-08-21. The map (Parts 1–2) is done and one
-  thing it found, **A2, is fixed and landed the same day**; the interruptible
-  engine itself (Part 3) is designed and not started.
+  thing it found, **A2, is fixed and landed the same day**. Part 3's base
+  case has landed: the settle is a driven `settle_step(budget)`, and since
+  2026-10-09 the checkpoint is stepped too (RFC 0067 step 3). Still open: the
+  wasm macrotask yield, and whether a yield between `plan_slot` calls is legal.
 - **Crates:** `wavedb-storage` (the map and the work), `wavedb-quick-node` (the
   loop that drives it), later `wavedb-platform` (the wasm yield)
 - **Successor to:** [RFC 0058](0058-per-type-actors-DEPRECATED.md). This RFC
