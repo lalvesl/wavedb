@@ -3,8 +3,9 @@
 //!
 //! Split from `disk` by layer: that module is the actor — its queues and
 //! its loop; this one is the work the loop dispatches to. Every unit covers
-//! every shard the actor owns (RFC 0067); a settle steps one shard at a
-//! time, round-robin, so a round stays one bounded slice.
+//! every shard the actor owns (RFC 0067); a settle — or an open checkpoint —
+//! steps one shard at a time, round-robin, so a round stays one bounded
+//! slice.
 
 use wavedb_storage::PageStore;
 
@@ -22,7 +23,8 @@ use super::msg::Maintenance;
 /// positioned write) is not paid per handful of records.
 pub const SETTLE_BUDGET_IDS: usize = 4096;
 
-/// Run one unit of maintenance. Returns whether a settle is still owed.
+/// Run one unit of maintenance. Returns whether stepped work — a settle, or
+/// an open checkpoint — is still owed.
 ///
 /// Faults are reported, never propagated: nobody asked, so there is nobody to
 /// return to. Nothing acknowledged is at risk either way — the journal still
@@ -34,17 +36,19 @@ pub(super) fn maintain(
 ) -> bool {
     match work {
         Maintenance::Settle => return step(stores, cursor),
-        // A checkpoint is deliberately **not** stepped: it drains, syncs
-        // `data.bin` and frames the journal as one thing, and a partial
-        // checkpoint is not a checkpoint. It is the one maintenance unit
-        // that must run to completion, and therefore the one that bounds
-        // read latency — see the module note on RFC 0063.
+        // A checkpoint is only **opened** here — each shard rotates its
+        // journal and sets aside what it owes, which is bounded. The settle
+        // and the close are stepped by [`step`] like any settle, one bounded
+        // round at a time between the requests the actor serves (RFC 0067
+        // step 3), so a checkpoint no longer holds the only thread for as
+        // long as its journal is.
         Maintenance::Checkpoint => {
             for store in stores {
-                if let Err(e) = store.commit_journal() {
+                if let Err(e) = store.begin_checkpoint() {
                     eprintln!("disk actor: checkpoint failed: {e}");
                 }
             }
+            return stores.iter().any(owes);
         }
         Maintenance::Evict { budget_bytes } => {
             let share = budget_bytes / stores.len().max(1);
@@ -88,20 +92,31 @@ pub(super) fn run_now(
     })
 }
 
-/// One settle round, on the next shard from `cursor` with anything pending.
-/// `true` if any shard still owes a settle.
+/// Whether `store` has stepped work: a queue to settle or a checkpoint open.
+fn owes(store: &PageStore) -> bool {
+    store.has_pending() || store.is_checkpointing()
+}
+
+/// One bounded step on the next shard from `cursor` that owes one: a round
+/// of its open checkpoint (or that checkpoint's close), else a settle round.
+/// `true` if any shard still owes a step.
 pub(super) fn step(stores: &[PageStore], cursor: &mut usize) -> bool {
     let n = stores.len();
     let next = (0..n)
         .map(|k| (*cursor + k) % n)
-        .find(|&i| stores.get(i).is_some_and(PageStore::has_pending));
+        .find(|&i| stores.get(i).is_some_and(owes));
     let Some((i, store)) = next.and_then(|i| stores.get(i).map(|s| (i, s)))
     else {
         return false;
     };
     *cursor = (i + 1) % n;
-    match store.settle_step(SETTLE_BUDGET_IDS) {
-        Ok(_) => stores.iter().any(PageStore::has_pending),
+    let done = if store.is_checkpointing() {
+        store.checkpoint_step(SETTLE_BUDGET_IDS).map(|_| ())
+    } else {
+        store.settle_step(SETTLE_BUDGET_IDS).map(|_| ())
+    };
+    match done {
+        Ok(()) => stores.iter().any(owes),
         Err(e) => {
             eprintln!("disk actor: settle failed: {e}");
             // The round went back on the queue. Stop claiming to owe a settle
