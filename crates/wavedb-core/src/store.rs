@@ -146,6 +146,36 @@ impl<S: Store + ?Sized> Store for std::rc::Rc<S> {
     }
 }
 
+/// A borrowed store is a store, for the same reason as [`Rc`]: a wrapper that
+/// owns its backend by value can then hold a borrow of an engine somebody
+/// else owns — a node worker's view of one of its shards.
+///
+/// [`Rc`]: std::rc::Rc
+impl<S: Store + ?Sized> Store for &S {
+    async fn get(&self, id: Id) -> Result<Option<Vec<u8>>> {
+        (**self).get(id).await
+    }
+
+    async fn get_of(
+        &self,
+        struct_hash: u64,
+        id: Id,
+    ) -> Result<Option<Vec<u8>>> {
+        (**self).get_of(struct_hash, id).await
+    }
+
+    async fn apply(&self, batch: &[Write]) -> Result<()> {
+        (**self).apply(batch).await
+    }
+
+    fn note_mutation(
+        &self,
+        mutation: impl FnOnce() -> crate::notify::Mutation,
+    ) {
+        (**self).note_mutation(mutation);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
