@@ -35,12 +35,16 @@ use wavedb_net::frame::{
     CommandFrame, NodeError, NodeErrorKind, Request, Response,
 };
 
+use futures::channel::oneshot::Receiver as Closing;
+use wavedb_storage::{PageStore, StorageResult};
+
+use super::Owner;
 use super::worker::{self, Job};
-use super::{DiskHandle, Owner};
 use crate::__rt::NodeTasks;
 use crate::dispatch::Answer;
 use crate::edge::{self, Exec};
 use crate::feed::MutationFeed;
+use crate::upkeep::Maintenance;
 
 /// The fan-out onto the shard workers.
 ///
@@ -56,35 +60,59 @@ pub struct Router<E> {
 }
 
 impl<E: NodeTasks> Router<E> {
-    /// Start `threads` workers over the disk actor's `shards` data shards and
-    /// return the router onto them. Worker `w` serves the contiguous range
-    /// of shards `p` with `p · threads / shards = w`.
+    /// Start `threads` workers over the database's data shards (`stores`, in
+    /// shard order) and return the router onto them, with one receiver per
+    /// worker for the outcome of closing its stores. Worker `w` owns the
+    /// contiguous range of shards `p` with `p · threads / shards = w`, and
+    /// its stores move onto its thread with it.
     ///
-    /// `publisher` is likewise one channel: every worker's committed mutations
+    /// `publisher` is one channel: every worker's committed mutations
     /// converge on the accept thread that owns the subscription table.
     ///
     /// # Errors
-    /// A worker thread failing to spawn.
+    /// A worker thread failing to spawn. The workers already started keep
+    /// their stores and close them when this router's senders drop.
     pub fn start(
         registry: E,
-        disk: &DiskHandle,
+        stores: Vec<PageStore>,
         publisher: &MutationFeed,
         secret: [u8; 32],
         threads: usize,
-        shards: usize,
-    ) -> wavedb_platform::Result<Self> {
-        let shards = shards.max(1);
-        let workers = (0..threads.clamp(1, shards))
-            .map(|_| {
-                worker::start(registry, disk.clone(), publisher.clone(), shards)
-            })
-            .collect::<wavedb_platform::Result<Vec<_>>>()?;
-        Ok(Self {
-            registry,
-            workers,
-            shards,
-            secret,
-        })
+        policy: Maintenance,
+    ) -> wavedb_platform::Result<(Self, Vec<Closing<StorageResult<()>>>)> {
+        let shards = stores.len().max(1);
+        let threads = threads.clamp(1, shards);
+        let mut workers = Vec::with_capacity(threads);
+        let mut closing = Vec::with_capacity(threads);
+        let mut rest = stores.into_iter();
+        let mut first = 0;
+        for w in 0..threads {
+            // Shards `p` with `p · threads / shards = w`: from `first` up to
+            // the first `p` of the next worker.
+            let end = ((w + 1) * shards).div_ceil(threads);
+            let range: Vec<PageStore> =
+                rest.by_ref().take(end - first).collect();
+            let started = worker::start(
+                registry,
+                first,
+                range,
+                publisher.clone(),
+                shards,
+                policy,
+            )?;
+            workers.push(started.jobs);
+            closing.push(started.closed);
+            first = end;
+        }
+        Ok((
+            Self {
+                registry,
+                workers,
+                shards,
+                secret,
+            },
+            closing,
+        ))
     }
 }
 
