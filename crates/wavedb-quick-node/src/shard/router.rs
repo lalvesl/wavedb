@@ -1,22 +1,29 @@
 //! Routing — where each piece of work goes, and how it gets there.
 //!
-//! The accept thread reads a socket, decodes a [`Request`] — or a WebSocket
+//! A connection reads a socket, decodes a [`Request`] — or a WebSocket
 //! session's `Call` — and runs the edge ([`crate::edge`]): gate 1, then every
-//! operation at its owner. It owns no store. Accepting and coordinating are
-//! I/O; executing is work, and it belongs to the shard that owns the data.
+//! operation at its owner. Every worker holds a router onto every worker,
+//! its own included: an operation it owns goes into its own queue, the same
+//! way an operation another worker owns goes into that one's (RFC 0067 §6).
+//! Accepting and coordinating are I/O; executing is work, and it belongs to
+//! the worker that owns the data.
 //!
 //! ## The routing key is the brake's key, and it has to be
 //!
 //! [`OwnerLocks`](super::OwnerLocks) excludes two operations on one owner from
-//! interleaving — one table per shard, which is enough only because of this
+//! interleaving — one table per worker, which is enough only because of this
 //! routing. Both use the same [`Owner`]: a collection command's Pivot, read
 //! off the front of its payload, or a Unique type under the caller's tenant
 //! ([`Owner::of_command`]); a node operation's owner comes from the operation
 //! itself ([`NodeOp::owner`]). The registry says how a hash is addressed
 //! ([`Exposure::addressing`]), which is why the router holds it. Route one way
 //! and brake another and two operations on one owner could be picked up by
-//! two shards holding two different locks — the silent index loss, with
+//! two workers holding two different locks — the silent index loss, with
 //! routing in front of it.
+//!
+//! A subscription is placed by the same rule: a topic is an owner, so its
+//! subscribers are registered with the worker its mutations commit on
+//! ([`Router::watch`]).
 //!
 //! A `#[server]` function has no owner: it runs at the edge, and each
 //! operation it performs is routed here on its own ([`Route`]).
@@ -25,28 +32,29 @@
 //!
 //! A POST's token is verified at the edge, and the [`Caller`] it resolves
 //! travels with the work, exactly as a WebSocket session's does from its
-//! `Hello`. A shard runs gates 2–3 only.
+//! `Hello`. A worker runs gates 2–3 only.
 
 use async_channel::Sender;
 use futures::channel::oneshot;
 use wavedb_core::expose::{Caller, Exposure};
+
 use wavedb_core::{NodeOp, NodeReply, Route, U48};
 use wavedb_net::frame::{
     CommandFrame, NodeError, NodeErrorKind, Request, Response,
 };
-
-use futures::channel::oneshot::Receiver as Closing;
-use wavedb_storage::{PageStore, StorageResult};
+use wavedb_net::ws::Topic;
+use wavedb_storage::PageStore;
 
 use super::Owner;
-use super::worker::{self, Job};
+use super::spawn::{self, Closing};
+use super::worker::Job;
 use crate::__rt::NodeTasks;
 use crate::dispatch::Answer;
 use crate::edge::{self, Exec};
-use crate::feed::MutationFeed;
+use crate::subscribe::Outbox;
 use crate::upkeep::Maintenance;
 
-/// The fan-out onto the shard workers.
+/// The fan-out onto the workers.
 ///
 /// Cheap to clone (the registry is a zero-sized value, then a `Vec` of channel
 /// senders and a key) and `Send`, so every connection task can hold one.
@@ -59,65 +67,49 @@ pub struct Router<E> {
     secret: [u8; 32],
 }
 
+impl<E> Router<E> {
+    pub(super) const fn new(
+        registry: E,
+        workers: Vec<Sender<Job>>,
+        shards: usize,
+        secret: [u8; 32],
+    ) -> Self {
+        Self {
+            registry,
+            workers,
+            shards,
+            secret,
+        }
+    }
+
+    /// Gate 1's key, for a WebSocket session's `Hello`.
+    pub(crate) const fn secret(&self) -> &[u8; 32] {
+        &self.secret
+    }
+}
+
 impl<E: NodeTasks> Router<E> {
     /// Start `threads` workers over the database's data shards (`stores`, in
-    /// shard order) and return the router onto them, with one receiver per
-    /// worker for the outcome of closing its stores. Worker `w` owns the
-    /// contiguous range of shards `p` with `p · threads / shards = w`, and
-    /// its stores move onto its thread with it.
-    ///
-    /// `publisher` is one channel: every worker's committed mutations
-    /// converge on the accept thread that owns the subscription table.
+    /// shard order), with no ingress of their own, and return the router onto
+    /// them with one receiver per worker for the outcome of closing its
+    /// stores ([`spawn::start`]). The workers stop once every clone of the
+    /// router is dropped.
     ///
     /// # Errors
-    /// A worker thread failing to spawn. The workers already started keep
-    /// their stores and close them when this router's senders drop.
+    /// A worker thread failing to spawn.
     pub fn start(
         registry: E,
         stores: Vec<PageStore>,
-        publisher: &MutationFeed,
         secret: [u8; 32],
         threads: usize,
         policy: Maintenance,
-    ) -> wavedb_platform::Result<(Self, Vec<Closing<StorageResult<()>>>)> {
-        let shards = stores.len().max(1);
-        let threads = threads.clamp(1, shards);
-        let mut workers = Vec::with_capacity(threads);
-        let mut closing = Vec::with_capacity(threads);
-        let mut rest = stores.into_iter();
-        let mut first = 0;
-        for w in 0..threads {
-            // Shards `p` with `p · threads / shards = w`: from `first` up to
-            // the first `p` of the next worker.
-            let end = ((w + 1) * shards).div_ceil(threads);
-            let range: Vec<PageStore> =
-                rest.by_ref().take(end - first).collect();
-            let started = worker::start(
-                registry,
-                first,
-                range,
-                publisher.clone(),
-                shards,
-                policy,
-            )?;
-            workers.push(started.jobs);
-            closing.push(started.closed);
-            first = end;
-        }
-        Ok((
-            Self {
-                registry,
-                workers,
-                shards,
-                secret,
-            },
-            closing,
-        ))
+    ) -> wavedb_platform::Result<(Self, Vec<Closing>)> {
+        spawn::start(registry, stores, secret, threads, policy, None)
     }
 }
 
 impl<E: Exposure> Router<E> {
-    /// How many shards this router fans out to.
+    /// How many workers this router fans out to.
     #[must_use]
     pub const fn count(&self) -> usize {
         self.workers.len()
@@ -140,6 +132,33 @@ impl<E: Exposure> Router<E> {
         edge::command(&self.registry, self, caller, frame).await
     }
 
+    /// Have `topic`'s owner publish its mutations into `outbox`, and return
+    /// once it is registered there — a mutation committed after this returns
+    /// reaches the outbox. A worker that is gone registers nothing; the
+    /// session then hears nothing, and its client catches up by cursor.
+    pub async fn watch(&self, tenant: U48, topic: Topic, outbox: Outbox) {
+        let (done, registered) = oneshot::channel();
+        let job = Job::Watch {
+            tenant,
+            topic,
+            outbox,
+            done,
+        };
+        if self.post(topic_owner(tenant, topic), job).await.is_ok() {
+            let _ = registered.await;
+        }
+    }
+
+    /// Stop `topic`'s owner publishing into `outbox`.
+    pub async fn unwatch(&self, tenant: U48, topic: Topic, outbox: Outbox) {
+        let job = Job::Unwatch {
+            tenant,
+            topic,
+            outbox,
+        };
+        let _ = self.post(topic_owner(tenant, topic), job).await;
+    }
+
     /// Queue `job` on the worker serving `owner`'s data shard.
     async fn post(&self, owner: Owner, job: Job) -> Result<(), &'static str> {
         // Unreachable: `start` refuses an empty set and the range arithmetic
@@ -156,7 +175,7 @@ impl<E: Exposure> Router<E> {
     }
 
     /// The owner of `frame` reached under `tenant` — the lock's key, so one
-    /// owner is always on one shard, however its work arrived.
+    /// owner is always on one worker, however its work arrived.
     fn owner(&self, tenant: U48, frame: &CommandFrame) -> Owner {
         Owner::of_command(
             self.registry.addressing(frame.struct_hash),
@@ -165,6 +184,18 @@ impl<E: Exposure> Router<E> {
             frame.command,
             &frame.payload,
         )
+    }
+}
+
+/// The owner whose commits are `topic`'s mutations: the collection's Pivot,
+/// or the Unique type under the tenant.
+const fn topic_owner(tenant: U48, topic: Topic) -> Owner {
+    match topic.pivot {
+        Some(pivot) => Owner::Collection(pivot),
+        None => Owner::Unique {
+            tenant,
+            struct_hash: topic.struct_hash,
+        },
     }
 }
 
