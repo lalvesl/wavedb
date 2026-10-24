@@ -218,7 +218,7 @@ Inside one row's cage:
 | system | workload | generators | consumers | database |
 |---|---|--:|--:|---|
 | `wavedb/single` | both | 1 | 1 | same binary, `PageStore` in the consumer thread |
-| `wavedb/multi` | **`shop` only** | 1 | **3** | same binary, `ShardStore` per consumer over one disk actor |
+| `wavedb/multi` | **`shop` only** | 1 | **3** | same binary, one data shard per consumer, each owning its `PageStore` (§11) |
 | `sqlite` | both | 1 | 1 | same binary, one `Connection` |
 | `postgres` / `mysql` / `mongodb` | both | 1 | 1 | child process, **same cage** |
 
@@ -504,6 +504,19 @@ the phase boundary is the one every row crosses. The tag index (micro) and
 the two shop indexes are sets / sorted sets the client keeps, and a checkout
 is one pipelined `MULTI … EXEC`. The client is hand-rolled RESP2. The matrix
 grows to 26 rows.
+
+### 11. `wavedb/multi` after RFC 0067 step 4 (2026-10-09)
+
+The disk actor and `ShardStore` are gone from the node, and the row follows:
+the shop database is opened as **one data shard per consumer**
+(`open_shards`, N = 3), the preload puts user `u` in shard `u % N`, and
+consumer `i` takes shard `i`'s `PageStore` onto its own thread — a node
+worker's shape, without the network. The correctness condition moved with
+it: it is no longer "absence is cached by one holder" but "a user's records
+are in its consumer's shard", which `Factory::route` (`u % N`) and the
+driver's `debug_assert` both still state. The `micro` sharded engine is
+gone; `micro` never had a `multi` row. The single row opens one data shard,
+so its directory gains a `MANIFEST`.
 
 ## Alternatives
 
