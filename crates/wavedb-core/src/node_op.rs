@@ -5,7 +5,7 @@
 //! belongs to an [`Owner`] — a collection's Pivot, or a Unique type under a
 //! tenant — and runs **where that owner lives, under that owner's lock**:
 //! on another thread more often than not. So the body hands each operation
-//! to a [`Route`] as a [`NodeOp`], and the route brings back a [`NodeReply`].
+//! to a [`Route`](crate::Route) as a [`NodeOp`], and the route brings back a [`NodeReply`].
 //!
 //! Both are plain data. Record bodies travel as their wire bytes, because a
 //! job crossing a thread cannot be generic over the type without `dyn`; the
@@ -19,13 +19,10 @@
 //!
 //! [`Exposure::run_node`]: crate::expose::Exposure::run_node
 
-use std::future::Future;
-
 use futures::{StreamExt, TryStreamExt};
 
 use crate::collection::Collection;
 use crate::error::{Error, Result};
-use crate::expose::Exposure;
 use crate::fuzzy::{Fuzzy, Scored};
 use crate::handle::DbHandle;
 use crate::id::Id;
@@ -142,49 +139,6 @@ pub enum NodeReply {
     Values(Vec<Vec<u8>>),
     Versions(Vec<(Metadata, Vec<u8>)>),
     Scored(Vec<Scored<(Id, Vec<u8>)>>),
-}
-
-/// Where a server body's operations run.
-///
-/// The node routes each one to its owner's shard and runs it under the
-/// owner's lock; [`LocalRoute`] runs it on a store in hand, for tests and
-/// in-process use. Generic, never `dyn`: a body is monomorphised per route.
-pub trait Route {
-    /// Run `op` on `struct_hash` under `tenant`, wherever its owner lives.
-    fn run(
-        &self,
-        tenant: U48,
-        struct_hash: u64,
-        op: NodeOp,
-    ) -> impl Future<Output = Result<NodeReply>>;
-}
-
-/// A [`Route`] over one store: every owner is here.
-#[derive(Debug)]
-pub struct LocalRoute<'a, S, E> {
-    store: &'a S,
-    registry: &'a E,
-}
-
-impl<'a, S: Store, E: Exposure> LocalRoute<'a, S, E> {
-    /// Run operations on `store`, typed through `registry`.
-    #[must_use]
-    pub const fn new(store: &'a S, registry: &'a E) -> Self {
-        Self { store, registry }
-    }
-}
-
-impl<S: Store, E: Exposure> Route for LocalRoute<'_, S, E> {
-    async fn run(
-        &self,
-        tenant: U48,
-        struct_hash: u64,
-        op: NodeOp,
-    ) -> Result<NodeReply> {
-        self.registry
-            .run_node(self.store, tenant, struct_hash, op)
-            .await
-    }
 }
 
 /// The refusal for an operation the type's shape does not have.
