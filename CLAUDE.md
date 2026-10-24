@@ -185,8 +185,11 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   node state, an outage or restart loses nothing; same-record writes within one tick
   coalesce to the live state).
 - **wavedb-quick-node** — library (no bin): `Server::new(REGISTRY).data_dir(d).serve(addr)`;
-  `.threads(n)` workers each serve a contiguous range of the data shards, behind
-  one disk actor until RFC 0067 step 4. Node-side seeding goes through
+  `.threads(n)` workers each **own** a contiguous range of the data shards — their
+  `PageStore`s move onto the worker's thread, operations are plain calls there,
+  and a BG task beside the jobs steps settle/checkpoint when they leave room
+  (RFC 0067 step 4; one executor per thread, no `unsafe`). On shutdown each
+  worker closes and drops its stores before reporting. Node-side seeding goes through
   `RouteHandle::new(&bound.route(), tenant)` — each op on its owner's shard.
   `expose_server!` also emits `StorageRegistry`, so `.registry(REGISTRY)` alone opens
   the `PageStore`. Gates 4–6 (permission/validate/preprocess) are an M8 seam.

@@ -1,9 +1,10 @@
 # RFC 0067 — Thread per core: the shard as a database, the thread as placement
 
-- **Status:** In progress — opened 2026-10-08. **Steps 1–3 landed**
+- **Status:** In progress — opened 2026-10-08. **Steps 1–4 landed**
   (per-type state out of the statics; the routing function; the Pivot on
   the wire; server bodies at the edge; the shard layout; the stepped
-  checkpoint); see "Progress".
+  checkpoint; workers owning their shards, the disk actor gone); see
+  "Progress".
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the owner
   as the unit of concurrency, and `shard_of`),
   [0066](0066-embassy-executor-and-async-io.md) (the executor, the reactor
@@ -430,6 +431,44 @@ all of it.
 
 The yield between `plan_slot` calls inside one round, which RFC 0063 left
 undecided, is not used: steps break only at round boundaries.
+
+### Step 4 — each worker owns its shards (landed 2026-10-09)
+
+The disk actor and `ShardStore` are deleted. `Router::start` takes the
+database's stores and moves each worker's contiguous range onto its thread
+(`shard::Owned`); an operation is a plain call on its owner's `PageStore`,
+wrapped in `NotifyStore` for the live feed. Nothing crosses a thread but the
+`Job` and its answer.
+
+- **BG beside DATA, one executor.** §4 draws three executors per thread.
+  Polling several Embassy executors on one thread needs
+  `raw::Executor::poll`, which is `unsafe`, and the project admits `unsafe`
+  only by explicit exception — so this step keeps one executor and gets the
+  priority cooperatively: a BG task per worker (`shard::background`) takes
+  one bounded step (`Owned::step`: a settle round, a checkpoint round or a
+  checkpoint's close) only when the 0064 valve (`Priority`) puts maintenance
+  next — immediately when no job is executing or queued, and under load once
+  the journal is in the valve's band — and yields after every step. EDGE is
+  not on worker threads until step 5, so two classes are all a worker has.
+  The three-executor loop stays the target if `unsafe` is granted there.
+- **Policy per worker.** Every `UPKEEP_PERIOD` (200 ms), whatever the load,
+  each store gets the node's policy at its per-shard share: open a
+  checkpoint past `checkpoint_after_bytes / P` of journal, evict to
+  `cache_budget_bytes / P`, defragment below the extent threshold. The
+  accept thread keeps only the mutation publisher.
+- **Shutdown.** Dropping the router closes each worker's queue; the root
+  waits for its jobs and BG to let go of the stores, then `Owned::close`
+  commits, forces retirement and **drops every store before reporting** —
+  so `run_with_shutdown` returns only when a restart can reopen at once.
+- **Seeding** borrows the stores (`Bound::route()` → `Seeder<'_>`) before
+  `run` hands them to the workers; the record cache in front of a record is
+  its owner's `PageStore`, and no second holder exists.
+- **Benchmark.** `wavedb/multi` opens one data shard per consumer and each
+  consumer owns its store (RFC 0065 §11); the bench no longer links
+  `wavedb-quick-node`.
+- Tests: `tests/shard_workers.rs` (ingress and a `RouteHandle` over the
+  router; clean close; reopen with nothing to replay; every record in the
+  shard placement names and no other) and `shard::owned` unit tests.
 
 ## Alternatives
 

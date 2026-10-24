@@ -18,8 +18,8 @@ Nothing declares that. It is a property of the *executor and the backend*, not
 of any structure in the engine.
 
 Swap in a backend that genuinely suspends — `IndexedDB`, anything over a
-network, or `shard::ShardStore`, whose every cache miss is a message to the disk
-actor — and it breaks.
+network, or the worker cache the node had in front of a disk actor until RFC
+0067 step 4, whose every miss was a message — and it breaks.
 
 ## What breaks, exactly
 
@@ -63,8 +63,9 @@ and says so in its header:
 > absent from the index.
 
 It drives two synthetic backends, identical but for whether `get` suspends.
-It does **not** cover `ShardStore`, so it stays green while the real hazard is
-introduced elsewhere.
+Since RFC 0067 step 4 the node ships no suspending store at all — a worker
+calls its own `PageStore` — so this pair is what keeps the brake honest until
+one returns (per-thread `io_uring`, or step 5's cross-thread leases).
 
 This is the third invariant single-threadedness was supplying tacitly.
 [RFC 0063](rfcs/0063-engine-yield-map-and-interruptible-engine-PLANNED.md) found
@@ -133,30 +134,27 @@ keep 5 of their 40 inserts.
   and `one_owner_runs_one_operation_at_a_time` fails with `a1 b1 b2 a2`, the
   exact interleaving in which one op reads the node another is about to
   overwrite.
-- **Wired.** The node runs entirely behind the disk actor: `Server` no longer
-  holds a `PageStore`. A POST passes gate 1 at the edge (`edge::handle`) and
+- **Wired.** The node's workers own their data shards (RFC 0067 step 4): each
+  calls the `PageStore` of its owner's shard on its own thread. A POST passes gate 1 at the edge (`edge::handle`) and
   its command is routed to its owner's shard (`shard::Router`), where
   `dispatch::call` takes the lock around the whole operation. A WebSocket
   `Call` takes the same path (`Router::call`, carrying the caller bound at
   `Hello`) — that path once executed unbraked on the accept thread, which was
   a hole in its own right — and so does every operation of a `#[server]`
   body (`Route for Router`, `Job::Node`).
-- **Only shards cache.** `ShardStore` remembers *absence*, which is sound only
-  while one holder reaches a record. Everything that is not a shard — node-side
-  seeding before serving — gets the cacheless `Shards::store()` (through
-  `Bound::route()`, which picks each owner's data shard); the accept
-  thread has no store at all. A second caching store over one record is how a stale
-  `None` outlives another holder's insert.
-
-### Still coarser than it should be
-
-The key is the type, so two collections of one type serialise where they need
-not. Narrowing it needs `Get`/`Update`/`Remove` to carry their Pivot on the
-wire, and the router has to narrow in the same commit.
+- **One holder per record.** A record is reached only through the worker that
+  owns its shard, and that worker's `PageStore` is the only cache in front of
+  it. Node-side seeding (`Bound::route()`) borrows the same stores before the
+  workers take them, so it is never a second holder; the accept thread has no
+  store at all.
+- **The key is the owner.** `(tenant, Owner)` since RFC 0067 step 2b — the
+  Pivot rides the front of every collection command — so two collections of
+  one type no longer serialise.
 
 ## The rule
 
 **Any `Store` whose futures can suspend needs the brake.** That is
-`ShardStore`, `IndexedDB`, and anything network-backed. `PageStore` alone on a
+`IndexedDB`, anything network-backed, and the per-thread `io_uring` engine RFC
+0067 plans. `PageStore` alone on a
 current-thread runtime does not — which is precisely why the requirement is
 invisible until someone changes the backend.
