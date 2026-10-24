@@ -32,13 +32,9 @@ pub const MAX_CONNECTIONS: usize = 1024;
 /// lost.
 pub const MAX_JOBS: usize = 1024;
 
-/// Shards a process may run.
+/// Workers a process may run — and so accept loops and BG tasks, one of each
+/// per worker.
 pub const MAX_SHARDS: usize = 256;
-
-/// Nodes a process may run at once. The engine allows one open store per
-/// process, so one is the real limit; the headroom covers a node that is
-/// still winding down while the next starts.
-pub const MAX_NODES: usize = 4;
 
 /// A registry the node can run: the four generic tasks, made concrete by
 /// [`node_tasks!`](crate::node_tasks) in the crate that owns the registry type.
@@ -49,13 +45,14 @@ pub const MAX_NODES: usize = 4;
 pub trait NodeTasks:
     wavedb_core::expose::Exposure + Copy + Send + 'static
 {
-    /// The accept loop: the root task of the node's accept carrier.
+    /// A worker's accept loop, on that worker's carrier.
     ///
     /// # Errors
-    /// [`MAX_NODES`] accept loops already running.
+    /// [`MAX_SHARDS`] accept loops already running.
     fn spawn_accept(ctx: Accept<Self>, here: Here) -> Result<(), SpawnError>;
 
-    /// One accepted connection, on the accept carrier.
+    /// One accepted connection, on the carrier of the worker that accepted
+    /// it.
     ///
     /// # Errors
     /// [`MAX_CONNECTIONS`] connections already open: the caller drops the
@@ -102,7 +99,7 @@ macro_rules! node_tasks {
             };
 
             #[$crate::__rt::rt::task(
-                                        pool_size = $crate::__rt::MAX_NODES,
+                                        pool_size = $crate::__rt::MAX_SHARDS,
                                         embassy_executor = $crate::__rt::rt
                                     )]
             async fn accept(ctx: Accept<$registry>, here: Here) {
