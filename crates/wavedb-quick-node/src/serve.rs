@@ -36,19 +36,22 @@ use wavedb_platform::carrier::Here;
 use wavedb_platform::io::{IoError, Listener, Stream};
 
 use crate::__rt::NodeTasks;
-use crate::shard::{Router, Shards};
+use crate::feed::FeedReceiver;
+use crate::shard::Router;
 use crate::subscribe::SubTable;
-use crate::upkeep::{self, Maintenance};
-use crate::{ServerError, dispatch, feed, serve_ws};
+use crate::upkeep;
+use crate::{dispatch, serve_ws};
 
 /// What the accept loop is started with. Built on the caller's thread and
 /// moved onto the accept carrier, so every field is `Send`; the node's
 /// non-`Send` state is built over there, by [`accept`].
 pub struct Accept<E> {
-    pub(crate) registry: E,
     pub(crate) listener: Listener,
-    pub(crate) shards: Shards,
-    pub(crate) maintenance: Maintenance,
+    /// The workers, started by the caller: they own the stores, and the
+    /// caller is who waits for them to close.
+    pub(crate) router: Router<E>,
+    /// Committed mutations, coming back from the workers.
+    pub(crate) incoming: FeedReceiver,
     pub(crate) secret: [u8; 32],
     /// Closed by the caller to stop serving.
     pub(crate) stop: Receiver<()>,
@@ -67,63 +70,30 @@ pub struct Connection<E> {
 /// or until the listener faults.
 pub async fn accept<E: NodeTasks>(ctx: Accept<E>, here: Here) {
     let Accept {
-        registry,
         listener,
-        shards,
-        maintenance,
+        router,
+        incoming,
         secret,
         stop,
         outcome,
     } = ctx;
-    let result = serve(
-        registry,
-        &listener,
-        &shards,
-        maintenance,
-        secret,
-        &stop,
-        &here,
-    )
-    .await;
+    let result = serve(&listener, router, incoming, secret, &stop, &here).await;
     let _ = outcome.send(result);
 }
 
 async fn serve<E: NodeTasks>(
-    registry: E,
     listener: &Listener,
-    shards: &Shards,
-    maintenance: Maintenance,
+    router: Router<E>,
+    incoming: FeedReceiver,
     secret: [u8; 32],
     stop: &Receiver<()>,
     here: &Here,
 ) -> crate::Result<()> {
     let subs = Rc::new(RefCell::new(SubTable::default()));
-    // Committed mutations come back from the shards as plain data; the
-    // subscription table lives here and is fanned out by `feed::publish`.
-    let (mutations, incoming) = feed::feed(feed::MUTATION_DEPTH);
-    let router = Router::start(
-        registry,
-        &shards.handle(),
-        &mutations,
-        secret,
-        shards.threads(),
-        shards.shards(),
-    )
-    .map_err(|e| ServerError::Io(std::io::Error::other(e.to_string())))?;
-    // Ours goes; the workers hold the live clones, so the publisher ends when
-    // the last of them does rather than never.
-    drop(mutations);
 
     // Closed when serving stops: every task on this carrier watches it.
     let (halt, halted) = async_channel::bounded::<()>(1);
-    upkeep::spawn_background(
-        shards.handle(),
-        maintenance,
-        incoming,
-        Rc::clone(&subs),
-        halted.clone(),
-        here,
-    )?;
+    upkeep::spawn_background(incoming, Rc::clone(&subs), halted.clone(), here)?;
     let node = Node {
         router,
         secret,
