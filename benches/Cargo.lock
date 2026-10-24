@@ -2834,6 +2834,7 @@ dependencies = [
  "embedded-io-async",
  "futures",
  "js-sys",
+ "rustix",
  "sha1 0.11.0",
  "thiserror",
  "wasm-bindgen",

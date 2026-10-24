@@ -54,3 +54,8 @@ web-sys = { workspace = true, features = [
   "WebSocket",
   "Window",
 ] }
+
+# Linux: the node's listeners form one `SO_REUSEPORT` group, which the kernel
+# balances (`listen`, RFC 0067 §6). Elsewhere a group is one listener.
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+rustix.workspace = true
