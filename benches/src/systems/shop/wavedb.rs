@@ -21,12 +21,19 @@ use crate::systems::Durability;
 
 /// Fill: every user is a tenant, holding an order collection, each order
 /// holding a line-item collection. Not timed.
-pub fn preload(cfg: &ShopCfg, dir: &Path) -> Result<(), String> {
-    let store = open_relaxed(dir)?;
+///
+/// The database is `shards` data shards — one per consumer the row will run —
+/// and user `u` goes to shard `u % shards`, the one its consumer owns.
+pub fn preload(cfg: &ShopCfg, dir: &Path, shards: usize) -> Result<(), String> {
+    let stores = open_relaxed(dir, shards)?;
+    let n = stores.len().max(1) as u64;
     for u in 0..cfg.users {
-        block_on(create_user(&store, cfg, u))?;
+        let store = stores
+            .get(usize::try_from(u % n).unwrap_or(0))
+            .ok_or("no shard for this user")?;
+        block_on(create_user(store, cfg, u))?;
         for s in 0..shopping_count(u, cfg.seed, cfg.orders_max) {
-            block_on(create_order(&store, cfg, u, s))?;
+            block_on(create_order(store, cfg, u, s))?;
         }
         // A bare `PageStore` has no background maintenance — a node gets that
         // from `quick-node`'s loop — so **two** things grow unbounded here,
@@ -50,13 +57,16 @@ pub fn preload(cfg: &ShopCfg, dir: &Path) -> Result<(), String> {
             store
                 .commit_journal()
                 .map_err(|e| format!("checkpoint: {e}"))?;
-            store.evict_settled(FILL_CACHE_BYTES);
+            store.evict_settled(FILL_CACHE_BYTES / stores.len().max(1));
         }
     }
-    store.drain().map_err(|e| format!("drain: {e}"))?;
-    store
-        .commit_journal()
-        .map_err(|e| format!("checkpoint: {e}"))
+    for store in &stores {
+        store.drain().map_err(|e| format!("drain: {e}"))?;
+        store
+            .commit_journal()
+            .map_err(|e| format!("checkpoint: {e}"))?;
+    }
+    Ok(())
 }
 
 async fn create_user(
@@ -135,9 +145,14 @@ async fn create_order(
 /// Each type contributes a different number of `StructStorage` slots — a
 /// Unique one, a NonUnique with a declared list six — so they are collected
 /// rather than concatenated as arrays.
-pub fn open_measured(dir: &Path, d: Durability) -> Result<PageStore, String> {
+pub fn open_measured(
+    dir: &Path,
+    d: Durability,
+    shards: usize,
+) -> Result<Vec<PageStore>, String> {
     open_with(
         dir,
+        shards,
         StoreOptions {
             relax_window: match d {
                 Durability::Durable => std::time::Duration::ZERO,
@@ -158,9 +173,10 @@ pub fn open_measured(dir: &Path, d: Durability) -> Result<PageStore, String> {
 /// is never what a row reports. The other four systems do the same thing by
 /// different names: their bulk loaders are not running the per-statement
 /// commit path either.
-fn open_relaxed(dir: &Path) -> Result<PageStore, String> {
+fn open_relaxed(dir: &Path, shards: usize) -> Result<Vec<PageStore>, String> {
     open_with(
         dir,
+        shards,
         StoreOptions {
             relax_window: PRELOAD_WINDOW,
             ..Default::default()
@@ -190,12 +206,18 @@ const FILL_CACHE_BYTES: usize = 192 << 20;
 /// shares a 500 MB cage with the row that follows it.
 const CHECKPOINT_AFTER_BYTES: u64 = 64 << 20;
 
-fn open_with(dir: &Path, options: StoreOptions) -> Result<PageStore, String> {
+/// The shop database: `shards` data shards (`MANIFEST` + `shards/xx`, RFC
+/// 0067), the budgets in `options` shared equally by them.
+fn open_with(
+    dir: &Path,
+    shards: usize,
+    options: StoreOptions,
+) -> Result<Vec<PageStore>, String> {
     let mut entries = Vec::new();
     entries.extend_from_slice(&User::storage_entries());
     entries.extend_from_slice(&Shopping::storage_entries());
     entries.extend_from_slice(&Product::storage_entries());
-    PageStore::open_with(dir, &entries, options)
+    wavedb_storage::open_shards(dir, &entries, options, shards)
         .map_err(|e| format!("open: {e}"))
 }
 
