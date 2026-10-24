@@ -81,6 +81,10 @@ pub mod prelude {
     // What a `#[wavedb::fuzzy]` lookup takes and yields (RFC 0056).
     pub use wavedb_core::fuzzy::{Fuzzy, Scored};
 
+    // What a `#[server]` body locks to hold owners across awaits (RFC 0067
+    // §5): `db.lock(&[Owner::unique::<T>(db.tenant()), Owner::Collection(p)])`.
+    pub use wavedb_core::placement::Owner;
+
     // Collection iterators are async streams.
     pub use futures::{Stream, StreamExt, TryStreamExt};
 }
