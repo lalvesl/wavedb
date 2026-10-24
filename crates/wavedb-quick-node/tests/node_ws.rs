@@ -66,7 +66,10 @@ fn start(dir: PathBuf) -> Node {
     let (stop, stop_rx) = oneshot::channel::<()>();
     let thread = thread::spawn(move || {
         wavedb_platform::carrier::block_on(async move {
+            // Four workers, four listeners: the sessions and the topics' owners
+            // spread over threads, so events cross from owner to session.
             let bound: Bound<_> = Server::new(REGISTRY)
+                .threads(4)
                 .secret(SECRET)
                 .data_dir(&dir)
                 .bind("127.0.0.1:0")
