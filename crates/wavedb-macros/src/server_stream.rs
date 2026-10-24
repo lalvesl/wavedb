@@ -8,7 +8,10 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{ItemFn, Type};
 
-use crate::server::{Arg, decode_and_forward, encode_payload, guard};
+use crate::server::guard;
+use crate::server_args::{
+    Arg, decode_and_forward, encode_payload, node_context,
+};
 
 /// Emit the three items for a stream-returning fn (body, fn-type + dispatch,
 /// client stub). `hash` is the composed-identity `const` expression;
@@ -29,6 +32,7 @@ pub fn expand(
     let auth_guard = guard(public);
     let body_fn = format_ident!("__{}_body", name);
     let (decode, forward) = decode_and_forward(args);
+    let context = node_context();
     let payload = encode_payload(args);
     let arg_sig: Vec<TokenStream> = args
         .iter()
@@ -78,7 +82,7 @@ pub fn expand(
                 use ::wavedb_core::TryStreamExt as _;
                 #auth_guard
                 #decode
-                let db = ::wavedb::ServerDb::for_caller(route, caller);
+                #context
                 let items = #body_fn(&db, #(#forward),*);
                 let collected: ::std::vec::Vec<#item_ty> =
                     match items.try_collect().await {
