@@ -46,6 +46,7 @@ use wavedb_net::ws::Topic;
 use wavedb_storage::PageStore;
 
 use super::Owner;
+use super::lease::Lease;
 use super::spawn::{self, Closing};
 use super::worker::Job;
 use crate::__rt::NodeTasks;
@@ -218,6 +219,8 @@ impl<E: Exposure> Exec for Router<E> {
 }
 
 impl<E: Exposure> Route for Router<E> {
+    type Lease = Lease;
+
     async fn run(
         &self,
         tenant: U48,
@@ -232,13 +235,44 @@ impl<E: Exposure> Route for Router<E> {
             op,
             answer,
         };
-        let unreachable = |why: &str| {
-            wavedb_core::Error::Backend(format!("shard router: {why}"))
-        };
         self.post(owner, job).await.map_err(unreachable)?;
         wait.await
             .unwrap_or_else(|_| Err(unreachable("shard dropped the job")))
     }
+
+    /// A lease job on the owner's worker; resolves once the owner is held
+    /// there. A worker whose job pool is full refuses rather than hold its
+    /// queue for the length of a body.
+    async fn lease(
+        &self,
+        tenant: U48,
+        owner: Owner,
+    ) -> wavedb_core::Result<Lease> {
+        let (answer, held) = oneshot::channel();
+        let job = Job::Lease {
+            tenant,
+            owner,
+            answer,
+        };
+        self.post(owner, job).await.map_err(unreachable)?;
+        held.await
+            .map_err(|_| unreachable("shard refused the lease"))
+    }
+
+    async fn run_leased(
+        &self,
+        lease: &Lease,
+        _tenant: U48,
+        struct_hash: u64,
+        op: NodeOp,
+    ) -> wavedb_core::Result<NodeReply> {
+        lease.run(struct_hash, op).await
+    }
+}
+
+/// The router could not reach a worker, for a node operation.
+fn unreachable(why: &str) -> wavedb_core::Error {
+    wavedb_core::Error::Backend(format!("shard router: {why}"))
 }
 
 /// The node could not reach a shard. A backend fault, not a refusal of the
