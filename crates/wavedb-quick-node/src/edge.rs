@@ -212,10 +212,14 @@ pub(crate) struct Direct<'a, E, S> {
     pub locks: crate::shard::OwnerLocks,
 }
 
+/// Leases are the router's business; this double grants none that hold
+/// anything, which no edge test asks it to.
 #[cfg(test)]
 impl<E: Exposure, S: wavedb_core::Store> wavedb_core::Route
     for Direct<'_, E, S>
 {
+    type Lease = ();
+
     async fn run(
         &self,
         tenant: wavedb_core::U48,
@@ -228,6 +232,24 @@ impl<E: Exposure, S: wavedb_core::Store> wavedb_core::Route
         self.registry
             .run_node(self.store, tenant, struct_hash, op)
             .await
+    }
+
+    fn lease(
+        &self,
+        _tenant: wavedb_core::U48,
+        _owner: wavedb_core::placement::Owner,
+    ) -> impl Future<Output = wavedb_core::Result<()>> {
+        std::future::ready(Ok(()))
+    }
+
+    async fn run_leased(
+        &self,
+        (): &(),
+        tenant: wavedb_core::U48,
+        struct_hash: u64,
+        op: wavedb_core::NodeOp,
+    ) -> wavedb_core::Result<wavedb_core::NodeReply> {
+        self.run(tenant, struct_hash, op).await
     }
 }
 
