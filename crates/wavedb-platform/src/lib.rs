@@ -39,6 +39,8 @@ pub mod error;
 pub mod http;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod io;
+#[cfg(not(target_arch = "wasm32"))]
+mod listen;
 pub mod rand;
 #[cfg(target_arch = "wasm32")]
 pub mod task;
