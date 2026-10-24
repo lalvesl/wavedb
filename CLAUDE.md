@@ -106,7 +106,8 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   half: hand-rolled RFC 6455 / browser `WebSocket`; `Conn::split()` for reader-task
   patterns), `task` (browser only: `spawn_local` and `spawn_detached`, which runs the
   client manager there — natively it runs on a carrier), `io` (native sockets from
-  `async-io`; protocols are generic over `embedded-io-async`) and `carrier`
+  `async-io`, a node's listeners an `SO_REUSEPORT` group on Linux via `rustix`;
+  protocols are generic over `embedded-io-async`) and `carrier`
   (native: an OS thread running one Embassy executor whose tasks come from
   static pools — the node runs on these).
   Everything above must route clock/entropy/client-HTTP through it — never name
@@ -188,7 +189,12 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   `.threads(n)` workers each **own** a contiguous range of the data shards — their
   `PageStore`s move onto the worker's thread, operations are plain calls there,
   and a BG task beside the jobs steps settle/checkpoint when they leave room
-  (RFC 0067 step 4; one executor per thread, no `unsafe`). On shutdown each
+  (RFC 0067 step 4; one executor per thread, no `unsafe`). Each worker also
+  **accepts its own connections** — one listener per worker, an
+  `SO_REUSEPORT` group on Linux (`Listener::bind_many`; one listener
+  elsewhere) — and routes every operation by owner, to its own queue or
+  another's; a topic's subscriptions live on its owner's worker, which
+  publishes straight into each session's outbox (step 5). On shutdown each
   worker closes and drops its stores before reporting. Node-side seeding goes through
   `RouteHandle::new(&bound.route(), tenant)` — each op on its owner's shard.
   `expose_server!` also emits `StorageRegistry`, so `.registry(REGISTRY)` alone opens

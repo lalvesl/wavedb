@@ -145,7 +145,7 @@ keep 5 of their 40 inserts.
 - **One holder per record.** A record is reached only through the worker that
   owns its shard, and that worker's `PageStore` is the only cache in front of
   it. Node-side seeding (`Bound::route()`) borrows the same stores before the
-  workers take them, so it is never a second holder; the accept thread has no
+  workers take them, so it is never a second holder; a connection has no
   store at all.
 - **The key is the owner.** `(tenant, Owner)` since RFC 0067 step 2b — the
   Pivot rides the front of every collection command — so two collections of
