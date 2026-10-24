@@ -1050,7 +1050,7 @@ mod tests {
     }
 
     /// A bounded settle round takes its budget and leaves the rest queued —
-    /// RFC 0063's interruptible drain, and the property the disk actor's
+    /// RFC 0063's interruptible drain, and the property a worker's
     /// priority valve needs in order to have anything to interleave between.
     ///
     /// The budget has to bite **within** one slot, not only across slots: a
