@@ -24,7 +24,7 @@ use crate::corpus::{FootprintRecord, PhaseRecord, RowRecord};
 use crate::harness::micro::MicroWorkload;
 use crate::harness::{PhaseResult, percentiles};
 use crate::schema::logical_bytes;
-use crate::systems::engine::{Engine, Sharded};
+use crate::systems::engine::Engine;
 use crate::systems::{Cfg, Durability};
 
 /// The note a harness row carries in place of
@@ -51,7 +51,13 @@ pub fn measure(
         "sqlite" => embedded::sqlite(run, d).map(Some),
         "wavedb" => match super::engine_of(&run.key.variant)? {
             Engine::Direct => embedded::wavedb::<PageStore>(run, d).map(Some),
-            Engine::Sharded => embedded::wavedb::<Sharded>(run, d).map(Some),
+            // One collection is one owner, so one thread however many exist:
+            // the planner never makes this row, and it is refused here too.
+            Engine::Sharded => {
+                Err("wavedb/multi is a shop row only: a micro row is one \
+                 collection, so one owner"
+                    .into())
+            }
         },
         #[cfg(feature = "servers")]
         "postgres" => super::server::postgres(run, d).map(Some),
