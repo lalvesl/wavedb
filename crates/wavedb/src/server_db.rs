@@ -10,30 +10,39 @@
 //! goes through core's [`RouteHandle`] to its owner — on a node, usually on
 //! another thread — and the error is re-wrapped into the client-facing
 //! [`Error`](crate::Error) so a body's `?` and the typed helpers
-//! (`Error::not_found`, …) compose.
+//! (`Error::not_found`, …) compose. Each operation is atomic on its own; a
+//! body that needs several to be one step [`lock`](ServerDb::lock)s their
+//! owners first (RFC 0067 §5).
 
 use futures::{Stream, TryStreamExt};
 use wavedb_core::fuzzy::{Fuzzy, Scored};
+use wavedb_core::placement::Owner;
 use wavedb_core::{
-    Bound, DbHandle, Id, LocalId, Metadata, NonUniqueStruct, Route,
-    RouteHandle, U48, UniqueStruct,
+    Bound, DbHandle, Id, Leases, LocalId, Locked, Metadata, NonUniqueStruct,
+    Route, RouteHandle, U48, UniqueStruct,
 };
 
 use crate::error::{Error, Result};
 
-/// A node-side handle: a borrowed [`Route`] plus the bound identity. Cheap
-/// to re-scope with [`as_tenant`](DbHandle::as_tenant).
-pub struct ServerDb<'a, R> {
+/// A node-side handle: a borrowed [`Route`] plus the bound identity, and
+/// the owners the body holds. Cheap to re-scope with
+/// [`as_tenant`](DbHandle::as_tenant).
+pub struct ServerDb<'a, R: Route> {
     local: RouteHandle<'a, R>,
     user: U48,
 }
 
 impl<'a, R: Route> ServerDb<'a, R> {
     /// Wrap a route + tenant as an execution context (`user = tenant` — the
-    /// engine-local/B2C identity).
-    pub const fn new(route: &'a R, tenant: U48) -> Self {
+    /// engine-local/B2C identity). `leases` is the body's table of held
+    /// owners: one per invocation.
+    pub const fn new(
+        route: &'a R,
+        tenant: U48,
+        leases: &'a Leases<R::Lease>,
+    ) -> Self {
         Self {
-            local: RouteHandle::new(route, tenant),
+            local: RouteHandle::leasing(route, tenant, leases),
             user: tenant,
         }
     }
@@ -42,11 +51,29 @@ impl<'a, R: Route> ServerDb<'a, R> {
     /// `#[server]` dispatch builds from gate 1's [`Caller`].
     ///
     /// [`Caller`]: wavedb_core::Caller
-    pub const fn for_caller(route: &'a R, caller: wavedb_core::Caller) -> Self {
+    pub const fn for_caller(
+        route: &'a R,
+        caller: wavedb_core::Caller,
+        leases: &'a Leases<R::Lease>,
+    ) -> Self {
         Self {
-            local: RouteHandle::new(route, caller.tenant),
+            local: RouteHandle::leasing(route, caller.tenant, leases),
             user: caller.user,
         }
+    }
+
+    /// Hold `owners` across this body's awaits until the returned guard
+    /// drops: operations on them run under their leases, so nothing else
+    /// runs on them in between. Take **every** owner the body needs in one
+    /// call — a second lock, or an operation outside the held owners, is
+    /// refused (`wavedb_core::lease` has the rules) — except a collection
+    /// the body creates while holding the lock.
+    ///
+    /// # Errors
+    /// [`Error`] carrying `LockOrder` when a lock is already held; the
+    /// node's fault taking a lease.
+    pub async fn lock(&self, owners: &[Owner]) -> Result<Locked<'a, R::Lease>> {
+        Ok(self.local.lock(owners).await?)
     }
 
     /// The verified user this context executes as (`U48::MAX` = the
@@ -72,9 +99,9 @@ impl<'a, R: Route> ServerDb<'a, R> {
     /// authority over identity, so this is deliberately absent from
     /// [`DbHandle`] and reachable only server-side.
     #[must_use]
-    pub const fn as_identity(&self, user: U48, tenant: U48) -> Self {
+    pub fn as_identity(&self, user: U48, tenant: U48) -> Self {
         Self {
-            local: RouteHandle::new(self.local.route(), tenant),
+            local: self.local.as_tenant(tenant),
             user,
         }
     }
