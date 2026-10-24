@@ -215,7 +215,7 @@ impl PageStore {
             head: meta.head(),
         }))?;
         // Under the same guard as the append — see `Retiring`.
-        Ok(journal.barriers())
+        Ok(journal.barrier_floor())
     }
 }
 
