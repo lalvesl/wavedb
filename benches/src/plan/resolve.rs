@@ -143,8 +143,8 @@ pub const fn consumers_for(
 /// Whether this configuration is a row at all.
 ///
 /// `wavedb/multi` exists only on `shop`: with one consumer it would be an
-/// expensive re-run of `wavedb/single` plus a disk actor, which is a row the
-/// corpus already has under a name that says so.
+/// expensive re-run of `wavedb/single` — one collection is one owner, so one
+/// thread however many exist.
 #[must_use]
 fn is_a_row(system: &str, variant: &str, workload: &str) -> bool {
     !(system == "wavedb" && variant == "multi" && workload != "shop")
