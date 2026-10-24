@@ -8,10 +8,10 @@
 //! key at all. A user is a tenant is one `Shopping` collection, so routing by
 //! user routes by **Pivot instance** — [RFC 0064]'s unit of concurrency.
 //!
-//! That disjointness is a correctness condition, not an optimisation.
-//! `ShardStore` memoises absence, which is sound only while a record is
-//! reached by exactly one holder; two consumers sharing a tenant would keep
-//! serving a `None` after the other's insert filled it. The generator
+//! That disjointness is a correctness condition, not an optimisation. On
+//! `wavedb/multi` each consumer owns one data shard, and user `u` lives in
+//! shard `u % N` — the preload put it there — so a user handed to another
+//! consumer would find nothing in that consumer's store. The generator
 //! partitions by user and never sends one user's work to two consumers, and
 //! [`Factory::route`] is that rule.
 //!
@@ -53,16 +53,15 @@ pub struct Factory<E: ShopEngine> {
 impl<E: ShopEngine> Factory<E> {
     /// # Errors
     /// The shared engine could not be started.
-    pub fn new(store: PageStore, asked: usize) -> Result<Self, String> {
+    pub fn new(stores: Vec<PageStore>, asked: usize) -> Result<Self, String> {
         let consumers = E::consumers(asked);
         Ok(Self {
-            shared: E::share(store, consumers)?,
+            shared: E::share(stores, consumers)?,
             consumers,
         })
     }
 
-    /// The shared half, so the row can shut the actor down after the last
-    /// consumer has closed.
+    /// The shared half: the shards no consumer has taken yet.
     pub const fn shared(&self) -> &E::Shared {
         &self.shared
     }
@@ -114,11 +113,10 @@ impl<E: ShopEngine> Driver for ShopWavedb<E> {
         let u = op.partition_key();
         // The correctness condition, checked rather than trusted.
         //
-        // `ShardStore` memoises **absence**, which is sound only while a
-        // record is reached by exactly one holder: two consumers sharing a
-        // tenant would keep serving a `None` after the other's insert filled
-        // it. That is silent wrong data, not a slow read, and it would show
-        // up as a plausible number rather than a failure. So the routing rule
+        // User `u` lives in data shard `u % N`, and this consumer owns only
+        // its own: handed someone else's user, it would read a `None` from a
+        // store that never held them. That is silent wrong data, not a slow
+        // read, and it would show up as a plausible number, not a failure. So the routing rule
         // gets an assertion at the one place it can be observed.
         //
         // `debug_assert` because it is on the timed path: the release row must
@@ -166,9 +164,7 @@ impl<E: ShopEngine> Driver for ShopWavedb<E> {
         Ok(())
     }
 
-    /// Settle, and stop there. The disk actor belongs to the row: with three
-    /// consumers over one actor, the first `close` to shut it down would stop
-    /// the actor the other two are still using.
+    /// Settle, and stop there: the store goes down with this driver.
     fn close(self) -> Result<(), String> {
         self.engine.checkpoint()
     }
