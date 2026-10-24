@@ -1,22 +1,17 @@
-//! The node's background upkeep: what it asks the disk actor for, on a timer.
+//! The node's maintenance **policy**, and the accept thread's background task.
 //!
-//! Split from `lib.rs` for the file budget, and it reads better apart anyway:
-//! everything here is *policy* — when to suggest work — while the actor
-//! decides when to do it.
-//!
-//! Hints, not calls. Once the actor owns the engine (RFC 0064) this loop can
-//! only suggest, and the actor weighs each suggestion against the reads it is
-//! also serving (`shard::priority`). A hint dropped because the queue is full
-//! is a hint the actor has already been given.
+//! The policy is plain numbers: when a worker opens a checkpoint, how far it
+//! evicts, when it defragments. Each worker applies it to the stores it owns,
+//! on its own thread, between its jobs (`shard::background`, RFC 0067
+//! step 4). What is left on the accept thread is the mutation publisher.
 
 use async_channel::Receiver;
-use embassy_futures::join::join;
 use embassy_futures::select::select;
 use wavedb_platform::carrier::Here;
 
+use crate::ServerError;
 use crate::feed::FeedReceiver;
 use crate::subscribe::Subscriptions;
-use crate::{ServerError, shard};
 
 /// The background maintenance policy: how the node settles, checkpoints,
 /// and bounds its caches while serving.
@@ -46,95 +41,39 @@ impl Default for Maintenance {
     }
 }
 
-/// How often the upkeep loop looks at the engine.
-const UPKEEP_PERIOD: std::time::Duration =
-    std::time::Duration::from_millis(200);
-
-/// The background maintenance loop: periodically settle the pending queue,
-/// checkpoint once the journal crosses the threshold, and evict settled
-/// cache entries down to budget. An engine fault stops maintenance (acked
-/// writes stay safe in the journal); serving continues.
-pub async fn maintain(disk: shard::DiskHandle, policy: Maintenance) {
-    loop {
-        // A sleep per round rather than a ticker: a ticker that fell behind
-        // fires back to back to catch up, and a burst of hints is exactly
-        // what a busy actor does not need. (tokio's interval needed
-        // `MissedTickBehavior::Delay` to say the same thing.)
-        wavedb_platform::time::sleep(UPKEEP_PERIOD).await;
-        // Hints, not calls: the actor owns the engine, and it decides *when*
-        // to act on them against the reads it is also serving (`shard::
-        // priority`). A hint dropped because the queue is full is a hint the
-        // actor has already been given.
-        let Ok(stats) = disk.stats().await else {
-            return; // the actor is gone; serving is over too
-        };
-        disk.hint(shard::Maintenance::Settle);
-        if stats.journal_bytes > policy.checkpoint_after_bytes {
-            disk.hint(shard::Maintenance::Checkpoint);
-        }
-        disk.hint(shard::Maintenance::Evict {
-            budget_bytes: policy.cache_budget_bytes,
-        });
-        // A checkpoint leaves its `Commit` frame unsynced for the next write to
-        // carry, for free, and its retired journal on disk until the next
-        // checkpoint disposes of it (RFC 0047). Maintenance has nothing to do
-        // about either: forcing the barrier here would spend the IOp the
-        // deferral exists to save, to reclaim disk — the abundant resource.
-        // Keep a window large enough for the next checkpoint to land in a
-        // hole rather than at the tail; a pass that finds nothing is free.
-        if stats.largest_free_extent < policy.defrag_below_blocks {
-            disk.hint(shard::Maintenance::Defragment {
-                budget_blocks: policy.defrag_budget_blocks,
-            });
-        }
-    }
-}
-
-/// The engine's owner is gone — nothing can be asked of it again.
-pub const fn stopped() -> ServerError {
-    ServerError::Storage(wavedb_storage::StorageError::Corrupt(
-        "disk actor stopped before the node did",
-    ))
-}
-
 /// Background tasks alive at once: one per node, with headroom for a node
 /// still winding down (see `__rt::MAX_NODES`).
 const BACKGROUND: usize = crate::__rt::MAX_NODES;
 
-/// Start the node's background task on the accept carrier: [`maintain`] and
-/// the mutation publisher, until `halt` closes.
+/// Start the node's background task on the accept carrier — the mutation
+/// publisher — until `halt` closes.
 ///
 /// # Errors
 /// [`ServerError::Io`] when the background pool is full — a node that could
-/// not maintain its engine refuses to start rather than serve without it.
+/// not deliver its live events refuses to start rather than serve without.
 pub fn spawn_background(
-    disk: shard::DiskHandle,
-    policy: Maintenance,
     feed: FeedReceiver,
     subs: Subscriptions,
     halt: Receiver<()>,
     here: &Here,
 ) -> crate::Result<()> {
-    here.spawn(background(disk, policy, feed, subs, halt, here.clone()))
+    here.spawn(background(feed, subs, halt, here.clone()))
         .map_err(|_| {
             ServerError::Io(std::io::Error::other("background pool full"))
         })
 }
 
-/// Both never-ending background jobs, until the node halts.
+/// The publisher, until the node halts.
 #[wavedb_platform::carrier::rt::task(
     pool_size = BACKGROUND,
     embassy_executor = wavedb_platform::carrier::rt
 )]
 async fn background(
-    disk: shard::DiskHandle,
-    policy: Maintenance,
     feed: FeedReceiver,
     subs: Subscriptions,
     halt: Receiver<()>,
     here: Here,
 ) {
-    let work = join(maintain(disk, policy), crate::feed::publish(feed, subs));
-    select(work, halt.recv()).await;
+    select(crate::feed::publish(feed, subs), halt.recv()).await;
     drop(here); // held to the end: the carrier waits for this task
 }
