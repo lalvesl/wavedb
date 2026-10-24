@@ -63,9 +63,11 @@ and says so in its header:
 > absent from the index.
 
 It drives two synthetic backends, identical but for whether `get` suspends.
-Since RFC 0067 step 4 the node ships no suspending store at all — a worker
-calls its own `PageStore` — so this pair is what keeps the brake honest until
-one returns (per-thread `io_uring`, or step 5's cross-thread leases).
+Since RFC 0067 step 4 a worker calls its own `PageStore`, and since the
+barrier helper that store **suspends** again: an `apply` waits for its
+`fsync` on the worker's helper thread, and the worker runs other owners'
+operations meanwhile. That is safe only because the operation still holds
+its owner's lock — exactly what this pair proves the brake provides.
 
 This is the third invariant single-threadedness was supplying tacitly.
 [RFC 0063](rfcs/0063-engine-yield-map-and-interruptible-engine-PLANNED.md) found
@@ -163,7 +165,8 @@ keep 5 of their 40 inserts.
 ## The rule
 
 **Any `Store` whose futures can suspend needs the brake.** That is
-`IndexedDB`, anything network-backed, and the per-thread `io_uring` engine RFC
+`IndexedDB`, anything network-backed, a `PageStore` with a barrier helper
+(every node worker's, RFC 0067 §4), and the per-thread `io_uring` engine RFC
 0067 plans. `PageStore` alone on a
 current-thread runtime does not — which is precisely why the requirement is
 invisible until someone changes the backend.

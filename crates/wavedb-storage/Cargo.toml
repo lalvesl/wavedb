@@ -26,6 +26,9 @@ seahash.workspace = true
 zstd.workspace = true
 # Streams for the search walk over the Store seam.
 futures.workspace = true
+# The barrier helper's queue (`barrier`): an `fsync` asked from a worker,
+# answered from the helper thread (RFC 0067 §4).
+async-channel.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

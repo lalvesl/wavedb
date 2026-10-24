@@ -562,6 +562,45 @@ and a write become one step.
   and an operation outside the lock are refused and write nothing; a
   collection created under the lock is filled and linked in one step.
 
+### The barrier helper (landed 2026-10-09)
+
+§4's fsync helper. A batch's barrier no longer blocks the worker that
+committed it.
+
+- **Storage (`barrier.rs`).** `Barrier::spawn` starts a helper thread;
+  `PageStore::use_barrier` hands it the store's batch barriers. `apply` then
+  writes the frame and commits it to the caches under the journal lock as
+  before, asks the helper for a barrier on that file, and **suspends** until
+  it is done. The helper takes every request queued since its last round
+  and syncs each file once for all of them — group commit falls out of the
+  queue, with no window and no timer. A windowed store (RFC 0061) asks the
+  helper once per window and does not wait.
+- **Why suspending is safe here.** A batch is visible in the caches before
+  it is durable, but only to its own owner's next operation, and the owner
+  stays locked until `apply` returns — on the node every operation, read or
+  write, runs under its owner's lock (`CONCURRENCY_BRAKE.md`). A store
+  without a helper — the client cache, tests, seeding — never suspends, as
+  before.
+- **Retirement across threads.** RFC 0047 retires a journal once a barrier
+  *since* the checkpoint's `Commit` frame has landed. A journal file now
+  counts barriers **started** and **completed**; a frame appended at
+  `started = n` is durable once `completed > n`, which holds whatever thread
+  took the barriers and in whatever order they finished.
+- **A failed barrier** marks the file failed: the waiting `apply` reports it
+  and every later append is refused (`StorageError::BarrierFailed`) until the
+  store is reopened and recovers from what is on disk — the batch was
+  already visible, and an `fsync` that failed leaves the file's state
+  unknown.
+- **Node.** Each worker spawns one helper (`wavedb-fsync`) and gives it to
+  every store in its range; it ends when the last of them is dropped.
+  Checkpoint barriers (`data.bin`, one per checkpoint) stay on the worker,
+  inside the stepped checkpoint.
+- Tests: `barrier` unit tests (started/completed counts; sixteen queued
+  waits cost one `fsync`; a failed file refuses appends) and
+  `tests/barrier_helper.rs` (an acknowledged batch survives a reopen;
+  retirement completes with barriers on the helper). Every node test now
+  runs with it.
+
 ## Alternatives
 
 - **One journal per thread.** Fewer `fsync`s per window, but a shard stops

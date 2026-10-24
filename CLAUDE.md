@@ -159,7 +159,9 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   (checked-wire envelope, per-type zstd dictionaries with version = prefix length),
   journal-first WAL (append + cache commit under the journal lock = the atomic unit;
   one barrier per batch by default, or one per elapsed `StoreOptions::relax_window`
-  — RFC 0061, `flush()` forces it),
+  — RFC 0061, `flush()` forces it; with `use_barrier(Barrier)` the barrier is
+  taken on a helper thread and `apply` waits for it, grouped per round — each
+  node worker has one, RFC 0067 §4),
   replay on open. Per-type routing is compile-time (`StructStorage` statics are
   declarations: hash + compression policy); the per-type state (cache, directory,
   dictionary) belongs to the open store (RFC 0067 step 1). **One open `PageStore`

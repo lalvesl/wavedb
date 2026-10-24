@@ -1863,6 +1863,7 @@ dependencies = [
 name = "wavedb-storage"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "crc32fast",
  "futures",
  "parking_lot",
