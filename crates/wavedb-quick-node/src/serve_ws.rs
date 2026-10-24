@@ -7,32 +7,30 @@
 //! per-message token. Then the loop multiplexes two sources:
 //!
 //! - the **client** — [`Call`](ClientMsg::Call)s (routed to the owning
-//!   shard with the bound caller, which runs gates 2–3; answered by
+//!   worker with the bound caller, which runs gates 2–3; answered by
 //!   `Item*`/`End`, FIFO per connection) and
 //!   [`Subscribe`](ClientMsg::Subscribe)/[`Unsubscribe`](ClientMsg::Unsubscribe),
 //!   each acked with a [`TopicOk`](ServerMsg::TopicOk) once applied (FIFO ⇒
 //!   an acked watch cannot miss a later mutation); an **anonymous**
 //!   `Subscribe` is refused by closing the connection;
-//! - the **event channel** — mutations the [`NotifyStore`] pushed for this
+//! - the **outbox** — mutations the topics' owners pushed for this
 //!   connection's subscriptions, forwarded verbatim.
 //!
 //! Frame reads are not cancel-safe, so a dedicated reader task
 //! ([`crate::ws_read`]) owns the read half and forwards decoded messages over
-//! a channel; the loop selects on that channel (cancel-safe) and the event
-//! channel. On disconnect every subscription the connection held is dropped.
+//! a channel; the loop selects on that channel (cancel-safe) and the outbox.
+//! On disconnect every subscription the connection held is dropped.
 //!
-//! The session executes nothing itself: every command, and the tail a
-//! subscribe acks with, runs on the shard that owns it
-//! ([`Router::call`](crate::shard::Router::call)). This thread holds the
-//! socket and the subscription table, and no store.
-//!
-//! [`NotifyStore`]: crate::subscribe::NotifyStore
+//! The session executes nothing itself, and holds no subscription table:
+//! a subscription is registered with the worker that owns its topic
+//! ([`Router::watch`](crate::shard::Router::watch)), which publishes into
+//! this session's outbox from its own thread, and every command — the tail
+//! a subscribe acks with included — runs on its owner's worker
+//! ([`Router::call`](crate::shard::Router::call)).
 
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use async_channel::Sender;
 use embassy_futures::select::{Either, select};
 use wavedb_core::expose::{Caller, Change, Command, Exposure, Reply};
 use wavedb_core::wire::{from_wire, to_wire};
@@ -43,17 +41,16 @@ use wavedb_platform::io::{ReadHalf, WriteHalf};
 use wavedb_platform::ws::codec::{self, OP_BINARY, OP_CLOSE, OP_PONG};
 
 use crate::dispatch;
-use crate::serve::Node;
 use crate::shard::Router;
-use crate::subscribe::SubTable;
+use crate::subscribe::Outbox;
 use crate::ws_read::{FromClient, Halt, Inbound, StopReader, reader};
 
 /// Events queued for one connection before it is disconnected.
 ///
-/// Deliberately not a backpressure point: the publisher serves every
-/// connection, so waiting on one slow reader would stall them all. A client
-/// that falls this far behind is cut off and catches up by cursor
-/// (`SubTable::publish`).
+/// Deliberately not a backpressure point: an owner publishes to every
+/// subscriber of a topic as it commits, so waiting on one slow reader would
+/// stall the writes. A client that falls this far behind is cut off and
+/// catches up by cursor (`SubTable::publish`).
 pub const WS_OUTBOUND_DEPTH: usize = 256;
 
 /// Run one upgraded connection to its end. Returns `Ok` on any clean or
@@ -66,10 +63,9 @@ pub const WS_OUTBOUND_DEPTH: usize = 256;
 pub async fn serve<E: Exposure>(
     read: ReadHalf,
     mut write: WriteHalf,
-    node: &Node<E>,
+    router: &Router<E>,
     here: &Here,
 ) -> wavedb_net::Result<()> {
-    let (router, secret, subs) = (&node.router, &node.secret, &node.subs);
     let inbound = Rc::new(Inbound::new());
     let halt = Rc::new(Halt::new());
     // However the session ends — returning, or dropped mid-await when the
@@ -88,14 +84,13 @@ pub async fn serve<E: Exposure>(
         close(&mut write).await;
         return Ok(());
     };
-    let Ok(caller) = dispatch::identify(&auth, secret) else {
+    let Ok(caller) = dispatch::identify(&auth, router.secret()) else {
         close(&mut write).await;
         return Ok(());
     };
     send(&mut write, &ServerMsg::HelloOk).await?;
 
-    let (event_tx, event_rx) = async_channel::bounded(WS_OUTBOUND_DEPTH);
-    let conn = subs.borrow_mut().new_conn();
+    let (outbox, events) = async_channel::bounded(WS_OUTBOUND_DEPTH);
     // The connection's own subscription set: keeps `subscribe` one-per-topic
     // and drives teardown on disconnect.
     let mut topics: HashSet<Topic> = HashSet::new();
@@ -103,20 +98,16 @@ pub async fn serve<E: Exposure>(
     // Both receives are cancel-safe: losing the race leaves the message
     // queued for the next round.
     let result = loop {
-        match select(inbound.receive(), event_rx.recv()).await {
+        match select(inbound.receive(), events.recv()).await {
             Either::First(FromClient::End) => break Ok(()),
             Either::First(item) => {
-                if let Err(e) = handle_client(
-                    &mut write,
+                let session = Session {
                     router,
                     caller,
-                    subs,
-                    conn,
-                    &event_tx,
-                    &mut topics,
-                    item,
-                )
-                .await
+                    outbox: &outbox,
+                };
+                if let Err(e) =
+                    session.handle(&mut write, &mut topics, item).await
                 {
                     break Err(e);
                 }
@@ -126,10 +117,9 @@ pub async fn serve<E: Exposure>(
                     break Err(e);
                 }
             }
-            // `event_tx` is held here, so the outbox only fails when the
-            // publisher closed it: this client fell behind, or the feed
-            // dropped a mutation. Say so and end; the client reconnects and
-            // catches up by cursor.
+            // `outbox` is held here, so it only fails when an owner closed
+            // it: this client fell behind. Say so and end; the client
+            // reconnects and catches up by cursor.
             Either::Second(Err(_)) => {
                 close(&mut write).await;
                 break Ok(());
@@ -137,76 +127,86 @@ pub async fn serve<E: Exposure>(
         }
     };
 
-    // Teardown: unregister every subscription; the reader stops as
-    // `_stop_reader` drops.
-    let mut table = subs.borrow_mut();
-    for topic in &topics {
-        table.unsubscribe(caller.tenant, *topic, conn);
+    // Teardown: unregister every subscription at its owner; the reader stops
+    // as `_stop_reader` drops. (A session dropped mid-await by a halting node
+    // skips this, and loses nothing: the workers' tables go with the node.)
+    for topic in topics {
+        router.unwatch(caller.tenant, topic, outbox.clone()).await;
     }
-    drop(table);
     result
 }
 
-/// Handle one message from the client. The returned `Err` is a socket write
-/// fault only — a *command* refusal is a `Response::Err` sent over the wire.
-#[allow(clippy::too_many_arguments)]
-async fn handle_client<E: Exposure>(
-    write: &mut WriteHalf,
-    router: &Router<E>,
+/// What handling one client message needs besides the message.
+struct Session<'a, E> {
+    router: &'a Router<E>,
     caller: Caller,
-    subs: &Rc<RefCell<SubTable>>,
-    conn: u64,
-    event_tx: &Sender<ServerMsg>,
-    topics: &mut HashSet<Topic>,
-    item: FromClient,
-) -> wavedb_net::Result<()> {
-    match item {
-        FromClient::Ping(payload) => {
-            codec::write_message(write, OP_PONG, &payload, false).await?;
-        }
-        // Ended by the session loop before it gets here.
-        FromClient::End => {}
-        FromClient::Msg(ClientMsg::Call(frame)) => {
-            // Awaited before the next message is read: FIFO per connection.
-            let response = router.call(caller, frame).await;
-            write_reply(write, response).await?;
-        }
-        FromClient::Msg(ClientMsg::Subscribe(topic)) => {
-            // Only an authenticated caller may watch a tenant's data; an
-            // anonymous connection (public functions only) asking to is a
-            // protocol violation — refused loudly (close), never silently
-            // ignored (a client waiting on the ack must not hang).
-            if caller.is_anonymous() {
+    outbox: &'a Outbox,
+}
+
+impl<E: Exposure> Session<'_, E> {
+    /// Handle one message from the client. The returned `Err` is a socket
+    /// write fault only — a *command* refusal is a `Response::Err` sent over
+    /// the wire.
+    async fn handle(
+        &self,
+        write: &mut WriteHalf,
+        topics: &mut HashSet<Topic>,
+        item: FromClient,
+    ) -> wavedb_net::Result<()> {
+        let Self {
+            router,
+            caller,
+            outbox,
+        } = self;
+        match item {
+            FromClient::Ping(payload) => {
+                codec::write_message(write, OP_PONG, &payload, false).await?;
+            }
+            // Ended by the session loop before it gets here.
+            FromClient::End => {}
+            FromClient::Msg(ClientMsg::Call(frame)) => {
+                // Awaited before the next message is read: FIFO per
+                // connection.
+                let response = router.call(*caller, frame).await;
+                write_reply(write, response).await?;
+            }
+            FromClient::Msg(ClientMsg::Subscribe(topic)) => {
+                // Only an authenticated caller may watch a tenant's data; an
+                // anonymous connection (public functions only) asking to is
+                // a protocol violation — refused loudly (close), never
+                // silently ignored (a client waiting on the ack must not
+                // hang).
+                if caller.is_anonymous() {
+                    close(write).await;
+                    return Err(wavedb_net::Error::Http("anonymous subscribe"));
+                }
+                // Registered at the owner *before* the tail is read there,
+                // so no mutation falls between the two.
+                if topics.insert(topic) {
+                    router.watch(caller.tenant, topic, (*outbox).clone()).await;
+                }
+                // FIFO ack: once this arrives the subscription is live, so a
+                // watcher established before a mutation cannot miss its
+                // event. The tail seeds the client's reconnect cursor (W6).
+                let tail = topic_tail(router, *caller, topic).await;
+                send(write, &ServerMsg::TopicOk(topic, tail)).await?;
+            }
+            FromClient::Msg(ClientMsg::Unsubscribe(topic)) => {
+                if topics.remove(&topic) {
+                    router
+                        .unwatch(caller.tenant, topic, (*outbox).clone())
+                        .await;
+                }
+                send(write, &ServerMsg::TopicOk(topic, 0)).await?;
+            }
+            // A second `Hello` is a protocol violation — end the session.
+            FromClient::Msg(ClientMsg::Hello(_)) => {
                 close(write).await;
-                return Err(wavedb_net::Error::Http("anonymous subscribe"));
+                return Err(wavedb_net::Error::Http("second hello"));
             }
-            if topics.insert(topic) {
-                subs.borrow_mut().subscribe(
-                    caller.tenant,
-                    topic,
-                    conn,
-                    event_tx.clone(),
-                );
-            }
-            // FIFO ack: once this arrives the subscription is live, so a
-            // watcher established before a mutation cannot miss its event.
-            // The tail seeds the client's reconnect cursor (W6).
-            let tail = topic_tail(router, caller, topic).await;
-            send(write, &ServerMsg::TopicOk(topic, tail)).await?;
         }
-        FromClient::Msg(ClientMsg::Unsubscribe(topic)) => {
-            if topics.remove(&topic) {
-                subs.borrow_mut().unsubscribe(caller.tenant, topic, conn);
-            }
-            send(write, &ServerMsg::TopicOk(topic, 0)).await?;
-        }
-        // A second `Hello` is a protocol violation — end the session.
-        FromClient::Msg(ClientMsg::Hello(_)) => {
-            close(write).await;
-            return Err(wavedb_net::Error::Http("second hello"));
-        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// The topic's current tail instant — the cursor a fresh subscribe seeds its
