@@ -45,7 +45,8 @@ use wavedb_platform::carrier::Here;
 use wavedb_storage::PageStore;
 
 use super::background::{Background, background};
-use super::owned::Owned;
+use super::lease::{self, Lease};
+use super::owned::{Busy, Owned};
 use super::spawn::ShardCtx;
 use super::{Owner, OwnerKey, OwnerLocks};
 use crate::__rt::NodeTasks;
@@ -84,6 +85,13 @@ pub enum Job {
         topic: Topic,
         outbox: Outbox,
     },
+    /// Hold `owner` for a `#[server]` body until the [`Lease`] it is
+    /// answered with drops (`super::lease`).
+    Lease {
+        tenant: U48,
+        owner: Owner,
+        answer: oneshot::Sender<Lease>,
+    },
 }
 
 /// A job on its way into a task, recoverable if the task never starts.
@@ -108,6 +116,16 @@ impl<E> Worker<E> {
     fn store(&self, owner: Owner) -> wavedb_core::Result<OpStore<'_>> {
         let store = self.owned.store(owner.shard(self.shards))?;
         Ok(NotifyStore::new(store, &self.subs))
+    }
+
+    /// This worker's owner locks.
+    pub(super) const fn locks(&self) -> &OwnerLocks {
+        &self.locks
+    }
+
+    /// Count an operation as executing until the guard drops.
+    pub(super) fn busy(&self) -> Busy<'_> {
+        self.owned.busy()
     }
 
     /// Apply a subscription job here and now; any other job comes back.
@@ -188,10 +206,13 @@ pub async fn shard<E: NodeTasks>(ctx: ShardCtx<E>, here: Here) {
         let spawned =
             E::spawn_job(Rc::clone(&slot), Rc::clone(&worker), here.clone());
         // Refused: the pool is full. The job comes back out of its slot and
-        // runs here, holding the queue until it is done.
+        // runs here, holding the queue until it is done — except a lease,
+        // which would hold the queue for as long as its body holds the
+        // owner: it is refused instead, its answer dropped.
         let refused = spawned.is_err().then(|| slot.borrow_mut().take());
-        if let Some(Some(job)) = refused {
-            serve(&worker, job).await;
+        match refused {
+            None | Some(None | Some(Job::Lease { .. })) => {}
+            Some(Some(job)) => serve(&worker, job).await,
         }
     }
     drop(halt);
@@ -231,8 +252,6 @@ pub async fn job<E: NodeTasks>(
 }
 
 async fn serve<E: NodeTasks>(worker: &Worker<E>, job: Job) {
-    let (registry, locks) = (&worker.registry, &worker.locks);
-    let _busy = worker.owned.busy();
     // A caller that gave up between routing and here: the answer has
     // nowhere to go, and that is not this worker's problem.
     match job {
@@ -241,11 +260,18 @@ async fn serve<E: NodeTasks>(worker: &Worker<E>, job: Job) {
             frame,
             answer,
         } => {
+            let _busy = worker.busy();
+            let registry = &worker.registry;
             let owner = dispatch::owner_of(registry, caller.tenant, &frame);
             let response = match worker.store(owner) {
                 Ok(store) => {
                     dispatch::call(
-                        registry, &store, locks, caller, owner, frame,
+                        registry,
+                        &store,
+                        &worker.locks,
+                        caller,
+                        owner,
+                        frame,
                     )
                     .await
                 }
@@ -261,25 +287,39 @@ async fn serve<E: NodeTasks>(worker: &Worker<E>, job: Job) {
             op,
             answer,
         } => {
+            let _busy = worker.busy();
             let owner = op.owner(tenant, struct_hash);
-            let reply = match worker.store(owner) {
-                Ok(store) => {
-                    let held =
-                        locks.acquire(OwnerKey::new(tenant, owner)).await;
-                    let reply = registry
-                        .run_node(&store, tenant, struct_hash, op)
-                        .await;
-                    drop(held);
-                    reply
-                }
-                Err(e) => Err(e),
-            };
+            let held = worker.locks.acquire(OwnerKey::new(tenant, owner)).await;
+            let reply = worker.run_node(owner, tenant, struct_hash, op).await;
+            drop(held);
             let _ = answer.send(reply);
         }
+        // Busy only while an operation runs under it, not while it is held.
+        Job::Lease {
+            tenant,
+            owner,
+            answer,
+        } => lease::hold(worker, tenant, owner, answer).await,
         // Applied in the receive loop; a refused spawn never carries one.
         job @ (Job::Watch { .. } | Job::Unwatch { .. }) => {
             let _ = worker.subscription(job);
         }
+    }
+}
+
+impl<E: NodeTasks> Worker<E> {
+    /// Run a node operation on `owner`'s store, whoever holds its lock.
+    pub(super) async fn run_node(
+        &self,
+        owner: Owner,
+        tenant: U48,
+        struct_hash: u64,
+        op: NodeOp,
+    ) -> wavedb_core::Result<NodeReply> {
+        let store = self.store(owner)?;
+        self.registry
+            .run_node(&store, tenant, struct_hash, op)
+            .await
     }
 }
 
