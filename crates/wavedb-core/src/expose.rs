@@ -16,8 +16,9 @@
 
 use crate::error::{Error, Result};
 use crate::id::Id;
-use crate::node_op::{NodeOp, NodeReply, Route};
+use crate::node_op::{NodeOp, NodeReply};
 use crate::record;
+use crate::route::Route;
 use crate::store::Store;
 use crate::traits::WaveDbStruct;
 use crate::u48::U48;
