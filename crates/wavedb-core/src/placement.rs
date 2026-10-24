@@ -21,6 +21,7 @@
 //! [RFC 0067]: ../../../rfcs/0067-thread-per-core-shards-WIP.md
 
 use crate::expose::{Addressing, Command};
+use crate::traits::UniqueStruct;
 use crate::wire::from_wire;
 use crate::{LocalId, U48};
 
@@ -36,7 +37,10 @@ pub const DEFAULT_SHARDS: usize = 64;
 /// which `hash(id)` would split across two shards with no owner to be atomic
 /// in. A collection is the same: its B+tree nodes and chain segments carry
 /// ids of their own, and they belong to the Pivot because the operation does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Ordered (any total order will do) so a body taking several owners takes
+/// them in one order everywhere (RFC 0067 §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Owner {
     /// A NonUnique collection, named by its Pivot.
     Collection(LocalId),
@@ -47,6 +51,15 @@ pub enum Owner {
 }
 
 impl Owner {
+    /// The Unique type `T` under `tenant`.
+    #[must_use]
+    pub const fn unique<T: UniqueStruct>(tenant: U48) -> Self {
+        Self::Unique {
+            tenant,
+            struct_hash: T::STRUCT_HASH,
+        }
+    }
+
     /// The owner of one wire command on `struct_hash` under `tenant`, given
     /// how the registry addresses that hash.
     ///
