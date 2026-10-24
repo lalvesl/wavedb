@@ -149,9 +149,9 @@ impl ShopOp {
 /// consumer *holds* has to be.
 ///
 /// Structural rather than asserted in prose: both ops are plain data, so a
-/// consumer's `Rc`-shaped state (a `ShardStore`, a `Collection` handle, an
-/// in-flight non-`Send` future) stays free to be exactly that. This is the
-/// same split `wavedb-quick-node/src/shard/msg.rs` makes for the node.
+/// consumer's own state (its store, a `Collection` handle, an in-flight
+/// non-`Send` future) stays free to be exactly that. This is the same split
+/// a node makes: only its `Job`s cross into a worker.
 const _: fn() = || {
     const fn assert_send<T: Send>() {}
     assert_send::<MicroOp>();
