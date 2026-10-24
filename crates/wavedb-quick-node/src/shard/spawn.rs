@@ -12,7 +12,7 @@
 use async_channel::Receiver;
 use futures::channel::oneshot;
 use wavedb_platform::carrier;
-use wavedb_storage::{PageStore, StorageError, StorageResult};
+use wavedb_storage::{Barrier, PageStore, StorageError, StorageResult};
 
 use super::router::Router;
 use super::worker::Job;
@@ -90,10 +90,19 @@ pub fn start<E: NodeTasks>(
         // first `p` of the next worker.
         let end = ((w + 1) * shards).div_ceil(threads);
         let (closed, on_close) = oneshot::channel();
+        // The worker's `fsync` helper: its stores' batch barriers are taken
+        // there, so a barrier never stops the worker (RFC 0067 §4). It ends
+        // when the last of those stores is dropped.
+        let barrier = Barrier::spawn("wavedb-fsync")?;
+        let mut stores: Vec<PageStore> =
+            rest.by_ref().take(end - first).collect();
+        for store in &mut stores {
+            store.use_barrier(barrier.clone());
+        }
         let ctx = ShardCtx {
             registry,
             first,
-            stores: rest.by_ref().take(end - first).collect(),
+            stores,
             shards,
             policy,
             jobs,
