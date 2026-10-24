@@ -149,7 +149,7 @@ where
             settings: settings(engine, d),
             compression: "zstd (per-type dictionaries)",
             retains_history: true,
-            notes: wavedb_adapter::notes(seeded, engine),
+            notes: wavedb_adapter::notes(seeded),
             seed_path: path_of(cfg.seed_wavedb.as_ref()),
             materialise_ms,
             footprints: points.into_vec(),
@@ -188,15 +188,14 @@ fn quiesce<E: Engineish>(engine: &E, points: &Points) -> Result<(), String> {
 fn settings(engine: Engine, d: Durability) -> Vec<(String, String)> {
     vec![
         ("mode".into(), engine.mode().into()),
-        // Counted, not assumed. `Shards::start` spawns the **disk actor** and
-        // nothing else — the per-shard worker threads belong to the node's
-        // `Router`, which a benchmark driving `Store` directly never builds.
+        // Counted, not assumed.
         (
             "threads".into(),
             match engine {
                 Engine::Direct => "1 consumer (everything there)".to_string(),
                 Engine::Sharded => {
-                    "1 consumer, which is the shard, + 1 disk actor".to_string()
+                    "one consumer per data shard, each its own thread"
+                        .to_string()
                 }
             },
         ),
