@@ -10,9 +10,8 @@
 //! is refused rather than silently sharing.
 //!
 //! The engine is then constructed *on the consumer's thread*, which is the
-//! constraint the whole seam is shaped by: [`Sharded`] holds an
-//! `Rc<ShardStore>` and is not `Send`, so it could not have been built
-//! anywhere else and moved.
+//! constraint the whole seam is shaped by: an engine built on one thread
+//! stays on it.
 //!
 //! ## What is inside the timed window, and what is not
 //!
@@ -37,7 +36,7 @@ use crate::harness::{Driver, DriverFactory};
 use crate::plan::op::MicroOp;
 use crate::schema::{Thing, ThingPivotId};
 use crate::seed::TENANT;
-use crate::systems::engine::{Engineish, Sharded};
+use crate::systems::engine::Engineish;
 
 /// Journal bytes above which a row checkpoints, between operations.
 const CHECKPOINT_AFTER_BYTES: u64 = 64 << 20;
@@ -47,8 +46,8 @@ const CACHE_BUDGET_BYTES: usize = 96 << 20;
 
 /// Building one engine from the process's single store.
 ///
-/// Two implementations, one per row of the single/multi axis, and no `dyn`:
-/// each row monomorphises to its own concrete engine.
+/// One implementation today — the direct engine; `micro` has no sharded row —
+/// and no `dyn`: a row monomorphises to its concrete engine.
 pub trait FromStore: Engineish + Sized {
     fn from_store(store: PageStore) -> Result<Self, String>;
 }
@@ -56,12 +55,6 @@ pub trait FromStore: Engineish + Sized {
 impl FromStore for PageStore {
     fn from_store(store: Self) -> Result<Self, String> {
         Ok(store)
-    }
-}
-
-impl FromStore for Sharded {
-    fn from_store(store: PageStore) -> Result<Self, String> {
-        Self::new(store)
     }
 }
 
@@ -103,9 +96,8 @@ pub struct WavedbDriver<E: Engineish> {
     ids: Vec<Id>,
 }
 
-// No `Send` bound on `E`, and that is the point: `Sharded` holds an
-// `Rc<ShardStore>` and never crosses a thread. `Factory<E>` is `Send`
-// regardless, because it holds a `PageStore` and a `PhantomData<fn() -> E>` —
+// No `Send` bound on `E`: the engine is built on the consumer's thread and
+// never crosses one. `Factory<E>` is `Send` regardless, because it holds a `PageStore` and a `PhantomData<fn() -> E>` —
 // a phantom that produces `E` rather than containing one.
 impl<E> DriverFactory for Factory<E>
 where
@@ -133,7 +125,7 @@ where
                      consumer"
                 )
             })?;
-        // On this thread, and it has to be: `Sharded` holds an `Rc`.
+        // On this thread: the engine never has to cross one.
         let engine = E::from_store(store)?;
 
         let (ids, pivot) = match &self.seeded {
@@ -256,7 +248,6 @@ mod tests {
     use crate::harness::micro::MicroWorkload;
     use crate::harness::{DriverFactory, run};
     use crate::schema::Thing;
-    use crate::systems::engine::Sharded;
 
     struct Scratch(PathBuf);
 
@@ -320,19 +311,6 @@ mod tests {
         assert!(phases.iter().all(|p| p.wall_ns > 0));
     }
 
-    /// The sharded row — and the one that proves the seam's whole shape: a
-    /// `Sharded` holds an `Rc<ShardStore>` and is **not** `Send`, so it can
-    /// only exist because `build` runs on the consumer's own thread.
-    #[test]
-    fn a_sharded_micro_row_runs_on_the_consumers_thread() {
-        let scratch = Scratch::new();
-        let phases = run_one::<Sharded>(&scratch);
-
-        assert_eq!(phases.len(), 4);
-        assert_eq!(phases[0].samples.len(), 120);
-        assert!(phases.iter().all(|p| !p.samples.is_empty()));
-    }
-
     /// The rule that forces the `Mutex<Option<_>>`: a second consumer asking
     /// for the store must be refused, not quietly handed a share of it.
     #[test]
@@ -349,19 +327,13 @@ mod tests {
         drop(first);
     }
 
-    /// Micro is one consumer for both engines, because a collection is
-    /// indivisible — the constraint that makes `wavedb/multi` a `shop` row.
+    /// Micro is one consumer, because a collection is indivisible — the
+    /// constraint that makes `wavedb/multi` a `shop` row.
     #[test]
-    fn both_engines_ask_for_exactly_one_consumer() {
+    fn micro_asks_for_exactly_one_consumer() {
         let scratch = Scratch::new();
         let direct: Factory<PageStore> =
             Factory::new(open(&scratch.0), None, 1);
         assert_eq!(direct.consumers(), 1);
-        drop(direct);
-
-        let scratch2 = Scratch::new();
-        let sharded: Factory<Sharded> =
-            Factory::new(open(&scratch2.0), None, 1);
-        assert_eq!(sharded.consumers(), 1);
     }
 }
