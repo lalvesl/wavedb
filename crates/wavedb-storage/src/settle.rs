@@ -55,8 +55,8 @@ impl PageStore {
     /// 0063 left that open, to be settled by wasm artifact size. It does not
     /// need to be: the engine contains no await point, so an `async fn drain`
     /// would be a future that never yields — the machinery of suspension with
-    /// nothing to suspend on. The driver that makes a step useful (the node's
-    /// maintenance loop, the disk actor's queue loop) already exists.
+    /// nothing to suspend on. The driver that makes a step useful (a node
+    /// worker's BG task, between its jobs) already exists.
     ///
     /// ## `budget`
     ///
