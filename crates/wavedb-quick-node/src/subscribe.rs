@@ -219,8 +219,7 @@ impl<S: Store, P: Publish> Store for NotifyStore<S, P> {
 /// and the channel carrying it.
 ///
 /// **Not** the `NotifyStore` itself — that is built on the shard's own thread
-/// and holds an `Rc`, exactly like `ShardStore`, and must stay non-`Send` so
-/// it cannot drift. An earlier version of this assertion asked for the wrapper
+/// and borrows the worker's own store and publisher, so it cannot drift. An earlier version of this assertion asked for the wrapper
 /// to be `Send` and the compiler refused, which was the right answer to the
 /// wrong question: the seam is the *message*, not the store.
 const _: fn() = || {
