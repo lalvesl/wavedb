@@ -107,6 +107,9 @@ pub enum NodeErrorKind {
     /// [`Unauthorized`](Self::Unauthorized) on purpose: the caller *is*
     /// authenticated, and the fix is the token's shape rather than a login.
     IdentityMismatch,
+    /// A `#[server]` body reached past the owners it holds (RFC 0067 §5) —
+    /// a node-side programming fault, reported to the caller as one.
+    LockOrder,
 }
 
 /// A structured node-side rejection, riding **inside** the 200 response —
@@ -148,6 +151,7 @@ impl NodeError {
             CoreError::ListOutOfRange(_) => NodeErrorKind::ListOutOfRange,
             CoreError::FuzzyOutOfRange(_) => NodeErrorKind::FuzzyOutOfRange,
             CoreError::IdentityMismatch(..) => NodeErrorKind::IdentityMismatch,
+            CoreError::LockOrder(_) => NodeErrorKind::LockOrder,
         };
         Self {
             kind,
