@@ -8,18 +8,38 @@
 
 use wavedb_core::{Id, Result as CoreResult, Store, Write};
 
+use crate::barrier::{Barrier, Durable};
 use crate::error::{StorageError, StorageResult};
 use crate::page_store::{PageStore, Touched};
 use crate::pending::note_touched;
 use crate::struct_storage::TypeSlot;
 
 impl PageStore {
-    /// Journal first (durable fsync), then commit to the per-type caches and
-    /// queue the touched ids for the settle drain. The batch is durable when
-    /// this returns — unless the store was opened with a durability window,
-    /// in which case it is durable within that window (RFC 0061). The page
-    /// write happens later ([`drain`](Self::drain)) — a crash before it
-    /// replays from the journal.
+    /// Take batch barriers on `barrier`'s helper thread from now on, instead
+    /// of the thread calling [`apply`](Store::apply) ([`crate::barrier`]).
+    ///
+    /// The store's futures then **suspend**: an `apply` returns once its
+    /// barrier is done, and its caller's executor runs other work meanwhile.
+    /// A caller that interleaves operations on one owner needs the owner
+    /// lock that makes that safe — the node holds it around every operation
+    /// (`CONCURRENCY_BRAKE.md`); a store without a helper never suspends.
+    pub fn use_barrier(&mut self, barrier: Barrier) {
+        self.barrier = Some(barrier);
+    }
+
+    /// Barriers completed on the live journal, on any thread.
+    #[must_use]
+    pub fn journal_barriers(&self) -> u64 {
+        self.journal.lock().barriers()
+    }
+
+    /// Journal first, then commit to the per-type caches and queue the
+    /// touched ids for the settle drain. The page write happens later
+    /// ([`drain`](Self::drain)) — a crash before it replays from the journal.
+    ///
+    /// The batch is durable when this returns — or, with a barrier helper,
+    /// when the returned [`Durable`] resolves; a durability window (RFC 0061)
+    /// relaxes either to "within the window".
     // The journal guard deliberately spans the cache commit — releasing it
     // earlier (the lint's suggestion) would let two applies commit their
     // caches in the opposite order to their journal frames, so replay could
@@ -27,7 +47,7 @@ impl PageStore {
     // under it: eviction relies on "empty queue under its lock ⇒ every
     // committed id is settled" (see `evict_settled`).
     #[allow(clippy::significant_drop_tightening)]
-    fn apply_inner(&self, batch: &[Write]) -> StorageResult<()> {
+    fn apply_inner(&self, batch: &[Write]) -> StorageResult<Option<Durable>> {
         // Refuse unroutable writes *before* the journal sees the batch, so the
         // log never holds a batch replay would choke on.
         self.route_batch(batch)?;
@@ -60,14 +80,28 @@ impl PageStore {
         // The durability point, and the one place the window changes anything
         // (RFC 0061). The check runs under the journal lock this function
         // already holds, so a burst inside one window amortises to a single
-        // barrier with no timer, no flusher task, and no interaction with the
-        // engine's non-`Send` current-thread model.
+        // barrier with no timer and no flusher task. With a helper, the
+        // barrier is asked for here — after the write, so it covers it — and
+        // waited for by the caller, off this lock.
+        let mut wait = None;
         if self.relax_window.is_zero() {
-            journal.append(&frame)?; // write + fsync
+            match &self.barrier {
+                None => journal.append(&frame)?, // write + fsync
+                Some(barrier) => {
+                    journal.append_deferred(&frame)?;
+                    wait = Some(barrier.sync(journal.synced()));
+                }
+            }
         } else {
             journal.append_deferred(&frame)?; // write, no barrier
             if journal.since_last_sync() >= self.relax_window {
-                journal.sync()?; // one barrier for the whole window
+                match &self.barrier {
+                    None => journal.sync()?, // one barrier for the window
+                    Some(barrier) => {
+                        barrier.flush(journal.synced());
+                        journal.flush_requested();
+                    }
+                }
             }
         }
         // Commit under the journal lock: cache order == journal order.
@@ -79,7 +113,7 @@ impl PageStore {
         // protection) belongs to the next checkpoint, which can see it in the
         // journal's barrier count (RFC 0047); the write path stays a journal
         // append and a cache commit.
-        Ok(())
+        Ok(wait)
     }
 
     /// Read `id`'s current bytes from `struct_hash`'s slot: its cache, then
@@ -191,9 +225,11 @@ impl PageStore {
     }
 }
 
-// Every method is synchronous and its future is `Ready`: the engine never
-// suspends, which is what lets a collection op run read-to-apply without
+// Every read is synchronous and its future is `Ready`, and so is `apply`
+// unless the store hands its barriers to a helper (`use_barrier`): an engine
+// that never suspends is what lets a collection op run read-to-apply without
 // interleaving on a current-thread executor (`concurrent_node_clobber.rs`).
+// A store that does suspend is used under the owner lock, as on the node.
 impl Store for PageStore {
     fn get(&self, id: Id) -> impl Future<Output = CoreResult<Option<Vec<u8>>>> {
         // Untyped fallback: the id alone names no type, so probe every slot —
@@ -214,8 +250,17 @@ impl Store for PageStore {
     }
 
     fn apply(&self, batch: &[Write]) -> impl Future<Output = CoreResult<()>> {
-        // StorageError → core::Error (typed seam)
-        std::future::ready(self.apply_inner(batch).map_err(Into::into))
+        // The batch is written and committed now, on this call; only its
+        // barrier, when a helper takes it, is left to wait for.
+        let staged = self.apply_inner(batch);
+        async move {
+            // StorageError → core::Error (typed seam)
+            match staged {
+                Ok(Some(durable)) => durable.await.map_err(Into::into),
+                Ok(None) => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        }
     }
 }
 
