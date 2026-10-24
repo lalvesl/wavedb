@@ -35,13 +35,10 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{FnArg, GenericArgument, ItemFn, PathArguments, Type, parse2};
 
+use crate::server_args::{
+    Arg, decode_and_forward, encode_payload, node_context,
+};
 use crate::struct_hash;
-
-/// One argument: its binding pattern and its type.
-pub struct Arg {
-    pub pat: Box<syn::Pat>,
-    pub ty: Box<Type>,
-}
 
 /// The `Ok` type of a `Result<Ok, …>` return; the whole type otherwise.
 fn ok_type(output: &syn::ReturnType) -> Type {
@@ -127,43 +124,6 @@ fn split_inputs(f: &ItemFn) -> syn::Result<(Box<syn::Pat>, Vec<Arg>)> {
         });
     }
     Ok((db_pat, args))
-}
-
-/// `(let-bindings decoding `payload` into the args, the arg idents to pass on)`.
-pub fn decode_and_forward(args: &[Arg]) -> (TokenStream, Vec<&syn::Pat>) {
-    let pats: Vec<&syn::Pat> = args.iter().map(|a| a.pat.as_ref()).collect();
-    let decode = match args.len() {
-        0 => quote!(let _ = payload;),
-        1 => {
-            let (p, t) = (&args[0].pat, &args[0].ty);
-            quote! {
-                let #p: #t = ::wavedb_core::wire::from_wire(payload)
-                    .map_err(::wavedb_core::Error::from)?;
-            }
-        }
-        _ => {
-            let types = args.iter().map(|a| &a.ty);
-            quote! {
-                let ( #(#pats),* ): ( #(#types),* ) =
-                    ::wavedb_core::wire::from_wire(payload)
-                        .map_err(::wavedb_core::Error::from)?;
-            }
-        }
-    };
-    (decode, pats)
-}
-
-/// The client stub's payload expression (args → wire bytes).
-pub fn encode_payload(args: &[Arg]) -> TokenStream {
-    let pats = args.iter().map(|a| a.pat.as_ref());
-    match args.len() {
-        0 => quote!(::std::vec::Vec::new()),
-        1 => {
-            let p = args[0].pat.as_ref();
-            quote!(::wavedb_core::wire::to_wire(&#p))
-        }
-        _ => quote!(::wavedb_core::wire::to_wire(&( #(#pats),* ))),
-    }
 }
 
 /// The identity `const` expression:
@@ -267,6 +227,7 @@ pub fn expand(
     let body = func.block;
     let body_fn = format_ident!("__{}_body", name);
     let (decode, forward) = decode_and_forward(&args);
+    let context = node_context();
     let payload = encode_payload(&args);
     let arg_sig: Vec<TokenStream> = args
         .iter()
@@ -318,7 +279,7 @@ pub fn expand(
             ) -> ::wavedb_core::Result<::wavedb_core::expose::Reply> {
                 #auth_guard
                 #decode
-                let db = ::wavedb::ServerDb::for_caller(route, caller);
+                #context
                 match #body_fn(&db, #(#forward),*).await {
                     ::core::result::Result::Ok(value) => {
                         ::core::result::Result::Ok(
