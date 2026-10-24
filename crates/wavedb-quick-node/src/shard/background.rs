@@ -1,0 +1,100 @@
+//! A worker's maintenance — BG, sharing the thread with its jobs (DATA)
+//! ([RFC 0067] §4, step 4).
+//!
+//! RFC 0067 draws three executors per thread, polled in priority order. This
+//! is the same priority on **one** executor: a second and third Embassy
+//! executor on a thread need `raw::Executor::poll`, which is `unsafe`, and
+//! the project admits `unsafe` only by explicit exception. So BG is one task
+//! that takes a single bounded step ([`Owned::step`]) only when the valve
+//! ([`Priority`]) says maintenance goes next — which, with jobs executing or
+//! queued, is only once the journal has grown into the valve's band — and
+//! yields after every step. A job waits behind maintenance for at most one
+//! step: one settle round of `SETTLE_BUDGET_IDS` ids, or one checkpoint's
+//! close.
+//!
+//! On a timer it applies the node's policy to each store in turn
+//! ([`Owned::upkeep`]): open a checkpoint, evict, defragment — each bounded,
+//! with a yield between stores.
+//!
+//! [RFC 0067]: ../../../../rfcs/0067-thread-per-core-shards-WIP.md
+
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+use async_channel::Receiver;
+use embassy_futures::select::{Either, select};
+use embassy_futures::yield_now;
+use wavedb_platform::carrier::Here;
+use wavedb_platform::time::sleep;
+
+use super::owned::Owned;
+use super::priority::{Available, Class, Priority};
+use super::worker::Job;
+use crate::upkeep::Maintenance;
+
+/// How often the policy looks at the stores.
+pub const UPKEEP_PERIOD: Duration = Duration::from_millis(200);
+
+/// How long BG waits before looking again while jobs have the thread.
+const BUSY_RECHECK: Duration = Duration::from_millis(1);
+
+/// What a worker's BG task is started with.
+pub struct Background {
+    pub owned: Rc<Owned>,
+    /// The worker's job queue — read only for "is anything waiting?".
+    pub jobs: Receiver<Job>,
+    pub policy: Maintenance,
+    /// Data shards in the database, for the policy's per-shard shares.
+    pub partitions: usize,
+    /// Closed by the worker's root when its queue has closed.
+    pub halt: Receiver<()>,
+}
+
+/// BG's task. One per worker, from a static pool sized to the workers a
+/// process may run.
+#[wavedb_platform::carrier::rt::task(
+    pool_size = crate::__rt::MAX_SHARDS,
+    embassy_executor = wavedb_platform::carrier::rt
+)]
+pub async fn background(bg: Background, here: Here) {
+    run(&bg).await;
+    drop(bg); // the worker's root waits for this `Rc` before closing the stores
+    drop(here);
+}
+
+async fn run(bg: &Background) {
+    let mut valve = Priority::default();
+    let mut cursor = 0usize;
+    let mut last = Instant::now();
+    loop {
+        if bg.halt.is_closed() {
+            return;
+        }
+        let busy = bg.owned.working() || !bg.jobs.is_empty();
+        let avail = Available {
+            reads: busy,
+            maintenance: bg.owned.owes(),
+        };
+        if valve.next(avail, bg.owned.journal_bytes())
+            == Some(Class::Maintenance)
+        {
+            bg.owned.step(&mut cursor);
+            yield_now().await;
+            continue;
+        }
+        let wait = if busy { BUSY_RECHECK } else { UPKEEP_PERIOD };
+        if let Either::Second(_) = select(sleep(wait), bg.halt.recv()).await {
+            return;
+        }
+        // Due regardless of load: the policy is what opens a checkpoint, and
+        // a node that only checkpointed when idle would grow its journal
+        // without bound under steady traffic.
+        if last.elapsed() >= UPKEEP_PERIOD {
+            for i in 0..bg.owned.len() {
+                bg.owned.upkeep(i, &bg.policy, bg.partitions);
+                yield_now().await;
+            }
+            last = Instant::now();
+        }
+    }
+}
