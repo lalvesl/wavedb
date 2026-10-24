@@ -42,7 +42,7 @@ mod serve;
 mod serve_ws;
 pub mod shard;
 mod subscribe;
-mod upkeep;
+pub mod upkeep;
 mod ws_read;
 
 use std::future::{Future, pending};
@@ -59,7 +59,7 @@ pub use error::{Result, ServerError};
 /// Implemented for a schema's `ServerRegistry` by `expose_server!` — the
 /// node's tasks, made concrete for that registry (RFC 0066).
 pub use __rt::NodeTasks;
-use upkeep::Maintenance;
+pub use upkeep::Maintenance;
 
 /// A node, configured but not yet bound.
 ///
@@ -74,7 +74,7 @@ pub struct Server<E> {
     maintenance: Maintenance,
     secret: Option<[u8; 32]>,
     store: StoreOptions,
-    /// Shard workers to serve on — see [`Server::shards`].
+    /// Workers to serve on — see [`Server::threads`].
     threads: usize,
 }
 
@@ -84,10 +84,12 @@ pub struct Server<E> {
 pub struct Bound<E> {
     registry: E,
     listener: Listener,
-    /// The engine, behind its disk actor (RFC 0064). Nothing here can touch
-    /// the `PageStore` except by message; requests are routed across
-    /// [`Server::shards`] workers, one by default.
-    shards: crate::shard::Shards,
+    /// The database's data shards, in shard order — opened here, and handed
+    /// to the workers that will own them when serving starts (RFC 0067
+    /// step 4). Until then [`route`](Bound::route) may seed through them.
+    stores: Vec<wavedb_storage::PageStore>,
+    /// Workers to serve on — see [`Server::threads`].
+    threads: usize,
     maintenance: Maintenance,
     secret: [u8; 32],
 }
@@ -169,7 +171,7 @@ where
     /// two operations on one owner serialise on the brake wherever they land
     /// (`CONCURRENCY_BRAKE.md`), and the brake's key is the owner — one
     /// collection, or one Unique type under one tenant. Each worker costs a
-    /// thread and a cache, and `ShardStore::CACHE_BYTES` is *per worker*.
+    /// thread, and owns the stores of its shards outright.
     ///
     /// Clamped to `1..=` the shard count: no worker is not a degraded node, it
     /// is a node that serves nothing.
@@ -209,9 +211,8 @@ where
         Ok(Bound {
             registry: self.registry,
             listener,
-            shards: crate::shard::Shards::start(stores, self.threads).map_err(
-                |e| ServerError::Io(std::io::Error::other(e.to_string())),
-            )?,
+            stores,
+            threads: self.threads,
             maintenance: self.maintenance,
             secret,
         })
@@ -246,12 +247,8 @@ where
     /// notify wrapper, so they raise no live events — subscriptions predate
     /// serving anyway.
     #[must_use]
-    pub fn route(&self) -> shard::Seeder<E> {
-        shard::Seeder::new(
-            self.registry,
-            shard::ShardStore::with_budget(self.shards.handle(), 0),
-            self.shards.shards(),
-        )
+    pub fn route(&self) -> shard::Seeder<'_, E> {
+        shard::Seeder::new(self.registry, &self.stores)
     }
 
     /// Accept and serve connections until the listener faults (runs forever
@@ -276,14 +273,30 @@ where
         self,
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
-        let disk = self.shards.handle();
+        // Committed mutations come back from the workers as plain data; the
+        // subscription table lives on the accept thread, which fans them out.
+        let (mutations, incoming) = feed::feed(feed::MUTATION_DEPTH);
+        // The workers take the stores (RFC 0067 step 4). Started here rather
+        // than on the accept thread because this is who waits for them to
+        // close the stores, below.
+        let (router, closing) = shard::Router::start(
+            self.registry,
+            self.stores,
+            &mutations,
+            self.secret,
+            self.threads,
+            self.maintenance,
+        )
+        .map_err(|e| ServerError::Io(std::io::Error::other(e.to_string())))?;
+        // Ours goes; the workers hold the live clones, so the publisher ends
+        // when the last of them does rather than never.
+        drop(mutations);
         let (stop, stopped) = async_channel::bounded::<()>(1);
         let (outcome, served) = futures::channel::oneshot::channel();
         let ctx = serve::Accept {
-            registry: self.registry,
             listener: self.listener,
-            shards: self.shards,
-            maintenance: self.maintenance,
+            router,
+            incoming,
             secret: self.secret,
             stop: stopped,
             outcome,
@@ -309,20 +322,16 @@ where
         };
         stop.close();
         // Every connection, the WS readers and the background task have
-        // returned once the carrier has — the engine is quiet.
+        // returned once the carrier has, and the router went with them — so
+        // each worker finishes its last job and closes its stores.
         finished.await;
-        result.unwrap_or_else(|_| Err(node_refused()))?;
-        // Clean shutdown: everything settled + committed, and the checkpoint's
-        // frame forced durable — a restart replays nothing. It is a *request*
-        // rather than a hint because this outcome is returned to the caller.
-        let (answer, wait) = futures::channel::oneshot::channel();
-        disk.send(shard::DiskRequest::Shutdown { answer })
-            .await
-            .map_err(|_| upkeep::stopped())?;
-        wait.await
-            .map_err(|_| upkeep::stopped())
-            .and_then(|r| r.map_err(|_| upkeep::stopped()))?;
-        Ok(())
+        let served = result.unwrap_or_else(|_| Err(node_refused()));
+        // Clean shutdown: everything settled and committed, each checkpoint's
+        // frame forced durable — a restart replays nothing — and every store
+        // dropped before its worker answers, so a restart can reopen at once.
+        let closed = shard::closed_all(closing).await;
+        served?;
+        closed.map_err(ServerError::Storage)
     }
 }
 
