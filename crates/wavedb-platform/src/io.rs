@@ -12,7 +12,7 @@
 //!
 //! [RFC 0066]: ../../../rfcs/0066-embassy-executor-and-async-io.md
 
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -22,6 +22,7 @@ use embedded_io_adapters::futures_03::FromFutures;
 use embedded_io_async::{ErrorType, Read, Write};
 
 use crate::error::{Error, Result};
+pub use crate::listen::Listener;
 
 /// The error every stream on this target reports.
 ///
@@ -89,7 +90,7 @@ pub struct ReadHalf(FromFutures<Shared>);
 pub struct WriteHalf(FromFutures<Shared>);
 
 impl Stream {
-    fn new(socket: Async<TcpStream>) -> Self {
+    pub(crate) fn new(socket: Async<TcpStream>) -> Self {
         Self(FromFutures::new(Shared(Arc::new(socket))))
     }
 
@@ -226,47 +227,6 @@ async fn resolve(addr: &str) -> Result<Vec<SocketAddr>> {
     rx.await
         .map_err(|_| IoError::other("resolver thread ended without an answer"))?
         .map_err(Error::Io)
-}
-
-/// A bound TCP listener.
-#[derive(Debug)]
-pub struct Listener(Async<TcpListener>);
-
-impl Listener {
-    /// Bind `addr` (`host:port`; port `0` picks a free one).
-    ///
-    /// Resolution here may block: binding happens once, at startup, before
-    /// there is anything for the executor to run.
-    ///
-    /// # Errors
-    /// Resolution failing, or the address being unavailable.
-    pub fn bind(addr: &str) -> Result<Self> {
-        let target = addr.to_socket_addrs()?.next().ok_or_else(|| {
-            IoError::new(
-                std::io::ErrorKind::NotFound,
-                "address resolved to nothing",
-            )
-        })?;
-        Ok(Self(Async::<TcpListener>::bind(target)?))
-    }
-
-    /// The address actually bound — the chosen port, after binding `:0`.
-    ///
-    /// # Errors
-    /// The socket refusing to report it.
-    pub fn local_addr(&self) -> Result<SocketAddr> {
-        Ok(self.0.get_ref().local_addr()?)
-    }
-
-    /// The next connection. Cancel-safe: dropping the future loses nothing,
-    /// which the accept loop's race against shutdown relies on.
-    ///
-    /// # Errors
-    /// A fault on the listening socket.
-    pub async fn accept(&self) -> Result<(Stream, SocketAddr)> {
-        let (socket, peer) = self.0.accept().await?;
-        Ok((Stream::new(socket), peer))
-    }
 }
 
 /// Two connected ends over loopback TCP — a real socket pair, for tests that
