@@ -13,9 +13,12 @@
 //! > network-backed — breaks that, and the loss is **silent**: the record is
 //! > live at its anchor and absent from the index.
 //!
-//! [`ShardStore`](super::ShardStore) is exactly such a store: every cache miss
-//! is a message to the disk actor and a real suspension. Putting it under the
-//! node without this module would ship that silent loss.
+//! The node had exactly such a store until RFC 0067 step 4 — a worker cache in
+//! front of a disk actor, every miss a real suspension. A worker now calls
+//! its own `PageStore`, which does not suspend, but the brake keeps the
+//! property independent of that: an engine that yields (`io_uring`, the
+//! planned per-thread I/O) or an owner reached from another thread (step 5's
+//! leases) brings the suspension back, and the loss with it.
 //!
 //! The failure is worth spelling out, because it is not an ordering question.
 //! Two inserts into one collection both read the same leaf, both compute a
@@ -269,7 +272,7 @@ mod tests {
     }
 
     /// One operation: take the lock, do two steps with a yield between them.
-    /// The yield is where a real op awaits the disk actor.
+    /// The yield is where a real op would await a suspending engine.
     async fn op(
         locks: &OwnerLocks,
         trace: &RefCell<Vec<String>>,
