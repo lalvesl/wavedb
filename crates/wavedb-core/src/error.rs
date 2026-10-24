@@ -108,6 +108,15 @@ pub enum Error {
         "identity mismatch: user {0:?} under tenant {1:?} (one user per tenant)"
     )]
     IdentityMismatch(U48, U48),
+    /// A `#[server]` body reached past the owners it holds (RFC 0067 §5): a
+    /// second `lock` while one is held, an operation on an owner the held
+    /// lock does not cover, or a lock asked of a handle that cannot take one.
+    ///
+    /// Taking every owner a body needs in **one** `lock` is what keeps two
+    /// bodies from each holding an owner and waiting for the other's, so a
+    /// body that reaches further is refused rather than allowed to wait.
+    #[error("lock order: {0}")]
+    LockOrder(&'static str),
     /// A failure inside a [`Store`](crate::Store) backend — disk I/O, on-disk
     /// corruption, or similar. Core stays I/O-free, so the concrete cause is
     /// flattened to a message at the trait boundary.
