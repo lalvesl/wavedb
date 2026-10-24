@@ -1,33 +1,33 @@
-//! The accept loop and per-connection handling (native, HTTP POST).
+//! Ingress: each worker accepts and serves its own connections ([RFC 0067]
+//! §6, step 5).
+//!
+//! The node binds one listener per worker on one address
+//! ([`Listener::bind_many`]); on Linux the kernel spreads connections across
+//! them. A worker's accept loop runs beside its jobs, on the same carrier,
+//! and each connection it accepts is a task there, from a static pool. A
+//! full pool refuses the connection: its socket closes, never queued.
 //!
 //! One connection = one request/response exchange (the tunnel sends
-//! `connection: close`). The node runs on its own **accept carrier** — a
-//! thread with one Embassy executor (RFC 0066) — and each connection is a
-//! task from a static pool there, so no `Send` bound leaks onto the
-//! `Store`-generic engine futures (deliberately non-`Send` — an internal node
-//! seam, not a public API). A full pool refuses the connection.
+//! `connection: close`), or a WebSocket session. Either way the connection
+//! **executes nothing itself**: every operation goes to its owner's worker
+//! as a [`Job`](crate::shard::Job) through the [`Router`] — this worker's
+//! own queue when it owns the operation, another worker's otherwise. Local
+//! and remote are the same code, and a connection's task stays the size of
+//! the I/O it does, not of the engine call it waits on.
 //!
 //! ## Stopping
 //!
-//! Embassy cannot abort a task, so every task on the carrier watches one
-//! `halt` channel and returns when the accept loop closes it. The carrier's
-//! thread returns once the last of them has (`wavedb_platform::carrier`).
+//! Embassy cannot abort a task, so every connection watches one `halt`
+//! channel and returns when the accept loop closes it. The accept loop ends
+//! when the node's `stop` closes, or when its listener faults — reported
+//! to the node, which then stops every worker.
 //!
-//! ## What this thread does, and what it hands off
-//!
-//! Everything is **routed**: a POST is decoded here, executed on the shard
-//! that owns it ([`Router`](crate::shard::Router)), and written back here; a
-//! WebSocket session's `Call`s go the same way, carrying the caller the
-//! session bound at `Hello`. This thread holds sockets and the subscription
-//! table, and touches no engine: it has no store at all.
+//! [RFC 0067]: ../../../rfcs/0067-thread-per-core-shards-WIP.md
+//! [`Listener::bind_many`]: wavedb_platform::io::Listener::bind_many
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
-use async_channel::Receiver;
+use async_channel::{Receiver, Sender};
 use embassy_futures::select::{Either, select};
 use embedded_io_async::Write;
-use futures::channel::oneshot;
 use wavedb_core::expose::Reply;
 use wavedb_core::wire::{from_wire, to_wire};
 use wavedb_net::frame::{Request, Response, StreamFrame};
@@ -36,111 +36,96 @@ use wavedb_platform::carrier::Here;
 use wavedb_platform::io::{IoError, Listener, Stream};
 
 use crate::__rt::NodeTasks;
-use crate::feed::FeedReceiver;
 use crate::shard::Router;
-use crate::subscribe::SubTable;
-use crate::upkeep;
-use crate::{dispatch, serve_ws};
+use crate::{ServerError, dispatch, serve_ws};
 
-/// What the accept loop is started with. Built on the caller's thread and
-/// moved onto the accept carrier, so every field is `Send`; the node's
-/// non-`Send` state is built over there, by [`accept`].
+/// What one worker's accept loop is started with. Built on the caller's
+/// thread and moved onto the worker's carrier, so every field is `Send`.
 pub struct Accept<E> {
     pub(crate) listener: Listener,
-    /// The workers, started by the caller: they own the stores, and the
-    /// caller is who waits for them to close.
+    /// Onto every worker, this one included.
     pub(crate) router: Router<E>,
-    /// Committed mutations, coming back from the workers.
-    pub(crate) incoming: FeedReceiver,
-    pub(crate) secret: [u8; 32],
-    /// Closed by the caller to stop serving.
+    /// Closed by the node to stop serving.
     pub(crate) stop: Receiver<()>,
-    /// How serving ended: `Ok` on a stop, the fault otherwise.
-    pub(crate) outcome: oneshot::Sender<crate::Result<()>>,
+    /// Where a listener fault goes: it stops the node.
+    pub(crate) fault: Sender<ServerError>,
+}
+
+/// The node's half of ingress, handed to the workers when they start: one
+/// listener each (fewer where the platform cannot spread connections), the
+/// stop signal, and the fault channel.
+pub struct Ingress {
+    pub(crate) listeners: Vec<Listener>,
+    pub(crate) stop: Receiver<()>,
+    pub(crate) fault: Sender<ServerError>,
+}
+
+impl Ingress {
+    /// The accept loop for the next worker, while listeners remain.
+    pub(crate) fn next<E: Clone>(
+        &mut self,
+        router: &Router<E>,
+    ) -> Option<Accept<E>> {
+        let listener = self.listeners.pop()?;
+        Some(Accept {
+            listener,
+            router: router.clone(),
+            stop: self.stop.clone(),
+            fault: self.fault.clone(),
+        })
+    }
 }
 
 /// One accepted connection, as its task receives it.
 pub struct Connection<E> {
     sock: Stream,
-    node: Node<E>,
+    router: Router<E>,
     halt: Receiver<()>,
 }
 
-/// The accept loop: build the node on this thread, then accept until stopped
-/// or until the listener faults.
+/// A worker's accept loop: accept until stopped or until the listener
+/// faults, then stop this worker's connections.
 pub async fn accept<E: NodeTasks>(ctx: Accept<E>, here: Here) {
     let Accept {
         listener,
         router,
-        incoming,
-        secret,
         stop,
-        outcome,
+        fault,
     } = ctx;
-    let result = serve(&listener, router, incoming, secret, &stop, &here).await;
-    let _ = outcome.send(result);
-}
-
-async fn serve<E: NodeTasks>(
-    listener: &Listener,
-    router: Router<E>,
-    incoming: FeedReceiver,
-    secret: [u8; 32],
-    stop: &Receiver<()>,
-    here: &Here,
-) -> crate::Result<()> {
-    let subs = Rc::new(RefCell::new(SubTable::default()));
-
-    // Closed when serving stops: every task on this carrier watches it.
+    // Closed when serving stops: every connection on this carrier watches it.
     let (halt, halted) = async_channel::bounded::<()>(1);
-    upkeep::spawn_background(incoming, Rc::clone(&subs), halted.clone(), here)?;
-    let node = Node {
-        router,
-        secret,
-        subs,
-    };
-    let result = loop {
+    loop {
         match select(listener.accept(), stop.recv()).await {
             Either::First(Ok((sock, _))) => {
                 let conn = Connection {
                     sock,
-                    node: node.clone(),
+                    router: router.clone(),
                     halt: halted.clone(),
                 };
                 // A full pool refuses: the connection drops, closing its
                 // socket — an explicit refusal, never a queue.
                 let _ = E::spawn_connection(conn, here.clone());
             }
-            Either::First(Err(e)) => break Err(e.into()),
+            Either::First(Err(e)) => {
+                let _ = fault.try_send(e.into());
+                break;
+            }
             // A message or a closed channel: either way, stop.
-            Either::Second(_) => break Ok(()),
+            Either::Second(_) => break,
         }
-    };
+    }
     halt.close();
-    result
+    drop(here); // held to the end: the carrier waits for this loop
 }
 
-/// One connection's task: serve it, or stop with the node. Made concrete per
-/// registry by [`node_tasks!`](crate::node_tasks): routing asks the registry
-/// how each hash is addressed.
+/// One connection's task: serve it, or stop with the worker. Made concrete
+/// per registry by [`node_tasks!`](crate::node_tasks): routing asks the
+/// registry how each hash is addressed.
 pub async fn connection<E: NodeTasks>(conn: Connection<E>, here: Here) {
-    let Connection { sock, node, halt } = conn;
+    let Connection { sock, router, halt } = conn;
     // A per-connection fault is dropped: it never takes the node down. (No
     // tracing dep yet — silent.)
-    let _ = select(serve_connection(sock, &node, &here), halt.recv()).await;
-}
-
-/// Everything a connection needs beyond its socket.
-///
-/// Each field is a refcount or a key, so a clone per connection is a handful
-/// of increments.
-#[derive(Clone)]
-pub struct Node<E> {
-    /// Where every command goes: the shard that owns it.
-    pub router: Router<E>,
-    /// Gate 1's key, for a WebSocket session's `Hello`.
-    pub secret: [u8; 32],
-    pub subs: Rc<RefCell<SubTable>>,
+    let _ = select(serve_connection(sock, &router, &here), halt.recv()).await;
 }
 
 /// Read one request and answer it: a POST body dispatches + writes the
@@ -148,7 +133,7 @@ pub struct Node<E> {
 /// socket to the [`serve_ws`] session loop.
 async fn serve_connection<E: NodeTasks>(
     sock: Stream,
-    node: &Node<E>,
+    router: &Router<E>,
     here: &Here,
 ) -> wavedb_net::Result<()> {
     let (mut reader, mut writer) = sock.split();
@@ -157,10 +142,10 @@ async fn serve_connection<E: NodeTasks>(
         Some(Incoming::Post(body)) => {
             match from_wire::<Request>(&body) {
                 // Handed off, not handled: the gates and the engine run on
-                // the owning shard, and this task only waits for bytes to
+                // the owning worker, and this task only waits for bytes to
                 // write back.
                 Ok(request) => {
-                    let answer = node.router.dispatch(request).await;
+                    let answer = router.dispatch(request).await;
                     write_response(&mut writer, answer).await
                 }
                 // The envelope is malformed — a transport-level client
@@ -171,7 +156,7 @@ async fn serve_connection<E: NodeTasks>(
         Some(Incoming::Upgrade { key }) => {
             let accept = wavedb_platform::ws::codec::accept_key(&key);
             http::write_switching_head(&mut writer, &accept).await?;
-            serve_ws::serve(reader, writer, node, here).await
+            serve_ws::serve(reader, writer, router, here).await
         }
     }
 }
@@ -210,3 +195,10 @@ where
     };
     http::write_frame(w, &to_wire(&StreamFrame::End(end))).await
 }
+
+/// What an accept loop carries has to cross onto its worker.
+const _: fn() = || {
+    const fn assert_send<T: Send>() {}
+    assert_send::<Accept<()>>();
+    assert_send::<Ingress>();
+};
