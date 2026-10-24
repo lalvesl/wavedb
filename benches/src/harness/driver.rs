@@ -11,14 +11,13 @@
 //! crosses the thread boundary is a [`DriverFactory`] — plain configuration,
 //! `Send` — and never the driver itself. That is not a style preference: the
 //! WaveDB engine is a current-thread `LocalSet` model whose futures are
-//! deliberately non-`Send`, and a `ShardStore` holds an `Rc`, so constructing
-//! one anywhere it could be moved from would not compile. It is the same split
+//! deliberately non-`Send`. It is the same split
 //! `wavedb-quick-node/src/shard/worker.rs` makes for the node, for the same
 //! reason.
 //!
 //! It also buys the thing the sharded row needs: each consumer calls
-//! [`build`](DriverFactory::build) with its own index, so each gets its own
-//! cache in front of one shared disk actor.
+//! [`build`](DriverFactory::build) with its own index, so each takes its own
+//! data shard's store.
 //!
 //! ## No `dyn`
 //!
