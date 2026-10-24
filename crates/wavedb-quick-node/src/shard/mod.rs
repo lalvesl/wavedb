@@ -30,6 +30,7 @@
 //! [RFC 0067]: ../../../../rfcs/0067-thread-per-core-shards-WIP.md
 
 mod background;
+mod lease;
 mod lock;
 mod owned;
 pub mod priority;
@@ -41,6 +42,7 @@ mod waiters;
 mod worker;
 
 pub use background::{Background, UPKEEP_PERIOD, background};
+pub use lease::{Lease, Leased};
 pub use lock::{Acquire, Held, OwnerKey, OwnerLocks};
 pub use owned::{Owned, SETTLE_BUDGET_IDS};
 pub use priority::Priority;
