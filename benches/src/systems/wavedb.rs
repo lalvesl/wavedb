@@ -20,10 +20,9 @@ use std::path::Path;
 use wavedb_storage::PageStore;
 
 use super::Durability;
-use super::engine::Engine;
 use crate::schema::Thing;
 
-pub fn notes(seeded: bool, engine: Engine) -> Vec<String> {
+pub fn notes(seeded: bool) -> Vec<String> {
     let mut notes = vec![
         "Every collection op is one apply batch. The durable row takes one \
          fsync per batch; the relaxed row takes one per elapsed window \
@@ -42,38 +41,6 @@ pub fn notes(seeded: bool, engine: Engine) -> Vec<String> {
              and no read_hot phase — the per-type cache is a write cache that \
              reads never populate, so on a store nobody has just written to, \
              hot and cold are the same measurement. RFC 0044 is that gap."
-                .into(),
-        );
-    }
-    if engine == Engine::Sharded {
-        notes.push(
-            "Sharded row: the engine is owned by a disk actor on its own \
-             thread and reached by message through a ShardStore. It is the \
-             single/multi-thread axis, and it measures the cost of that \
-             boundary — NOT parallelism. This benchmark issues one operation \
-             at a time, so only one shard ever has work; and the brake keys \
-             on the owner, so this one collection would be one owner even \
-             under a concurrent client."
-                .into(),
-        );
-        notes.push(
-            "read_cold is NOT comparable to the direct row. ShardStore \
-             memoises on read; the engine's per-type cache is a write cache \
-             that reads never populate. So the sharded row has a read cache \
-             the direct row does not — the gap RFC 0044 names, filled here as \
-             a side effect of the shard owning its own cache. A faster \
-             read_cold on this row is that difference, not a faster read path."
-                .into(),
-        );
-        notes.push(
-            "Measured cost of a ShardStore MISS: the same row run with a \
-             16 MiB shard budget against a ~40 MB working set reported \
-             read_hot at 96 175/s where the direct row reported 1 269 423/s. \
-             The round trip is roughly an order of magnitude over an \
-             in-process hit, so the row's result is governed by the shard's \
-             hit rate — and ShardStore bounds itself by clearing the whole \
-             cache rather than evicting (RFC 0044 is that gap). This row uses \
-             the shipped 64 MiB default, which holds this working set."
                 .into(),
         );
     }
