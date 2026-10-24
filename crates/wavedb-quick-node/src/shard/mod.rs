@@ -1,147 +1,49 @@
-//! Pivot-owned shards ([RFC 0064]) — the concurrency model, first slice.
+//! Thread per core: each worker owns its data shards ([RFC 0067]).
 //!
 //! ```text
-//!   route by pivot ──> shard i   (owns its cache; runs Collection/BpTree)
-//!                        │
-//!                        │  DiskRequest  (the only Send surface)
-//!                        ▼
-//!                   disk actor   (sole owner of the PageStore)
+//!   edge (accept thread) ── route by owner ──> worker w  (owns shards p with
+//!                                               │          p · T / P = w)
+//!                                               ├─ jobs: operations on its
+//!                                               │  owners, as calls on the
+//!                                               │  owner's PageStore
+//!                                               └─ BG: settle / checkpoint
+//!                                                  steps, upkeep policy
 //! ```
 //!
-//! **What is built here:** the ownership boundary. One disk actor owns the
-//! engine, shards reach it only by message, each shard keeps its own cache,
-//! and `shard_of(pivot)` decides which shard an operation belongs to. Nothing
-//! above `Store` changes.
+//! A database is `P` data shards, each a whole `PageStore` (`MANIFEST` +
+//! `shards/xx`); an owner — a collection's Pivot, or a Unique type under a
+//! tenant — lives in shard `seahash(owner) % P`. `T` workers each own a
+//! contiguous range of the shards, **stores included**: an operation reaches
+//! its engine as a function call on the thread that owns it, and nothing but
+//! the [`Job`] that brought it crosses a thread. The single disk actor this
+//! replaced is gone (RFC 0067 step 4).
 //!
-//! **What is not, and why.** RFC 0064's target splits the disk owner into a
-//! journal actor and a page actor, and moves `StructStorage`'s per-type cache
-//! into the shards. Both wait on the same open question — the settle path
-//! straddles the boundary, reading shard-side caches to write page-side
-//! dictionaries — so this slice draws the boundary where it can be drawn
-//! correctly and leaves that seam alone.
+//! What crosses: a [`Job`] in (plain data — a command frame or a
+//! [`NodeOp`](wavedb_core::NodeOp)), its answer back, committed mutations to
+//! the accept thread's publisher, and at shutdown each worker's report of
+//! closing its stores.
 //!
-//! The shard count `N` is [`wavedb_platform::cpu::available`] by default: the
-//! parallelism this process may actually use, which is the affinity mask and
-//! the container quota rather than the machine's core count.
-//!
-//! [RFC 0064]: ../../../../rfcs/0064-pivot-owned-concurrency-PLANNED.md
+//! [RFC 0067]: ../../../../rfcs/0067-thread-per-core-shards-WIP.md
 
-mod disk;
-mod disk_work;
+mod background;
 mod lock;
-mod msg;
+mod owned;
 pub mod priority;
 mod route;
 mod router;
 mod seed;
-mod store;
 mod waiters;
 mod worker;
 
-pub use disk::{
-    DiskHandle, MAINTENANCE_DEPTH, QUEUE_DEPTH, start as start_disk,
-};
+pub use background::{Background, UPKEEP_PERIOD, background};
 pub use lock::{Acquire, Held, OwnerKey, OwnerLocks};
-pub use msg::{DiskRequest, EngineStats, Maintenance};
+pub use owned::{Owned, SETTLE_BUDGET_IDS};
 pub use priority::Priority;
 pub use route::{Owner, shard_of};
 pub use router::Router;
 pub use seed::Seeder;
-pub use store::{CACHE_BYTES, ShardStore, ShardView};
 pub use waiters::MAX_WAITERS;
-pub use worker::{JOB_DEPTH, Job, JobSlot, ShardCtx, Worker, job, shard};
-
-use std::rc::Rc;
-
-use wavedb_storage::PageStore;
-
-/// A running database: its data shards behind one disk actor, and the
-/// worker threads that serve them.
-///
-/// A worker's own `ShardStore` is built **on that worker's thread**, because
-/// it is non-`Send` and must not be constructed anywhere it could be moved
-/// from; this holds only the handle it is built from.
-pub struct Shards {
-    disk: DiskHandle,
-    /// Data shards (`P`, from the `MANIFEST`).
-    partitions: usize,
-    /// Worker threads, each serving a contiguous range of the data shards.
-    threads: usize,
-}
-
-impl Shards {
-    /// Take ownership of the database's shard `stores` into a disk actor and
-    /// prepare `threads` workers over them.
-    ///
-    /// `threads` is clamped to `1..=stores.len()`: zero workers is not a
-    /// degraded mode, it is a process that serves nothing, and a worker
-    /// without a shard of its own would serve nothing either.
-    ///
-    /// # Errors
-    /// The disk actor's thread failing to spawn.
-    pub fn start(
-        stores: Vec<PageStore>,
-        threads: usize,
-    ) -> wavedb_platform::Result<Self> {
-        let partitions = stores.len().max(1);
-        Ok(Self {
-            disk: disk::start(stores)?,
-            partitions,
-            threads: threads.clamp(1, partitions),
-        })
-    }
-
-    /// Workers sized to the parallelism this process actually has.
-    ///
-    /// # Errors
-    /// The disk actor's thread failing to spawn.
-    pub fn start_sized(
-        stores: Vec<PageStore>,
-    ) -> wavedb_platform::Result<Self> {
-        Self::start(stores, wavedb_platform::cpu::available())
-    }
-
-    /// How many worker threads serve the shards.
-    #[must_use]
-    pub const fn threads(&self) -> usize {
-        self.threads
-    }
-
-    /// How many data shards the database has.
-    #[must_use]
-    pub const fn shards(&self) -> usize {
-        self.partitions
-    }
-
-    /// The data shard holding the collection `pivot`.
-    #[must_use]
-    pub fn owner(&self, pivot: wavedb_core::LocalId) -> usize {
-        shard_of(pivot, self.partitions)
-    }
-
-    /// A **cacheless** store onto the disk actor, for code that is not a
-    /// worker: node-side seeding before serving, and tests. Reach a data
-    /// shard through [`ShardStore::at`].
-    ///
-    /// Cacheless is not a tuning choice, it is the correctness condition.
-    /// [`ShardStore`]'s cache remembers absence, and that is sound only while
-    /// exactly one holder reaches a given record — a second cache would keep
-    /// serving a `None` after a shard's insert filled it. So the shards cache
-    /// and nobody else does; every other holder forwards straight through.
-    #[must_use]
-    pub fn store(&self) -> Rc<ShardStore> {
-        Rc::new(ShardStore::with_budget(self.disk.clone(), 0))
-    }
-
-    /// A handle for a thread that will build its own store later.
-    #[must_use]
-    pub fn handle(&self) -> DiskHandle {
-        self.disk.clone()
-    }
-
-    /// Ask for low-priority maintenance. Returns immediately — the caller is
-    /// by definition not waiting, which is what makes it low priority.
-    pub fn hint(&self, work: Maintenance) {
-        self.disk.hint(work);
-    }
-}
+pub use worker::{
+    Closed, JOB_DEPTH, Job, JobSlot, ShardCtx, Started, Worker, closed_all,
+    job, shard,
+};
