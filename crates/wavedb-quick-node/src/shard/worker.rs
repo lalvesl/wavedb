@@ -1,12 +1,13 @@
 //! One worker thread — where an operation actually executes, on the data
-//! shards it owns ([RFC 0067] step 4).
+//! shards it owns ([RFC 0067] steps 4–5).
 //!
-//! A worker owns a carrier thread (one Embassy executor, RFC 0066) and the
-//! `PageStore`s of its contiguous range of data shards ([`Owned`]). It
-//! receives [`Job`]s and runs them as plain calls on the owner's store —
-//! nothing about an operation crosses a thread once it is here — and its
-//! maintenance runs beside them on the same thread, in bounded steps
-//! ([`super::background`]).
+//! A worker owns a carrier thread (one Embassy executor, RFC 0066), the
+//! `PageStore`s of its contiguous range of data shards ([`Owned`]) and the
+//! subscriptions to the topics those shards hold. It receives [`Job`]s and
+//! runs them as plain calls on the owner's store — nothing about an
+//! operation crosses a thread once it is here. Beside the jobs, on the same
+//! carrier: its maintenance, in bounded steps ([`super::background`]), and
+//! its accept loop and connections ([`crate::serve`]).
 //!
 //! ## Why each job is its own task
 //!
@@ -25,14 +26,9 @@
 //! refused spawn drops its arguments, and the slot is how the worker gets the
 //! job back.
 //!
-//! ## What crosses, and what does not
-//!
-//! Into the worker: its stores once, at start ([`ShardCtx`]), then a [`Job`]
-//! — a client command with the caller gate 1 resolved at the edge, or a
-//! `#[server]` body's [`NodeOp`] — and a `oneshot` for its answer. Out of it:
-//! a [`Mutation`](wavedb_core::notify::Mutation) per committed write, handed
-//! to the accept thread's publisher, and at the end the outcome of closing
-//! its stores.
+//! A subscription is not a job: registering one is a table insert, done in
+//! the receive loop itself, so it is in place before any job received after
+//! it runs.
 //!
 //! [RFC 0067]: ../../../../rfcs/0067-thread-per-core-shards-WIP.md
 
@@ -40,29 +36,21 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use async_channel::{Receiver, Sender};
 use futures::channel::oneshot;
 use wavedb_core::expose::Caller;
 use wavedb_core::{NodeOp, NodeReply, U48};
 use wavedb_net::frame::{CommandFrame, NodeError, Response};
-use wavedb_platform::carrier::{self, Here};
-use wavedb_storage::{PageStore, StorageResult};
+use wavedb_net::ws::Topic;
+use wavedb_platform::carrier::Here;
+use wavedb_storage::PageStore;
 
 use super::background::{Background, background};
 use super::owned::Owned;
+use super::spawn::ShardCtx;
 use super::{Owner, OwnerKey, OwnerLocks};
 use crate::__rt::NodeTasks;
 use crate::dispatch;
-use crate::feed::MutationFeed;
-use crate::subscribe::NotifyStore;
-use crate::upkeep::Maintenance;
-
-/// Jobs queued on one worker before its sender waits.
-///
-/// Bounded for the reason every queue here is: an unbounded queue turns a
-/// client outrunning a worker into unbounded memory, and a bound turns it into
-/// backpressure that reaches the socket.
-pub const JOB_DEPTH: usize = 512;
+use crate::subscribe::{NotifyStore, Outbox, SubTable};
 
 /// One piece of work routed to the worker that owns it, plus where its answer
 /// goes. An answer channel dropped without a send — the worker torn down
@@ -82,39 +70,35 @@ pub enum Job {
         op: NodeOp,
         answer: oneshot::Sender<wavedb_core::Result<NodeReply>>,
     },
+    /// Publish `topic`'s mutations into `outbox` from now on; `done` says
+    /// it is registered.
+    Watch {
+        tenant: U48,
+        topic: Topic,
+        outbox: Outbox,
+        done: oneshot::Sender<()>,
+    },
+    /// Stop publishing `topic` into `outbox`.
+    Unwatch {
+        tenant: U48,
+        topic: Topic,
+        outbox: Outbox,
+    },
 }
 
 /// A job on its way into a task, recoverable if the task never starts.
 pub type JobSlot = Rc<RefCell<Option<Job>>>;
 
 /// The store one operation runs on: its owner's data shard, wrapped so
-/// committed mutations reach the accept thread's publisher.
-type OpStore<'a> = NotifyStore<&'a PageStore, &'a MutationFeed>;
-
-/// Where a worker reports how closing its stores went.
-pub type Closed = oneshot::Sender<StorageResult<()>>;
-
-/// What a worker's root task is started with. Built on the routing thread and
-/// moved onto the worker's carrier, so every field is `Send` — the stores
-/// included: they move in once and never leave.
-pub struct ShardCtx<E> {
-    registry: E,
-    /// The first data shard of the range, and the range's stores in order.
-    first: usize,
-    stores: Vec<PageStore>,
-    publisher: MutationFeed,
-    /// Data shards in the database — where an owner's records live.
-    shards: usize,
-    policy: Maintenance,
-    jobs: Receiver<Job>,
-    closed: Closed,
-}
+/// committed mutations reach the topic's subscribers.
+type OpStore<'a> = NotifyStore<'a, &'a PageStore>;
 
 /// One worker's serving state, shared by its job tasks.
 pub struct Worker<E> {
     registry: E,
     owned: Rc<Owned>,
-    publisher: MutationFeed,
+    /// Subscriptions to the topics this worker's shards hold.
+    subs: RefCell<SubTable>,
     shards: usize,
     locks: OwnerLocks,
 }
@@ -123,73 +107,58 @@ impl<E> Worker<E> {
     /// The store an operation on `owner` runs on.
     fn store(&self, owner: Owner) -> wavedb_core::Result<OpStore<'_>> {
         let store = self.owned.store(owner.shard(self.shards))?;
-        Ok(NotifyStore::new(store, &self.publisher))
+        Ok(NotifyStore::new(store, &self.subs))
+    }
+
+    /// Apply a subscription job here and now; any other job comes back.
+    fn subscription(&self, job: Job) -> Option<Job> {
+        match job {
+            Job::Watch {
+                tenant,
+                topic,
+                outbox,
+                done,
+            } => {
+                self.subs.borrow_mut().subscribe(tenant, topic, outbox);
+                let _ = done.send(());
+                None
+            }
+            Job::Unwatch {
+                tenant,
+                topic,
+                outbox,
+            } => {
+                self.subs.borrow_mut().unsubscribe(tenant, topic, &outbox);
+                None
+            }
+            job => Some(job),
+        }
     }
 }
 
-/// What starting a worker hands back: the queue that reaches it, and where
-/// it will say how closing its stores went.
-pub struct Started {
-    pub jobs: Sender<Job>,
-    pub closed: oneshot::Receiver<StorageResult<()>>,
-}
-
-/// Start a worker over data shards `first ..` (`stores`, in order) and return
-/// the channel that reaches it.
-///
-/// A worker whose root task cannot be placed ([`MAX_SHARDS`] already running)
-/// drops its queue and its stores at once: every request routed to it is
-/// refused as "shard stopped", and its close is reported as never having
-/// run — a fault the caller sees, not a hang.
-///
-/// [`MAX_SHARDS`]: crate::__rt::MAX_SHARDS
-///
-/// # Errors
-/// The worker's thread failing to spawn.
-pub fn start<E: NodeTasks>(
-    registry: E,
-    first: usize,
-    stores: Vec<PageStore>,
-    publisher: MutationFeed,
-    shards: usize,
-    policy: Maintenance,
-) -> wavedb_platform::Result<Started> {
-    let (jobs, rx) = async_channel::bounded(JOB_DEPTH);
-    let (closed, on_close) = oneshot::channel();
-    let ctx = ShardCtx {
-        registry,
-        first,
-        stores,
-        publisher,
-        shards,
-        policy,
-        jobs: rx,
-        closed,
-    };
-    // The carrier ends by itself once the router's senders are gone, the
-    // last job has answered and the stores are closed; `closed` says when.
-    drop(carrier::spawn("wavedb-shard", move |here| {
-        let _ = E::spawn_shard(ctx, here);
-    })?);
-    Ok(Started {
-        jobs,
-        closed: on_close,
-    })
-}
-
-/// A worker's root: receive and serve until the router's last sender drops,
-/// then close the stores.
+/// A worker's root: start its accept loop and its maintenance, receive and
+/// serve until every router is gone, then close the stores.
 pub async fn shard<E: NodeTasks>(ctx: ShardCtx<E>, here: Here) {
     let ShardCtx {
         registry,
         first,
         stores,
-        publisher,
         shards,
         policy,
         jobs,
         closed,
+        accept,
     } = ctx;
+    // This worker's share of ingress. Its router is one of the senders that
+    // keep every queue open; the loop drops it when serving stops.
+    if let Some(accept) = accept {
+        let fault = accept.fault.clone();
+        if E::spawn_accept(accept, here.clone()).is_err() {
+            let _ = fault.try_send(crate::ServerError::Io(
+                std::io::Error::other("no free accept slot"),
+            ));
+        }
+    }
     let owned = Rc::new(Owned::new(first, stores));
     // BG ends when this closes; refused (its pool is full), the worker serves
     // without background maintenance and still closes its stores cleanly.
@@ -207,11 +176,14 @@ pub async fn shard<E: NodeTasks>(ctx: ShardCtx<E>, here: Here) {
     let worker = Rc::new(Worker {
         registry,
         owned,
-        publisher,
+        subs: RefCell::new(SubTable::default()),
         shards,
         locks: OwnerLocks::new(),
     });
     while let Ok(job) = jobs.recv().await {
+        let Some(job) = worker.subscription(job) else {
+            continue;
+        };
         let slot: JobSlot = Rc::new(RefCell::new(Some(job)));
         let spawned =
             E::spawn_job(Rc::clone(&slot), Rc::clone(&worker), here.clone());
@@ -229,29 +201,6 @@ pub async fn shard<E: NodeTasks>(ctx: ShardCtx<E>, here: Here) {
     let owned = sole(worker.owned).await;
     let _ = closed.send(owned.close());
     drop(here);
-}
-
-/// Wait for every worker to report closing its stores; the first fault wins,
-/// and a worker that never reported is one.
-///
-/// # Errors
-/// The first worker's fault.
-pub async fn closed_all(
-    closing: Vec<oneshot::Receiver<StorageResult<()>>>,
-) -> StorageResult<()> {
-    let mut first = Ok(());
-    for worker in closing {
-        let outcome =
-            worker
-                .await
-                .unwrap_or(Err(wavedb_storage::StorageError::Corrupt(
-                    "a worker stopped before closing its stores",
-                )));
-        if first.is_ok() {
-            first = outcome;
-        }
-    }
-    first
 }
 
 /// Wait until `rc` is the only reference left, and take its value.
@@ -327,6 +276,10 @@ async fn serve<E: NodeTasks>(worker: &Worker<E>, job: Job) {
             };
             let _ = answer.send(reply);
         }
+        // Applied in the receive loop; a refused spawn never carries one.
+        job @ (Job::Watch { .. } | Job::Unwatch { .. }) => {
+            let _ = worker.subscription(job);
+        }
     }
 }
 
@@ -337,6 +290,4 @@ async fn serve<E: NodeTasks>(worker: &Worker<E>, job: Job) {
 const _: fn() = || {
     const fn assert_send<T: Send>() {}
     assert_send::<Job>();
-    assert_send::<Sender<Job>>();
-    assert_send::<ShardCtx<()>>();
 };
