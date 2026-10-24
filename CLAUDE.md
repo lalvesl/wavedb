@@ -214,7 +214,9 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   engine per process ⇒ a `Db::open` client and a node never share one (tests run
   the node as a child process — see `local_cache_e2e.rs`). Typed calls spell
   `T::get(&db)` / `v.save(&db)` / `T::collection(pivot)` via the `DbHandle` seam;
-  `ServerDb` mirrors it node-side for `#[server]` bodies. Live sync (M7):
+  `ServerDb` mirrors it node-side for `#[server]` bodies, plus
+  `db.lock(&[Owner])`: owners held across awaits (leases, RFC 0067 §5) — all
+  in one call, nothing reached past them (`Error::LockOrder`). Live sync (M7):
   `db.watch_unique::<T>()` / `db.watch_collection::<T>(pivot)` (token required)
   yield typed `WatchEvent`s and mirror each into the cache before yielding; watches
   multiplex through `net::manager` (one WS connection per identity), or poll over

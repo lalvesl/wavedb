@@ -1,10 +1,10 @@
 # RFC 0067 — Thread per core: the shard as a database, the thread as placement
 
-- **Status:** In progress — opened 2026-10-08. **Steps 1–4 and 5a landed**
+- **Status:** In progress — opened 2026-10-08. **Steps 1–5 landed**
   (per-type state out of the statics; the routing function; the Pivot on
   the wire; server bodies at the edge; the shard layout; the stepped
   checkpoint; workers owning their shards, the disk actor gone; ingress
-  per thread, the accept thread gone); see
+  per thread, the accept thread gone; leases); see
   "Progress".
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the owner
   as the unit of concurrency, and `shard_of`),
@@ -228,14 +228,22 @@ the meantime.
 - A task on another thread acquires it as a **lease**:
 
   ```text
-  let g = db.lock(owner).await;   // Lock message to the owner's thread
+  let g = db.lock(&[owner]).await?; // Lease job to the owner's thread
   // ... awaits; this thread runs other tasks
-  // operations carrying g run on the owner's thread under the lease
-  drop(g);                        // Unlock: try_send into a reserved slot, cannot fail
+  // operations on the owner run on its thread under the lease
+  drop(g);                          // Unlock: the lease's queue closes, cannot fail
   ```
 
-- **Several owners:** `lock_many` acquires in `(shard, owner)` order, so two
-  tasks cannot hold one each and wait for the other.
+- **Several owners:** one `lock` takes them all, in `Owner`'s total order
+  whatever order they are named in, so two bodies cannot hold one each and
+  wait for the other. (Planned as `lock_many` in `(shard, owner)` order; any
+  total order breaks the cycle, and one call for one owner or many is the
+  smaller surface.)
+- **Hold, then stay inside.** A body holding owners that waited for another
+  would be half a deadlock even with ordered locks, so while a lock is held
+  a second `lock` and an operation outside the held owners are refused
+  (`Error::LockOrder`) — except on a collection the body creates under the
+  lock, which nobody else can name yet.
 - Within one thread nothing changes; the lease is the only new piece.
 
 ### 6. Ingress and coordination
@@ -515,6 +523,45 @@ node has no thread that is not a worker.
 - Tests: `listen` unit tests (a group shares one address; a plain bind
   cannot join; the kernel spreads 64 connections over more than one member)
   and `node_ws` now serving on four workers.
+
+### Step 5b — leases (landed 2026-10-09)
+
+A `#[server]` body can hold owners across its awaits, so a read, a decision
+and a write become one step.
+
+- **Surface.** `ServerDb::lock(&[Owner]) -> Locked` (`Owner::unique::<T>`,
+  `Owner::Collection(pivot)`; `Owner` is in the prelude). While the guard
+  lives, the body's operations on those owners run under their leases —
+  the handle knows what its body holds, through a `Leases` table the
+  generated dispatch builds per invocation — so a body never queues behind
+  its own lock. Dropping the guard releases everything.
+- **Core.** `Route` gained `type Lease: Clone`, `lease(tenant, owner)` and
+  `run_leased`. `RouteHandle::leasing` carries the table, routes each
+  operation (`Plain` / `Leased` / `Created` / `Refused`) and enforces the
+  rules of §5 with `Error::LockOrder` (on the wire, `NodeErrorKind::LockOrder`).
+  `LocalRoute` and the seeding route have no lock table, so their lease is
+  `()`.
+- **Node.** `Router::lease` posts a `Job::Lease` to the owner's worker. Its
+  job task takes the owner's lock — waiting in the owner's chain like any
+  operation — and answers with a queue into itself (`shard::Lease`), then
+  runs what arrives, one operation at a time, until the queue closes; then
+  the lock goes. Releasing is dropping the `Lease`, so it cannot fail, and a
+  body dropped mid-await (connection closed, node halting) releases the same
+  way. A worker whose job pool is full refuses a lease instead of serving it
+  inline, which would hold its queue for the length of a body. A held lease
+  counts as busy for the maintenance valve only while an operation runs
+  under it.
+- Files: `wavedb-core/src/lease.rs` (the table and the rules, unit tests),
+  `route.rs` (the trait, moved out of `node_op.rs`), `route_handle.rs`;
+  `wavedb-quick-node/src/shard/lease.rs`; `wavedb-macros/src/server_args.rs`
+  (the per-call table, shared by both `#[server]` shapes).
+- Tests: `wavedb/tests/server_lock_e2e.rs` on four workers — eight bodies
+  doing read-modify-write on one counter under its lock end exact and
+  without a `Conflict` (the same test without the lock fails with one); two
+  ledgers locked in opposite orders by eight bodies complete; a second lock
+  and an operation outside the lock are refused and write nothing; a
+  collection created under the lock is filled and linked in one step.
+
 ## Alternatives
 
 - **One journal per thread.** Fewer `fsync`s per window, but a shard stops

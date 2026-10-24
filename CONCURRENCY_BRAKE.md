@@ -101,8 +101,10 @@ one shard, so the table lives in its worker; under RFC 0067 a thread's shards
 share one. The table is runtime state only and starts empty with the thread.
 
 The condition is the routing: route one way and brake the other and the two
-locks are different locks. Both use one key, and an owner reached from another thread (RFC 0067) needs a lease, not this
-table.
+locks are different locks. Both use one key. An owner held by a `#[server]`
+body across its awaits is held **in this table** too: since RFC 0067 step 5b
+a lease is a job on the owner's worker that takes the owner's lock here and
+runs the body's operations on it until the body lets go.
 
 ### The key is the owner
 
@@ -150,6 +152,13 @@ keep 5 of their 40 inserts.
 - **The key is the owner.** `(tenant, Owner)` since RFC 0067 step 2b — the
   Pivot rides the front of every collection command — so two collections of
   one type no longer serialise.
+- **Held across awaits: leases.** A `#[server]` body that must read, decide
+  and write as one step `lock`s its owners (`ServerDb::lock`, RFC 0067 step
+  5b). Its operations on them then run under the lease, on the owner's
+  worker, while every other operation on those owners waits in the chain as
+  usual. Every owner a body needs is taken in one call, in one order, and a
+  body holding a lock may reach nothing past it (`Error::LockOrder`): that is
+  what keeps two bodies from waiting on each other.
 
 ## The rule
 
