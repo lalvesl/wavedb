@@ -167,13 +167,16 @@ where
     ));
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
 
-    crate::systems::shop::wavedb::preload(cfg, &dir)?;
+    // One data shard per consumer the seam runs: each consumer owns its
+    // shard's store, and the preload puts every user in its consumer's.
+    let shards = E::consumers(asked);
+    crate::systems::shop::wavedb::preload(cfg, &dir, shards)?;
     // Reopened: the per-type cache is a *write* cache, so everything the
     // preload just wrote would otherwise still be warm and the read phases
     // would measure RAM. The reopen is also where the measured durability is
     // chosen — the fill's window never survives it.
-    let store = crate::systems::shop::wavedb::open_measured(&dir, d)?;
-    let factory = drv::wavedb::Factory::<E>::new(store, asked)?;
+    let stores = crate::systems::shop::wavedb::open_measured(&dir, d, shards)?;
+    let factory = drv::wavedb::Factory::<E>::new(stores, asked)?;
     let used = crate::harness::DriverFactory::consumers(&factory);
     // The consumer count is a **row-identity field**: it is in the digest, and
     // every table prints it. A row that was asked for three and ran on one
@@ -197,8 +200,8 @@ where
         || points.borrow_mut().take(Point::Hot),
     )?;
     let mut points = points.into_inner();
-    // The engine goes down with the factory: with three consumers over one
-    // disk actor, a driver's own `close` cannot be the thing that stops it.
+    // Every consumer has closed and dropped its store; whatever the factory
+    // still holds goes with it.
     drop(factory);
     points.take(Point::Settled)?;
 
