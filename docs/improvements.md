@@ -34,7 +34,7 @@ from here. One that is done is removed too; the commit says so.
 
 ### Pool sizes are plain constants
 
-- **Now.** `MAX_CONNECTIONS`, `MAX_JOBS`, `MAX_SHARDS`, `MAX_NODES`
+- **Now.** `MAX_CONNECTIONS`, `MAX_JOBS`, `MAX_SHARDS`
   (`wavedb_quick_node::__rt`) are fixed in the source.
 - **Instead.** Use the same build-time knob as the client's `MAX_POSTS`
   (`option_env!` parsed by a `const fn`). The pools are statics, so the size

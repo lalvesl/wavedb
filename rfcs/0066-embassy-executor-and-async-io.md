@@ -285,6 +285,11 @@ any more, and none comes from tokio:
 | publisher → connection (events) | `async-channel` | `WS_OUTBOUND_DEPTH` = 256 | the connection is closed |
 | shards → publisher (mutations) | `async-channel` + a lag signal (`feed.rs`) | `MUTATION_DEPTH` = 4096 | dropped; every subscriber is disconnected |
 
+> **Since [0067](0067-thread-per-core-shards-WIP.md) step 5a** the last row
+> is gone: a topic's subscriptions live on its owner's worker, which publishes
+> straight into each session's outbox, so the feed, its lag signal and the
+> publisher task were deleted.
+
 Three choices differ from §2 as written, each for a reason that only showed
 in the code:
 

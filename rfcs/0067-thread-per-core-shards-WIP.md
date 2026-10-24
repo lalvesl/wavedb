@@ -1,9 +1,10 @@
 # RFC 0067 — Thread per core: the shard as a database, the thread as placement
 
-- **Status:** In progress — opened 2026-10-08. **Steps 1–4 landed**
+- **Status:** In progress — opened 2026-10-08. **Steps 1–4 and 5a landed**
   (per-type state out of the statics; the routing function; the Pivot on
   the wire; server bodies at the edge; the shard layout; the stepped
-  checkpoint; workers owning their shards, the disk actor gone); see
+  checkpoint; workers owning their shards, the disk actor gone; ingress
+  per thread, the accept thread gone); see
   "Progress".
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the owner
   as the unit of concurrency, and `shard_of`),
@@ -470,6 +471,50 @@ wrapped in `NotifyStore` for the live feed. Nothing crosses a thread but the
   router; clean close; reopen with nothing to replay; every record in the
   shard placement names and no other) and `shard::owned` unit tests.
 
+### Step 5a — ingress per thread (landed 2026-10-09)
+
+The accept thread is gone. Each worker accepts its own connections, and the
+node has no thread that is not a worker.
+
+- **One listener per worker.** `Listener::bind_many` (`wavedb-platform`)
+  binds them on one address. On Linux they form one `SO_REUSEPORT` group,
+  set up through `rustix`'s safe socket calls (already in the tree under
+  `async-io`, same features), and the kernel spreads connections across
+  them. Joining the group takes the option **and** the same user, so a plain
+  bind of the address still fails as in use. macOS does not balance such a
+  group and Windows has no equivalent that is not also a way to take over a
+  port, so elsewhere `bind_many` binds one listener and the node accepts on
+  one worker; the operations are still placed by owner.
+- **A connection executes nothing.** Its accept loop runs on the worker's
+  carrier, beside the jobs, and each connection is a task there. Every
+  operation becomes a `Job` posted through the `Router` — to this worker's
+  own queue when it owns the operation, to another's otherwise. Running a
+  local operation inline in the connection was rejected: a task's size is
+  its largest state, so the connection pool's ~2 KB slots would grow to the
+  job's ~6 KB across all 1024 of them (measured on the release binary),
+  for a saving of one channel push on the same thread.
+- **Subscriptions live with the topic's owner.** A topic is an owner, so its
+  mutations commit on one worker; that worker keeps the topic's subscribers,
+  and `NotifyStore` publishes straight into each session's outbox, an
+  `async-channel` drained on the session's thread. `Router::watch` posts a
+  `Job::Watch` and waits until it is registered, and only then reads the
+  tail the ack carries, so no mutation falls between the two; the receive
+  loop applies a subscription inline, before any later job. A subscription
+  is named by its outbox (`Sender::same_channel`), so no connection id is
+  minted across threads. The node-wide mutation feed, its lag signal and
+  the publisher task (0066 §2) are deleted: a slow client is still cut off
+  by its own full outbox, and nothing else can lag.
+- **Shutdown.** Every worker's queue exists before any worker starts, and
+  each worker's accept loop holds a router onto all of them. Closing the
+  node's `stop` ends every accept loop and then its connections; once no
+  router is left anywhere the queues close, and each worker finishes its
+  last job and closes its stores. A listener fault reaches the node on a
+  channel and stops every worker the same way.
+- **Pools.** The accept pool is per worker (`MAX_SHARDS`); `MAX_NODES` and
+  the publisher's pool are gone.
+- Tests: `listen` unit tests (a group shares one address; a plain bind
+  cannot join; the kernel spreads 64 connections over more than one member)
+  and `node_ws` now serving on four workers.
 ## Alternatives
 
 - **One journal per thread.** Fewer `fsync`s per window, but a shard stops
