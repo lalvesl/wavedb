@@ -37,7 +37,6 @@ pub mod __rt;
 pub mod dispatch;
 pub mod edge;
 pub mod error;
-pub mod feed;
 mod serve;
 mod serve_ws;
 pub mod shard;
@@ -83,7 +82,9 @@ pub struct Server<E> {
 /// [`local_addr`](Bound::local_addr) first (tests bind port 0).
 pub struct Bound<E> {
     registry: E,
-    listener: Listener,
+    /// One per worker, on one address (fewer where the platform cannot
+    /// spread connections — `Listener::bind_many`).
+    listeners: Vec<Listener>,
     /// The database's data shards, in shard order — opened here, and handed
     /// to the workers that will own them when serving starts (RFC 0067
     /// step 4). Until then [`route`](Bound::route) may seed through them.
@@ -181,7 +182,8 @@ where
         self
     }
 
-    /// Open the engine and bind the listener, without yet accepting.
+    /// Open the engine and bind a listener per worker, without yet
+    /// accepting.
     ///
     /// # Errors
     /// [`ServerError::Storage`] if the engine can't open (busy, corruption),
@@ -198,7 +200,8 @@ where
             self.store,
             wavedb_core::placement::DEFAULT_SHARDS,
         )?;
-        let listener = Listener::bind(addr)?;
+        let threads = self.threads.clamp(1, stores.len().max(1));
+        let listeners = Listener::bind_many(addr, threads)?;
         // Publish for the token-minting helpers (`wavedb::auth`) — one node
         // per process, like the engine's storage slots. The secret is
         // whatever the *first* open installed: an in-process reopen keeps
@@ -210,9 +213,9 @@ where
             .unwrap_or_else(|| unreachable!("just installed"));
         Ok(Bound {
             registry: self.registry,
-            listener,
+            listeners,
             stores,
-            threads: self.threads,
+            threads,
             maintenance: self.maintenance,
             secret,
         })
@@ -236,7 +239,10 @@ where
     /// # Errors
     /// [`ServerError::Io`] if the socket address can't be read.
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        Ok(self.listener.local_addr()?)
+        let first = self.listeners.first().ok_or_else(|| {
+            ServerError::Io(std::io::Error::other("no listener bound"))
+        })?;
+        Ok(first.local_addr()?)
     }
 
     /// A route onto the opened database for node-side seeding (e.g. creating
@@ -264,68 +270,46 @@ where
 
     /// Accept and serve connections until `shutdown` resolves, then settle
     /// and checkpoint (a clean restart replays nothing) and return —
-    /// dropping the engine, which releases the process-wide store claim.
+    /// dropping the engine, which releases every data shard's lock.
     ///
     /// # Errors
-    /// [`ServerError::Net`] on a fatal accept fault; [`ServerError::Storage`]
-    /// if the final checkpoint fails.
+    /// [`ServerError::Net`] or [`ServerError::Io`] on a fatal accept fault;
+    /// [`ServerError::Storage`] if the final checkpoint fails.
     pub async fn run_with_shutdown(
         self,
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
-        // Committed mutations come back from the workers as plain data; the
-        // subscription table lives on the accept thread, which fans them out.
-        let (mutations, incoming) = feed::feed(feed::MUTATION_DEPTH);
-        // The workers take the stores (RFC 0067 step 4). Started here rather
-        // than on the accept thread because this is who waits for them to
-        // close the stores, below.
-        let (router, closing) = shard::Router::start(
+        let (stop, stopped) = async_channel::bounded::<()>(1);
+        let (fault, faulted) =
+            async_channel::bounded::<ServerError>(self.threads.max(1));
+        let ingress = serve::Ingress {
+            listeners: self.listeners,
+            stop: stopped,
+            fault,
+        };
+        // Each worker takes its stores and a listener (RFC 0067 steps 4–5),
+        // and serves on its own carrier; this future only waits for them, so
+        // the caller may await it under any executor.
+        let (router, closing) = shard::start(
             self.registry,
             self.stores,
-            &mutations,
             self.secret,
             self.threads,
             self.maintenance,
+            Some(ingress),
         )
         .map_err(|e| ServerError::Io(std::io::Error::other(e.to_string())))?;
-        // Ours goes; the workers hold the live clones, so the publisher ends
-        // when the last of them does rather than never.
-        drop(mutations);
-        let (stop, stopped) = async_channel::bounded::<()>(1);
-        let (outcome, served) = futures::channel::oneshot::channel();
-        let ctx = serve::Accept {
-            listener: self.listener,
-            router,
-            incoming,
-            secret: self.secret,
-            stop: stopped,
-            outcome,
-        };
-        // The node runs on its own carrier thread (RFC 0066); this future only
-        // waits for it, so the caller may await it under any executor.
-        let finished =
-            wavedb_platform::carrier::spawn("wavedb-accept", |here| {
-                // Refused (`MAX_NODES` running): `outcome` drops, and the caller
-                // hears `served` cancelled below.
-                let _ = E::spawn_accept(ctx, here);
-            })
-            .map_err(|e| {
-                ServerError::Io(std::io::Error::other(e.to_string()))
-            })?;
-        let mut served = std::pin::pin!(served);
-        let result = match select(std::pin::pin!(shutdown), &mut served).await {
-            Either::First(()) => {
-                stop.close();
-                served.await
-            }
-            Either::Second(result) => result,
-        };
+        // Ours goes: the workers' accept loops and connections hold the live
+        // clones, so the queues close once the last of those has ended.
+        drop(router);
+        let served =
+            match select(std::pin::pin!(shutdown), faulted.recv()).await {
+                Either::First(()) | Either::Second(Err(_)) => Ok(()),
+                Either::Second(Ok(fault)) => Err(fault),
+            };
+        // Every accept loop stops, then its connections; once none is left
+        // anywhere, each worker finishes its last job and closes its stores.
         stop.close();
-        // Every connection, the WS readers and the background task have
-        // returned once the carrier has, and the router went with them — so
-        // each worker finishes its last job and closes its stores.
-        finished.await;
-        let served = result.unwrap_or_else(|_| Err(node_refused()));
         // Clean shutdown: everything settled and committed, each checkpoint's
         // frame forced durable — a restart replays nothing — and every store
         // dropped before its worker answers, so a restart can reopen at once.
@@ -333,12 +317,6 @@ where
         served?;
         closed.map_err(ServerError::Storage)
     }
-}
-
-/// The accept loop never ran: `MAX_NODES` nodes are already running in this
-/// process.
-fn node_refused() -> ServerError {
-    ServerError::Io(std::io::Error::other("no free node slot"))
 }
 
 /// A fresh random 32-byte secret from platform entropy
