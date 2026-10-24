@@ -26,7 +26,6 @@ use wavedb_core::{LocalHandle, RouteHandle, U48};
 use wavedb_net::auth::{AccessClaims, TokenPurpose, sign};
 use wavedb_net::frame::{Auth, CommandFrame, Request, Response};
 use wavedb_quick_node::Maintenance;
-use wavedb_quick_node::feed::{MUTATION_DEPTH, feed};
 use wavedb_quick_node::shard::{Owner, Router};
 use wavedb_storage::{PageStore, StorageRegistry, StoreOptions, open_shards};
 
@@ -79,12 +78,10 @@ fn workers_own_their_shards_and_close_them_cleanly() {
     wavedb_platform::carrier::block_on(async {
         let dir = tempfile::tempdir().expect("tempdir");
         wavedb_net::auth::set_node_secret(SECRET);
-        let (mutations, _drain) = feed(MUTATION_DEPTH);
         // From here the stores belong to the workers' threads.
         let (router, closing) = Router::start(
             REGISTRY,
             open(dir.path()),
-            &mutations,
             SECRET,
             2,
             Maintenance::default(),
@@ -134,7 +131,6 @@ fn workers_own_their_shards_and_close_them_cleanly() {
 
         // ---- 3. stop: every worker closes its stores, and says so ----------
         drop(router);
-        drop(mutations);
         for worker in closing {
             worker
                 .await
