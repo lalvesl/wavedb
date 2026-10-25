@@ -43,19 +43,44 @@ struct Manifest {
 /// Open the sharded database at `dir`, creating it with `shards` shards if
 /// it does not exist yet. Returns one store per shard, in shard order.
 ///
-/// The budgets in `options` are the database's: each shard gets an equal
-/// share of the page cache and of the record-cache budget.
+/// Recovery runs on as many threads as the machine offers
+/// ([`open_shards_with`]).
 ///
 /// # Errors
-/// [`StorageError::Corrupt`] for an unreadable `MANIFEST`, a shard count out
-/// of `1..=256`, or a directory holding an unsharded store; otherwise
-/// whatever opening a shard raises (a shard already open is
-/// [`StorageError::EngineBusy`]).
+/// As [`open_shards_with`].
 pub fn open_shards(
     dir: impl AsRef<Path>,
     types: &[&'static StructStorage],
     options: StoreOptions,
     shards: usize,
+) -> StorageResult<Vec<PageStore>> {
+    let threads = std::thread::available_parallelism().map_or(1, usize::from);
+    open_shards_with(dir, types, options, shards, threads)
+}
+
+/// [`open_shards`], recovering on `threads` threads.
+///
+/// The shards share nothing, so their journals replay independently: thread
+/// `t` opens the contiguous range of shards `p` with `p · threads / P = t` —
+/// the ranges a node's workers will own — and the database is open once the
+/// slowest range is. The stores are returned in shard order whichever thread
+/// opened them; they move to whoever owns them next.
+///
+/// The budgets in `options` are the database's: each shard gets an equal
+/// share of the page cache and of the record-cache budget.
+///
+/// # Errors
+/// [`StorageError::Corrupt`] for an unreadable `MANIFEST`, a shard count out
+/// of `1..=256`, or a directory holding an unsharded store; otherwise the
+/// first fault, in shard order, that opening a shard raised (a shard already
+/// open is [`StorageError::EngineBusy`]). Every store that did open is
+/// dropped again before this returns, so a retry finds them closed.
+pub fn open_shards_with(
+    dir: impl AsRef<Path>,
+    types: &[&'static StructStorage],
+    options: StoreOptions,
+    shards: usize,
+    threads: usize,
 ) -> StorageResult<Vec<PageStore>> {
     let dir = dir.as_ref();
     let count = match read_manifest(dir)? {
@@ -68,9 +93,34 @@ pub fn open_shards(
         record_cache_bytes: share(options.record_cache_bytes),
         ..options
     };
-    (0..count)
-        .map(|i| PageStore::open_with(shard_dir(dir, i), types, options))
-        .collect()
+    let threads = threads.clamp(1, count);
+    let open_range = |range: std::ops::Range<usize>| -> Vec<_> {
+        range
+            .map(|i| PageStore::open_with(shard_dir(dir, i), types, options))
+            .collect()
+    };
+    let opened: Vec<StorageResult<PageStore>> = std::thread::scope(|s| {
+        let ranges = (0..threads).map(|t| {
+            (t * count).div_ceil(threads)..((t + 1) * count).div_ceil(threads)
+        });
+        // Collected on purpose: every range must be spawned before the first
+        // join, or the lazy chain would spawn and join one range at a time.
+        #[allow(clippy::needless_collect)]
+        let running: Vec<_> = ranges
+            .map(|range| s.spawn(move || open_range(range)))
+            .collect();
+        running
+            .into_iter()
+            .flat_map(|thread| {
+                thread.join().unwrap_or_else(|_| {
+                    vec![Err(StorageError::Corrupt(
+                        "a shard's recovery panicked",
+                    ))]
+                })
+            })
+            .collect()
+    });
+    opened.into_iter().collect()
 }
 
 /// The directory of shard `i` under the database root `dir`.
@@ -128,9 +178,73 @@ const fn checked(count: usize) -> StorageResult<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MANIFEST, open_shards, shard_dir};
-    use crate::StoreOptions;
+    use futures::executor::block_on;
+    use wavedb_core::{Id, Store, U48, Write};
+
+    use super::{MANIFEST, open_shards, open_shards_with, shard_dir};
     use crate::error::StorageError;
+    use crate::{PageStore, StoreOptions, StructStorage};
+
+    const SH: u64 = 0x0067_0005_4EC0_0E21;
+    static SLOT: StructStorage = StructStorage::new(SH);
+
+    fn id(k: u64) -> Id {
+        Id::new(k, U48::from(1u32), false, 1)
+    }
+
+    fn put(k: u64) -> Write {
+        let mut bytes = SH.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&k.to_le_bytes());
+        Write::Put(id(k), bytes)
+    }
+
+    fn open_on(dir: &std::path::Path, threads: usize) -> Vec<PageStore> {
+        open_shards_with(dir, &[&SLOT], StoreOptions::default(), 8, threads)
+            .unwrap()
+    }
+
+    /// Recovery on three threads hands back every shard, in shard order,
+    /// each having replayed its own journal and no other.
+    #[test]
+    fn parallel_recovery_replays_every_shard_into_its_place() {
+        let dir = tempfile::tempdir().unwrap();
+        for (k, store) in (0u64..).zip(open_on(dir.path(), 1)) {
+            block_on(store.apply(&[put(k)])).unwrap();
+        } // dropped unsettled: only the journals hold the records
+        let stores = open_on(dir.path(), 3);
+        assert_eq!(stores.len(), 8);
+        for (i, store) in stores.iter().enumerate() {
+            assert_eq!(store.data_dir, shard_dir(dir.path(), i));
+            for k in 0..8u64 {
+                let found = block_on(store.get_of(SH, id(k))).unwrap();
+                assert_eq!(
+                    found.is_some(),
+                    k == i as u64,
+                    "shard {i}, key {k}"
+                );
+            }
+        }
+    }
+
+    /// One shard failing to open fails the database — and every shard that
+    /// did open is closed again, so a retry finds them free.
+    #[test]
+    fn a_shard_that_fails_releases_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(open_on(dir.path(), 4));
+        let held = PageStore::open(shard_dir(dir.path(), 5), &[&SLOT]).unwrap();
+        let err = open_shards_with(
+            dir.path(),
+            &[&SLOT],
+            StoreOptions::default(),
+            8,
+            4,
+        )
+        .unwrap_err();
+        assert!(matches!(err, StorageError::EngineBusy), "{err:?}");
+        drop(held);
+        assert_eq!(open_on(dir.path(), 4).len(), 8);
+    }
 
     #[test]
     fn a_new_database_records_its_shard_count() {
