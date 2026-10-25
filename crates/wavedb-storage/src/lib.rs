@@ -56,7 +56,7 @@ pub use journal::{CommitFrame, Journal, JournalFrame};
 pub use page::SlotPage;
 pub use page_store::{DEFAULT_RECORD_CACHE_BYTES, PageStore, StoreOptions};
 pub use settle::Progress;
-pub use shard_set::{MANIFEST, open_shards};
+pub use shard_set::{MANIFEST, open_shards, open_shards_with};
 pub use struct_storage::{BPTREE_NODE_STORAGE, StorageRegistry, StructStorage};
 
 /// The engine's thread-safety, **asserted rather than described**.
