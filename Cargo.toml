@@ -91,7 +91,6 @@ byteorder = "1.5.0"
 # STRUCT_HASH identity is load-bearing, so a version bump that changed the
 # algorithm would invalidate every stored record's type hash — never loosen `=`.
 seahash = { path = "crates/seahash", version = "=4.1.0" }
-parking_lot = "0.12.5"
 proptest = "1.11.0"
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 trybuild = "1.0.122"

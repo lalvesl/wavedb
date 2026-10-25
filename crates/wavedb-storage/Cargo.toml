@@ -15,8 +15,6 @@ wavedb-core = { path = "../wavedb-core", features = ["validation"] }
 # Direct dep (not just via core): `#[derive(WaveWire)]` expands to absolute
 # `::wavedb_wire::` paths, so any crate deriving it must name the crate itself.
 wavedb-wire.workspace = true
-# The engine is single-writer per node; one non-async mutex guards its state.
-parking_lot.workspace = true
 thiserror.workspace = true
 # Page + journal-frame integrity checksums.
 crc32fast.workspace = true
@@ -26,9 +24,6 @@ seahash.workspace = true
 zstd.workspace = true
 # Streams for the search walk over the Store seam.
 futures.workspace = true
-# The barrier helper's queue (`barrier`): an `fsync` asked from a worker,
-# answered from the helper thread (RFC 0067 §4).
-async-channel.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
