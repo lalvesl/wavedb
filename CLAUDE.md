@@ -163,8 +163,11 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   taken on a helper thread and `apply` waits for it, grouped per round — each
   node worker has one, RFC 0067 §4),
   replay on open. Per-type routing is compile-time (`StructStorage` statics are
-  declarations: hash + compression policy); the per-type state (cache, directory,
-  dictionary) belongs to the open store (RFC 0067 step 1). **One open `PageStore`
+  declarations: hash + compression policy); the per-type state (directory,
+  dictionary) belongs to the open store (RFC 0067 step 1), and so does the
+  record cache — one log per type in chunks + one Dashtable-shaped index;
+  settledness is a cursor, eviction drops settled chunks (RFC 0068). A store
+  is used from one thread: plain cells, no lock, no atomic; `Send`, not `Sync`. **One open `PageStore`
   per data directory** — `data.bin` is locked while open, a second open of it is
   `EngineBusy` — and stores over different directories coexist in one process.
   A node's database is **sharded** (RFC 0067): `MANIFEST` (the shard count `P`,

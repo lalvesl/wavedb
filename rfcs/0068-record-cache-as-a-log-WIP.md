@@ -1,8 +1,8 @@
 # RFC 0068 — The record cache as a log
 
-- **Status:** Planned — opened 2026-10-10
+- **Status:** WIP — opened 2026-10-10
 - **Crates:** `wavedb-storage`
-- **Code (today):** `crates/wavedb-storage/src/{struct_storage,pending,settle,apply,plan,read_through}.rs`
+- **Code:** `crates/wavedb-storage/src/{record_index,record_log,record_cache,settle,apply,plan}.rs`, `tests/record_cache.rs`
 - **Builds on:** [0041](0041-single-barrier-checkpoint.md) (the checkpoint and
   its settle), [0063](0063-engine-yield-map-and-interruptible-engine-PLANNED.md)
   part 3 (the settle in bounded rounds), [0067](0067-thread-per-core-shards-WIP.md)
@@ -15,7 +15,7 @@
 
 A store's record cache becomes two structures: an **index** in the shape of
 Dragonfly's Dashtable — a small directory over fixed-size segments, each a
-flat open-addressed table — and a **log of fixed-size chunks** holding the
+flat open-addressed table — and, per type, a **log of chunks** holding the
 records' bytes, appended in commit order. Whether a record is settled is
 then a matter of **position**: a cursor `S` marks how far the settle has
 reached, everything before it is settled and may be dropped, everything from
@@ -66,48 +66,75 @@ deciding settledness *per record*; this RFC removes both.
 
 ### Two structures per store
 
-**One log and one index per store**, not per type. With 64 shards and a
-dozen types, a half-filled chunk per type per shard is real memory; one per
-store is one chunk. The index is keyed by the record's `Id` alone: ids do
-not collide across types — the same property the flat-keyspace stores
-(`wavedb::cache::IdbStore`, `MemStore`) already rely on, and that the salt
-guard (`wavedb-core/src/expose_salt.rs`) protects — and the type is the hash
-the bytes begin with, which is how `apply` routes a write today.
+**One log per type, one index per store.** The logs keep the types apart: a
+page holds one type, so a settle round is per type anyway and goes straight
+into that type's plan, and a type that is rarely used will be the first a
+retention policy lets go of ([0053](0053-tenant-fair-cache-retention-PLANNED.md)).
+What made a log per type expensive — a half-filled 64 KiB chunk per type per
+shard, ~360 MiB at 90 types × 64 shards — is answered by the chunk's growth
+(below), not by mixing the types. The index is shared: its slot already names
+the type, and an index per type would be one mostly empty segment per type
+per shard.
 
-On a node a store belongs to one worker (RFC 0067), so one lock per store
-contends with nothing; per-type locks bought nothing there.
+The key is `(Id, type)`. A slot names the type's log, so the type costs
+nothing to compare, and two types that did share an id would still be two
+records rather than one silently replacing the other.
+
+A store is used from one thread (RFC 0067), so the cache — like the rest of
+the store's state — lives in a plain cell: no lock, no atomic (see
+*Implementation decisions*).
 
 ### The log
 
-Fixed-size chunks (`Box<[u8]>`, 64 KiB to start), each entry
-`[Id 16 B][len u32][bytes]`, appended at the write end `W` under the journal
-lock — so **the log's order is the journal's order**. A record rewritten is
-appended again and the index repointed; its old copy stays where it was, dead,
-until its chunk goes. A remove appends a **tombstone** (an entry with a
-removed flag and no bytes).
+Chunks of at most 64 KiB, each entry `[Id 16 B][len u32][bytes]`, appended at
+the write end `W` right after the journal append — so **the log's order is
+the journal's order**. A record rewritten is appended again and the index
+repointed; its old copy stays where it was, dead, until its chunk goes. A
+remove appends a **tombstone** (`len = u32::MAX`, no bytes).
 
-The allocator sees one allocation size, and the store can take its whole
-budget at open if it wants a fixed resident size.
+The chunk being filled starts at **512 B and doubles** as it fills; at 64 KiB
+it is sealed and the next one starts small again. So the room a chunk has not
+used yet never exceeds what it already holds: a type barely written holds a
+few hundred bytes, and the worst case — every type of every shard just past a
+doubling — wastes at most as much as those chunks hold, never a fixed 64 KiB
+per type. A record larger than 64 KiB gets a chunk of its own size. Chunks are
+`Vec<u8>`s that grow by power-of-two steps, so the allocator sees a handful of
+sizes, not one per record.
+
+Positions are logical byte counts over everything ever appended, so `S`, `W`
+and `R` are plain integers and a chunk starts where the previous one ended.
 
 ### The index
 
 Dashtable's shape: a directory (a `Vec` of segment indexes) over segments of
 fixed size; a segment is a flat table of buckets with a few stash buckets for
 spill, and a full segment **splits in two** — only it, never the table — so
-growth is one segment at a time with no rehash spike. A slot holds the `Id`
-and the entry's location in the log (chunk `u32`, offset `u32`); a bucket's
-one-byte fingerprints sit together so a probe compares them in one pass. That
-comparison is written as plain code the compiler vectorises (on the pinned
-toolchain a 16-byte compare loop compiles to `movdqu`/`pcmpeqb`/`pmovmskb`);
-hand-written intrinsics need `unsafe` at their call site and are not used.
+growth is one segment at a time with no rehash spike. Geometry is Dragonfly's:
+56 regular + 4 stash buckets of 14 slots; a key lives in its home bucket, the
+next one, or the stash.
 
-The hash is seeded per process (`seahash::hash_seeded`, seeds from
-`platform::rand`): a `#[wavedb::key]` id is a hash of client data, and an
-unseeded table would let a client choose collisions and force splits.
+A slot holds **only the entry's location** — type slot `u16`, offset `u16`
+(an entry starts inside a 64 KiB chunk), chunk `u32` — 8 bytes, plus a
+one-byte fingerprint. The `Id` is not repeated: it heads the entry the slot
+names, so a fingerprint match is confirmed by reading it there, and a split
+rehashes a key the same way. That is ~9 B per slot instead of ~25, and the
+type is part of the key for free. The fingerprints of a bucket sit together
+so a probe compares them in one pass, written as plain code the compiler
+vectorises (on the pinned toolchain a 16-byte compare loop compiles to
+`movdqu`/`pcmpeqb`/`pmovmskb`); hand-written intrinsics need `unsafe` at
+their call site and are not used.
+
+The hash is seeded per open store (`seahash::hash_seeded`, with a seed from
+the same OS entropy the superblock's seed comes from): a `#[wavedb::key]` id
+is a hash of client data, and an unseeded table would let a client choose
+collisions and force splits. Keys a split cannot separate anyway go to a
+small overflow list once the directory would outgrow its segments by more
+than 2⁴ — so no input makes an insert loop or the directory explode.
 
 ### Settledness is a position
 
-Three marks on the log:
+Three marks on each type's log (the checkpoint owes while **any** log has
+`S < R`; a round may take entries from several logs):
 
 ```text
  chunk 0   chunk 1   chunk 2   chunk 3   chunk 4
@@ -169,21 +196,56 @@ cannot evict is `[S, W)`, as today it cannot evict the pending set; that span
 is bounded by the journal threshold, which forces a checkpoint, which forces
 the settle up to `R`.
 
-Per record, beyond its bytes: a slot (~38 B at a typical fill) and the entry
-head (20 B) — about 58 B, against ~115–130 B today. Dead copies inside
+Per record, beyond its bytes: a slot (9 B, ~13 B at a typical fill) and the
+entry head (20 B) — about 33 B, against ~115–130 B before. The index never
+shrinks: segments split and do not merge, so it stays sized for the most
+records it has held at once (open question 4). Dead copies inside
 `[S, W)` are waste bounded by the same window; dead copies before `S` leave
 with their chunk.
 
 ### Unchanged
 
 The on-disk format, the journal, the page and settle formats, the `Store`
-trait, and every caller above `wavedb-storage`. No `unsafe`.
+trait, and every caller above `wavedb-storage` — except that a store is now
+`Send` and not `Sync` (*Implementation decisions*). No `unsafe`.
+
+## Implementation decisions (2026-10-10)
+
+- **A log per type** (user decision), not one per store: see *Two structures
+  per store*. The chunk being filled grows from 512 B, which is what made it
+  affordable.
+- **A slot holds no `Id`** — only the entry's 8-byte location and a
+  fingerprint; the id is read from the log entry to confirm a match. The key
+  is `(Id, type)`.
+- **No lock, no atomic** (user decision). There is no parallel access to a
+  store's data: a node moves each store onto the worker that owns it, a
+  benchmark consumer builds its own, and nothing else reaches it. So the
+  whole store — the record cache, and with it the journal, allocator,
+  addressing log, checkpoint state, per-type directories and dictionaries,
+  the page cache and the I/O counters — moved from `parking_lot` locks and
+  atomics to `RefCell`/`Cell`. `PageStore` is `Send` (it moves to its owner
+  once; the parallel open builds stores on scoped threads) and deliberately
+  not `Sync`; `lib.rs` asserts the first. `parking_lot` left the workspace.
+  The barrier helper (RFC 0067 §4), the one real second thread, shares no
+  memory either: each request carries its own duplicate of the journal's
+  descriptor and a channel to answer on, and the barrier counters and the
+  failed mark are plain fields of the worker's journal, changed only when it
+  asks or reads an answer. `wavedb-storage` holds no lock, atomic, `Arc` or
+  `Rc`; what synchronises the two threads is inside the channels (`std`'s
+  `mpsc`, `futures`' `oneshot`), as any cross-thread message must be.
+  `async-channel` left the crate.
+- **One round at a time needs no guard**: a settle step is synchronous and
+  the store is used from one thread, so two rounds cannot interleave.
+- **The client's local cache is `Rc`**, as the browser's store already was:
+  a native `Db` opened with a cache is no longer `Send`.
+- **Records over `u32::MAX - 1` bytes** are refused before the journal sees
+  them (`StorageError::RecordTooLarge`) — a log entry's length is a `u32`.
 
 ## Deliberately out of scope
 
 - **Keeping settled records hot.** Eviction is FIFO by chunk, so a hot record
   — a B+tree's interior node — can leave and be read back from its page, as it
-  can today (`evict_up_to` pops by smallest id). Keeping it would mean copying
+  could before (`evict_up_to` popped by smallest id). Keeping it would mean copying
   it forward into a region the settle skips, and reads do not deposit into the
   cache today either. Both belong with [0053](0053-tenant-fair-cache-retention-PLANNED.md).
 - **The settle waiting on the disk.** A round runs synchronously on its worker;
@@ -197,19 +259,25 @@ trait, and every caller above `wavedb-storage`. No `unsafe`.
 
 1. **The index** (`record_index.rs`): the directory and segments, insert /
    get / remove / split, the seeded hash; unit tests including split under a
-   skewed hash and the fingerprint probe compiled to vector code.
+   skewed hash and the fingerprint probe compiled to vector code. **Done.**
 2. **The log** (`record_log.rs`): chunks, `W`/`S`/`R`, append, tombstones, the
-   round's copy-out, chunk drop with index cleanup.
+   round's copy-out, chunk drop with index cleanup. **Done**, with the
+   index and logs joined in `record_cache.rs`.
 3. **The switch.** `apply`, reads, the settle and the checkpoint use the log;
    `Pending` and `TypeSlot`'s cache and `dead` set are deleted; the budget is
-   measured against the footprint.
+   measured against the footprint. **Done.**
 4. **Proof.**
    - storage: settle part of a burst, evict — the settled leave and read back
      from pages, the unsettled stay; a write during a round reads back new and
      settles new; reopen and replay;
-   - under steady writes the footprint stays inside the budget (it does not
-     today);
+   - under steady writes the footprint stays inside the budget (it did not
+     before);
    - a row of the bench's memory columns before and after.
+
+   The storage proofs are done (`tests/record_cache.rs`, plus the unit tests
+   of the three modules; a write during a round is proved at the cache level,
+   where the round can be interleaved). The bench row waits for a run the
+   user approves.
 
 ## Alternatives
 
@@ -231,16 +299,21 @@ trait, and every caller above `wavedb-storage`. No `unsafe`.
   light writes the current chunk never fills, the settle never reaches `R`
   and the checkpoint stalls — unless chunks are sealed early, wasting their
   remainder.
-- **A log per type.** One partly filled chunk per type per shard: 64 shards ×
-  a dozen types × 64 KiB is ~50 MB of mostly empty chunks, for a lock split
-  that a worker-owned store does not need.
+- **One log per store, fixed-size chunks** — this RFC's first draft. Mixes
+  the types, so a settle round has to route each entry back to its type's
+  directory, and a retention policy cannot tell a cold type from a hot one.
+  Its reason — a log per type with fixed 64 KiB chunks holds ~360 MiB of
+  mostly empty chunks at 90 types × 64 shards — is answered by growing the
+  chunk being filled instead.
 
 ## Open questions
 
-1. **Chunk size.** 64 KiB to start: small enough that one partly filled chunk
-   per shard is nothing, large enough that its head is negligible. A record
-   larger than a chunk gets a chunk of its own size.
+1. **Chunk size.** 512 B growing to 64 KiB: whether the cap or the start
+   deserves tuning is for a measurement to say.
 2. **Segment and bucket geometry.** Dragonfly's 56 + 4 buckets of 14 slots is a
    starting point, not a finding.
-3. **Whether `S` should be per type** for settling: one round settles several
-   types today; one cursor keeps that.
+3. ~~Whether `S` should be per type~~ — it is, with a log per type.
+4. **Shrinking the index.** Segments only split; after a burst is evicted the
+   index stays sized for it. Merging two sibling segments whose keys fit in
+   one is the inverse of a split and would bound that, at the cost of a merge
+   check on eviction.

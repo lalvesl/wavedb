@@ -28,7 +28,7 @@ write pipeline. This is where most of WaveDB's engineering energy lives.
 | `page`            | `SlotPage` — the homogeneous record page: `[len][to_wire_checked(PageEnvelope)]`, body raw or zstd.                                                  |
 | `journal`         | Append-only WAL of `Write` batches (checked wire frames); fsync = durability; torn-tail-tolerant replay.                                             |
 | `struct_storage`  | `StructStorage` — one type's own cache + directory slot (`#[wavedb]` emits one `static` per type).                                                   |
-| `page_store`      | `PageStore` — the node's authoritative `Store`: journal-first → per-type caches → settle into pages.                                                 |
+| `page_store`      | `PageStore` — the node's authoritative `Store`: journal-first → per-type record logs → settle into pages.                                        |
 | `error`           | `StorageError` / `StorageResult`; flattens to `wavedb_core::Error::Backend` at the `Store` seam.                                                     |
 
 Settle and rebalance are **off the mutation path**: `apply` only journals,
@@ -402,10 +402,12 @@ Todo::storage_entries()     // the declarations to register: [Todo's, TodoPivot'
 ```
 
 An open `PageStore` builds one slot per registered declaration — that type's
-cache `RwLock<BTreeMap<u128, Vec<u8>>>`, its `Directory`, **and its compression
-state** (`DictState`: dictionary + persisted run — per-type by nature, since a
-page holds one type), each behind its own lock. The slots belong to that store,
-so stores over different directories share nothing (RFC 0067: one per shard).
+`Directory` **and its compression state** (`DictState`: dictionary + persisted
+run — per-type by nature, since a page holds one type) — and one **record
+cache** (RFC 0068): a log of committed records per type, in chunks that start
+at 512 B and double up to 64 KiB, with one Dashtable-shaped index over all of
+them. The slots and the cache belong to that store, so stores over different
+directories share nothing (RFC 0067: one per shard).
 
 Compression policy is declared with the type — `#[wavedb(compress = false)]`
 opts a type's pages out of zstd (already-compressed media, hot rewrite
@@ -420,14 +422,16 @@ directory has **one open `PageStore` at a time**: `data.bin` is locked while
 open, so a second open of the same directory — in this process or another —
 fails with `EngineBusy`. Stores over different directories open side by side.
 
-**Locking.** Reads (`get_of`, routed by the compile-time-known hash) take one
-binary search over the sorted registry plus that type's cache read lock —
-operations on different types never contend. The remaining shared locks are
-narrow: the journal mutex (append order; the cache commit runs under it so
-cache order always equals journal/replay order) and the allocator mutex (block
-space is one resource). Settling writes the **cache's current bytes** for each
-touched id, so it is idempotent and order-independent — `data.bin` stays a pure
-projection of the journal.
+**Threading.** A store is used from **one thread** — a node moves each onto the
+worker that owns it (RFC 0067) — so its state lives in plain cells (`RefCell`,
+`Cell`): no lock, no atomic. `PageStore` is `Send` and deliberately not `Sync`.
+Reads (`get_of`, routed by the compile-time-known hash) are one binary search
+over the sorted registry, one index probe, and a page read on a miss. The
+cache commit follows the journal append, so the logs' order is the journal's.
+A settle round copies each record's **newest entry** out of its log and skips
+the copies it superseded, so it is idempotent — `data.bin` stays a pure
+projection of the journal. Eviction drops whole chunks the settle has passed,
+measured against what the cache actually allocates.
 
 ### Atomicity is the journal entry + cache commit
 
@@ -435,7 +439,7 @@ A single operation can touch several records (a NonUnique insert writes the data
 record **and** a `BpTree` node). These are committed as **one journal entry**,
 and the cache commit runs under the journal lock — so commits are totally
 ordered, and a crash before the background settle replays the journal back into
-the caches, whole batches or nothing. No separate transaction manager: the
+the record cache, whole batches or nothing. No separate transaction manager: the
 journal entry + cache commit _is_ the atomic unit. Visibility is per-`get`
 (each read sees a fully committed value, never a torn one); a multi-`get` walk
 was never snapshot-isolated — an apply can land between two gets, exactly as

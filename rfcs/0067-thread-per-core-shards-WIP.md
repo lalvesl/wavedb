@@ -598,7 +598,9 @@ committed it.
   *since* the checkpoint's `Commit` frame has landed. A journal file now
   counts barriers **started** and **completed**; a frame appended at
   `started = n` is durable once `completed > n`, which holds whatever thread
-  took the barriers and in whatever order they finished.
+  took the barriers and in whatever order they finished. (Since RFC 0068 the
+  counts are the worker's own: started when it asks, completed when it reads
+  the helper's answer — the helper shares no memory with it.)
 - **A failed barrier** marks the file failed: the waiting `apply` reports it
   and every later append is refused (`StorageError::BarrierFailed`) until the
   store is reopened and recovers from what is on disk — the batch was
@@ -609,7 +611,7 @@ committed it.
   Checkpoint barriers (`data.bin`, one per checkpoint) stay on the worker,
   inside the stepped checkpoint.
 - Tests: `barrier` unit tests (started/completed counts; sixteen queued
-  waits cost one `fsync`; a failed file refuses appends) and
+  waits are served by one round; a failed answer fails the file) and
   `tests/barrier_helper.rs` (an acknowledged batch survives a reopen;
   retirement completes with barriers on the helper). Every node test now
   runs with it.

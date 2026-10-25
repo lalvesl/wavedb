@@ -224,7 +224,7 @@ The reason this file matters more than the checklist above.
   A release smoke run (20 000 rows, uncaged, so a shape rather than a corpus
   number) put `wavedb/single` at 752 480 read_hot/s and **1 393 read_cold/s**;
   `wavedb/multi` over the same phases sat at 105 951 and 98 556. The direct
-  row's per-type cache is a *write* cache that `evict(0)` empties and reads
+  row's record cache is a *write* cache that `evict(0)` empties and reads
   never repopulate, so every cold read walks the tree from pages; the sharded
   row's `ShardStore` memoises, so it has a read cache the direct row does not.
   RFC 0044 is that gap, and the pair is why `read_cold` is not comparable
