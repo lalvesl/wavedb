@@ -169,8 +169,8 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   `EngineBusy` — and stores over different directories coexist in one process.
   A node's database is **sharded** (RFC 0067): `MANIFEST` (the shard count `P`,
   64, fixed at creation) + `shards/00..3f/`, each a whole `PageStore`
-  (`open_shards`); a record lives in shard `seahash(owner bytes) % P`
-  (`core::placement`).
+  (`open_shards`; the journals replay in parallel ranges, `open_shards_with`);
+  a record lives in shard `seahash(owner bytes) % P` (`core::placement`).
 - **wavedb-net** — hand-rolled minimal HTTP/1.1 POST as a **dumb tunnel**: no headers,
   cookies, or status semantics as API; the body is a self-contained
   `Request { tenant, CommandFrame { struct_hash, command, payload } }` and a WaveDB

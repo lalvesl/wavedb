@@ -4,7 +4,8 @@
   (per-type state out of the statics; the routing function; the Pivot on
   the wire; server bodies at the edge; the shard layout; the stepped
   checkpoint; workers owning their shards, the disk actor gone; ingress
-  per thread, the accept thread gone; leases); see
+  per thread, the accept thread gone; leases; the fsync helper; parallel
+  recovery); see
   "Progress".
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the owner
   as the unit of concurrency, and `shard_of`),
@@ -600,6 +601,26 @@ committed it.
   `tests/barrier_helper.rs` (an acknowledged batch survives a reopen;
   retirement completes with barriers on the helper). Every node test now
   runs with it.
+
+### Parallel recovery (landed 2026-10-09)
+
+§3's startup: the shards' journals replay at once, not one after another.
+
+- `open_shards_with(…, threads)` splits the shards into the contiguous
+  ranges the workers will own (`p · T / P = t`) and opens each range on a
+  scoped thread; the database is open once the slowest range is. The node
+  passes its worker count; `open_shards` uses the machine's parallelism.
+- **Opened on one thread, owned by another.** §3 had each worker open its
+  shards on its own thread, because the engine state was not `Send` then.
+  Since step 4 a `PageStore` moves onto its worker whole, so opening it on a
+  recovery thread changes nothing — and it keeps seeding as it is: the
+  stores exist before serving, for `Bound::route()` to borrow.
+- **All or nothing.** The first fault in shard order fails the open, and
+  every shard that did open is dropped before it returns, so a retry finds
+  its locks free.
+- Tests: `shard_set` (eight shards recovered on three threads come back in
+  shard order, each with its own journal replayed and nobody else's; a shard
+  that cannot open fails the database and releases the others).
 
 ## Alternatives
 
