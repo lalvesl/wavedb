@@ -17,11 +17,13 @@
 //!   decompress from anyway, so storing it uncompressed would cache *fewer*
 //!   pages for the same RAM and save nothing on the read path.
 //!
-//! ## Cheap handing-out
+//! ## Lent, not handed out
 //!
-//! Entries are `Arc<[u8]>`, so serving a cached page is a refcount bump rather
-//! than a copy of the image — the "pointer copy" a checkpoint wants when it
-//! hands pages to a writer, available from `std` without a bespoke map.
+//! A hit is served by **lending** the image to the reader for as long as it
+//! decodes ([`with`](PageCache::with)): no copy of the page, and no shared
+//! pointer either — a reference count would have to be atomic for the store
+//! to stay `Send`, and the store is used from one thread, so there is nothing
+//! for one to protect. The reader decodes into its own buffers and lets go.
 //!
 //! ## Not cached
 //!
@@ -33,10 +35,8 @@
 //! [RFC 0044]: ../../../rfcs/0044-page-cache-PLANNED-LOW.md
 //! [RFC 0041]: ../../../rfcs/0041-single-barrier-checkpoint.md
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
-
-use parking_lot::Mutex;
 
 use crate::block::Run;
 
@@ -51,7 +51,7 @@ pub const DEFAULT_BUDGET_BYTES: usize = 64 << 20;
 struct Entry {
     /// Blocks the run spans, so an overlap test needs only the map.
     blocks: u64,
-    bytes: Arc<[u8]>,
+    bytes: Box<[u8]>,
 }
 
 #[derive(Default)]
@@ -68,9 +68,9 @@ struct Inner {
     bytes: usize,
 }
 
-/// Page images by run. Cheap to share; every method takes `&self`.
+/// Page images by run. Every method takes `&self`.
 pub struct PageCache {
-    inner: Mutex<Inner>,
+    inner: RefCell<Inner>,
     budget: usize,
 }
 
@@ -79,20 +79,24 @@ impl PageCache {
     #[must_use]
     pub fn new(budget: usize) -> Self {
         Self {
-            inner: Mutex::new(Inner::default()),
+            inner: RefCell::new(Inner::default()),
             budget,
         }
     }
 
-    /// `run`'s image, if held.
-    #[must_use]
-    pub fn get(&self, run: Run) -> Option<Arc<[u8]>> {
-        let inner = self.inner.lock();
-        inner
-            .pages
-            .get(&run.start)
-            .filter(|e| e.blocks == run.count)
-            .map(|e| Arc::clone(&e.bytes))
+    /// Lend `run`'s image to `read`, if held; `read` comes back unused on a
+    /// miss. `read` must not touch the cache — it runs while the image is
+    /// borrowed from it.
+    pub fn with<R, F: FnOnce(&[u8]) -> R>(
+        &self,
+        run: Run,
+        read: F,
+    ) -> Result<R, F> {
+        let inner = self.inner.borrow();
+        match inner.pages.get(&run.start) {
+            Some(e) if e.blocks == run.count => Ok(read(&e.bytes)),
+            _ => Err(read),
+        }
     }
 
     /// Hold `run`'s image, evicting oldest-first to stay inside the budget.
@@ -104,18 +108,18 @@ impl PageCache {
     // no reader may observe that. Releasing early — the lint's suggestion —
     // would make the over-budget window visible.
     #[allow(clippy::significant_drop_tightening)]
-    pub fn insert(&self, run: Run, bytes: &Arc<[u8]>) {
+    pub fn insert(&self, run: Run, bytes: Box<[u8]>) {
         if self.budget == 0 || bytes.len() > self.budget {
             return;
         }
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.borrow_mut();
         inner.drop_at(run.start);
         inner.bytes += bytes.len();
         inner.pages.insert(
             run.start,
             Entry {
                 blocks: run.count,
-                bytes: Arc::clone(bytes),
+                bytes,
             },
         );
         inner.fifo.push_back(run.start);
@@ -133,7 +137,7 @@ impl PageCache {
     /// write into it, and the allocator handing it out again. Overlap rather
     /// than exact match, because one window write covers many cached runs.
     pub fn invalidate(&self, run: Run) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.borrow_mut();
         let end = run.end();
         let doomed: Vec<u64> = inner
             .pages
@@ -157,13 +161,13 @@ impl PageCache {
     /// Bytes of images held.
     #[must_use]
     pub fn bytes(&self) -> usize {
-        self.inner.lock().bytes
+        self.inner.borrow_mut().bytes
     }
 
     /// Images held.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.lock().pages.len()
+        self.inner.borrow_mut().pages.len()
     }
 
     /// Whether the cache holds nothing.
@@ -174,7 +178,7 @@ impl PageCache {
 
     /// Drop everything (a reopen, or a test wanting a cold read).
     pub fn clear(&self) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.borrow_mut();
         inner.pages.clear();
         inner.fifo.clear();
         inner.bytes = 0;
@@ -194,7 +198,7 @@ impl Inner {
 /// would dump the database into whatever printed the `BlockFile` holding it.
 impl std::fmt::Debug for PageCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let inner = self.inner.lock();
+        let inner = self.inner.borrow_mut();
         f.debug_struct("PageCache")
             .field("pages", &inner.pages.len())
             .field("bytes", &inner.bytes)
@@ -207,18 +211,20 @@ impl std::fmt::Debug for PageCache {
 mod tests {
     use super::{DEFAULT_BUDGET_BYTES, PageCache};
     use crate::block::Run;
-    use std::sync::Arc;
-
-    fn image(len: usize, fill: u8) -> Arc<[u8]> {
+    fn image(len: usize, fill: u8) -> Box<[u8]> {
         vec![fill; len].into()
+    }
+
+    fn copy(cache: &PageCache, run: Run) -> Option<Vec<u8>> {
+        cache.with(run, <[u8]>::to_vec).ok()
     }
 
     #[test]
     fn a_held_page_comes_back_by_its_run() {
         let cache = PageCache::new(DEFAULT_BUDGET_BYTES);
         let run = Run::new(8, 2);
-        cache.insert(run, &image(100, 7));
-        assert_eq!(cache.get(run).as_deref(), Some(&[7u8; 100][..]));
+        cache.insert(run, image(100, 7));
+        assert_eq!(copy(&cache, run).as_deref(), Some(&[7u8; 100][..]));
         assert_eq!(cache.bytes(), 100);
     }
 
@@ -227,8 +233,8 @@ mod tests {
     #[test]
     fn a_run_of_another_length_is_a_miss() {
         let cache = PageCache::new(DEFAULT_BUDGET_BYTES);
-        cache.insert(Run::new(8, 2), &image(100, 7));
-        assert!(cache.get(Run::new(8, 3)).is_none());
+        cache.insert(Run::new(8, 2), image(100, 7));
+        assert!(copy(&cache, Run::new(8, 3)).is_none());
     }
 
     /// One window write covers many cached runs, so invalidation is by
@@ -237,37 +243,43 @@ mod tests {
     #[test]
     fn invalidating_a_window_forgets_every_page_inside_it() {
         let cache = PageCache::new(DEFAULT_BUDGET_BYTES);
-        cache.insert(Run::new(10, 2), &image(50, 1)); // 10..12
-        cache.insert(Run::new(12, 1), &image(50, 2)); // 12..13
-        cache.insert(Run::new(13, 4), &image(50, 3)); // 13..17
-        cache.insert(Run::new(40, 1), &image(50, 4)); // outside
+        cache.insert(Run::new(10, 2), image(50, 1)); // 10..12
+        cache.insert(Run::new(12, 1), image(50, 2)); // 12..13
+        cache.insert(Run::new(13, 4), image(50, 3)); // 13..17
+        cache.insert(Run::new(40, 1), image(50, 4)); // outside
         assert_eq!(cache.len(), 4);
 
         cache.invalidate(Run::new(11, 3)); // 11..14 — clips all three
-        assert!(cache.get(Run::new(10, 2)).is_none(), "overlaps at its tail");
-        assert!(cache.get(Run::new(12, 1)).is_none(), "wholly inside");
-        assert!(cache.get(Run::new(13, 4)).is_none(), "overlaps at its head");
-        assert!(cache.get(Run::new(40, 1)).is_some(), "untouched");
+        assert!(
+            copy(&cache, Run::new(10, 2)).is_none(),
+            "overlaps at its tail"
+        );
+        assert!(copy(&cache, Run::new(12, 1)).is_none(), "wholly inside");
+        assert!(
+            copy(&cache, Run::new(13, 4)).is_none(),
+            "overlaps at its head"
+        );
+        assert!(copy(&cache, Run::new(40, 1)).is_some(), "untouched");
         assert_eq!(cache.bytes(), 50, "byte count follows the evictions");
     }
 
     #[test]
     fn a_run_ending_where_another_begins_does_not_overlap() {
         let cache = PageCache::new(DEFAULT_BUDGET_BYTES);
-        cache.insert(Run::new(10, 2), &image(50, 1)); // 10..12
+        cache.insert(Run::new(10, 2), image(50, 1)); // 10..12
         cache.invalidate(Run::new(12, 2)); // 12..14 — adjacent, not overlapping
-        assert!(cache.get(Run::new(10, 2)).is_some());
+        assert!(copy(&cache, Run::new(10, 2)).is_some());
     }
 
     #[test]
     fn the_budget_evicts_oldest_first() {
         let cache = PageCache::new(250);
         for n in 0..5u64 {
-            cache.insert(Run::new(n * 2, 1), &image(100, n as u8));
+            cache.insert(Run::new(n * 2, 1), image(100, n as u8));
         }
         assert!(cache.bytes() <= 250, "held {} bytes", cache.bytes());
-        assert!(cache.get(Run::new(0, 1)).is_none(), "oldest goes first");
-        assert!(cache.get(Run::new(8, 1)).is_some(), "newest stays");
+        assert!(copy(&cache, Run::new(0, 1)).is_none(), "oldest goes first");
+        assert!(copy(&cache, Run::new(8, 1)).is_some(), "newest stays");
     }
 
     /// An image larger than the whole budget is not held: caching it would
@@ -275,7 +287,7 @@ mod tests {
     #[test]
     fn an_oversized_image_is_not_held() {
         let cache = PageCache::new(100);
-        cache.insert(Run::new(0, 64), &image(1000, 1));
+        cache.insert(Run::new(0, 64), image(1000, 1));
         assert!(cache.is_empty());
         assert_eq!(cache.bytes(), 0);
     }
@@ -283,7 +295,7 @@ mod tests {
     #[test]
     fn a_zero_budget_holds_nothing() {
         let cache = PageCache::new(0);
-        cache.insert(Run::new(0, 1), &image(10, 1));
+        cache.insert(Run::new(0, 1), image(10, 1));
         assert!(cache.is_empty());
     }
 
@@ -291,21 +303,21 @@ mod tests {
     #[test]
     fn replacing_an_entry_keeps_the_byte_count_true() {
         let cache = PageCache::new(DEFAULT_BUDGET_BYTES);
-        cache.insert(Run::new(4, 1), &image(100, 1));
-        cache.insert(Run::new(4, 1), &image(30, 2));
+        cache.insert(Run::new(4, 1), image(100, 1));
+        cache.insert(Run::new(4, 1), image(30, 2));
         assert_eq!(cache.bytes(), 30);
         assert_eq!(cache.len(), 1);
-        assert_eq!(cache.get(Run::new(4, 1)).unwrap().len(), 30);
+        assert_eq!(copy(&cache, Run::new(4, 1)).unwrap().len(), 30);
     }
 
-    /// Handing out a page is a refcount bump, not a copy of the image.
+    /// Serving a page lends the held image itself, not a copy of it.
     #[test]
-    fn serving_a_page_shares_rather_than_copies() {
+    fn serving_a_page_lends_rather_than_copies() {
         let cache = PageCache::new(DEFAULT_BUDGET_BYTES);
         let run = Run::new(2, 1);
-        cache.insert(run, &image(64, 9));
-        let a = cache.get(run).unwrap();
-        let b = cache.get(run).unwrap();
-        assert!(Arc::ptr_eq(&a, &b), "each read copied the page");
+        cache.insert(run, image(64, 9));
+        let a = cache.with(run, <[u8]>::as_ptr).ok();
+        let b = cache.with(run, <[u8]>::as_ptr).ok();
+        assert!(a.is_some() && a == b, "each read copied the page");
     }
 }
