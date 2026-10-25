@@ -593,6 +593,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) | Benchmark suite II: the row as the unit | Planned |
 | [0066](0066-embassy-executor-and-async-io.md) | Embassy executor and async-io: tokio out of the node | Implemented |
 | [0067](0067-thread-per-core-shards-WIP.md) | Thread per core: the shard as a database, the thread as placement | In progress (steps 1–5, the fsync helper and parallel recovery landed; one executor per thread decided; step 6, measuring, next) |
+| [0068](0068-record-cache-as-a-log-PLANNED.md) | The record cache as a log | Planned |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
