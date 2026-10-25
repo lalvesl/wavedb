@@ -1,11 +1,10 @@
 //! A worker's maintenance — BG, sharing the thread with its jobs (DATA)
 //! ([RFC 0067] §4, step 4).
 //!
-//! RFC 0067 draws three executors per thread, polled in priority order. This
-//! is the same priority on **one** executor: a second and third Embassy
-//! executor on a thread need `raw::Executor::poll`, which is `unsafe`, and
-//! the project admits `unsafe` only by explicit exception. So BG is one task
-//! that takes a single bounded step ([`Owned::step`]) only when the valve
+//! A worker has **one** executor, and it knows nothing of priority
+//! (RFC 0067 §4): jobs need none against the edge, which reaches them only
+//! through the bounded job queue, and maintenance regulates itself here. BG
+//! is one task that takes a single bounded step ([`Owned::step`]) only when the valve
 //! ([`Priority`]) says maintenance goes next — which, with jobs executing or
 //! queued, is only once the journal has grown into the valve's band — and
 //! yields after every step. A job waits behind maintenance for at most one
