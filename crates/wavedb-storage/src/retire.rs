@@ -41,9 +41,10 @@ use crate::page_store::PageStore;
 pub struct Retiring {
     /// The retired journal, deleted once the frame that retires it is durable.
     pub journal: Journal,
-    /// Barriers taken by the journal *carrying* the frame, read immediately
-    /// after appending it. The frame is durable once that journal's count has
-    /// moved past this.
+    /// Barriers *begun* on the journal carrying the frame, read immediately
+    /// after appending it. The frame is durable once more barriers than this
+    /// have *completed* on that journal — one of them began after it
+    /// (`crate::barrier`, where barriers run on a helper thread too).
     ///
     /// Read **after** the append and under the same guard, deliberately:
     /// `commit_journal` rotates before it appends, so a concurrent writer can
