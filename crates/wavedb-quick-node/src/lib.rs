@@ -194,11 +194,14 @@ where
     // callers should not change signature twice (RFC 0066).
     #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn bind(self, addr: &str) -> Result<Bound<E>> {
-        let stores = wavedb_storage::open_shards(
+        // Recovery runs on as many threads as will serve, each replaying the
+        // range of shards its worker will own (RFC 0067 §3).
+        let stores = wavedb_storage::open_shards_with(
             &self.data_dir,
             &self.registry.storage_entries(),
             self.store,
             wavedb_core::placement::DEFAULT_SHARDS,
+            self.threads.max(1),
         )?;
         let threads = self.threads.clamp(1, stores.len().max(1));
         let listeners = Listener::bind_many(addr, threads)?;
