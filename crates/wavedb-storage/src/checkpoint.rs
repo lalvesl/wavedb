@@ -29,8 +29,9 @@ use std::collections::BTreeMap;
 use crate::block::{BLOCK_SIZE, BlockAllocator, BlockDescriptor, Run};
 use crate::edit;
 use crate::error::{StorageError, StorageResult};
-use crate::page_store::{PageStore, Touched};
+use crate::page_store::PageStore;
 use crate::plan::{SlotPlan, blocks_of};
+use crate::record_cache::Records;
 
 /// Where the window itself is allocated.
 #[derive(Clone, Copy)]
@@ -57,8 +58,8 @@ enum Target {
 }
 
 impl PageStore {
-    /// Settle `touched` into pages: plan every slot, then write the whole
-    /// round as one window and publish it.
+    /// Settle a round's records into pages: plan every slot, then write the
+    /// whole round as one window and publish it.
     ///
     /// Durability is not taken here: the journal already holds the batch, and
     /// `data.bin` only becomes authoritative at
@@ -67,12 +68,15 @@ impl PageStore {
     ///
     /// # Errors
     /// Propagates page read/write, corruption, or compression faults. The
-    /// caller returns the round to the pending queue; re-settling is
-    /// idempotent because a plan derives from the caches' current bytes.
-    pub(crate) fn settle(&self, touched: &Touched) -> StorageResult<()> {
-        let mut plans = Vec::with_capacity(touched.len());
-        for (idx, ids) in touched {
-            plans.push(self.plan_slot(*idx, ids)?);
+    /// caller leaves the settle cursors where they were; re-settling is
+    /// idempotent because a round copies each record's newest entry.
+    pub(crate) fn settle(
+        &self,
+        work: Vec<(usize, Records)>,
+    ) -> StorageResult<()> {
+        let mut plans = Vec::with_capacity(work.len());
+        for (idx, records) in work {
+            plans.push(self.plan_slot(idx, records)?);
         }
         self.place_in(plans, Placement::BestFit)
     }
@@ -112,8 +116,8 @@ impl PageStore {
         if targets.is_empty() {
             return Ok(());
         }
-        let mut alloc = self.alloc.lock();
-        let mut meta = self.meta.lock();
+        let mut alloc = self.alloc.borrow_mut();
+        let mut meta = self.meta.borrow_mut();
 
         // Pass one: the chunk's shape fixes its length, so a skeleton built
         // from the same plans reserves exactly what the filled one needs.
@@ -169,8 +173,7 @@ impl PageStore {
         Ok(())
     }
 
-    /// Phase 4: adopt the working directories and the new dictionary runs,
-    /// and clear the tombstones the pages now satisfy.
+    /// Phase 4: adopt the working directories and the new dictionary runs.
     fn publish(
         &self,
         plans: Vec<SlotPlan>,
@@ -181,17 +184,14 @@ impl PageStore {
             let Some(&desc) = dicts.get(&plan) else {
                 continue;
             };
-            let old = self.types[work.idx].dictionary().lock().repoint(desc);
+            let old =
+                self.types[work.idx].dictionary().borrow_mut().repoint(desc);
             if old.is_allocated() {
                 alloc.free(old.run());
             }
         }
         for work in plans {
-            let slot = &self.types[work.idx];
-            for id in work.cleared {
-                slot.clear_removed(id); // the page now agrees the id is gone
-            }
-            *slot.directory().lock() = Some(work.dir);
+            *self.types[work.idx].directory().borrow_mut() = Some(work.dir);
         }
     }
 }
