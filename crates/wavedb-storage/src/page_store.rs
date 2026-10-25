@@ -6,29 +6,32 @@
 //!
 //! - [`Journal`](crate::journal::Journal) — the write-ahead log;
 //!   **durability is here** (`apply` fsyncs before it returns).
-//! - one slot **per registered type** — that type's own in-memory cache
-//!   (reads serve from it) and its own [`Directory`] over the shared
-//!   [`BlockFile`]. The types are the `#[wavedb]`-generated [`StructStorage`]
-//!   declarations handed in as an explicit registry at
-//!   [`open`](PageStore::open): a compile-time list, routed once at open, no
-//!   runtime registration. The slots belong to this store, so several stores
-//!   can be open in one process, each over its own directory.
+//! - one slot **per registered type** — that type's own [`Directory`] over
+//!   the shared [`BlockFile`] and its dictionary. The types are the
+//!   `#[wavedb]`-generated [`StructStorage`] declarations handed in as an
+//!   explicit registry at [`open`](PageStore::open): a compile-time list,
+//!   routed once at open, no runtime registration. The slots belong to this
+//!   store, so several stores can be open in one process, each over its own
+//!   directory.
+//! - the **record cache** (`record_cache`, RFC 0068) — one log of
+//!   committed records per type, in chunks, and one index over them; reads
+//!   serve from it, the settle writes from it, eviction drops whole chunks
+//!   of it.
 //!
 //! ## Locking
 //!
-//! There is no store-wide state lock. Each type's cache is its own `RwLock`
-//! and its directory its own `Mutex`, so operations on different types run
-//! concurrently and a cached read never waits on the settle path. The narrow
-//! globals:
+//! The narrow globals:
 //!
 //! - `journal` (`Mutex`) — appends must be ordered; the cache commit happens
 //!   under it so cache order always equals journal (= replay) order;
+//! - `cache` (`RwLock`) — the record cache; memory work only, never held
+//!   across a page read or write;
+//! - `settling` (`Mutex`) — one settle round at a time, held for the round;
 //! - `alloc` (`Mutex`) — block space is one shared resource.
 //!
-//! Lock order: `journal → pending → cache` on the commit path (the pending
-//! push stays under the journal so eviction's "queue empty ⇒ everything
-//! settled" check can't race a commit); `pending → dir → cache(read) →
-//! alloc` on the settle drain; `dir → dict` on the read-through path. No
+//! Lock order: `journal → cache` on the commit path; `settling → cache`
+//! (copy the round out, released) `→ dir → dict → alloc` (write it) `→
+//! cache` (advance) on the settle; `dir → dict` on the read-through path. No
 //! path takes them in a conflicting order, so the graph is acyclic.
 //! `checkpoint` comes before all of them: only a checkpoint step takes it,
 //! and it holds it for the whole step.
@@ -45,12 +48,12 @@
 //!
 //! ## Reads
 //!
-//! The cache is a **cache**, not the dataset: a read serves from the type's
-//! cache when it holds the id and falls back to the settled page
-//! ([`Directory::get_record`]) otherwise. Settle writes the cache's current
-//! bytes before anything is evicted, so the fallback can only ever see the
-//! newest settled state — never a version the cache has superseded. An
-//! absent id costs one page probe; that's fine until a keyed filter earns
+//! The cache is a **cache**, not the dataset: a read serves from it when it
+//! indexes the id — the bytes, or `None` for a remove not yet settled — and
+//! falls back to the settled page ([`Directory::get_record`]) otherwise. Only
+//! chunks the settle has passed are evicted, so the fallback can only ever
+//! see the newest settled state — never a version the cache has superseded.
+//! An absent id costs one page probe; that's fine until a keyed filter earns
 //! its place.
 //!
 //! ## Recovery model
@@ -65,23 +68,22 @@
 //! `Batch` frames replay; without one (first generation), the data file is
 //! truncated back to its superblock and every committed batch replays
 //! through the same commit + settle path a live `apply` uses. Either way a
-//! crash loses nothing that was acked. Settle writes the **cache's current
-//! bytes** for a touched id (not the batch's), which makes it
-//! order-independent and replay-idempotent: a late or repeated settle can
-//! only write newer state.
+//! crash loses nothing that was acked. Settle writes each record's **newest
+//! entry** in its log and skips the copies it superseded, which makes it
+//! replay-idempotent: a repeated settle can only write the same state.
 //!
-//! The settle into pages is **deferred**: `apply` commits to the journal +
-//! caches and queues the touched ids; [`drain`](PageStore::drain) (driven by
-//! the node's maintenance task) writes the pages later. An unsettled remove
-//! is tombstoned so the read fallback never resurrects the page's stale
-//! bytes. [`PageStore::commit_journal`] drains first, so the frame it
-//! appends always covers everything committed.
+//! The settle into pages is **deferred**: `apply` appends to the journal and
+//! the type's log; [`drain`](PageStore::drain) (driven by the node's
+//! maintenance task) writes the pages later and moves the log's settle
+//! cursor past them. A remove is a tombstone in the log, so the read
+//! fallback never resurrects the page's stale bytes until the settle has
+//! removed them too. [`PageStore::commit_journal`] settles everything its
+//! rotated journal holds before the frame it appends claims it.
 
 use std::path::Path;
 use std::time::Duration;
 
-use parking_lot::Mutex;
-use wavedb_core::Id;
+use std::cell::RefCell;
 
 use crate::block::BlockAllocator;
 use crate::block_file::BlockFile;
@@ -93,9 +95,6 @@ use crate::struct_storage::{BPTREE_NODE_STORAGE, StructStorage, TypeSlot};
 /// bucket over it is split when its turn comes round, and simply spans more
 /// blocks until then (RFC 0049). Tunable.
 const DEFAULT_TARGET_BLOCKS_PER_BUCKET: u64 = 8; // 32 KiB
-
-/// Ids one batch touched, grouped by registry slot — what the settle consumes.
-pub(crate) type Touched = Vec<(usize, Vec<Id>)>;
 
 /// How a store answers the durability question and how much RAM it may spend
 /// answering reads — chosen once at [`open_with`](PageStore::open_with)
@@ -177,28 +176,27 @@ pub struct PageStore {
     /// The directory holding `data.bin` + the journal chain (rotation
     /// creates new journal files here).
     pub(crate) data_dir: std::path::PathBuf,
-    pub(crate) journal: Mutex<crate::journal::Journal>,
-    pub(crate) alloc: Mutex<BlockAllocator>,
+    pub(crate) journal: RefCell<crate::journal::Journal>,
+    pub(crate) alloc: RefCell<BlockAllocator>,
     /// The addressing log written into the settle windows (RFC 0046): the
     /// last full snapshot chunk and every delta chunk after it.
-    pub(crate) meta: Mutex<crate::meta_log::MetaLog>,
+    pub(crate) meta: RefCell<crate::meta_log::MetaLog>,
     /// A checkpoint whose `Commit` frame is written but not yet durable —
     /// the retired journal and the protection roll it authorises (RFC 0046).
-    pub(crate) retiring: Mutex<Option<crate::retire::Retiring>>,
+    pub(crate) retiring: RefCell<Option<crate::retire::Retiring>>,
     /// The registered types' state, sorted by `STRUCT_HASH` (deduped) — a
     /// lock-free, read-only route table after open.
     pub(crate) types: Vec<TypeSlot>,
     pub(crate) seed: [u64; 4],
     pub(crate) target_blocks_per_bucket: u64,
-    /// Touched ids committed to the caches but not yet settled into pages —
-    /// what [`drain`](Self::drain) consumes — split by the checkpoint that
-    /// owes them ([`crate::pending`]).
-    pub(crate) pending: Mutex<crate::pending::Pending>,
+    /// Committed records, per type, in commit order — what reads serve from
+    /// and [`drain`](Self::drain) settles ([`crate::record_cache`]).
+    pub(crate) cache: RefCell<crate::record_cache::RecordCache>,
     /// The open checkpoint's rotated-out journal, from its rotation until its
     /// `Commit` frame is appended (RFC 0067 step 3). Outermost in the lock
     /// order: a checkpoint step holds it across everything it does, and
     /// nothing else takes it.
-    pub(crate) checkpoint: Mutex<Option<crate::journal::Journal>>,
+    pub(crate) checkpoint: RefCell<Option<crate::journal::Journal>>,
     /// The durability window this store was opened with (RFC 0061); zero is
     /// one barrier per batch.
     pub(crate) relax_window: Duration,
@@ -258,6 +256,7 @@ impl PageStore {
         declared.dedup_by_key(|s| s.struct_hash());
         let types: Vec<TypeSlot> =
             declared.into_iter().map(TypeSlot::new).collect();
+        let type_count = types.len();
 
         // Recover from the journal chain: the newest `Commit` frame roots
         // the directories/dictionaries/allocator (caches stay empty — reads
@@ -268,24 +267,29 @@ impl PageStore {
         let store = Self {
             file,
             data_dir: dir.to_path_buf(),
-            journal: Mutex::new(recovered.journal),
-            alloc: Mutex::new(recovered.alloc),
-            meta: Mutex::new(recovered.meta),
-            retiring: Mutex::new(None),
+            journal: RefCell::new(recovered.journal),
+            alloc: RefCell::new(recovered.alloc),
+            meta: RefCell::new(recovered.meta),
+            retiring: RefCell::new(None),
             types,
             seed,
             target_blocks_per_bucket: DEFAULT_TARGET_BLOCKS_PER_BUCKET,
-            pending: Mutex::new(crate::pending::Pending::default()),
-            checkpoint: Mutex::new(None),
+            cache: RefCell::new(crate::record_cache::RecordCache::new(
+                type_count,
+                crate::block_file::random_seed(),
+            )),
+            checkpoint: RefCell::new(None),
             relax_window: options.relax_window,
             record_cache_bytes: options.record_cache_bytes,
             barrier: None,
         };
+        // Rebuild the logs in journal order, no re-journal, then settle them
+        // into the pages as the live engine would have.
         for batch in &recovered.replay {
-            store.route_batch(batch)?; // rebuild caches + pages, no re-journal
-            let touched = store.commit_to_caches(batch);
-            store.settle(&touched)?;
+            store.route_batch(batch)?;
+            store.commit_to_caches(batch);
         }
+        store.drain()?;
         Ok(store)
     }
 
@@ -301,20 +305,31 @@ impl PageStore {
     /// # Errors
     /// [`StorageError::Io`](crate::StorageError::Io) if the sync fails.
     pub fn flush(&self) -> StorageResult<()> {
-        self.journal.lock().sync()
+        self.journal.borrow_mut().sync()
     }
 
-    /// Number of live records currently cached across every registered type.
+    /// Number of records the cache indexes across every registered type —
+    /// live ones, and removes not yet settled.
     #[must_use]
     pub fn cache_len(&self) -> usize {
-        self.types.iter().map(TypeSlot::cached_len).sum()
+        self.cache.borrow().len()
+    }
+
+    /// Bytes the record cache holds — its index and every type's log, the
+    /// number [`evict_settled`](Self::evict_settled) compares its budget to.
+    #[must_use]
+    pub fn cache_bytes(&self) -> usize {
+        self.cache.borrow().footprint()
     }
 
     /// Bucket count of one type's directory (`0` while nothing settled).
     #[must_use]
     pub fn bucket_count(&self, struct_hash: u64) -> usize {
         self.slot_of(struct_hash).map_or(0, |slot| {
-            slot.directory().lock().as_ref().map_or(0, Directory::len)
+            slot.directory()
+                .borrow_mut()
+                .as_ref()
+                .map_or(0, Directory::len)
         })
     }
 
@@ -425,20 +440,14 @@ mod tests {
             }
         });
         s.drain().unwrap();
-        let cached = |s: &PageStore| -> usize {
-            s.types
-                .iter()
-                .map(crate::struct_storage::TypeSlot::cached_bytes)
-                .sum()
-        };
         assert!(
-            cached(&s) > 1,
+            s.cache_len() == 64,
             "settling 64 records must not evict them: the budget is the \
              caller's to apply"
         );
         s.evict_to_budget();
         assert!(
-            cached(&s) <= 1,
+            s.cache_len() == 0,
             "asked, the store must evict to the budget it was opened with, \
              not to one remembered at the call site"
         );
@@ -543,7 +552,7 @@ mod tests {
             assert_eq!(w - writes, 1, "pages + delta ride one window write");
             assert_eq!(sy - syncs, 1, "one `data.bin` barrier…");
             assert_eq!(
-                s.journal.lock().barriers(),
+                s.journal.borrow_mut().barriers(),
                 0,
                 "…and none on the fresh journal: the frame is deferred"
             );
@@ -555,7 +564,11 @@ mod tests {
             s.apply(&[Write::Put(nonunique(99), rec(SH, b"carrier"))])
                 .await
                 .unwrap();
-            assert_eq!(s.journal.lock().barriers(), 1, "the batch's own fsync");
+            assert_eq!(
+                s.journal.borrow_mut().barriers(),
+                1,
+                "the batch's own fsync"
+            );
             assert!(s.is_retiring(), "disposal belongs to the next checkpoint");
             assert_eq!(journals(d.path()).len(), 2);
 
@@ -567,7 +580,7 @@ mod tests {
             assert_eq!(w2 - w, 1, "one window write again");
             assert_eq!(sy2 - sy, 1, "one `data.bin` barrier again");
             assert_eq!(
-                s.journal.lock().barriers(),
+                s.journal.borrow_mut().barriers(),
                 0,
                 "the fresh journal took none: no barrier for housekeeping"
             );
@@ -600,7 +613,7 @@ mod tests {
             }
             s.commit_journal().unwrap();
             assert_eq!(
-                s.alloc.lock().deferred_blocks(),
+                s.alloc.borrow_mut().deferred_blocks(),
                 0,
                 "nothing held yet — this checkpoint is the first root"
             );
@@ -614,7 +627,7 @@ mod tests {
             }
             s.drain().unwrap();
             assert!(
-                s.alloc.lock().deferred_blocks() > 0,
+                s.alloc.borrow_mut().deferred_blocks() > 0,
                 "runs the live frame names must be held, not pooled"
             );
         });
@@ -643,8 +656,11 @@ mod tests {
                 2,
                 "one generation disposed of, this one's taken its place"
             );
-            let carrier =
-                s.retiring.lock().as_ref().map(|r| r.journal.barriers());
+            let carrier = s
+                .retiring
+                .borrow_mut()
+                .as_mut()
+                .map(|r| r.journal.barriers());
             assert_eq!(
                 carrier,
                 Some(1),
@@ -1093,7 +1109,7 @@ mod tests {
             assert!(!s.has_pending(), "the queue must end empty");
 
             // And the records are all readable from their pages.
-            s.slot_of(SH).unwrap().mem_cache().write().clear();
+            s.evict_settled(0);
             for n in 1..=20u64 {
                 assert_eq!(
                     s.get_of(SH, nonunique(n)).await.unwrap(),
@@ -1125,8 +1141,8 @@ mod tests {
             .await
             .unwrap();
             s.drain().unwrap(); // settle into pages
-            // Simulate eviction: drop the cache; the settled pages must serve.
-            s.slot_of(SH).unwrap().mem_cache().write().clear();
+            // Evict: the settled pages must serve.
+            s.evict_settled(0);
             assert_eq!(
                 s.get_of(SH, nonunique(1)).await.unwrap(),
                 Some(rec(SH, b"settled")),
@@ -1154,7 +1170,7 @@ mod tests {
                     .unwrap();
                 s.drain().unwrap();
                 // Evict, then remove: the owner must be found on the page.
-                s.slot_of(SH).unwrap().mem_cache().write().clear();
+                s.evict_settled(0);
                 s.apply(&[Write::Remove(SH, nonunique(3))]).await.unwrap();
                 // Before the settle lands, the tombstone must hide the
                 // (still-present) page bytes…
@@ -1682,7 +1698,7 @@ mod tests {
     fn a_zero_window_takes_one_barrier_per_batch() {
         let d = tempfile::tempdir().unwrap();
         let s = open(d.path()); // StoreOptions::default()
-        let before = s.journal.lock().barriers();
+        let before = s.journal.borrow_mut().barriers();
         block_on(async {
             for k in 0..8u64 {
                 s.apply(&[Write::Put(nonunique(k), rec(SH, b"strict"))])
@@ -1690,7 +1706,7 @@ mod tests {
                     .unwrap();
             }
         });
-        assert_eq!(s.journal.lock().barriers(), before + 8);
+        assert_eq!(s.journal.borrow_mut().barriers(), before + 8);
     }
 
     /// The whole point of the window: a burst inside one costs no barrier,
@@ -1709,7 +1725,7 @@ mod tests {
             },
         )
         .unwrap();
-        let before = s.journal.lock().barriers();
+        let before = s.journal.borrow_mut().barriers();
         block_on(async {
             for k in 0..32u64 {
                 s.apply(&[Write::Put(nonunique(k), rec(SH, b"windowed"))])
@@ -1718,12 +1734,12 @@ mod tests {
             }
         });
         assert_eq!(
-            s.journal.lock().barriers(),
+            s.journal.borrow_mut().barriers(),
             before,
             "32 batches inside one window must take no barrier"
         );
         s.flush().unwrap();
-        assert_eq!(s.journal.lock().barriers(), before + 1);
+        assert_eq!(s.journal.borrow_mut().barriers(), before + 1);
     }
 
     /// Elapsed window ⇒ the barrier is taken, and what was acked is on the
@@ -1742,10 +1758,10 @@ mod tests {
                 },
             )
             .unwrap();
-            let before = s.journal.lock().barriers();
+            let before = s.journal.borrow_mut().barriers();
             block_on(s.apply(&[Write::Put(nonunique(7), rec(SH, b"elapsed"))]))
                 .unwrap();
-            assert_eq!(s.journal.lock().barriers(), before + 1);
+            assert_eq!(s.journal.borrow_mut().barriers(), before + 1);
         }
         let s = open(d.path());
         assert_eq!(
