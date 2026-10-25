@@ -18,6 +18,7 @@
 
 pub mod alloc;
 mod apply;
+pub mod barrier;
 pub mod block;
 pub mod block_file;
 mod checkpoint;
@@ -30,6 +31,7 @@ mod directory_pages;
 mod edit;
 pub mod error;
 pub mod journal;
+mod journal_frame;
 mod meta_log;
 pub mod page;
 pub mod page_cache;
@@ -42,6 +44,7 @@ mod settle;
 pub mod shard_set;
 pub mod struct_storage;
 
+pub use barrier::{Barrier, Durable};
 pub use block::{BLOCK_SIZE, BlockAllocator, BlockDescriptor, Run};
 pub use block_file::{BlockFile, IoCounts, RESERVED_BLOCKS};
 pub use commit_steps::Checkpointing;
