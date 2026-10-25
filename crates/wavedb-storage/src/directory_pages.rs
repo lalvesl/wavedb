@@ -37,10 +37,9 @@ impl Directory {
         // as long as its run stays allocated — page writes are copy-on-write
         // and land in a *new* run — so a hit needs no validation, only the
         // decompression below.
-        let page = SlotPage::from_bytes(
-            &file.read_run_shared(desc.run())?,
-            dict.dictionary(),
-        )?;
+        let page = file.read_run_with(desc.run(), |image| {
+            SlotPage::from_bytes(image, dict.dictionary())
+        })??;
         debug_assert_eq!(page.struct_hash(), struct_hash);
         Ok(page)
     }
