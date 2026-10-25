@@ -2,13 +2,15 @@
 //! [`Segment`]s with a [`SparseTree`] above it, over a [`Store`].
 //!
 //! [`segment`](super::segment) is one segment's bytes and in-place edits;
-//! [`sparse_write`](super::sparse_write) is the index that finds one. This is the
+//! [`sparse_tree`](super::sparse_tree) is the index that finds one. This is the
 //! structure: locate the segment a key belongs to, edit it, split it when it
 //! fills, and keep the index in step — all as one [`Write`] batch the caller
 //! folds into its own, so a segment and the entry naming it can never disagree.
 //!
-//! Removal and merging live in [`chain_remove`](super::chain_remove), the same
-//! way `BpTree` splits insert and delete.
+//! This file is the handle. Inserting and splitting live in
+//! [`chain_insert`](super::chain_insert), removal and merging in
+//! [`chain_remove`](super::chain_remove) — the way `BpTree` splits insert and
+//! delete — and reaching a segment in [`chain_io`](super::chain_io).
 //!
 //! ## Endpoints are permanent, and that is the point
 //!
@@ -35,17 +37,17 @@
 
 use core::marker::PhantomData;
 
-use crate::error::{Error, Result};
+#[cfg(doc)]
+use crate::error::Error;
+use crate::error::Result;
 use crate::local_id::LocalId;
-use crate::overlay::Overlay;
 use crate::store::{Store, Write};
 use crate::u48::U48;
 use crate::wire::WaveWire;
 
 use super::node_key::SecKey;
 use super::segment::{Lane, Segment, mint_lane_id};
-use super::sparse::Slot;
-use super::sparse_write::SparseTree;
+use super::sparse_tree::SparseTree;
 use super::{ChainRoots, LogRoots};
 
 /// Default minimum entries per record segment — a segment holds 16…32 records.
@@ -70,14 +72,14 @@ pub const DEFAULT_DEAD_MIN: usize = 256;
 /// live in the [`Store`] under `LocalId::to_id(tenant)`.
 #[derive(Debug)]
 pub struct Chain<P> {
-    head: LocalId,
-    tail: LocalId,
-    tenant: U48,
-    lane_hash: u64,
+    pub(super) head: LocalId,
+    pub(super) tail: LocalId,
+    pub(super) tenant: U48,
+    pub(super) lane_hash: u64,
     /// `None` for the removal log, which nothing searches — see
     /// [`log_at`](Chain::log_at).
-    index: Option<SparseTree>,
-    min: usize,
+    pub(super) index: Option<SparseTree>,
+    pub(super) min: usize,
     _payload: PhantomData<fn() -> P>,
 }
 
@@ -300,261 +302,6 @@ impl<P: WaveWire> Chain<P> {
     {
         let (_, seg) = self.locate(store, key).await?;
         Ok(seg.get(key).cloned())
-    }
-
-    /// Insert or replace `key`'s entry, splitting the segment when it reaches
-    /// `2N` and keeping the sparse index in step.
-    ///
-    /// Takes `&mut self` only because a chain's **first** split must move one
-    /// endpoint (when `head == tail`, one of them becomes the fresh id). After
-    /// that the endpoints are frozen, so a caller that compares them before and
-    /// after will see a `Pivot` rewrite at most once per chain.
-    ///
-    /// # Errors
-    /// As [`get`](Self::get).
-    pub async fn plan_insert<S: Store>(
-        &mut self,
-        store: &S,
-        key: SecKey,
-        payload: P,
-    ) -> Result<Vec<Write>> {
-        let mut view = Overlay::new(store);
-        let mut writes = Vec::new();
-        let (id, mut seg) = self.locate(&view, &key).await?;
-        let was = seg.first_key().cloned();
-        seg.insert(key, payload);
-
-        if seg.len() >= self.min.saturating_mul(2) {
-            self.split(&mut view, &mut writes, id, seg, was).await?;
-        } else {
-            self.emit(&mut view, &mut writes, id, &seg);
-            self.reindex(&mut view, &mut writes, was, id, &seg).await?;
-        }
-        Ok(writes)
-    }
-
-    /// Split a full segment 50/50 and relink it.
-    ///
-    /// Three segment writes, not two: the two halves, plus the neighbour on the
-    /// far side of the freshly minted one, whose pointer must now name it. Only
-    /// a split at a chain end costs two, and that end is where the endpoint
-    /// pointer moves instead.
-    async fn split<S: Store>(
-        &mut self,
-        view: &mut Overlay<'_, S>,
-        writes: &mut Vec<Write>,
-        id: LocalId,
-        mut seg: Segment<P>,
-        was: Option<SecKey>,
-    ) -> Result<()> {
-        let (prev, next) = (seg.prev(), seg.next());
-        let mut lower = seg.take_entries();
-        let upper = lower.split_off(lower.len() / 2);
-        let fresh = mint_lane_id(self.lane_hash);
-
-        // The growth end keeps its id *and* the newer half, so the fresh
-        // segment lands behind it; everywhere else the fresh half goes after.
-        let (kept, made) = if id == self.tail {
-            let made = Segment::with_entries(prev, Some(id), lower);
-            let kept = Segment::with_entries(Some(fresh), next, upper);
-            match prev {
-                Some(outer) => {
-                    self.relink(view, writes, outer, Some(fresh), true).await?;
-                }
-                None => self.head = fresh,
-            }
-            (kept, made)
-        } else {
-            let made = Segment::with_entries(Some(id), next, upper);
-            let kept = Segment::with_entries(prev, Some(fresh), lower);
-            match next {
-                Some(outer) => {
-                    self.relink(view, writes, outer, Some(fresh), false)
-                        .await?;
-                }
-                None => self.tail = fresh,
-            }
-            (kept, made)
-        };
-
-        self.emit(view, writes, id, &kept);
-        self.emit(view, writes, fresh, &made);
-        // Whichever half holds the lower keys inherits the old separator; the
-        // other needs one of its own.
-        let (low_id, low, high_id, high) = if id == self.tail {
-            (fresh, &made, id, &kept)
-        } else {
-            (id, &kept, fresh, &made)
-        };
-        self.reindex(view, writes, was, low_id, low).await?;
-        self.reindex(view, writes, None, high_id, high).await
-    }
-
-    /// Repoint one neighbour's `next` (or `prev`) at `to`.
-    pub(super) async fn relink<S: Store>(
-        &self,
-        view: &mut Overlay<'_, S>,
-        writes: &mut Vec<Write>,
-        id: LocalId,
-        to: Option<LocalId>,
-        set_next: bool,
-    ) -> Result<()> {
-        let mut seg: Segment<P> = self.load(view, id).await?;
-        if set_next {
-            seg.set_next(to);
-        } else {
-            seg.set_prev(to);
-        }
-        self.emit(view, writes, id, &seg);
-        Ok(())
-    }
-
-    /// File `seg` in the index under its current least key, dropping the entry
-    /// it used to sit under when that key moved.
-    pub(super) async fn reindex<S: Store>(
-        &self,
-        view: &mut Overlay<'_, S>,
-        writes: &mut Vec<Write>,
-        was: Option<SecKey>,
-        id: LocalId,
-        seg: &Segment<P>,
-    ) -> Result<()> {
-        // An index-less chain (the removal log) has no separators to keep.
-        let Some(index) = self.index else {
-            return Ok(());
-        };
-        let now = seg.first_key().cloned();
-        if was != now
-            && let Some(old) = was
-        {
-            let batch = index.plan_remove(view, &old).await?;
-            view.stage(&batch);
-            writes.extend(batch);
-        }
-        if let Some(first) = now {
-            let slot = Slot {
-                first,
-                seg: id,
-                count: seg.len() as u64,
-            };
-            let batch = index.plan_upsert(view, slot).await?;
-            view.stage(&batch);
-            writes.extend(batch);
-        }
-        Ok(())
-    }
-
-    /// The segment covering `key`, and its id. A key below every separator is
-    /// covered by the head — the index has no entry for it by construction.
-    pub(super) async fn locate<S: Store>(
-        &self,
-        store: &S,
-        key: &SecKey,
-    ) -> Result<(LocalId, Segment<P>)> {
-        let Some(index) = self.index else {
-            return self.walk_back_to(store, key).await;
-        };
-        let id = match index.find(store, key).await? {
-            Some(slot) => slot.seg,
-            None => self.head,
-        };
-        Ok((id, self.load(store, id).await?))
-    }
-
-    /// [`locate`](Self::locate) without an index: step back from the tail until
-    /// a segment's least key no longer sits above `key`.
-    ///
-    /// The removal log's only writer appends a monotone instant, so this stops
-    /// at the tail on the first read; it stays correct, at a read per segment
-    /// passed, for anything that does not.
-    async fn walk_back_to<S: Store>(
-        &self,
-        store: &S,
-        key: &SecKey,
-    ) -> Result<(LocalId, Segment<P>)> {
-        let mut id = self.tail;
-        loop {
-            let seg = self.load(store, id).await?;
-            let above = seg.first_key().is_some_and(|first| first > key);
-            match seg.prev() {
-                Some(prev) if above => id = prev,
-                // Either this segment covers the key, or there is nothing
-                // before it and the head is where the key belongs.
-                _ => return Ok((id, seg)),
-            }
-        }
-    }
-
-    /// Push a segment write and stage it, so later steps of the same plan read
-    /// what earlier ones wrote.
-    pub(super) fn emit<S: Store>(
-        &self,
-        view: &mut Overlay<'_, S>,
-        writes: &mut Vec<Write>,
-        id: LocalId,
-        seg: &Segment<P>,
-    ) {
-        let write = self.put(id, seg);
-        view.stage(core::slice::from_ref(&write));
-        writes.push(write);
-    }
-
-    /// Drop a segment from the store and stage the removal.
-    pub(super) fn erase<S: Store>(
-        &self,
-        view: &mut Overlay<'_, S>,
-        writes: &mut Vec<Write>,
-        id: LocalId,
-    ) {
-        let write = Write::Remove(self.lane_hash, id.to_id(self.tenant));
-        view.stage(core::slice::from_ref(&write));
-        writes.push(write);
-    }
-
-    /// The [`Write`] persisting `seg` under `id`.
-    fn put(&self, id: LocalId, seg: &Segment<P>) -> Write {
-        Write::Put(id.to_id(self.tenant), seg.to_bytes(self.lane_hash))
-    }
-
-    /// Read one segment by id — how a scan steps along the chain, following
-    /// [`Segment::next`] forward or [`Segment::prev`] back.
-    ///
-    /// # Errors
-    /// As [`get`](Self::get).
-    pub(crate) async fn segment<S: Store>(
-        &self,
-        store: &S,
-        id: LocalId,
-    ) -> Result<Segment<P>> {
-        self.load(store, id).await
-    }
-
-    /// Read one segment, checking its lane tag.
-    pub(super) async fn load<S: Store>(
-        &self,
-        store: &S,
-        id: LocalId,
-    ) -> Result<Segment<P>> {
-        let bytes = store
-            .get_of(self.lane_hash, id.to_id(self.tenant))
-            .await?
-            .ok_or(Error::ChainNodeMissing(id))?;
-        Segment::from_bytes(self.lane_hash, &bytes)
-    }
-
-    /// This chain's size band minimum.
-    pub(super) const fn min(&self) -> usize {
-        self.min
-    }
-
-    /// Set the head — `chain_remove` moves it when a merge consumes it.
-    pub(super) const fn set_head(&mut self, id: LocalId) {
-        self.head = id;
-    }
-
-    /// Set the tail — `chain_remove` moves it when a merge consumes it.
-    pub(super) const fn set_tail(&mut self, id: LocalId) {
-        self.tail = id;
     }
 }
 
