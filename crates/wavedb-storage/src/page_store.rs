@@ -205,6 +205,9 @@ pub struct PageStore {
     /// The record-cache budget this store was opened with — carried, not
     /// applied (see [`StoreOptions::record_cache_bytes`]).
     pub(crate) record_cache_bytes: usize,
+    /// The thread's `fsync` helper, once the store has one: batch barriers
+    /// are then taken there and waited for ([`crate::barrier`]).
+    pub(crate) barrier: Option<crate::barrier::Barrier>,
 }
 
 impl PageStore {
@@ -276,6 +279,7 @@ impl PageStore {
             checkpoint: Mutex::new(None),
             relax_window: options.relax_window,
             record_cache_bytes: options.record_cache_bytes,
+            barrier: None,
         };
         for batch in &recovered.replay {
             store.route_batch(batch)?; // rebuild caches + pages, no re-journal
