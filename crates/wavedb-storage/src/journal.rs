@@ -43,7 +43,6 @@
 use std::fs::OpenOptions;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use wavedb_core::wire::{from_wire_checked, to_wire_checked};
@@ -58,8 +57,9 @@ const FRAME_PREFIX: usize = 4;
 /// An append-only log of [`JournalFrame`]s in one timestamped file.
 #[derive(Debug)]
 pub struct Journal {
-    /// Shared with the thread's barrier helper, if the store has one.
-    file: Arc<Synced>,
+    /// The file and its barrier accounting; the helper, if the store has one,
+    /// gets its own descriptor per request ([`crate::barrier`]).
+    file: Synced,
     path: PathBuf,
     ts: u64,
     /// Byte offset of the end of the last whole frame (next append lands here).
@@ -106,7 +106,7 @@ impl Journal {
             .create_new(true)
             .open(&path)?;
         Ok(Self {
-            file: Arc::new(Synced::new(file)),
+            file: Synced::new(file)?,
             path,
             ts,
             end: 0,
@@ -123,7 +123,7 @@ impl Journal {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let end = file.metadata()?.len();
         Ok(Self {
-            file: Arc::new(Synced::new(file)),
+            file: Synced::new(file)?,
             path: path.to_path_buf(),
             ts,
             end,
@@ -185,9 +185,9 @@ impl Journal {
         Ok(())
     }
 
-    /// The file as the barrier helper takes it ([`crate::barrier`]).
-    pub(crate) const fn synced(&self) -> &Arc<Synced> {
-        &self.file
+    /// The file as a barrier is asked of the helper ([`crate::barrier`]).
+    pub(crate) const fn synced(&mut self) -> &mut Synced {
+        &mut self.file
     }
 
     /// A barrier was handed to the helper: the durability window restarts
@@ -203,18 +203,18 @@ impl Journal {
         self.last_sync.elapsed()
     }
 
-    /// Barriers completed on this journal, on any thread — the accounting
-    /// behind "a checkpoint costs one barrier", asserted in `page_store`'s
-    /// tests.
+    /// Barriers completed on this journal, inline or answered by the helper —
+    /// the accounting behind "a checkpoint costs one barrier", asserted in
+    /// `page_store`'s tests.
     #[must_use]
-    pub fn barriers(&self) -> u64 {
+    pub fn barriers(&mut self) -> u64 {
         self.file.completed()
     }
 
     /// Barriers begun on this journal. A frame appended now is durable once
     /// [`barriers`](Self::barriers) exceeds this ([`crate::barrier`]).
     #[must_use]
-    pub fn barrier_floor(&self) -> u64 {
+    pub fn barrier_floor(&mut self) -> u64 {
         self.file.started()
     }
 
