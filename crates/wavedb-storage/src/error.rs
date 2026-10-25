@@ -38,6 +38,10 @@ pub enum StorageError {
     /// An on-disk structure failed an integrity check on read (crc, bounds, tag).
     #[error("corrupt {0}")]
     Corrupt(&'static str),
+    /// A record larger than the record cache can hold
+    /// (`record_log::MAX_RECORD`), refused before the journal sees it.
+    #[error("a record of {0} bytes is too large to commit")]
+    RecordTooLarge(usize),
     /// A write named a `STRUCT_HASH` with no registered [`StructStorage`] slot
     /// — the type was not listed at [`PageStore::open`]. Registration is an
     /// explicit allowlist (like exposure): unlisted types fail loudly here.
