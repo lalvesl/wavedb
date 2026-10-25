@@ -20,13 +20,12 @@
 //! native-only (the browser uses IndexedDB, never this file), so the Unix
 //! [`FileExt`] is the portable-enough surface here.
 
+use std::cell::Cell;
 use std::collections::hash_map::RandomState;
 use std::fs::{File, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use wavedb_core::wire::{
     CRC_PREFIX_LEN, WaveWire, from_wire_checked, to_wire_checked,
@@ -95,20 +94,16 @@ pub struct BlockFile {
 /// a checkpoint one write plus one sync, and reads are one per touched page.
 #[derive(Debug, Default)]
 pub struct IoCounts {
-    reads: AtomicU64,
-    writes: AtomicU64,
-    syncs: AtomicU64,
+    reads: Cell<u64>,
+    writes: Cell<u64>,
+    syncs: Cell<u64>,
 }
 
 impl IoCounts {
     /// `(reads, writes, syncs)` so far.
     #[must_use]
-    pub fn snapshot(&self) -> (u64, u64, u64) {
-        (
-            self.reads.load(Ordering::Relaxed),
-            self.writes.load(Ordering::Relaxed),
-            self.syncs.load(Ordering::Relaxed),
-        )
+    pub const fn snapshot(&self) -> (u64, u64, u64) {
+        (self.reads.get(), self.writes.get(), self.syncs.get())
     }
 }
 
@@ -200,7 +195,7 @@ impl BlockFile {
         }
         let mut buf = vec![0u8; run.byte_len() as usize];
         self.file.read_exact_at(&mut buf, run.byte_offset())?;
-        self.io.reads.fetch_add(1, Ordering::Relaxed);
+        self.io.reads.set(self.io.reads.get() + 1);
         Ok(buf)
     }
 
@@ -228,32 +223,36 @@ impl BlockFile {
         // defragmenter's relocation.
         self.cache.invalidate(run);
         self.file.write_all_at(bytes, run.byte_offset())?;
-        self.io.writes.fetch_add(1, Ordering::Relaxed);
+        self.io.writes.set(self.io.writes.get() + 1);
         Ok(())
     }
 
-    /// [`read_run`](Self::read_run) through the page cache.
-    ///
-    /// Returns a shared image rather than an owned buffer: a hit is a refcount
-    /// bump instead of a copy of the page. Use this for anything read
-    /// repeatedly and consumed read-only — which is pages, and only pages.
-    /// The dictionary image, the addressing log's chunks and the
-    /// defragmenter's relocation buffers want owned bytes and are read once,
-    /// so they keep using [`read_run`](Self::read_run).
+    /// [`read_run`](Self::read_run) through the page cache: `read` decodes
+    /// the image where it lies — lent by the cache on a hit (so it must not
+    /// reach the cache itself), or the buffer just read on a miss, which the
+    /// cache then keeps. Pages only: the dictionary image, the addressing
+    /// log's chunks and the defragmenter's buffers are read once and want
+    /// owned bytes ([`read_run`](Self::read_run)).
     ///
     /// # Errors
     /// The same faults as [`read_run`](Self::read_run). A cache hit cannot
     /// fault at all, which is the point.
-    pub fn read_run_shared(&self, run: Run) -> StorageResult<Arc<[u8]>> {
-        if let Some(hit) = self.cache.get(run) {
-            return Ok(hit);
-        }
-        let bytes: Arc<[u8]> = self.read_run(run)?.into();
-        self.cache.insert(run, &bytes);
-        Ok(bytes)
+    pub fn read_run_with<R>(
+        &self,
+        run: Run,
+        read: impl FnOnce(&[u8]) -> R,
+    ) -> StorageResult<R> {
+        let read = match self.cache.with(run, read) {
+            Ok(done) => return Ok(done),
+            Err(read) => read,
+        };
+        let bytes = self.read_run(run)?;
+        let done = read(&bytes);
+        self.cache.insert(run, bytes.into_boxed_slice());
+        Ok(done)
     }
 
-    /// The page cache backing [`read_run_shared`](Self::read_run_shared).
+    /// The page cache backing [`read_run_with`](Self::read_run_with).
     #[must_use]
     pub const fn page_cache(&self) -> &PageCache {
         &self.cache
@@ -265,7 +264,7 @@ impl BlockFile {
     /// [`StorageError::Io`] if the sync fails.
     pub fn sync(&self) -> StorageResult<()> {
         self.file.sync_all()?;
-        self.io.syncs.fetch_add(1, Ordering::Relaxed);
+        self.io.syncs.set(self.io.syncs.get() + 1);
         Ok(())
     }
 
@@ -337,7 +336,7 @@ fn read_and_check_superblock(file: &File) -> StorageResult<SuperblockBody> {
 /// A per-database random `[u64; 4]` seed, drawn from the OS via the stdlib's
 /// randomly-keyed [`RandomState`] (no extra crate dependency). Each lane uses an
 /// independently constructed hasher, so the four words are independent.
-fn random_seed() -> [u64; 4] {
+pub(crate) fn random_seed() -> [u64; 4] {
     let mut seed = [0u64; 4];
     for (i, lane) in seed.iter_mut().enumerate() {
         let mut h = RandomState::new().build_hasher();
@@ -369,7 +368,7 @@ mod tests {
         let byte = u8::try_from(start % 251).unwrap();
         bf.write_run(run, &vec![byte; run.byte_len() as usize])
             .unwrap();
-        bf.read_run_shared(run).unwrap();
+        bf.read_run_with(run, |_| ()).unwrap();
     }
 
     /// The caller's budget is kept by **evicting**, not by refusing to cache:
@@ -390,17 +389,17 @@ mod tests {
             bf.page_cache().bytes()
         );
         assert!(
-            bf.page_cache().get(Run::new(8, 1)).is_some(),
+            bf.page_cache().with(Run::new(8, 1), |_| ()).is_ok(),
             "the newest read must be the one kept"
         );
         assert!(
-            bf.page_cache().get(Run::new(1, 1)).is_none(),
+            bf.page_cache().with(Run::new(1, 1), |_| ()).is_err(),
             "the oldest must have been evicted"
         );
     }
 
     /// Zero disables it, and a disabled cache must still serve correct bytes
-    /// — `read_run_shared` is the read path, not an optimisation beside it.
+    /// — `read_run_with` is the read path, not an optimisation beside it.
     #[test]
     fn a_zero_budget_disables_the_cache_without_changing_reads() {
         let (_d, path) = temp_path();
@@ -408,7 +407,7 @@ mod tests {
         let run = Run::new(1, 2);
         let payload = vec![0xA5; run.byte_len() as usize];
         bf.write_run(run, &payload).unwrap();
-        assert_eq!(&*bf.read_run_shared(run).unwrap(), &payload[..]);
+        assert_eq!(bf.read_run_with(run, <[u8]>::to_vec).unwrap(), payload);
         assert!(bf.page_cache().is_empty(), "zero must hold nothing");
     }
 
