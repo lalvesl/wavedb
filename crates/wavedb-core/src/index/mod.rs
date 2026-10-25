@@ -10,6 +10,8 @@
 //! never named here.
 
 mod chain;
+mod chain_insert;
+mod chain_io;
 mod chain_remove;
 mod key;
 #[cfg(test)]
@@ -18,6 +20,7 @@ mod node;
 mod node_key;
 mod segment;
 mod sparse;
+mod sparse_tree;
 mod sparse_write;
 mod stream;
 mod tree;
@@ -30,7 +33,7 @@ pub use node::BPTREE_NODE_STRUCT_HASH;
 pub use node_key::{NodeKey, SecKey};
 pub use segment::{Lane, Segment, mint_lane_id};
 pub use sparse::{Branch, Slot, SparseNode, Step};
-pub use sparse_write::{DEFAULT_SPARSE_CAP, SparseTree};
+pub use sparse_tree::{DEFAULT_SPARSE_CAP, SparseTree};
 pub use stream::{Except, IdStreamExt, Intersect, Union};
 pub use tree::{BpTree, DEFAULT_INTERNAL_CAP, DEFAULT_LEAF_CAP};
 
