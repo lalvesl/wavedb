@@ -58,7 +58,7 @@ impl PageStore {
     /// fit a hole?", the gauge a defrag policy triggers on.
     #[must_use]
     pub fn largest_free_extent(&self) -> u64 {
-        self.alloc.lock().largest_free_extent()
+        self.alloc.borrow_mut().largest_free_extent()
     }
 
     /// Relocate up to `budget_blocks` worth of isolated pages, coalescing the
@@ -95,8 +95,10 @@ impl PageStore {
             let plan = match plans.entry(candidate.slot) {
                 std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
                 std::collections::btree_map::Entry::Vacant(v) => {
-                    let Some(dir) =
-                        self.types[candidate.slot].directory().lock().clone()
+                    let Some(dir) = self.types[candidate.slot]
+                        .directory()
+                        .borrow_mut()
+                        .clone()
                     else {
                         continue;
                     };
@@ -126,11 +128,11 @@ impl PageStore {
     // could be scored against neighbours that no longer exist.
     #[allow(clippy::significant_drop_tightening)]
     fn candidates(&self) -> Vec<Candidate> {
-        let alloc = self.alloc.lock();
+        let alloc = self.alloc.borrow_mut();
         let end_of_file = alloc.total_blocks();
         let mut out = Vec::new();
         for (slot, storage) in self.types.iter().enumerate() {
-            let dir = storage.directory().lock();
+            let dir = storage.directory().borrow_mut();
             let Some(dir) = dir.as_ref() else { continue };
             for (bucket, desc) in dir.slots().iter().enumerate() {
                 if !desc.is_allocated() {
