@@ -12,8 +12,8 @@
     clippy::cast_lossless,
     clippy::cast_sign_loss
 )]
-// The lint fires on the crate's `async fn`s in their *generic* setting; the
-// concrete engine's futures are `Send`, and `thread_safety` below asserts it.
+// The engine is used from one thread and its futures borrow it, so they are
+// not `Send` (see `thread_safety` below).
 #![allow(clippy::future_not_send)]
 
 pub mod alloc;
@@ -36,9 +36,11 @@ mod meta_log;
 pub mod page;
 pub mod page_cache;
 pub mod page_store;
-mod pending;
 mod plan;
 mod read_through;
+mod record_cache;
+mod record_index;
+mod record_log;
 mod retire;
 mod settle;
 pub mod shard_set;
@@ -59,42 +61,30 @@ pub use settle::Progress;
 pub use shard_set::{MANIFEST, open_shards, open_shards_with};
 pub use struct_storage::{BPTREE_NODE_STORAGE, StorageRegistry, StructStorage};
 
-/// The engine's thread-safety, **asserted rather than described**.
+/// The engine's threading contract, **asserted rather than described**.
 ///
-/// `PageStore` is `Send + Sync` and its futures are `Send` today, and nothing
-/// arranges that: it holds `parking_lot` locks and its per-type slots behind
-/// them, and it never awaits, so both properties fall out of how the code
-/// happens to be written. A single `Rc`/`RefCell` field, or one non-`Send`
-/// value held across a future await point, would silently take them away.
+/// A store is used from **one thread**. Its state lives in plain cells
+/// (`RefCell`, `Cell`) — no lock, no atomic — because nothing reaches it from
+/// two threads at once: a node moves each store onto the worker that owns it
+/// (RFC 0067), a benchmark consumer builds its driver on its own thread, and
+/// the one other thread the engine runs, the barrier helper, shares nothing
+/// with it — each request carries its own file descriptor and a channel to
+/// answer on (`crate::barrier`).
 ///
-/// That matters because two designs rest on them —
-/// [RFC 0064](../../../rfcs/0064-pivot-owned-concurrency-PLANNED.md) builds
-/// multi-thread ownership on top, and
-/// [RFC 0063](../../../rfcs/0063-engine-yield-map-and-interruptible-engine-PLANNED.md)'s
-/// yield map is only meaningful if they hold. 0063 also records what happens to
-/// a load-bearing property nobody asserts: its I1 and I2 became invariants by
-/// accident, discovered years later by reading for something else. A comment
-/// would have the same fate, so these are compile errors instead.
+/// So `PageStore` is `Send` — it must move to its owner's thread once, at
+/// startup, and the parallel open builds stores on scoped threads — and is
+/// deliberately **not** `Sync`, which is what makes the cells sound without
+/// a lock. Its futures borrow it, so they are not `Send` either, the stance
+/// `#![allow(clippy::future_not_send)]` above records.
 ///
-/// Both cost nothing at runtime — a `const` closure is type-checked and never
-/// called.
+/// A non-`Send` field would take the first property away silently, so it is
+/// a compile error instead. It costs nothing at runtime — a `const` closure
+/// is type-checked and never called.
 mod thread_safety {
     use super::PageStore;
-    use wavedb_core::store::Store;
 
     const _: fn() = || {
-        const fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<PageStore>();
-    };
-
-    // The type being `Send + Sync` does not imply its futures are: an `async
-    // fn` body may hold something non-`Send` across an await. That is the
-    // regression this second assertion catches and the first cannot.
-    const _: fn(&PageStore) = |store| {
-        fn assert_send<T: Send>(_: T) {}
-        let id = wavedb_core::Id::from_raw(0);
-        assert_send(async move { store.apply(&[]).await });
-        assert_send(async move { store.get(id).await });
-        assert_send(async move { store.get_of(0, id).await });
+        const fn assert_send<T: Send>() {}
+        assert_send::<PageStore>();
     };
 }
