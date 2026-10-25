@@ -1,6 +1,6 @@
 //! [`PageStore`]'s commit path — the [`Store`] impl and the batch pipeline
 //! behind it: route, validate guards, journal (the durability point),
-//! commit to the per-type caches, queue the settle.
+//! append to the types' logs (RFC 0068).
 //!
 //! Split from [`page_store`](crate::page_store) (which keeps open/recovery
 //! and the accessors) the same way the read fallback lives in
@@ -10,8 +10,9 @@ use wavedb_core::{Id, Result as CoreResult, Store, Write};
 
 use crate::barrier::{Barrier, Durable};
 use crate::error::{StorageError, StorageResult};
-use crate::page_store::{PageStore, Touched};
-use crate::pending::note_touched;
+use crate::page_store::PageStore;
+use crate::record_cache::Lookup;
+use crate::record_log::MAX_RECORD;
 use crate::struct_storage::TypeSlot;
 
 impl PageStore {
@@ -30,11 +31,11 @@ impl PageStore {
     /// Barriers completed on the live journal, on any thread.
     #[must_use]
     pub fn journal_barriers(&self) -> u64 {
-        self.journal.lock().barriers()
+        self.journal.borrow_mut().barriers()
     }
 
-    /// Journal first, then commit to the per-type caches and queue the
-    /// touched ids for the settle drain. The page write happens later
+    /// Journal first, then append to the types' logs, where the settle drain
+    /// finds them. The page write happens later
     /// ([`drain`](Self::drain)) — a crash before it replays from the journal.
     ///
     /// The batch is durable when this returns — or, with a barrier helper,
@@ -43,15 +44,14 @@ impl PageStore {
     // The journal guard deliberately spans the cache commit — releasing it
     // earlier (the lint's suggestion) would let two applies commit their
     // caches in the opposite order to their journal frames, so replay could
-    // disagree with what live readers saw. The pending-queue push also stays
-    // under it: eviction relies on "empty queue under its lock ⇒ every
-    // committed id is settled" (see `evict_settled`).
+    // disagree with what live readers saw, and the logs' order is what the
+    // checkpoint's rotation mark (taken under this lock too) relies on.
     #[allow(clippy::significant_drop_tightening)]
     fn apply_inner(&self, batch: &[Write]) -> StorageResult<Option<Durable>> {
         // Refuse unroutable writes *before* the journal sees the batch, so the
         // log never holds a batch replay would choke on.
         self.route_batch(batch)?;
-        let mut journal = self.journal.lock();
+        let mut journal = self.journal.borrow_mut();
         // Guards validate against the pre-batch state under the same lock
         // that orders commits; a mismatch refuses the batch before the
         // durability point. Guards are not state — the journal never holds
@@ -97,16 +97,18 @@ impl PageStore {
             if journal.since_last_sync() >= self.relax_window {
                 match &self.barrier {
                     None => journal.sync()?, // one barrier for the window
+                    // Not asked (a descriptor could not be duplicated):
+                    // the window stays open, so the next batch asks again.
                     Some(barrier) => {
-                        barrier.flush(journal.synced());
-                        journal.flush_requested();
+                        if barrier.flush(journal.synced()) {
+                            journal.flush_requested();
+                        }
                     }
                 }
             }
         }
         // Commit under the journal lock: cache order == journal order.
-        let touched = self.commit_to_caches(&effective);
-        self.pending.lock().note(touched);
+        self.commit_to_caches(&effective);
         // The append's fsync flushed the whole file, so a checkpoint's deferred
         // `Commit` frame is now durable too — for free, and with nothing to do
         // about it here. Acting on it (deleting the retired journal, rolling
@@ -116,8 +118,8 @@ impl PageStore {
         Ok(wait)
     }
 
-    /// Read `id`'s current bytes from `struct_hash`'s slot: its cache, then
-    /// its settled page. The sync body [`Store::get_of`] wraps, reused by the
+    /// Read `id`'s current bytes from `struct_hash`'s slot: the record
+    /// cache, then its settled page. The sync body [`Store::get_of`] wraps, reused by the
     /// `Expect` guard — one binary search on the route table and at most one
     /// page read, whatever the schema's width.
     ///
@@ -129,25 +131,30 @@ impl PageStore {
         struct_hash: u64,
         id: Id,
     ) -> StorageResult<Option<Vec<u8>>> {
-        let Some(slot) = self.slot_of(struct_hash) else {
+        let Some(idx) = self.slot_index(struct_hash) else {
             return Ok(None);
         };
-        if let Some(bytes) = slot.get(id) {
-            return Ok(Some(bytes));
+        let cached = self.cache.borrow().get(idx, id);
+        match cached {
+            Lookup::Hit(bytes) => Ok(Some(bytes)),
+            Lookup::Removed => Ok(None),
+            Lookup::Miss => self.read_from_pages(&self.types[idx], id),
         }
-        self.read_from_pages(slot, id)
     }
 
-    /// Read `id`'s current bytes without knowing its type: every cache, then
-    /// every settled page — the sync body [`Store::get`] wraps.
+    /// Read `id`'s current bytes without knowing its type: the record cache,
+    /// then every settled page — the sync body [`Store::get`] wraps.
     ///
     /// The cost is a page read per registered type, so nothing on a write
     /// path may call this (RFC 0063). `Store::get` keeps it because an
     /// untyped read is what that method *means*; typed callers spell
     /// [`read_of`](Self::read_of).
     fn read_any(&self, id: Id) -> StorageResult<Option<Vec<u8>>> {
-        if let Some(bytes) = self.types.iter().find_map(|s| s.get(id)) {
-            return Ok(Some(bytes));
+        let cached = self.cache.borrow().get_any(id);
+        match cached {
+            Lookup::Hit(bytes) => return Ok(Some(bytes)),
+            Lookup::Removed => return Ok(None),
+            Lookup::Miss => {}
         }
         for slot in &self.types {
             if let Some(bytes) = self.read_from_pages(slot, id)? {
@@ -167,6 +174,9 @@ impl PageStore {
     pub(crate) fn route_batch(&self, batch: &[Write]) -> StorageResult<()> {
         for w in batch {
             let sh = match w {
+                Write::Put(_, bytes) if bytes.len() > MAX_RECORD => {
+                    return Err(StorageError::RecordTooLarge(bytes.len()));
+                }
                 Write::Put(_, bytes) => struct_hash_of(bytes)?,
                 Write::Remove(hash, _) | Write::Expect(hash, _, _) => *hash,
             };
@@ -177,51 +187,45 @@ impl PageStore {
         Ok(())
     }
 
-    /// Apply `batch` to the per-type caches (routing validated beforehand),
-    /// returning the touched ids per slot. Runs under the journal lock, so
-    /// commits are ordered and each type's write guard is held only briefly.
+    /// Append `batch` to the types' logs (routing validated beforehand). Runs
+    /// under the journal lock, so the logs' order is the journal's.
     ///
     /// Every write here routes by a hash it already carries, so this touches
     /// no page and cannot fault: it is memory work under the commit lock, as
     /// RFC 0063's map requires of anything inside that section.
-    pub(crate) fn commit_to_caches(&self, batch: &[Write]) -> Touched {
-        let mut touched: Touched = Vec::new();
+    pub(crate) fn commit_to_caches(&self, batch: &[Write]) {
+        let mut cache = self.cache.borrow_mut();
         for w in batch {
+            // `route_batch` accepted every hash here, so neither lookup can
+            // miss; a write that somehow did would have no log to go to.
             match w {
                 Write::Put(id, bytes) => {
-                    let sh = struct_hash_of(bytes)
-                        .expect("route_batch validated the head");
-                    let idx = self.slot_index(sh);
-                    self.types[idx]
-                        .mem_cache()
-                        .write()
-                        .insert(id.raw(), bytes.clone());
-                    // A Put supersedes any unsettled remove of the same id.
-                    self.types[idx].clear_removed(*id);
-                    note_touched(&mut touched, idx, *id);
+                    let idx = struct_hash_of(bytes)
+                        .ok()
+                        .and_then(|sh| self.slot_index(sh));
+                    if let Some(idx) = idx {
+                        cache.put(idx, *id, Some(bytes));
+                    }
                 }
+                // The page still holds the bytes until the settle lands —
+                // the tombstone keeps reads from resurrecting them.
                 Write::Remove(hash, id) => {
-                    let idx = self.slot_index(*hash);
-                    self.types[idx].mem_cache().write().remove(&id.raw());
-                    // The page still holds the bytes until the settle
-                    // lands — tombstone so reads don't resurrect them.
-                    self.types[idx].mark_removed(*id);
-                    note_touched(&mut touched, idx, *id);
+                    if let Some(idx) = self.slot_index(*hash) {
+                        cache.put(idx, *id, None);
+                    }
                 }
                 // Validated and stripped in `apply_inner`; never reaches a
                 // journaled batch (nor, therefore, replay).
                 Write::Expect(..) => {}
             }
         }
-        touched
     }
 
-    /// The slot index for a hash [`route_batch`](Self::route_batch) has
-    /// already accepted.
-    fn slot_index(&self, struct_hash: u64) -> usize {
+    /// The slot index for a registered hash.
+    fn slot_index(&self, struct_hash: u64) -> Option<usize> {
         self.types
             .binary_search_by_key(&struct_hash, TypeSlot::struct_hash)
-            .expect("route_batch validated registration")
+            .ok()
     }
 }
 
@@ -269,5 +273,7 @@ fn struct_hash_of(bytes: &[u8]) -> StorageResult<u64> {
     if bytes.len() < 8 {
         return Err(StorageError::Corrupt("record shorter than STRUCT_HASH"));
     }
-    Ok(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&bytes[..8]);
+    Ok(u64::from_le_bytes(head))
 }
