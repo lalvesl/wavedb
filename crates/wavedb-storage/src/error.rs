@@ -51,6 +51,11 @@ pub enum StorageError {
     /// another process. `data.bin` is locked while a store has it open.
     #[error("the data directory is already open")]
     EngineBusy,
+    /// A journal barrier failed: the file's durable state is unknown, so the
+    /// store refuses further writes until it is reopened and recovers from
+    /// what is on disk (`crate::barrier`).
+    #[error("a journal barrier failed; reopen the store")]
+    BarrierFailed,
     /// A core/codec fault surfaced inside the engine.
     #[error(transparent)]
     Core(#[from] wavedb_core::Error),
