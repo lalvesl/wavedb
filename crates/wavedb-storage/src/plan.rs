@@ -19,14 +19,13 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use wavedb_core::Id;
-
 use crate::block::{BLOCK_SIZE, BlockDescriptor};
 use crate::dictionary::DictState;
 use crate::directory::Directory;
 use crate::error::StorageResult;
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
+use crate::record_cache::Records;
 use crate::struct_storage::TypeSlot;
 
 /// Splits one round may perform — a pacing budget on how fast the directory
@@ -49,8 +48,6 @@ pub struct SlotPlan {
     pub(crate) pages: BTreeMap<usize, Vec<u8>>,
     /// The grown dictionary buffer, when sampling extended it this round.
     pub(crate) dict: Option<Vec<u8>>,
-    /// Ids whose page write clears an unsettled-remove tombstone.
-    pub(crate) cleared: Vec<Id>,
 }
 
 impl SlotPlan {
@@ -62,7 +59,6 @@ impl SlotPlan {
             dir,
             pages: BTreeMap::new(),
             dict: None,
-            cleared: Vec::new(),
         }
     }
 }
@@ -86,12 +82,13 @@ fn planned_blocks(
 }
 
 impl PageStore {
-    /// Plan slot `idx`'s pages for the touched `ids` — read each bucket once,
-    /// apply every id that routes to it, decide splits, serialise.
+    /// Plan slot `idx`'s pages for a round's `records` — read each bucket
+    /// once, apply every record that routes to it (`None` bytes remove it),
+    /// decide splits, serialise.
     ///
     /// The directory is cloned rather than held: the settle path is the only
-    /// writer of a directory and runs serially (maintenance loop / open
-    /// replay), so the working copy cannot go stale under the plan, and
+    /// writer of a directory and runs one round at a time (maintenance loop /
+    /// open replay), so the working copy cannot go stale under the plan, and
     /// readers keep resolving the old — still valid, still allocated — pages
     /// while the window is written.
     ///
@@ -105,30 +102,28 @@ impl PageStore {
     pub(crate) fn plan_slot(
         &self,
         idx: usize,
-        ids: &[Id],
+        records: Records,
     ) -> StorageResult<SlotPlan> {
         let slot = &self.types[idx];
         let mut dir = slot
             .directory()
-            .lock()
+            .borrow_mut()
             .clone()
             .unwrap_or_else(|| Directory::new(self.seed));
-        let mut dict = slot.dictionary().lock();
+        let mut dict = slot.dictionary().borrow_mut();
 
         let mut staged: BTreeMap<usize, SlotPage> = BTreeMap::new();
-        let mut cleared = Vec::new();
         let mut dict_grew = false;
 
-        for &id in ids {
+        for (id, bytes) in records {
             let bucket = dir.bucket_of(id.raw());
             let page =
                 staged_page(self, slot, &dir, &dict, &mut staged, bucket)?;
-            if let Some(bytes) = slot.get(id) {
+            if let Some(bytes) = bytes {
                 dict_grew |= dict.sample(&bytes);
                 page.upsert(id, bytes);
             } else {
                 page.remove(id);
-                cleared.push(id);
             }
         }
 
@@ -146,7 +141,6 @@ impl PageStore {
             dir,
             pages,
             dict: dict_grew.then(|| dict.image()),
-            cleared,
         })
     }
 
