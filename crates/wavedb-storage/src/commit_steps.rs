@@ -13,12 +13,12 @@
 //! ## Why that is legal
 //!
 //! The frame says "every batch in the rotated-out journal is in the pages
-//! this frame addresses". Those batches are exactly the ids queued at the
-//! rotation, which [`Pending::rotate`](crate::pending::Pending::rotate) set
-//! aside as **owed**; writes after it commit into the new journal and queue
-//! as fresh, which the frame does not claim. So a step boundary is a round
+//! this frame addresses". Those batches are exactly what the logs hold at the
+//! rotation: under the same lock, every type's log marks its write end as
+//! **owed** (`r`); writes after it commit into the new journal and land past
+//! that mark, which the frame does not claim. So a step boundary is a round
 //! boundary — the one yield point RFC 0063 Part 2 declares legal — and the
-//! checkpoint closes only once no owed id is queued *or still being written*.
+//! checkpoint closes only once every log's settle cursor has passed its mark.
 //!
 //! A crash while a checkpoint is open is the crash today's checkpoint could
 //! already suffer mid-drain: no frame names the old journal, so recovery
@@ -77,7 +77,7 @@ impl PageStore {
     /// Whether a checkpoint is open: rotated, not yet framed.
     #[must_use]
     pub fn is_checkpointing(&self) -> bool {
-        self.checkpoint.lock().is_some()
+        self.checkpoint.borrow_mut().is_some()
     }
 
     /// Open a checkpoint — steps 0–2 of `crate::commit`: claim the previous
@@ -94,7 +94,7 @@ impl PageStore {
     // not both see "none open" and rotate twice.
     #[allow(clippy::significant_drop_tightening)]
     pub fn begin_checkpoint(&self) -> StorageResult<bool> {
-        let mut open = self.checkpoint.lock();
+        let mut open = self.checkpoint.borrow_mut();
         if open.is_some() {
             return Ok(false);
         }
@@ -105,19 +105,19 @@ impl PageStore {
         // there: it would sync the wrong file and delete a journal whose frame
         // is not durable. A fault before step 2 drops the record instead, which
         // only leaves a covered journal for recovery to clean.
-        let pending = self.retiring.lock().take();
+        let pending = self.retiring.borrow_mut().take();
 
         // 1. Rotate under the append lock — writers redirect immediately —
         // and, under the same lock, set aside what the old journal holds:
-        // the commit path queues under this lock too, so the owed set is
-        // exactly the old journal's ids.
+        // the commit path appends under this lock too, so the owed span is
+        // exactly the old journal's batches.
         let mut old = {
-            let mut journal = self.journal.lock();
+            let mut journal = self.journal.borrow_mut();
             let fresh = Journal::create(
                 &self.data_dir,
                 journal::next_ts(journal.ts()),
             )?;
-            self.pending.lock().rotate();
+            self.cache.borrow_mut().rotate();
             std::mem::replace(&mut *journal, fresh)
         };
 
@@ -146,19 +146,19 @@ impl PageStore {
         &self,
         budget: usize,
     ) -> StorageResult<Checkpointing> {
-        let mut open = self.checkpoint.lock();
+        let mut open = self.checkpoint.borrow_mut();
         let Some(old) = open.as_ref() else {
             return Ok(Checkpointing::Done);
         };
-        if self.pending.lock().owes() {
-            // A round drawn while anything is owed comes from the owed half.
+        if self.cache.borrow().owes() {
+            // A round drawn while anything is owed takes owed entries only.
             self.settle_step(budget)?;
             return Ok(Checkpointing::Settling);
         }
         let journal_ts = old.ts();
         let frame_barrier = self.close_checkpoint(journal_ts)?;
         if let Some(journal) = open.take() {
-            *self.retiring.lock() = Some(Retiring {
+            *self.retiring.borrow_mut() = Some(Retiring {
                 journal,
                 frame_barrier,
             });
@@ -176,11 +176,11 @@ impl PageStore {
         // Every run the frame will keep reachable — the next protected set.
         // The allocator guard spans the snapshot so no window can land between
         // reading this state and syncing it.
-        let mut alloc = self.alloc.lock();
-        let meta = self.meta.lock();
+        let mut alloc = self.alloc.borrow_mut();
+        let meta = self.meta.borrow_mut();
         let mut used = vec![Run::new(0, RESERVED_BLOCKS)];
         for slot in &self.types {
-            let dir_guard = slot.directory().lock();
+            let dir_guard = slot.directory().borrow_mut();
             if let Some(dir) = dir_guard.as_ref() {
                 used.extend(
                     dir.slots()
@@ -189,7 +189,7 @@ impl PageStore {
                         .map(|d| d.run()),
                 );
             }
-            let dict = slot.dictionary().lock();
+            let dict = slot.dictionary().borrow_mut();
             if dict.descriptor().is_allocated() {
                 used.push(dict.descriptor().run());
             }
@@ -209,7 +209,7 @@ impl PageStore {
         // marker, in ONE crc-framed append — written **without** a barrier.
         // The frame only points at state the sync above already made durable,
         // so the next `Batch` append's fsync carries it for free.
-        let mut journal = self.journal.lock();
+        let mut journal = self.journal.borrow_mut();
         journal.append_deferred(&JournalFrame::Commit(CommitFrame {
             journal_ts,
             head: meta.head(),
