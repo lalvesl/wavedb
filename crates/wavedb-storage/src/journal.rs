@@ -26,7 +26,7 @@
 //! ```
 //!
 //! Two frame kinds:
-//! - [`JournalFrame::Batch`] — one all-or-nothing batch of [`Write`]s (the
+//! - [`JournalFrame::Batch`] — one all-or-nothing batch of [`Write`](wavedb_core::Write)s (the
 //!   unit [`Store::apply`](wavedb_core::Store::apply) commits);
 //! - [`JournalFrame::Commit`] — "journal `<ts>` is fully settled into
 //!   `data.bin`": the retired journal's timestamp plus the head of the
@@ -40,67 +40,30 @@
 //!
 //! [`Commit`]: JournalFrame::Commit
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use wavedb_core::Write;
-use wavedb_core::wire::{WaveWire, from_wire_checked, to_wire_checked};
+use wavedb_core::wire::{from_wire_checked, to_wire_checked};
 
+use crate::barrier::Synced;
 use crate::error::{StorageError, StorageResult};
+pub use crate::journal_frame::{CommitFrame, JournalFrame};
 
 /// Per-frame prefix: `payload_len (u32)`.
 const FRAME_PREFIX: usize = 4;
 
-/// One journal frame — see the module docs for the two kinds.
-#[derive(Debug, Clone, PartialEq, Eq, WaveWire)]
-pub enum JournalFrame {
-    /// One atomic batch of writes.
-    Batch(Vec<Write>),
-    /// The retirement record of an older journal.
-    Commit(CommitFrame),
-}
-
-/// "Journal `journal_ts` is **done**" — its writes are settled into
-/// `data.bin` — plus where to find the addressing state that makes those
-/// pages findable.
-///
-/// The frame is a **pointer**, not the state: the descriptors themselves ride
-/// the settle windows that changed them
-/// ([RFC 0046](../../../rfcs/0046-directory-deltas-in-the-window.md)), and each
-/// chunk names the one before it, so this needs to name only the newest
-/// ([RFC 0048](../../../rfcs/0048-chained-addressing-log.md)).
-///
-/// **Fixed size.** It was a list of every chunk since the last snapshot, which
-/// meant appending the whole list again at every checkpoint to name state the
-/// previous frame already named — quadratic in the compaction interval, and so
-/// a ceiling on that interval. Now it is 16 bytes whether the log holds one
-/// chunk or a thousand.
-///
-/// Appended **after** the page window is synced: physical order is the
-/// contract, and a frame is only meaningful once the blocks it addresses
-/// are durable.
-#[derive(Debug, Clone, PartialEq, Eq, WaveWire)]
-pub struct CommitFrame {
-    /// Timestamp of the journal this commit retires — the DONE marker.
-    pub journal_ts: u64,
-    /// Raw descriptor of the newest edit chunk; the walk goes back from here
-    /// to the snapshot. `0` = no addressing log yet (a first-generation
-    /// database whose directories are still empty).
-    pub head: u64,
-}
-
 /// An append-only log of [`JournalFrame`]s in one timestamped file.
 #[derive(Debug)]
 pub struct Journal {
-    file: File,
+    /// Shared with the thread's barrier helper, if the store has one.
+    file: Arc<Synced>,
     path: PathBuf,
     ts: u64,
     /// Byte offset of the end of the last whole frame (next append lands here).
     end: u64,
-    /// Barriers taken on this file (see [`syncs`](Self::syncs)).
-    syncs: u64,
     /// When the last barrier was taken — the durability window is measured
     /// against this (RFC 0061). Monotonic, deliberately: a rewound wall clock
     /// would either stall the window forever or sync on every append.
@@ -143,11 +106,10 @@ impl Journal {
             .create_new(true)
             .open(&path)?;
         Ok(Self {
-            file,
+            file: Arc::new(Synced::new(file)),
             path,
             ts,
             end: 0,
-            syncs: 0,
             last_sync: Instant::now(),
         })
     }
@@ -161,11 +123,10 @@ impl Journal {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let end = file.metadata()?.len();
         Ok(Self {
-            file,
+            file: Arc::new(Synced::new(file)),
             path: path.to_path_buf(),
             ts,
             end,
-            syncs: 0,
             last_sync: Instant::now(),
         })
     }
@@ -213,15 +174,26 @@ impl Journal {
         self.write_frame(frame)
     }
 
-    /// `fsync` this journal, making every deferred append durable.
+    /// `fsync` this journal on the calling thread, making every deferred
+    /// append durable.
     ///
     /// # Errors
     /// [`StorageError::Io`] if the sync fails.
     pub fn sync(&mut self) -> StorageResult<()> {
-        self.file.sync_all()?;
-        self.syncs += 1;
+        self.file.sync()?;
         self.last_sync = Instant::now();
         Ok(())
+    }
+
+    /// The file as the barrier helper takes it ([`crate::barrier`]).
+    pub(crate) const fn synced(&self) -> &Arc<Synced> {
+        &self.file
+    }
+
+    /// A barrier was handed to the helper: the durability window restarts
+    /// from here, so a windowed store asks once per window, not per append.
+    pub(crate) fn flush_requested(&mut self) {
+        self.last_sync = Instant::now();
     }
 
     /// Elapsed time since the last barrier — what a durability window is
@@ -231,11 +203,19 @@ impl Journal {
         self.last_sync.elapsed()
     }
 
-    /// Barriers this journal has taken — the accounting behind "a checkpoint
-    /// costs one barrier", asserted in `page_store`'s tests.
+    /// Barriers completed on this journal, on any thread — the accounting
+    /// behind "a checkpoint costs one barrier", asserted in `page_store`'s
+    /// tests.
     #[must_use]
-    pub const fn barriers(&self) -> u64 {
-        self.syncs
+    pub fn barriers(&self) -> u64 {
+        self.file.completed()
+    }
+
+    /// Barriers begun on this journal. A frame appended now is durable once
+    /// [`barriers`](Self::barriers) exceeds this ([`crate::barrier`]).
+    #[must_use]
+    pub fn barrier_floor(&self) -> u64 {
+        self.file.started()
     }
 
     /// Write one framed payload at the tail, no barrier.
@@ -245,7 +225,8 @@ impl Journal {
         buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         buf.extend_from_slice(&payload);
 
-        self.file.write_all_at(&buf, self.end)?;
+        self.file.check()?;
+        self.file.file().write_all_at(&buf, self.end)?;
         self.end += buf.len() as u64;
         Ok(())
     }
@@ -263,7 +244,7 @@ impl Journal {
     /// its first bad frame).
     pub fn replay(&mut self) -> StorageResult<Vec<JournalFrame>> {
         let mut buf = vec![0u8; self.end as usize];
-        self.file.read_exact_at(&mut buf, 0)?;
+        self.file.file().read_exact_at(&mut buf, 0)?;
 
         let mut frames = Vec::new();
         let mut pos = 0usize;
@@ -289,8 +270,8 @@ impl Journal {
         }
 
         if (good_end as u64) < self.end {
-            self.file.set_len(good_end as u64)?;
-            self.file.sync_all()?;
+            self.file.file().set_len(good_end as u64)?;
+            self.file.file().sync_all()?;
             self.end = good_end as u64;
         }
         Ok(frames)
