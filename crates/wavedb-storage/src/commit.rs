@@ -180,7 +180,7 @@ fn load_commit(
                 .filter(|d| d.is_allocated())
                 .map(|d| d.run()),
         );
-        *slot.directory().lock() =
+        *slot.directory().borrow_mut() =
             Some(Directory::from_slots(descriptors, file.seed()));
     }
     for (hash, desc_raw) in dicts {
@@ -191,7 +191,7 @@ fn load_commit(
         }
         used.push(desc.run());
         let dict = Dictionary::from_bytes(&file.read_run(desc.run())?)?;
-        slot.dictionary().lock().load(dict, desc);
+        slot.dictionary().borrow_mut().load(dict, desc);
     }
     let mut alloc = BlockAllocator::from_layout(file.len_blocks()?, &used);
     alloc.set_protected(&used);
