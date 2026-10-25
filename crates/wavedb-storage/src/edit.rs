@@ -198,7 +198,7 @@ fn planned_edit(
     let dict = if work.dict.is_some() {
         Some(dicts.get(&plan).copied().map_or(0, BlockDescriptor::raw))
     } else if full {
-        Some(slot.dictionary().lock().descriptor().raw())
+        Some(slot.dictionary().borrow_mut().descriptor().raw())
     } else {
         None
     };
@@ -214,7 +214,7 @@ fn planned_edit(
 fn resident_edit(slot: &TypeSlot) -> Option<SlotEdit> {
     // The directory guard is released before the dictionary's is taken: this
     // is a read of settled state, so it needs no consistent pair.
-    let guard = slot.directory().lock();
+    let guard = slot.directory().borrow_mut();
     let dir = guard.as_ref()?;
     let buckets = dir.len() as u32;
     let changed = every_bucket(dir.slots());
@@ -223,7 +223,7 @@ fn resident_edit(slot: &TypeSlot) -> Option<SlotEdit> {
         struct_hash: slot.struct_hash(),
         buckets,
         changed,
-        dict: Some(slot.dictionary().lock().descriptor().raw()),
+        dict: Some(slot.dictionary().borrow_mut().descriptor().raw()),
     })
 }
 
