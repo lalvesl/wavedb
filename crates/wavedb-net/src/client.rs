@@ -1,4 +1,4 @@
-//! The client-side transport: build a [`Request`], POST it, read the framed
+//! The client-side transport: build a [`Request`](crate::frame::Request), POST it, read the framed
 //! response.
 //!
 //! Compiles for native and wasm32 alike. Every exchange routes through the
