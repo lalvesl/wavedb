@@ -5,8 +5,7 @@
   the wire; server bodies at the edge; the shard layout; the stepped
   checkpoint; workers owning their shards, the disk actor gone; ingress
   per thread, the accept thread gone; leases; the fsync helper; parallel
-  recovery); see
-  "Progress".
+  recovery; one executor per thread, decided); see "Progress".
 - **Builds on:** [0064](0064-pivot-owned-concurrency-PLANNED.md) (the owner
   as the unit of concurrency, and `shard_of`),
   [0066](0066-embassy-executor-and-async-io.md) (the executor, the reactor
@@ -16,8 +15,8 @@
   [0041](0041-single-barrier-checkpoint.md) (the checkpoint that stays atomic
   per shard), [0018](0018-storage-engine.md) (the per-type dictionaries)
 - **Amends:** 0064's single disk actor (one engine per **shard** instead);
-  0018's one-`PageStore`-per-process rule (one per shard); 0066 step 4
-  (three executors per thread, not one). The thread-local owner locks this
+  0018's one-`PageStore`-per-process rule (one per shard). 0066 step 4's
+  one executor per thread is kept (§4). The thread-local owner locks this
   RFC asked for were delivered by 0066 step 5; this RFC adds the leases.
 - **Related:** [0059](0059-object-storage-capacity-tier-PLANNED.md) (object
   storage, which a per-shard prefix makes a per-shard decision)
@@ -39,9 +38,10 @@ for the shards it owns.
   own a contiguous range of shards. Restarting with more cores reassigns the
   ranges and touches nothing else, and a future cluster assigns ranges to
   nodes with the same function.
-- **Inside a thread, three priorities.** Data operations first, then the
-  network edge and business logic, then background maintenance — each its own
-  Embassy executor, polled in that order by the thread's own loop.
+- **Inside a thread, one executor.** Data operations, the network edge and
+  business logic, and background maintenance share it. The edge cannot
+  outrun the data — it reaches it through a bounded queue — and maintenance
+  is paced by the 0064 valve; nothing preempts.
 - **A request on the wrong thread hops.** The kernel hands out connections,
   not requests, so the connection's thread routes each operation to its
   owner's thread and writes the answer back. The connection never moves.
@@ -73,8 +73,7 @@ Two observations close the gap:
 Redis keeps one thread on the data and lets everything else prepare work for
 it, which is what makes it predictable. Dragonfly keeps that property per
 thread and runs one such thread per core. Embassy fits the per-thread part:
-it schedules tasks deterministically on one thread, and it already expresses
-priority the way this RFC needs — one executor per priority level.
+it schedules tasks deterministically on one thread, from static pools.
 
 ## Design
 
@@ -177,31 +176,45 @@ type with few records occupies only the shards that hold them.
 - A future cluster assigns ranges to nodes with the same function. That needs
   the hop in §6 to cross a network, which is out of scope.
 
-### 4. Inside a thread: three executors, one loop
+### 4. Inside a thread: one executor, priority by structure
 
-```text
-loop {
-    data.poll();                  // owners' operations: never wait behind the rest
-    if data has woken work { continue }
-    edge.poll();                  // sockets, frames, coordination, business logic
-    if data or edge woke { continue }
-    bg.poll();                    // one round of maintenance, which yields per slice
-    if shutdown { break }
-    park();                       // reactor or a cross-thread wake unparks
-}
-```
+A thread runs **one** Embassy executor (0066's carrier, unchanged). Its tasks
+fall into three roles:
 
-| executor | runs | must hold |
+| role | runs | must hold |
 |---|---|---|
 | **DATA** | operations on this thread's owners (`Collection`, `BpTree`, record cache), journal appends, publishing mutations | short and bounded; synchronous engine calls |
-| **EDGE** | listener and connections, HTTP/WS parsing and encoding, coordination (§6), `#[server]` bodies and application tasks | may await freely; heavy CPU goes through an explicit offload |
-| **BG** | settle, page compression, checkpoint, defragment, eviction | yields every K pages (0063 part 3) |
+| **EDGE** | listener and connections, HTTP/WS parsing and encoding, coordination (§6), `#[server]` bodies and application tasks | may await freely; the CPU it spends is the thread's |
+| **BG** | settle, page compression, checkpoint, defragment, eviction | yields every bounded step (0063 part 3) |
 
-This is Embassy's own priority model: on a microcontroller each priority is a
-separate executor driven by an interrupt level; here it is a separate
-`raw::Executor` driven by the loop. The journal-length valve RFC 0064 built
-(`priority.rs`) decides when BG must be polled ahead of EDGE so maintenance
-cannot starve into an out-of-memory.
+The roles are not separate executors, and the executor knows nothing of
+them. DATA's precedence comes from the shape of the pipeline, not from the
+scheduler:
+
+- **EDGE cannot outrun DATA.** EDGE reaches DATA only through the worker's
+  job queue, which is bounded (`JOB_DEPTH`). A connection can get at most a
+  queue's worth of jobs ahead of the worker; then its `send` waits, it stops
+  reading its socket, and TCP holds the client back. EDGE admits work at the
+  rate DATA drains it.
+- **EDGE is the pipeline's two ends, not a competitor.** It decodes the
+  request and writes the answer. Holding it back to favour DATA would speed
+  nothing up: an answer DATA has produced still needs EDGE to leave.
+- **BG regulates itself.** The journal-length valve RFC 0064 built
+  (`priority.rs`) decides when a maintenance step goes next, so maintenance
+  neither delays jobs below the valve's band nor starves into an
+  out-of-memory above it.
+
+**Preemption is not a goal.** No option here preempts: Embassy is
+cooperative, so a polled task runs to its next `.await` whichever executor
+holds it. The engine's own steps are bounded (one settle round, one
+checkpoint close). A `#[server]` body that spends a long time on the CPU
+spends it on its worker — the developer's choice, and the developer's to
+move elsewhere.
+
+What this gives up, unmeasured: under saturation a ready job can wait one
+executor round behind other ready tasks. If step 6 shows it in the tail
+latency, per-task priority on the same executor is the next step (see
+"The executor decision").
 
 **Helper threads** carry no executor and own no shard. Each does one blocking
 call and wakes the requester through a channel:
@@ -298,7 +311,7 @@ the meantime.
 | one disk actor owns the one `PageStore` | one engine per shard, owned by the shard's thread |
 | one open store per process (`EngineClaim`, `StructStorage` statics) | statics keep compile-time constants; per-type runtime state lives in each shard's engine |
 | one journal, one `data.bin` | 64 of each, under `shards/xx/` |
-| shard workers + disk actor + serve loop on a `LocalSet` | `T` identical threads, three executors each |
+| shard workers + disk actor + serve loop on a `LocalSet` | `T` identical threads, one executor each |
 | `OwnerLocks`: one table per thread (0066 step 5), local owners only | the same table, plus leases for owners on other threads |
 | `shard_of`: SplitMix64 over packed keys, `% shards`, a thread choice | `seahash(owner bytes) % P`, a frozen on-disk placement |
 
@@ -313,7 +326,7 @@ the meantime.
    routing by SeaHash and remainder, with golden vectors.
 3. **Interruptible background work** (0063 part 3), so BG can share a thread
    with DATA.
-4. **The thread loop** with three executors — 0066 step 4, reshaped.
+4. **The thread's executor**: one per thread, priority by structure (§4).
 5. **Ingress per thread** (`SO_REUSEPORT`), coordination by hop, leases.
 6. **Measure** at `small`, against the pre-0066 baseline:
    - the `wavedb/multi` to `wavedb/single` ratio, which must not fall;
@@ -450,17 +463,16 @@ database's stores and moves each worker's contiguous range onto its thread
 wrapped in `NotifyStore` for the live feed. Nothing crosses a thread but the
 `Job` and its answer.
 
-- **BG beside DATA, one executor.** §4 draws three executors per thread.
-  Polling several Embassy executors on one thread needs
-  `raw::Executor::poll`, which is `unsafe`, and the project admits `unsafe`
-  only by explicit exception — so this step keeps one executor and gets the
-  priority cooperatively: a BG task per worker (`shard::background`) takes
-  one bounded step (`Owned::step`: a settle round, a checkpoint round or a
-  checkpoint's close) only when the 0064 valve (`Priority`) puts maintenance
-  next — immediately when no job is executing or queued, and under load once
+- **BG beside DATA, one executor.** §4 then drew three executors per
+  thread; polling several on one thread needs `raw::Executor::poll`, which
+  is `unsafe`, so this step kept one executor and got the priority
+  cooperatively (later made the design, "The executor decision"): a BG
+  task per worker (`shard::background`) takes one bounded step
+  (`Owned::step`: a settle round, a checkpoint round or a checkpoint's
+  close) only when the 0064 valve (`Priority`) puts maintenance next —
+  immediately when no job is executing or queued, and under load once
   the journal is in the valve's band — and yields after every step. EDGE is
   not on worker threads until step 5, so two classes are all a worker has.
-  The three-executor loop stays the target if `unsafe` is granted there.
 - **Policy per worker.** Every `UPKEEP_PERIOD` (200 ms), whatever the load,
   each store gets the node's policy at its per-shard share: open a
   checkpoint past `checkpoint_after_bytes / P` of journal, evict to
@@ -622,6 +634,39 @@ committed it.
   shard order, each with its own journal replayed and nobody else's; a shard
   that cannot open fails the database and releases the others).
 
+### The executor decision (2026-10-09)
+
+§4 used to draw three Embassy executors per thread — DATA, EDGE, BG —
+polled in that order by a loop of the thread's own. With EDGE on the
+workers since step 5a, the choice came due, and the thread keeps **one**
+executor (§4 as it now reads). Nothing in the code changes: what step 4
+built is the design.
+
+What was weighed:
+
+- **Three executors per thread.** The priority is real, per batch of ready
+  tasks. It needs `raw::Executor::poll` (`unsafe`), and its pender: the
+  `std` platform's `__pender` reads its context as its own private
+  signaller, so raw executors of our own mean dropping `executor-thread` and
+  exporting a pender of ours (`#[unsafe(export_name)]`) — a thread executor
+  maintained by this project over an Embassy internal. Strict
+  DATA > EDGE > BG would also starve BG under saturation, so the 0064 valve
+  is still needed. **Not taken.**
+- **Per-task priority on one executor.** Embassy 0.10's `scheduler-priority`
+  feature orders the run queue by a per-task `u8` set on the `SpawnToken`
+  before spawning — no `unsafe`, priority per task rather than per batch.
+  The cost is an insertion sort of each round's woken tasks (`O(n·m)`),
+  unmeasured. **Kept in reserve:** the next step if step 6 shows a ready job
+  waiting behind other ready tasks in the tail latency.
+- **An EDGE class in the valve**, consulted by connections before admitting
+  a request. Priority only where code remembers to ask, and an extra yield
+  per check. **Not taken.**
+- **One executor, priority by structure.** DATA cannot be outrun — EDGE
+  reaches it through the bounded job queue, and backpressure reaches the
+  socket — and BG has the valve. Preemption is not a goal: no option above
+  preempts, the engine's steps are bounded, and a `#[server]` body's CPU is
+  its developer's choice. **Taken.**
+
 ## Alternatives
 
 - **One journal per thread.** Fewer `fsync`s per window, but a shard stops
@@ -634,12 +679,13 @@ committed it.
   64, at the cost of the only cross-shard dependency and of dictionaries that
   no longer follow from each shard's own replay. Rejected; the per-shard cost
   is at most 64 KiB per type.
-- **Keep one disk actor.** The current slice. It serialises all page I/O on
+- **Keep one disk actor.** The slice before step 4. It serialises all page I/O on
   one thread, and its reads wait behind checkpoints (0064's own note).
 - **Separate edge or application threads** (Redis 6+ I/O threads). Kept as a
   placement option rather than the default: on a 4-core machine dedicated
-  edge threads take cores from the shards. Executors are per role, so moving
-  EDGE onto threads of its own is configuration, not a rewrite, if
+  edge threads take cores from the shards, and every operation pays a
+  cross-thread hop that step 5a removed. EDGE tasks are spawned apart from
+  DATA's, so moving them onto threads of their own stays possible if
   measurement asks for it.
 - **Co-locating a child Pivot with its holder** by choosing the child's id
   until it hashes to the holder's shard (about 64 tries on average). That

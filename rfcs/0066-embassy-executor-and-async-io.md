@@ -240,10 +240,9 @@ working. tokio and the new stack coexist until step 5.
 4. **Executor spike, then the switch** — prove `TaskPool` inference on
    `serve_connection<E, S>`; then `platform::task`, the serve loop, the shard
    workers and the disk actor move to `raw::Executor`; `block_on` replaces
-   the test macros. RFC 0067 reshapes the carrier loop to poll **three**
-   executors per thread (data, edge, background) in priority order; this
-   step can build the single-executor loop first, as long as nothing assumes
-   one executor per thread.
+   the test macros. RFC 0067 §4 once drew **three** executors per thread
+   (data, edge, background); it kept this step's single executor instead
+   (0067, "The executor decision").
 5. **tokio removed** from every manifest; `cargo tree -i tokio` empty for the
    workspace and the bench crate (which dropped it in step 2).
 
