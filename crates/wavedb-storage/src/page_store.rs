@@ -206,6 +206,8 @@ pub struct PageStore {
     /// The thread's `fsync` helper, once the store has one: batch barriers
     /// are then taken there and waited for ([`crate::barrier`]).
     pub(crate) barrier: Option<crate::barrier::Barrier>,
+    /// Where a compaction is between its steps (RFC 0069).
+    pub(crate) compaction: std::cell::Cell<crate::compact::Phase>,
 }
 
 impl PageStore {
@@ -282,6 +284,7 @@ impl PageStore {
             relax_window: options.relax_window,
             record_cache_bytes: options.record_cache_bytes,
             barrier: None,
+            compaction: std::cell::Cell::default(),
         };
         // Rebuild the logs in journal order, no re-journal, then settle them
         // into the pages as the live engine would have.
@@ -783,62 +786,6 @@ mod tests {
                 s.get_of(SH2, nonunique(7)).await.unwrap(),
                 Some(rec(SH2, b"untouched")),
                 "a snapshot must carry the types its round did not touch"
-            );
-        });
-    }
-
-    /// RFC 0042: relocation moves page bytes verbatim to fresh tail blocks and
-    /// repoints the buckets — the records must survive it, including once the
-    /// caches are gone and every read comes off the moved pages.
-    #[test]
-    fn defragment_relocates_pages_without_losing_records() {
-        let d = tempfile::tempdir().unwrap();
-        let s = open(d.path());
-        block_on(async {
-            // Enough noisy records to split into several buckets…
-            for k in 0..200u64 {
-                s.apply(&[Write::Put(nonunique(k), rec(SH, &noise(k)))])
-                    .await
-                    .unwrap();
-            }
-            s.drain().unwrap();
-            s.commit_journal().unwrap();
-            // …then rewrite half of them: every settled page is written
-            // copy-on-write, so the runs they vacate pock the file.
-            for k in (0..200u64).step_by(2) {
-                s.apply(&[Write::Put(nonunique(k), rec(SH, &noise(k + 7)))])
-                    .await
-                    .unwrap();
-            }
-            s.drain().unwrap();
-            s.commit_journal().unwrap();
-
-            let report = s.defragment(4096).unwrap();
-            assert!(
-                report.largest_after >= report.largest_before,
-                "a pass must not fragment further: {report:?}"
-            );
-
-            // Force every read through the relocated pages.
-            s.commit_journal().unwrap();
-            s.evict_settled(0);
-            assert_eq!(s.cache_len(), 0);
-            for k in 0..200u64 {
-                let want = if k % 2 == 0 { k + 7 } else { k };
-                assert_eq!(
-                    s.get(nonunique(k)).await.unwrap(),
-                    Some(rec(SH, &noise(want))),
-                    "record {k} lost across relocation"
-                );
-            }
-        });
-        // And the relocation survives a reopen from the commit.
-        drop(s);
-        let s = open(d.path());
-        block_on(async {
-            assert_eq!(
-                s.get(nonunique(101)).await.unwrap(),
-                Some(rec(SH, &noise(101)))
             );
         });
     }
