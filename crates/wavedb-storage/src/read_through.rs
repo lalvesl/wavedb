@@ -15,9 +15,9 @@ use crate::struct_storage::TypeSlot;
 
 impl PageStore {
     /// Read `id` from `slot`'s settled pages — the fallback when the cache
-    /// does not hold it. `None` when the type has never settled anything,
-    /// the page does not hold the id, or an unsettled remove tombstones it
-    /// (the page's bytes are stale until the settle lands).
+    /// does not hold it. `None` when the type has never settled anything or
+    /// the page does not hold the id. A remove not yet settled never reaches
+    /// here: its tombstone is in the cache, which answers first.
     // The directory guard must span the page read — `dir` borrows from it.
     #[allow(clippy::significant_drop_tightening)]
     pub(crate) fn read_from_pages(
@@ -25,14 +25,11 @@ impl PageStore {
         slot: &TypeSlot,
         id: Id,
     ) -> StorageResult<Option<Vec<u8>>> {
-        if slot.is_removed(id) {
-            return Ok(None);
-        }
-        let dir_guard = slot.directory().lock();
+        let dir_guard = slot.directory().borrow_mut();
         let Some(dir) = dir_guard.as_ref() else {
             return Ok(None);
         };
-        let dict = slot.dictionary().lock();
+        let dict = slot.dictionary().borrow_mut();
         dir.get_record(slot.struct_hash(), &self.file, id, &dict)
     }
 }
