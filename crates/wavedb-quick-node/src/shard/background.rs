@@ -12,7 +12,7 @@
 //! close.
 //!
 //! On a timer it applies the node's policy to each store in turn
-//! ([`Owned::upkeep`]): open a checkpoint, evict, defragment — each bounded,
+//! ([`Owned::upkeep`]): open a checkpoint, evict, compact — each bounded,
 //! with a yield between stores.
 //!
 //! [RFC 0067]: ../../../../rfcs/0067-thread-per-core-shards-WIP.md
