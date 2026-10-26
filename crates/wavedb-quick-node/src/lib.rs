@@ -58,7 +58,7 @@ pub use error::{Result, ServerError};
 /// Implemented for a schema's `ServerRegistry` by `expose_server!` — the
 /// node's tasks, made concrete for that registry (RFC 0066).
 pub use __rt::NodeTasks;
-pub use upkeep::Maintenance;
+pub use upkeep::{Compaction, Maintenance, UtcTime};
 
 /// A node, configured but not yet bound.
 ///
