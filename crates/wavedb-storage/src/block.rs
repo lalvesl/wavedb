@@ -14,23 +14,21 @@ use wavedb_core::wire::{Cursor, Result, WaveWire};
 /// Size of one block in bytes (the allocation unit).
 pub const BLOCK_SIZE: usize = 4096;
 
-const START_BITS: u32 = 40;
+const START_BITS: u32 = 43;
 const COUNT_BITS: u32 = 20;
-const OCC_BITS: u32 = 4;
+/// Bit 0 is reserved: RFC 0070's "not yet uploaded" flag. Always zero today.
+const FLAG_BITS: u32 = 1;
 
-const START_SHIFT: u32 = COUNT_BITS + OCC_BITS; // 24
-const COUNT_SHIFT: u32 = OCC_BITS; // 4
+const START_SHIFT: u32 = COUNT_BITS + FLAG_BITS; // 21
+const COUNT_SHIFT: u32 = FLAG_BITS; // 1
 
 const START_MASK: u64 = (1 << START_BITS) - 1;
 const COUNT_MASK: u64 = (1 << COUNT_BITS) - 1;
-const OCC_MASK: u64 = (1 << OCC_BITS) - 1;
 
-/// Largest representable start block (`2^40 − 1`).
+/// Largest representable start block (`2^43 − 1`, 32 PiB of blocks).
 pub const MAX_START: u64 = START_MASK;
-/// Largest representable block count in one run/page (`2^20 − 1`).
+/// Largest representable block count in one run/page (`2^20 − 1`, 4 GiB).
 pub const MAX_COUNT: u64 = COUNT_MASK;
-/// Full occupation gauge value (16/16).
-pub const MAX_OCCUPATION: u8 = OCC_MASK as u8;
 
 /// A contiguous run of blocks: a start block and a length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -67,11 +65,10 @@ impl Run {
     }
 }
 
-/// A 64-bit page/dictionary descriptor: `start (u40) · count (u20) · occupation
-/// (u4)`. One format for both pages and dictionary runs.
+/// A 64-bit page/dictionary descriptor: `start (u43) · count (u20) · flag (u1)`.
 ///
-/// `occupation` is a coarse 1/16th fill gauge the directory can read **without
-/// touching the page** — enough to decide "grow / split" from the directory alone.
+/// One format for both pages and dictionary runs. The flag bit is reserved for
+/// the object-store backend (RFC 0070) and is zero today.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct BlockDescriptor(u64);
 
@@ -84,31 +81,19 @@ impl BlockDescriptor {
     /// # Panics
     /// Panics (in debug) if any field exceeds its bit width.
     #[must_use]
-    pub fn new(start: u64, count: u64, occupation: u8) -> Self {
-        debug_assert!(start <= MAX_START, "start {start} exceeds u40");
+    pub fn new(start: u64, count: u64) -> Self {
+        debug_assert!(start <= MAX_START, "start {start} exceeds u43");
         debug_assert!(count <= MAX_COUNT, "count {count} exceeds u20");
-        debug_assert!(
-            u64::from(occupation) <= OCC_MASK,
-            "occupation {occupation} exceeds u4"
-        );
         Self(
             ((start & START_MASK) << START_SHIFT)
-                | ((count & COUNT_MASK) << COUNT_SHIFT)
-                | (u64::from(occupation) & OCC_MASK),
+                | ((count & COUNT_MASK) << COUNT_SHIFT),
         )
     }
 
-    /// Pack a descriptor from a [`Run`] and an occupation gauge.
+    /// Pack a descriptor addressing `run`.
     #[must_use]
-    pub fn from_run(run: Run, occupation: u8) -> Self {
-        Self::new(run.start, run.count, occupation)
-    }
-
-    /// Pack a descriptor from a [`Run`] and the bytes actually used of it —
-    /// the occupation gauge computed via [`occupation_of`].
-    #[must_use]
-    pub fn from_run_used(run: Run, used_bytes: u64) -> Self {
-        Self::from_run(run, occupation_of(used_bytes, run.byte_len()))
+    pub fn from_run(run: Run) -> Self {
+        Self::new(run.start, run.count)
     }
 
     /// Wrap a raw `u64` (as read from a directory `Vec<u64>`).
@@ -135,12 +120,6 @@ impl BlockDescriptor {
         (self.0 >> COUNT_SHIFT) & COUNT_MASK
     }
 
-    /// The 1/16th occupation gauge (0 = empty, 15 = full).
-    #[must_use]
-    pub const fn occupation(self) -> u8 {
-        (self.0 & OCC_MASK) as u8
-    }
-
     /// `true` if this slot points at a real run (`count > 0`).
     #[must_use]
     pub const fn is_allocated(self) -> bool {
@@ -152,21 +131,6 @@ impl BlockDescriptor {
     pub const fn run(self) -> Run {
         Run::new(self.start(), self.count())
     }
-
-    /// A copy with a new occupation gauge (start/count unchanged).
-    #[must_use]
-    pub fn with_occupation(self, occupation: u8) -> Self {
-        Self::new(self.start(), self.count(), occupation)
-    }
-}
-
-/// Coarse 1/16th fill gauge: how full `used` bytes leave a `capacity`-byte run.
-#[must_use]
-pub fn occupation_of(used: u64, capacity: u64) -> u8 {
-    if capacity == 0 {
-        return 0;
-    }
-    (used.saturating_mul(16) / capacity).min(15) as u8
 }
 
 impl core::fmt::Debug for BlockDescriptor {
@@ -174,7 +138,6 @@ impl core::fmt::Debug for BlockDescriptor {
         f.debug_struct("BlockDescriptor")
             .field("start", &self.start())
             .field("count", &self.count())
-            .field("occupation", &self.occupation())
             .finish()
     }
 }
@@ -200,34 +163,28 @@ mod tests {
 
     #[test]
     fn descriptor_packs_and_unpacks() {
-        let d = BlockDescriptor::new(0x12_3456_789A, 0xABCDE, 0xF);
-        assert_eq!(d.start(), 0x12_3456_789A);
-        assert_eq!(d.count(), 0xABCDE);
-        assert_eq!(d.occupation(), 0xF);
+        let d = BlockDescriptor::new(0x0512_3456_789A, 0xA_BCDE);
+        assert_eq!(d.start(), 0x0512_3456_789A);
+        assert_eq!(d.count(), 0xA_BCDE);
+        assert_eq!(d.raw() & 1, 0, "the flag bit stays clear");
         assert!(d.is_allocated());
-        assert_eq!(d.run(), Run::new(0x12_3456_789A, 0xABCDE));
+        assert_eq!(d.run(), Run::new(0x0512_3456_789A, 0xA_BCDE));
     }
 
     #[test]
     fn descriptor_boundaries() {
-        let d = BlockDescriptor::new(MAX_START, MAX_COUNT, 15);
+        let d = BlockDescriptor::new(MAX_START, MAX_COUNT);
         assert_eq!(d.start(), MAX_START);
         assert_eq!(d.count(), MAX_COUNT);
-        assert_eq!(d.occupation(), 15);
+        assert_eq!(MAX_COUNT, (1 << 20) - 1);
+        assert_eq!(MAX_START, (1 << 43) - 1);
         assert!(!BlockDescriptor::EMPTY.is_allocated());
         assert_eq!(BlockDescriptor::EMPTY.count(), 0);
     }
 
     #[test]
-    fn descriptor_with_occupation_preserves_run() {
-        let d = BlockDescriptor::new(100, 8, 3).with_occupation(12);
-        assert_eq!(d.run(), Run::new(100, 8));
-        assert_eq!(d.occupation(), 12);
-    }
-
-    #[test]
     fn descriptor_wire_roundtrip() {
-        let d = BlockDescriptor::new(777, 9, 5);
+        let d = BlockDescriptor::new(777, 9);
         let bytes = to_wire(&d);
         assert_eq!(bytes.len(), 8);
         assert_eq!(from_wire::<BlockDescriptor>(&bytes).unwrap(), d);
