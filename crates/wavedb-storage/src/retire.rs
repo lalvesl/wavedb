@@ -109,8 +109,8 @@ impl PageStore {
         // The pending frame lives in the current journal — `commit_journal`
         // claims the record before it rotates, so there is no state in which a
         // retirement is observable while its carrier is not `self.journal`.
-        self.journal.lock().sync()?;
-        let taken = self.retiring.lock().take();
+        self.journal.borrow_mut().sync()?;
+        let taken = self.retiring.borrow_mut().take();
         let Some(retiring) = taken else {
             return Ok(()); // someone else got there first
         };
@@ -121,7 +121,7 @@ impl PageStore {
     /// the steady state between checkpoints, not an anomaly.
     #[must_use]
     pub fn is_retiring(&self) -> bool {
-        self.retiring.lock().is_some()
+        self.retiring.borrow_mut().is_some()
     }
 
     /// Drop the older generation's protection and the retired file. The frame's
@@ -131,7 +131,7 @@ impl PageStore {
     /// Takes the record by value: `retiring` is never held across another
     /// lock, which is what keeps the lock graph acyclic (see `page_store`).
     fn dispose(&self, retiring: Retiring) -> StorageResult<()> {
-        self.alloc.lock().release_previous();
+        self.alloc.borrow_mut().release_previous();
         retiring.journal.delete()
     }
 }
