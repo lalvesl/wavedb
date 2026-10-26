@@ -11,9 +11,9 @@
 
 use std::cell::Cell;
 
-use wavedb_storage::{PageStore, StorageError, StorageResult};
+use wavedb_storage::{Compacting, PageStore, StorageError, StorageResult};
 
-use crate::upkeep::Maintenance;
+use crate::upkeep::{Armed, Compaction, Maintenance};
 
 /// Ids one settle or checkpoint round may take before the worker looks at
 /// its jobs again.
@@ -29,6 +29,8 @@ pub struct Owned {
     /// The first data shard in the range.
     first: usize,
     stores: Vec<PageStore>,
+    /// Each store's compaction triggers, by index.
+    armed: Vec<Cell<Armed>>,
     /// Jobs executing right now — the "is DATA busy?" half of the
     /// maintenance valve.
     inflight: Cell<usize>,
@@ -46,9 +48,10 @@ impl Drop for Busy<'_> {
 impl Owned {
     /// The stores of data shards `first ..` in order.
     #[must_use]
-    pub const fn new(first: usize, stores: Vec<PageStore>) -> Self {
+    pub fn new(first: usize, stores: Vec<PageStore>) -> Self {
         Self {
             first,
+            armed: stores.iter().map(|_| Cell::default()).collect(),
             stores,
             inflight: Cell::new(0),
         }
@@ -122,8 +125,9 @@ impl Owned {
 
     /// The policy's decisions for store `i`, each bounded: open a checkpoint
     /// past this range's share of the journal threshold, evict to its share
-    /// of the cache budget, defragment past the extent threshold. The steps
-    /// the checkpoint then owes are [`step`](Self::step)'s.
+    /// of the cache budget, and compact when a trigger says so (RFC 0069) —
+    /// one pass per tick until it ends. The steps a checkpoint then owes,
+    /// the compaction's sealing ones included, are [`step`](Self::step)'s.
     pub fn upkeep(&self, i: usize, policy: &Maintenance, partitions: usize) {
         let Some(store) = self.stores.get(i) else {
             return;
@@ -138,11 +142,34 @@ impl Owned {
         }
         let share = policy.cache_budget_bytes / partitions;
         store.evict_settled(share);
-        if store.largest_free_extent() < policy.defrag_below_blocks
-            && let Err(e) = store.defragment(policy.defrag_budget_blocks)
+        self.compact(i, store, &policy.compaction, partitions);
+    }
+
+    /// Start or continue store `i`'s compaction, if its triggers say so.
+    fn compact(
+        &self,
+        i: usize,
+        store: &PageStore,
+        policy: &Compaction,
+        partitions: usize,
+    ) {
+        let Some(cell) = self.armed.get(i) else {
+            return;
+        };
+        let mut armed = cell.get();
+        let now = wavedb_platform::time::unix_secs();
+        if store.is_compacting()
+            || policy.due(&mut armed, store.space(), partitions, now)
         {
-            eprintln!("worker: defragment failed: {e}");
+            match store.compact_step(policy.budget_blocks) {
+                Ok(Compacting::Done { .. }) => {
+                    Compaction::finished(&mut armed, store.space());
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("worker: compaction failed: {e}"),
+            }
         }
+        cell.set(armed);
     }
 
     /// How many stores the range holds.
@@ -190,7 +217,7 @@ mod tests {
     use wavedb_storage::{PageStore, StoreOptions, StructStorage, open_shards};
 
     use super::Owned;
-    use crate::upkeep::Maintenance;
+    use crate::upkeep::{Compaction, Maintenance};
 
     const SH: u64 = 0x0067_0004_5EED_0001;
     static SLOT: StructStorage = StructStorage::new(SH);
@@ -199,10 +226,14 @@ mod tests {
         open_shards(dir, &[&SLOT], StoreOptions::default(), shards).unwrap()
     }
 
+    fn id(k: u64) -> Id {
+        Id::new(k, U48::from(1u32), false, 1)
+    }
+
     fn put(store: &PageStore, keys: std::ops::Range<u64>) {
         block_on(async {
             for k in keys {
-                let id = Id::new(k, U48::from(1u32), false, 1);
+                let id = id(k);
                 let mut bytes = SH.to_le_bytes().to_vec();
                 bytes.extend_from_slice(&k.to_le_bytes());
                 store.apply(&[Write::Put(id, bytes)]).await.unwrap();
@@ -247,6 +278,61 @@ mod tests {
             owned.step(&mut cursor);
         }
         assert!(!owned.store(0).unwrap().is_checkpointing());
+    }
+
+    /// A met trigger starts a compaction, and the ticks carry it to its end:
+    /// a pass per upkeep, the sealing checkpoints closed by the steps.
+    #[test]
+    fn a_met_trigger_compacts_the_store_to_its_end() {
+        let d = tempfile::tempdir().unwrap();
+        let owned = Owned::new(0, open(d.path(), 1));
+        let store = owned.store(0).unwrap();
+        block_on(async {
+            for k in 0..600u64 {
+                let mut bytes = SH.to_le_bytes().to_vec();
+                let mut x = k ^ 0x9E37_79B9_7F4A_7C15;
+                for _ in 0..128 {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    bytes.extend_from_slice(&x.to_le_bytes());
+                }
+                store.apply(&[Write::Put(id(k), bytes)]).await.unwrap();
+            }
+            store.commit_journal().unwrap();
+            for k in (0..600u64).filter(|k| k % 3 != 0) {
+                store.apply(&[Write::Remove(SH, id(k))]).await.unwrap();
+            }
+        });
+        store.commit_journal().unwrap();
+        store.commit_journal().unwrap();
+        let before = store.space().file_blocks;
+        let policy = Maintenance {
+            checkpoint_after_bytes: u64::MAX,
+            compaction: Compaction {
+                daily_at: None,
+                above_bytes: None,
+                above_free_percent: Some(20),
+                budget_blocks: 8,
+            },
+            ..Maintenance::default()
+        };
+        let mut cursor = 0;
+        owned.upkeep(0, &policy, 1);
+        assert!(store.is_compacting(), "the free share is past 20%");
+        for _ in 0..1_000 {
+            owned.upkeep(0, &policy, 1);
+            while owned.owes() {
+                owned.step(&mut cursor);
+            }
+            if !store.is_compacting() {
+                break;
+            }
+        }
+        assert!(!store.is_compacting(), "it ended");
+        assert!(store.space().file_blocks < before, "and the file shrank");
+        owned.upkeep(0, &policy, 1);
+        assert!(!store.is_compacting(), "nothing new to give back");
     }
 
     /// A shard outside the range is a refusal, not a panic: routing put the
