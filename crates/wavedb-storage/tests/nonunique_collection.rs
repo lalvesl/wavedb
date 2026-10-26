@@ -7,6 +7,9 @@
 //! `DbHandle` — so this also proves the unified `T::get(&db)` spelling
 //! against the real engine.
 
+// The engine is used from one thread; its futures are not `Send` (lib.rs).
+#![allow(clippy::future_not_send)]
+
 use futures::TryStreamExt;
 use futures::executor::block_on;
 use wavedb_core::{LocalHandle, U48};
