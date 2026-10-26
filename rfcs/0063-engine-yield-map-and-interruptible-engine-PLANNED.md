@@ -124,7 +124,7 @@ there.
 | M2 | `place_in` window write (`checkpoint.rs:106`) | **pwrite of the whole window** | **alloc + meta, across carve → write → free** | 10²–10³ µs, grows with the round |
 | M3 | `commit_journal` `data.bin` sync (`commit.rs:79`) | **fsync** | — | 10²–10³ µs |
 | M4 | `evict_settled` (`settle.rs:54`) | memory walk of every slot's cache | **journal** + pending | µs–ms |
-| M5 | `defragment` → `relocate` (`checkpoint.rs:89`) | as M2 | alloc + meta | as M2 |
+| M5 | `compact_step` → `relocate` (`checkpoint.rs`) | as M2 | alloc + meta | as M2 |
 
 M1 and M2 together are the answer to "why does a checkpoint stall the node": not
 a lock, but occupancy of the only thread, for a duration that scales with how

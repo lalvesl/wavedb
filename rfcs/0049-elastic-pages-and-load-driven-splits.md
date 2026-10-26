@@ -241,7 +241,7 @@ blocks to wait its turn — elasticity and pacing in one trace.
   different targets, and both are known at compile time.
 - **Does the window still fit?** [RFC 0041](0041-single-barrier-checkpoint.md)
   carves one contiguous window per round, so the largest single page now sets a
-  floor on the window size. [RFC 0042](0042-free-space-defragmentation.md) is
+  floor on the window size. [RFC 0042](0042-free-space-defragmentation-DEPRECATED.md) is
   what supplies such extents; a page larger than any hole grows the tail, which
   is the existing fallback and needs no new mechanism — but the interaction is
   worth measuring before the target is tuned.

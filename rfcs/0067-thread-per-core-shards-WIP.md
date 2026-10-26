@@ -185,7 +185,7 @@ fall into three roles:
 |---|---|---|
 | **DATA** | operations on this thread's owners (`Collection`, `BpTree`, record cache), journal appends, publishing mutations | short and bounded; synchronous engine calls |
 | **EDGE** | listener and connections, HTTP/WS parsing and encoding, coordination (§6), `#[server]` bodies and application tasks | may await freely; the CPU it spends is the thread's |
-| **BG** | settle, page compression, checkpoint, defragment, eviction | yields every bounded step (0063 part 3) |
+| **BG** | settle, page compression, checkpoint, compaction, eviction | yields every bounded step (0063 part 3) |
 
 The roles are not separate executors, and the executor knows nothing of
 them. DATA's precedence comes from the shape of the pipeline, not from the
@@ -476,7 +476,8 @@ wrapped in `NotifyStore` for the live feed. Nothing crosses a thread but the
 - **Policy per worker.** Every `UPKEEP_PERIOD` (200 ms), whatever the load,
   each store gets the node's policy at its per-shard share: open a
   checkpoint past `checkpoint_after_bytes / P` of journal, evict to
-  `cache_budget_bytes / P`, defragment below the extent threshold. The
+  `cache_budget_bytes / P`, and compact on its triggers (RFC 0069 — one
+  pass per tick; the ceiling is `above_bytes / P`). The
   accept thread keeps only the mutation publisher.
 - **Shutdown.** Dropping the router closes each worker's queue; the root
   waits for its jobs and BG to let go of the stores, then `Owned::close`

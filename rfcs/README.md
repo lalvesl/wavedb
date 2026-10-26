@@ -40,10 +40,13 @@ _A snapshot for orientation; each RFC's status header is authoritative._
   checkpoint takes one, the window's (see 0046 for how the `Commit` frame
   stopped taking a second). The per-mutation path was already one append +
   fsync and did not change.
-  [0042](0042-free-space-defragmentation.md) *(Implemented)* keeps such windows
-  available: a background pass relocates live pages stranded between holes to
-  fresh tail blocks, so the space they vacate coalesces into the extent the next
-  checkpoint's best-fit lands in. And
+  [0042](0042-free-space-defragmentation-DEPRECATED.md) kept such windows
+  available by relocating stranded pages to the tail — *Deprecated* 2026-10-10:
+  it grew the file and nothing ever shrank it, so
+  [0069](0069-compaction-into-the-holes.md) *(Implemented)* moves the highest
+  runs **down** into the lowest holes instead, drops the old addressing chain,
+  and truncates the free tail, on a daily UTC time, a disk ceiling or a
+  free-space share. And
   [0043](0043-descriptors-in-the-commit-frame.md) *(Implemented)* moved the
   addressing state **into** the `Commit` frame — one journal append carries every
   type's descriptor vector plus the retired journal's DONE marker, so `data.bin`
@@ -569,7 +572,6 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0038](0038-argon2-and-oauth-credentials-PLANNED-LOW.md) | Argon2 & OAuth/OIDC credentials | Planned (low) |
 | [0039](0039-developer-experience-PLANNED-LOW.md) | Developer experience (M9) | Planned (low) |
 | [0041](0041-single-barrier-checkpoint.md) | Single-barrier checkpoint | Implemented |
-| [0042](0042-free-space-defragmentation.md) | Free-space defragmentation | Implemented |
 | [0043](0043-descriptors-in-the-commit-frame.md) | Descriptors in the `Commit` frame | Implemented |
 | [0044](0044-page-cache-PLANNED-LOW.md) | The page cache | Planned (low) |
 | [0045](0045-vector-search-PLANNED.md) | Vector search | Planned |
@@ -594,6 +596,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0066](0066-embassy-executor-and-async-io.md) | Embassy executor and async-io: tokio out of the node | Implemented |
 | [0067](0067-thread-per-core-shards-WIP.md) | Thread per core: the shard as a database, the thread as placement | In progress (steps 1–5, the fsync helper and parallel recovery landed; one executor per thread decided; step 6, measuring, next) |
 | [0068](0068-record-cache-as-a-log-WIP.md) | The record cache as a log | WIP |
+| [0069](0069-compaction-into-the-holes.md) | Compaction into the holes | Implemented |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |
@@ -609,6 +612,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0033](0033-cold-history-slow-node-tier-DEPRECATED.md) | Cold/history slow-node tier | removed |
 | [0058](0058-per-type-actors-DEPRECATED.md) | Per-type actors, and a `Send` engine | [0064](0064-pivot-owned-concurrency-PLANNED.md) (the unit) + [0063](0063-engine-yield-map-and-interruptible-engine-PLANNED.md) (the motivation) |
 | [0060](0060-comparative-benchmark-suite-DEPRECATED.md) | Comparative benchmark suite (vs MongoDB/PostgreSQL/MySQL/SQLite) | [0065](0065-benchmark-suite-ii-the-row-as-the-unit.md) (the row, not the run) |
+| [0042](0042-free-space-defragmentation-DEPRECATED.md) | Free-space defragmentation (tail relocation) | [0069](0069-compaction-into-the-holes.md) |
 
 ## Status vocabulary
 

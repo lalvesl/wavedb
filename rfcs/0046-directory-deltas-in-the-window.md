@@ -226,7 +226,7 @@ this design deliberately spends, and it is the right place to spend.
 The honest cost, beyond startup: the snapshot and the chunks become **allocator
 tenants**. They are short-lived runs interleaved among long-lived page runs, so
 freeing them at compaction leaves holes — the pattern
-[RFC 0042](0042-free-space-defragmentation.md) exists to clean up. Given that
+[RFC 0042](0042-free-space-defragmentation-DEPRECATED.md) exists to clean up. Given that
 disk space is not the scarce resource and the defragmenter is already running,
 this is a fair price for a metadata path that costs no IOps at all.
 
@@ -317,5 +317,5 @@ own fsync completing the retirement.
   a `changed` list. Letting `SlotEdit` carry either is a small addition; worth
   doing only if defrag rounds measure badly.
 - **Defrag and chunk size.** Every relocation is a changed descriptor, so
-  [RFC 0042](0042-free-space-defragmentation.md)'s budget now also bounds how
+  [RFC 0042](0042-free-space-defragmentation-DEPRECATED.md)'s budget now also bounds how
   large an edit chunk gets. Same knob, second effect — worth stating there.

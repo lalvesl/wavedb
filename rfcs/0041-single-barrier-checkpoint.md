@@ -4,7 +4,7 @@
 - **Crates:** `wavedb-storage` (`wavedb-quick-node`'s maintenance policy is the only affected caller)
 - **Code:** `crates/wavedb-storage/src/{plan,checkpoint,settle,commit}.rs`
 - **Builds on:** [RFC 0018](0018-storage-engine.md), [RFC 0019](0019-journal-rooted-recovery.md)
-- **Companion:** [RFC 0042](0042-free-space-defragmentation.md) — supplies the large
+- **Companion:** [RFC 0042](0042-free-space-defragmentation-DEPRECATED.md) — supplies the large
   contiguous windows this checkpoint consumes (not a correctness dependency:
   without it the window falls back to growing the tail)
 
@@ -87,7 +87,7 @@ today; nothing has been allocated or written.
 
 Sum the blocks of everything (pages + chain blocks + a grown dictionary run) and
 call `alloc.alloc(total)` **once**. Best-fit returns the smallest free extent that
-holds the whole checkpoint — when [RFC 0042](0042-free-space-defragmentation.md)
+holds the whole checkpoint — when [RFC 0042](0042-free-space-defragmentation-DEPRECATED.md)
 has consolidated a large window, recycling happens here with no special case; when
 no hole fits, the file grows at the tail. The returned `Run` is carved into
 per-page `BlockDescriptor::from_run_used(...)`. The allocator is not told about

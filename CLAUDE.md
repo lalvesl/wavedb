@@ -166,7 +166,9 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   declarations: hash + compression policy); the per-type state (directory,
   dictionary) belongs to the open store (RFC 0067 step 1), and so does the
   record cache — one log per type in chunks + one Dashtable-shaped index;
-  settledness is a cursor, eviction drops settled chunks (RFC 0068). A store
+  settledness is a cursor, eviction drops settled chunks (RFC 0068). Compaction
+  moves pages down into the holes and truncates the free tail, stepped,
+  on the node's triggers (daily UTC time, disk ceiling, free share — RFC 0069). A store
   is used from one thread: plain cells, no lock, no atomic; `Send`, not `Sync`. **One open `PageStore`
   per data directory** — `data.bin` is locked while open, a second open of it is
   `EngineBusy` — and stores over different directories coexist in one process.

@@ -10,7 +10,7 @@
 - **Builds on:** [RFC 0043](0043-descriptors-in-the-commit-frame.md) and
   [RFC 0046](0046-directory-deltas-in-the-window.md) (the descriptor is the only
   addressing state, and it already travels as a delta),
-  [RFC 0042](0042-free-space-defragmentation.md) (the background-pass shape this
+  [RFC 0042](0042-free-space-defragmentation-DEPRECATED.md) (the background-pass shape this
   copies), [RFC 0057](0057-page-arena-and-checkpoint-staging.md) (the memory tier),
   [RFC 0053](0053-tenant-fair-cache-retention-PLANNED.md) (the policy constraint
   phase 3 inherits)
@@ -167,7 +167,7 @@ ordering rule below safe under S3's own semantics.
 ### 3. Demotion, and the ordering rule
 
 Demotion is a background pass with the same shape as defrag
-([RFC 0042](0042-free-space-defragmentation.md)): it reads pages the request path
+([RFC 0042](0042-free-space-defragmentation-DEPRECATED.md)): it reads pages the request path
 is not using, produces descriptor changes, and hands them to the next settle
 window ([RFC 0046](0046-directory-deltas-in-the-window.md)) — so it costs **zero
 extra IOps of its own** on the local side and takes no barrier.
@@ -295,7 +295,7 @@ is still rejected. The difference is what the intervening engine work bought:
 
 | 0033's charge | Why it costs less now |
 |---|---|
-| a migration path | descriptors are copy-on-write and already travel as deltas in the settle window ([0043](0043-descriptors-in-the-commit-frame.md), [0046](0046-directory-deltas-in-the-window.md)) — a tier change *is* a descriptor change, and defrag ([0042](0042-free-space-defragmentation.md)) is already a background pass that relocates pages |
+| a migration path | descriptors are copy-on-write and already travel as deltas in the settle window ([0043](0043-descriptors-in-the-commit-frame.md), [0046](0046-directory-deltas-in-the-window.md)) — a tier change *is* a descriptor change, and defrag ([0042](0042-free-space-defragmentation-DEPRECATED.md)) is already a background pass that relocates pages |
 | a hot/cold routing decision | there is no decision: one bit of the `Id` classifies a slot with no read, and after §1 the routing is which lane, which is compile-time |
 | cross-tier consistency | archives are immutable and single-reader, so there is no coherence problem to have |
 

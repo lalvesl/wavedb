@@ -24,7 +24,8 @@ write pipeline. This is where most of WaveDB's engineering energy lives.
 | `retire`          | A checkpoint's deferred half: the retired journal + protection roll, held for the _next_ checkpoint to dispose of.                                   |
 | `settle`          | The drain queue: what a round is, when it retries, and the cache-eviction budget.                                                                    |
 | `chain`           | Directory chain blocks — the persisted address vector, copy-on-write, placed in the checkpoint's window.                                             |
-| `defrag`          | Relocates live pages stranded between holes to fresh tail blocks so free extents coalesce.                                                           |
+| `compact`         | Compaction's phases and surface (`compact_step`, `compact`, `reclaim_tail`, `space`): move, drop the old addressing, seal, truncate.                 |
+| `defrag`          | Compaction's moves: the highest runs, verbatim, into the lowest hole below them — one window write per round.                                        |
 | `page`            | `SlotPage` — the homogeneous record page: `[len][to_wire_checked(PageEnvelope)]`, body raw or zstd.                                                  |
 | `journal`         | Append-only WAL of `Write` batches (checked wire frames); fsync = durability; torn-tail-tolerant replay.                                             |
 | `struct_storage`  | `StructStorage` — one type's own cache + directory slot (`#[wavedb]` emits one `static` per type).                                                   |
@@ -375,13 +376,14 @@ mutation → journal append → the type's own BTreeMap<Id> cache → (client co
    Once the deltas outweigh the state they patch, a round emits a full chunk
    instead and the superseded runs are freed.
 
-6. **Background defragmentation.** Copy-on-write leaves holes, and what a
-   checkpoint needs is one _contiguous_ window. When the largest free extent
-   falls below the policy's threshold, a pass relocates live pages stranded
-   between holes — verbatim, to fresh tail blocks — so the space they vacate
-   merges into the extent the next checkpoint lands in
-   ([RFC 0042](../../rfcs/0042-free-space-defragmentation.md)). It is budgeted
-   in blocks per tick and finds nothing to do on a packed file.
+6. **Compaction.** Copy-on-write leaves holes, and best-fit only reuses the
+   ones a window happens to fit. Compaction moves the runs nearest the end of
+   the file — pages and dictionaries, verbatim — into the lowest hole below
+   them, rewrites the addressing chain as one low snapshot, lets two
+   checkpoints release what the moves vacated, and cuts the free tail off
+   `data.bin` ([RFC 0069](../../rfcs/0069-compaction-into-the-holes.md)). It
+   is stepped, a bounded pass at a time; the node starts one on a daily UTC
+   time, a disk ceiling, or a free-space share.
 
 On startup the directories and the block allocator rebuild by **journal replay**.
 

@@ -70,16 +70,14 @@ order of cost:
 - **Now.** The `large` seed's `data.bin` is 9.6 GB for 5 million inserts:
   ~1 920 bytes per row against ~260 in the dataset, where the 200 000-row
   tier suggests ~100 bytes live. Every checkpoint relocates pages
-  copy-on-write, and freed blocks stay in the file:
-  - the fill never calls `defragment`;
-  - `BlockAllocator::truncate()` (`wavedb-storage/src/alloc.rs`) has no
-    caller outside tests, so no path ever shrinks `data.bin`.
-- **Instead.**
-  1. Add a `PageStore::space()` diagnostic (total, free and deferred
-     blocks) and confirm how much is free.
-  2. End the fill with `defragment` plus a truncate of the free tail, which
-     wires up `truncate()`. That is a storage feature: give it a short RFC,
-     and first explain why a 5 000-row `defragment` once grew the file.
+  copy-on-write, and the bench fill never compacts.
+- **Since** 2026-10-10 the storage half exists
+  ([RFC 0069](../rfcs/0069-compaction-into-the-holes.md)): `PageStore::space()`
+  reports total, free and deferred blocks, and `compact()` moves pages down
+  and truncates the free tail (the 5 000-row growth was 0042's tail moves).
+  The embedded row's `compacted` point now runs it.
+- **Instead.** Read `space()` at the end of the fill, and decide whether the
+  fill should end with `compact()` — a bench question, needing a run.
 - **Decided** 2026-10-08: not now.
 
 ## Benchmarks

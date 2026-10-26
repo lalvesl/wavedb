@@ -88,7 +88,7 @@ as free space automatically.
   `StructStorage`, and with it the last piece of per-type state that was neither
   cache, directory, nor dictionary.
 - A checkpoint's `data.bin` write no longer contains metadata at all, which is
-  what lets [RFC 0042](0042-free-space-defragmentation.md) reason about the file
+  what lets [RFC 0042](0042-free-space-defragmentation-DEPRECATED.md) reason about the file
   as pages-only when it relocates.
 - The frame grows with the schema's total bucket count (8 bytes per bucket per
   commit). That is the same volume the chain wrote, now sequential — but it does
