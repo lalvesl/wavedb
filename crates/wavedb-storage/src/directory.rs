@@ -250,10 +250,10 @@ mod tests {
         assert_eq!(dir.bucket_of(123), 0);
         assert_eq!(dir.bucket_of(999), 0);
 
-        dir.set_descriptor(0, BlockDescriptor::new(10, 4, 8));
+        dir.set_descriptor(0, BlockDescriptor::new(10, 4));
         assert_eq!(dir.descriptor(0).run().start, 10);
 
-        let idx = dir.push_bucket(BlockDescriptor::new(20, 4, 0));
+        let idx = dir.push_bucket(BlockDescriptor::new(20, 4));
         assert_eq!(idx, 1);
         assert_eq!(dir.len(), 2);
         // Now routing uses one bit → buckets 0 and 1 both reachable.
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn from_slots_roundtrips() {
         let slots =
-            vec![BlockDescriptor::new(0, 1, 0), BlockDescriptor::new(8, 1, 0)];
+            vec![BlockDescriptor::new(0, 1), BlockDescriptor::new(8, 1)];
         let dir = Directory::from_slots(slots.clone(), SEED);
         assert_eq!(dir.slots(), slots.as_slice());
         assert_eq!(dir.seed(), SEED);
