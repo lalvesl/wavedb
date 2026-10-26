@@ -189,7 +189,7 @@ impl PageStore {
             alloc.free(run);
         }
         if let Some(run) = runs.last().copied().flatten() {
-            let desc = BlockDescriptor::from_run_used(run, chunk.len() as u64);
+            let desc = BlockDescriptor::from_run(run);
             for stale in meta.record(desc, full) {
                 alloc.free(stale);
             }
@@ -280,14 +280,12 @@ fn install(
         let Target::Page { plan, bucket } = target else {
             continue;
         };
-        let used = plans[*plan].pages.get(bucket).map_or(0, Vec::len) as u64;
         let old = plans[*plan].dir.descriptor(*bucket);
         if old.is_allocated() {
             freed.push(old.run());
         }
-        let desc = run.map_or(BlockDescriptor::EMPTY, |run| {
-            BlockDescriptor::from_run_used(run, used)
-        });
+        let desc =
+            run.map_or(BlockDescriptor::EMPTY, BlockDescriptor::from_run);
         plans[*plan].dir.set_descriptor(*bucket, desc);
     }
     freed
@@ -300,12 +298,11 @@ fn dict_descriptors(
     runs: &[Option<Run>],
 ) -> BTreeMap<usize, BlockDescriptor> {
     let mut out = BTreeMap::new();
-    for (plan, work) in plans.iter().enumerate() {
+    for plan in 0..plans.len() {
         let Some(run) = dict_run(targets, runs, plan) else {
             continue;
         };
-        let used = work.dict.as_ref().map_or(0, Vec::len) as u64;
-        out.insert(plan, BlockDescriptor::from_run_used(run, used));
+        out.insert(plan, BlockDescriptor::from_run(run));
     }
     out
 }
