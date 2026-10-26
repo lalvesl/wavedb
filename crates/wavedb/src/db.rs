@@ -12,6 +12,7 @@
 //! semantics.
 
 use core::time::Duration;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use wavedb_core::expose::{Command, Reply};
@@ -34,8 +35,9 @@ pub struct Db {
     /// unauthenticated tier (only `#[server(public)]` functions answer).
     access_token: Option<Vec<u8>>,
     /// The local write-through cache (`Db::open`); `None` = pure transport
-    /// handle (`Db::connect`). Shared by clones — one engine per client.
-    cache: Option<Arc<CacheStore>>,
+    /// handle (`Db::connect`). Shared by clones — one engine per client, used
+    /// from one thread, as the engine is (an `Rc`, like the browser's store).
+    cache: Option<Rc<CacheStore>>,
     /// How watches transport their events (WebSocket push by default;
     /// [`watch_via_polling`](Self::watch_via_polling) switches to POSTs).
     watch_mode: wavedb_net::WatchMode,
@@ -117,7 +119,7 @@ impl Db {
     ) -> Result<Self> {
         let store = crate::cache::open_native(&registry, dir.as_ref())?;
         let mut db = Self::connect(addr, user, tenant).await?;
-        db.cache = Some(Arc::new(store));
+        db.cache = Some(Rc::new(store));
         Ok(db)
     }
 
@@ -142,7 +144,7 @@ impl Db {
         let _ = registry;
         let store = CacheStore::open(app).await.map_err(Error::Core)?;
         let mut db = Self::connect(addr, user, tenant).await?;
-        db.cache = Some(Arc::new(store));
+        db.cache = Some(Rc::new(store));
         Ok(db)
     }
 
