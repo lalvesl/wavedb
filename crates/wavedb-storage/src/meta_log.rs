@@ -68,6 +68,11 @@ impl MetaLog {
         stale
     }
 
+    /// Whether any delta chunk follows the snapshot.
+    pub const fn has_deltas(&self) -> bool {
+        !self.edits.is_empty()
+    }
+
     /// Every run the log occupies — part of a checkpoint's protected set.
     pub fn runs(&self) -> Vec<Run> {
         self.edits
