@@ -3,6 +3,10 @@
 //! functions. Every call here is a `#[server]` stub; no struct is
 //! wire-addressable.
 
+// The client's local cache is the engine, used from one thread: its futures
+// are not `Send`, and nothing here needs them to be.
+#![allow(clippy::future_not_send)]
+
 use todo_app_schema::{
     add_todo, all_todos, complete_todo, delete_todo, login, register,
     search_todos,
