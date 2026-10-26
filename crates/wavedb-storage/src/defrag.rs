@@ -1,227 +1,258 @@
-//! Free-space defragmentation ([RFC 0042]) — relocating isolated live pages so
-//! free extents coalesce into windows a whole checkpoint can land in.
+//! Compaction's moves ([RFC 0069]) — which runs go down, into which hole,
+//! one round (one window write) at a time. The phases around them, and the
+//! public surface, are [`crate::compact`]'s.
 //!
-//! Copy-on-write page rewrites free the old run and allocate elsewhere, so
-//! `data.bin` accumulates holes whose *total* size stays ample while the
-//! *largest contiguous* one shrinks. Once no hole fits a checkpoint's window
-//! ([RFC 0041]) every checkpoint grows the tail and the file grows
-//! monotonically over mostly-free space.
-//!
-//! The defragmenter fixes the shape, not the size: it picks live page runs
-//! whose neighbours are already free — moving one merges the gap on its left,
-//! the run itself, and the gap on its right into a single extent — copies them
-//! **forward to the tail** (best-fit would cheerfully drop a page back beside
-//! the hole it was vacating), and repoints their descriptors. The bytes are
-//! moved verbatim: a page is position-independent, so nothing is decoded,
-//! recompressed, or re-planned.
-//!
-//! Safety falls out of what the checkpoint already guarantees. The relocation
-//! rides the same window write, the vacated runs are freed through the
-//! allocator's protected set — so a run the last durable `Commit` still names
-//! is only released after the next one — and the directory is merely marked
-//! dirty, leaving the last committed delta pointing at the old, still-intact
-//! locations until a checkpoint rewrites it.
-//!
-//! [RFC 0041]: ../../../rfcs/0041-single-barrier-checkpoint.md
-//! [RFC 0042]: ../../../rfcs/0042-free-space-defragmentation.md
+//! [RFC 0069]: ../../../rfcs/0069-compaction-into-the-holes.md
 
 use std::collections::BTreeMap;
 
-use crate::block::Run;
+use crate::block::{BlockAllocator, Run};
+use crate::edit;
 use crate::error::StorageResult;
 use crate::page_store::PageStore;
-use crate::plan::SlotPlan;
+use crate::plan::{SlotPlan, blocks_of};
 
-/// What one defragmentation pass did.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct DefragReport {
-    /// Pages relocated.
-    pub moved_pages: usize,
-    /// Blocks copied (the pass's IO cost, in 4 KiB units).
-    pub moved_blocks: u64,
-    /// Largest free extent before and after, in blocks.
-    pub largest_before: u64,
-    pub largest_after: u64,
-}
+/// Images one round moves at most, so its delta chunk stays inside the one
+/// block the round keeps for it (a moved page costs it 12 bytes).
+const ROUND_IMAGES: usize = 128;
 
-/// A page worth relocating, and what moving it buys.
-struct Candidate {
+/// A run worth moving down.
+#[derive(Clone, Copy)]
+struct Movable {
     slot: usize,
-    bucket: usize,
+    /// The page's bucket; `None` for the type's dictionary.
+    bucket: Option<usize>,
     run: Run,
-    /// Blocks that coalesce into one extent once this run moves away.
-    coalesced: u64,
+    /// Blocks its image takes once moved.
+    blocks: u64,
 }
 
 impl PageStore {
-    /// Blocks in the largest free extent — "would the next checkpoint's window
-    /// fit a hole?", the gauge a defrag policy triggers on.
-    #[must_use]
-    pub fn largest_free_extent(&self) -> u64 {
-        self.alloc.borrow_mut().largest_free_extent()
-    }
-
-    /// Relocate up to `budget_blocks` worth of isolated pages, coalescing the
-    /// space they vacate. Returns what the pass moved.
-    ///
-    /// Pages are chosen by how much free space their departure merges per
-    /// block copied, so a small page stranded between two large holes goes
-    /// first. A pass that finds nothing worth moving is free.
-    ///
-    /// # Errors
-    /// Propagates read/write faults. A fault leaves the descriptors untouched:
-    /// nothing is repointed until the window write returns.
-    pub fn defragment(
+    /// One pass: rounds until about `budget` blocks moved. `finished` once no
+    /// run can move down at all.
+    pub(crate) fn shift(
         &self,
-        budget_blocks: u64,
-    ) -> StorageResult<DefragReport> {
-        let largest_before = self.largest_free_extent();
-        let mut chosen = self.candidates();
-        // Best value first: merged blocks per block copied.
-        chosen.sort_by(|a, b| {
-            (b.coalesced * a.run.count).cmp(&(a.coalesced * b.run.count))
-        });
-
-        let mut plans: BTreeMap<usize, SlotPlan> = BTreeMap::new();
-        let mut moved_blocks = 0;
-        let mut moved_pages = 0;
-        for candidate in chosen {
-            if moved_blocks + candidate.run.count > budget_blocks {
-                break;
+        budget: u64,
+    ) -> StorageResult<(usize, u64, bool)> {
+        let mut movable = self.movable();
+        let (mut images, mut blocks) = (0, 0);
+        loop {
+            if self.meta.borrow().wants_snapshot() {
+                self.rewrite_addressing()?;
             }
-            let Some(bytes) = self.page_bytes(candidate.run)? else {
-                continue; // an unreadable length prefix: leave it alone
+            let found = next_round(&self.alloc.borrow(), &movable);
+            let Some((limit, mut picked)) = found else {
+                return Ok((images, blocks, true));
             };
-            let plan = match plans.entry(candidate.slot) {
-                std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
-                std::collections::btree_map::Entry::Vacant(v) => {
-                    let Some(dir) = self.types[candidate.slot]
-                        .directory()
-                        .borrow_mut()
-                        .clone()
-                    else {
-                        continue;
-                    };
-                    v.insert(SlotPlan::verbatim(candidate.slot, dir))
+            // The budget bounds the pass, not progress: a pass moves at least
+            // one image, however large.
+            let mut taken = blocks;
+            picked.retain(|&i| {
+                let fits = taken == 0 || taken + movable[i].blocks <= budget;
+                taken += if fits { movable[i].blocks } else { 0 };
+                fits
+            });
+            if picked.is_empty() {
+                return Ok((images, blocks, false));
+            }
+            let mut loaded = Vec::with_capacity(picked.len());
+            for &i in &picked {
+                if let Some(bytes) = self.image_of(movable[i])? {
+                    loaded.push((movable[i], bytes));
                 }
-            };
-            plan.pages.insert(candidate.bucket, bytes);
-            moved_blocks += candidate.run.count;
-            moved_pages += 1;
+            }
+            if !self.move_round(&mut loaded, limit)? {
+                return Ok((images, blocks, true)); // even one would not fit
+            }
+            images += loaded.len();
+            blocks += loaded.iter().map(|(m, _)| m.blocks).sum::<u64>();
+            for i in picked.into_iter().rev() {
+                movable.remove(i);
+            }
         }
-
-        if !plans.is_empty() {
-            self.relocate(plans.into_values().collect())?;
-        }
-        Ok(DefragReport {
-            moved_pages,
-            moved_blocks,
-            largest_before,
-            largest_after: self.largest_free_extent(),
-        })
     }
 
-    /// Every live page run that has free space adjacent to it, scored by how
-    /// much would coalesce if it moved.
-    // Both guards span their loops by design: the allocator's free map and a
-    // slot's directory must be read as one consistent picture, or a candidate
-    // could be scored against neighbours that no longer exist.
-    #[allow(clippy::significant_drop_tightening)]
-    fn candidates(&self) -> Vec<Candidate> {
-        let alloc = self.alloc.borrow_mut();
-        let end_of_file = alloc.total_blocks();
+    /// Write `loaded` below `limit` as one round, carrying one image fewer
+    /// each time the round (with its delta) outgrows the hole. `false` when
+    /// not even one fits; `loaded` is then empty.
+    fn move_round(
+        &self,
+        loaded: &mut Vec<(Movable, Vec<u8>)>,
+        limit: u64,
+    ) -> StorageResult<bool> {
+        while !loaded.is_empty() {
+            let mut plans: BTreeMap<usize, SlotPlan> = BTreeMap::new();
+            for (m, bytes) in loaded.iter() {
+                let Some(dir) = self.types[m.slot].directory().borrow().clone()
+                else {
+                    continue;
+                };
+                let plan = plans
+                    .entry(m.slot)
+                    .or_insert_with(|| SlotPlan::verbatim(m.slot, dir));
+                match m.bucket {
+                    Some(bucket) => {
+                        plan.pages.insert(bucket, bytes.clone());
+                    }
+                    None => plan.dict = Some(bytes.clone()),
+                }
+            }
+            if self.relocate(plans.into_values().collect(), limit)? {
+                return Ok(true);
+            }
+            loaded.pop();
+        }
+        Ok(false)
+    }
+
+    /// Every page and dictionary run, highest first.
+    fn movable(&self) -> Vec<Movable> {
         let mut out = Vec::new();
-        for (slot, storage) in self.types.iter().enumerate() {
-            let dir = storage.directory().borrow_mut();
+        for (slot, ts) in self.types.iter().enumerate() {
+            let dir = ts.directory().borrow();
             let Some(dir) = dir.as_ref() else { continue };
             for (bucket, desc) in dir.slots().iter().enumerate() {
-                if !desc.is_allocated() {
-                    continue;
+                if desc.is_allocated() {
+                    out.push(Movable {
+                        slot,
+                        bucket: Some(bucket),
+                        run: desc.run(),
+                        blocks: desc.run().count,
+                    });
                 }
-                let run = desc.run();
-                let (before, after) = alloc.free_neighbours(run);
-                let coalesced = before + run.count + after;
-                // Two guards against churn. A run must merge at least twice
-                // what copying it costs — otherwise it is only being shifted
-                // sideways into the hole next door…
-                if coalesced < run.count.saturating_mul(2) {
-                    continue;
-                }
-                // …and a run backing onto the file's trailing free space would
-                // be "moved" to almost exactly where it already is, gaining
-                // nothing and re-dirtying its page every pass.
-                if run.end() + after == end_of_file {
-                    continue;
-                }
-                out.push(Candidate {
+            }
+            let dict = ts.dictionary().borrow();
+            if dict.descriptor().is_allocated() {
+                out.push(Movable {
                     slot,
-                    bucket,
-                    run,
-                    coalesced,
+                    bucket: None,
+                    run: dict.descriptor().run(),
+                    blocks: blocks_of(&dict.image()),
                 });
             }
         }
+        out.sort_by_key(|m| std::cmp::Reverse(m.run.start));
         out
     }
 
-    /// A page's stored bytes, trimmed to its own length prefix so the copy
-    /// carries no padding.
-    fn page_bytes(&self, run: Run) -> StorageResult<Option<Vec<u8>>> {
-        let mut buf = self.file.read_run(run)?;
+    /// The bytes a move writes: a page as stored, trimmed to its own length
+    /// prefix; a dictionary as it stands (its newest image — growth is
+    /// append-only, so every page's prefix of it is unchanged).
+    fn image_of(&self, m: Movable) -> StorageResult<Option<Vec<u8>>> {
+        if m.bucket.is_none() {
+            let dict = self.types[m.slot].dictionary().borrow().image();
+            return Ok(Some(dict));
+        }
+        let mut buf = self.file.read_run(m.run)?;
         let Some(prefix) = buf.get(..4).and_then(|s| s.try_into().ok()) else {
             return Ok(None);
         };
         let len = 4 + u32::from_le_bytes(prefix) as usize;
         if len > buf.len() {
-            return Ok(None);
+            return Ok(None); // an unreadable length prefix: leave it alone
         }
         buf.truncate(len);
         Ok(Some(buf))
     }
+
+    /// Whether a fresh snapshot would land below the addressing run that
+    /// sits highest now.
+    pub(crate) fn snapshot_would_drop(&self) -> bool {
+        let meta = self.meta.borrow();
+        let Some(top) = meta.runs().iter().map(|r| r.start).max() else {
+            return false;
+        };
+        let full = edit::chunk_of(self, &[], true, &BTreeMap::new(), 0);
+        let need = blocks_of(&edit::encode(&full));
+        self.alloc.borrow().lowest_hole(need, top).is_some()
+    }
+}
+
+/// The next round: the lowest hole some of the highest runs fit in, and
+/// which of them (indices into `movable`, ascending). The hole keeps one
+/// block for the round's delta, so it needs two at least.
+fn next_round(
+    alloc: &BlockAllocator,
+    movable: &[Movable],
+) -> Option<(u64, Vec<usize>)> {
+    let top = movable.first()?.run.start;
+    for hole in alloc.holes_below(top).filter(|h| h.count >= 2) {
+        let mut room = hole.count - 1;
+        let mut picked = Vec::new();
+        for (i, m) in movable.iter().enumerate() {
+            if m.run.start < hole.end() || room == 0 {
+                break; // the rest lie below the hole
+            }
+            if m.blocks <= room {
+                picked.push(i);
+                room -= m.blocks;
+                if picked.len() == ROUND_IMAGES {
+                    break;
+                }
+            }
+        }
+        if !picked.is_empty() {
+            return Some((hole.end(), picked));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::block::Run;
+    use super::{Movable, next_round};
+    use crate::block::{BlockAllocator, Run};
 
-    #[test]
-    fn moving_an_isolated_run_merges_its_neighbours() {
-        // The allocator's view is what selection reads: a live run with free
-        // space on both sides is the cheapest thing to move.
-        let mut alloc = crate::block::BlockAllocator::new();
-        let left = alloc.alloc(4); // [0,4)
-        let live = alloc.alloc(1); // [4,5)  ← the straggler
-        let right = alloc.alloc(4); // [5,9)
-        let _keep = alloc.alloc(1); // [9,10) keeps the tail busy
-        alloc.free(left);
-        alloc.free(right);
-
-        assert_eq!(alloc.free_neighbours(live), (4, 4));
-        assert_eq!(alloc.largest_free_extent(), 4, "two 4-block holes");
-        // Vacating it coalesces 4 + 1 + 4.
-        alloc.free(live);
-        assert_eq!(alloc.largest_free_extent(), 9);
-        assert_eq!(alloc.free_extent_count(), 1);
+    fn page(start: u64, count: u64) -> Movable {
+        Movable {
+            slot: 0,
+            bucket: Some(start as usize),
+            run: Run::new(start, count),
+            blocks: count,
+        }
     }
 
+    /// A move only ever goes down: first-fit by address, never past the limit.
     #[test]
-    fn tail_allocation_never_lands_in_a_hole() {
-        let mut alloc = crate::block::BlockAllocator::new();
-        let hole = alloc.alloc(8); // [0,8)
-        let _live = alloc.alloc(1); // [8,9)
+    fn a_run_is_placed_in_the_lowest_hole_below_it() {
+        let mut alloc = BlockAllocator::new();
+        let low = alloc.alloc(4); // [0,4)
+        let _a = alloc.alloc(1); // [4,5)
+        let high = alloc.alloc(8); // [5,13)
+        let _b = alloc.alloc(1); // [13,14)
+        alloc.free(low);
+        alloc.free(high);
+        // Best-fit would take [0,4) for 3 blocks too, but for 6 it would take
+        // [5,13); below 5 there is no room for 6.
+        assert_eq!(alloc.alloc_below(6, 5), None);
+        assert_eq!(alloc.alloc_below(3, 14), Some(Run::new(0, 3)));
+        assert_eq!(alloc.alloc_below(3, 14), Some(Run::new(5, 3)));
+        assert_eq!(alloc.alloc_lowest(20), Run::new(14, 20), "none fits");
+    }
+
+    /// The highest runs go first, into the lowest hole, keeping a block for
+    /// the round's delta.
+    #[test]
+    fn a_round_fills_the_lowest_hole_from_the_top() {
+        let mut alloc = BlockAllocator::new();
+        let hole = alloc.alloc(4); // [0,4) — room for 3 + the delta
+        let _rest = alloc.alloc(16); // [4,20)
         alloc.free(hole);
-        // Best-fit would reuse [0,8) — the tail strategy must not.
-        let run = alloc.alloc_tail(2);
-        assert_eq!(run, Run::new(9, 2));
-        assert_eq!(alloc.largest_free_extent(), 8, "the hole is untouched");
+        let movable = [page(18, 2), page(15, 2), page(12, 1), page(2, 1)];
+        let (limit, picked) = next_round(&alloc, &movable).unwrap();
+        assert_eq!(limit, 4);
+        assert_eq!(picked, vec![0, 2], "18 (2 blocks) + 12 (1 block)");
     }
 
+    /// Nothing moves when every hole lies above the runs, or is too small
+    /// for a run and its delta.
     #[test]
-    fn a_packed_run_is_not_a_candidate() {
-        let mut alloc = crate::block::BlockAllocator::new();
-        let _a = alloc.alloc(2); // [0,2)
-        let live = alloc.alloc(2); // [2,4) — live neighbours on both sides
-        let _b = alloc.alloc(2); // [4,6)
-        assert_eq!(alloc.free_neighbours(live), (0, 0));
+    fn a_packed_file_has_no_round() {
+        let mut alloc = BlockAllocator::new();
+        let one = alloc.alloc(1); // [0,1) — a one-block hole fits no round
+        let _rest = alloc.alloc(9); // [1,10)
+        alloc.free(one);
+        assert!(next_round(&alloc, &[page(5, 1)]).is_none());
+        assert!(next_round(&alloc, &[]).is_none());
     }
 }
