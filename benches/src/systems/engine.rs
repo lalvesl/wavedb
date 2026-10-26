@@ -71,8 +71,9 @@ pub trait Engineish {
     /// Drop settled cache entries down to `budget`.
     fn evict(&self, budget: usize);
 
-    /// Relocate stranded live pages so free space coalesces.
-    fn defragment(&self, blocks: u64) -> Result<(), String>;
+    /// Compact `data.bin` to the end: live pages down into the holes, the
+    /// free tail cut off (RFC 0069).
+    fn compact(&self) -> Result<(), String>;
 
     /// Committed journal bytes — what the adapter's maintenance threshold
     /// weighs.
@@ -106,10 +107,10 @@ impl Engineish for PageStore {
         self.evict_settled(budget);
     }
 
-    fn defragment(&self, blocks: u64) -> Result<(), String> {
-        Self::defragment(self, blocks)
+    fn compact(&self) -> Result<(), String> {
+        Self::compact(self)
             .map(|_| ())
-            .map_err(|e| format!("defragment: {e}"))
+            .map_err(|e| format!("compact: {e}"))
     }
 
     fn journal_len(&self) -> u64 {
