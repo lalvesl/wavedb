@@ -216,11 +216,9 @@ impl BlockFile {
             });
         }
         self.ensure_len(run.end() * BLOCK_SIZE as u64)?;
-        // Before the write, not after: a concurrent reader must never be able
-        // to take a cached image that the bytes underneath have already
-        // stopped matching. Cached runs are immutable while allocated, so this
-        // fires only where that stops being true — a recycled extent, and the
-        // defragmenter's relocation.
+        // A write lands only on a recycled extent — cached runs are immutable
+        // while allocated — so whatever the cache still remembers of these
+        // blocks describes bytes about to be overwritten.
         self.cache.invalidate(run);
         self.file.write_all_at(bytes, run.byte_offset())?;
         self.io.writes.set(self.io.writes.get() + 1);
