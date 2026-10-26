@@ -9,10 +9,11 @@
 //! - Page writes are copy-on-write: a rewritten page is placed in a *new* run
 //!   and the descriptor is repointed ([RFC 0041]). A run's bytes are therefore
 //!   immutable for as long as that run is allocated, so a cache keyed by run
-//!   **never needs invalidating on a page rewrite**. The only events that can
-//!   falsify an entry are a run being written again after being recycled by
-//!   the allocator, and the defragmenter relocating one — both of which go
-//!   through [`invalidate`](PageCache::invalidate).
+//!   **never goes stale while its run is allocated**. An entry leaves through
+//!   [`invalidate`](PageCache::invalidate) at the two points where that stops
+//!   holding: when a round supersedes its run (no directory names it any
+//!   more, so its image is dead weight), and when a write lands on a
+//!   recycled extent.
 //! - Compressed is the form the disk holds and the form a reader must
 //!   decompress from anyway, so storing it uncompressed would cache *fewer*
 //!   pages for the same RAM and save nothing on the read path.
@@ -51,6 +52,9 @@ pub const DEFAULT_BUDGET_BYTES: usize = 64 << 20;
 struct Entry {
     /// Blocks the run spans, so an overlap test needs only the map.
     blocks: u64,
+    /// Which insertion this is, so the queue can tell it from an earlier
+    /// image of the same run.
+    stamp: u64,
     bytes: Box<[u8]>,
 }
 
@@ -61,10 +65,14 @@ struct Inner {
     /// query — which a `HashMap` could only answer by a full scan, and
     /// invalidation happens on every window write.
     pages: BTreeMap<u64, Entry>,
-    /// Insertion order, for eviction. Keys removed by invalidation stay here
-    /// and are skipped when they come up — cheaper than keeping the two
-    /// structures exactly in step for a queue that is drained in order.
-    fifo: VecDeque<u64>,
+    /// Insertion order, for eviction, as `(start, stamp)`. An entry that
+    /// left early (invalidated, or replaced by a newer image of its run)
+    /// stays queued and is skipped when it comes up — its stamp no longer
+    /// matches — and [`Inner::tidy`] drops such leftovers once they
+    /// outnumber the live entries, so the queue stays proportional to what
+    /// is held.
+    fifo: VecDeque<(u64, u64)>,
+    stamp: u64,
     bytes: usize,
 }
 
@@ -114,28 +122,34 @@ impl PageCache {
         }
         let mut inner = self.inner.borrow_mut();
         inner.drop_at(run.start);
+        inner.stamp += 1;
+        let stamp = inner.stamp;
         inner.bytes += bytes.len();
         inner.pages.insert(
             run.start,
             Entry {
                 blocks: run.count,
+                stamp,
                 bytes,
             },
         );
-        inner.fifo.push_back(run.start);
+        inner.fifo.push_back((run.start, stamp));
         while inner.bytes > self.budget {
-            let Some(oldest) = inner.fifo.pop_front() else {
+            let Some((oldest, stamp)) = inner.fifo.pop_front() else {
                 break; // nothing left to give back
             };
-            inner.drop_at(oldest);
+            if inner.pages.get(&oldest).is_some_and(|e| e.stamp == stamp) {
+                inner.drop_at(oldest);
+            }
         }
+        inner.tidy();
     }
 
     /// Forget every image overlapping `run`.
     ///
-    /// Called wherever a run's bytes stop being what the cache remembers: a
-    /// write into it, and the allocator handing it out again. Overlap rather
-    /// than exact match, because one window write covers many cached runs.
+    /// Called wherever a run stops being what the cache remembers: a round
+    /// superseding it, and a write into it. Overlap rather than exact match,
+    /// because one window write covers many cached runs.
     pub fn invalidate(&self, run: Run) {
         let mut inner = self.inner.borrow_mut();
         let end = run.end();
@@ -149,6 +163,7 @@ impl PageCache {
         for start in doomed {
             inner.drop_at(start);
         }
+        inner.tidy();
     }
 
     /// The ceiling this cache was built with — what
@@ -191,6 +206,18 @@ impl Inner {
         if let Some(old) = self.pages.remove(&start) {
             self.bytes -= old.bytes.len();
         }
+    }
+
+    /// Drop the queue entries whose image has already left, once they
+    /// outnumber the live ones — amortised O(1) per insert or invalidation.
+    fn tidy(&mut self) {
+        if self.fifo.len() <= 2 * self.pages.len() + 64 {
+            return;
+        }
+        let pages = &self.pages;
+        self.fifo.retain(|(start, stamp)| {
+            pages.get(start).is_some_and(|e| e.stamp == *stamp)
+        });
     }
 }
 
@@ -308,6 +335,38 @@ mod tests {
         assert_eq!(cache.bytes(), 30);
         assert_eq!(cache.len(), 1);
         assert_eq!(copy(&cache, Run::new(4, 1)).unwrap().len(), 30);
+    }
+
+    /// A run invalidated and held again is queued twice; the stale queue
+    /// entry must not evict the newer image when it comes up first.
+    #[test]
+    fn a_reinserted_run_is_not_evicted_by_its_old_queue_entry() {
+        let cache = PageCache::new(300);
+        cache.insert(Run::new(0, 1), image(100, 1));
+        cache.insert(Run::new(2, 1), image(100, 2));
+        cache.invalidate(Run::new(0, 1));
+        cache.insert(Run::new(0, 1), image(100, 3)); // queued again
+        cache.insert(Run::new(4, 1), image(100, 4));
+        cache.insert(Run::new(6, 1), image(100, 5)); // one must go
+        assert!(
+            copy(&cache, Run::new(2, 1)).is_none(),
+            "the oldest live image is the one that goes"
+        );
+        assert!(copy(&cache, Run::new(0, 1)).is_some(), "younger, kept");
+        assert_eq!(cache.bytes(), 300);
+    }
+
+    /// Invalidations under the budget never pop the queue, so without tidying
+    /// it would grow by one per insert for ever.
+    #[test]
+    fn the_queue_stays_proportional_to_what_is_held() {
+        let cache = PageCache::new(DEFAULT_BUDGET_BYTES);
+        for n in 0..10_000u64 {
+            cache.insert(Run::new(n, 1), image(8, 1));
+            cache.invalidate(Run::new(n, 1));
+        }
+        assert!(cache.is_empty());
+        assert!(cache.inner.borrow().fifo.len() <= 64, "queue leaked");
     }
 
     /// Serving a page lends the held image itself, not a copy of it.
