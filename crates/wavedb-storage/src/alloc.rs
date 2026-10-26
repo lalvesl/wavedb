@@ -92,8 +92,8 @@ impl BlockAllocator {
         self.total_blocks
     }
 
-    /// Total free blocks currently held in extents (excludes the unallocated
-    /// tail beyond `total_blocks` and any deferred frees).
+    /// Total free blocks currently held in extents (excludes any deferred
+    /// frees).
     #[must_use]
     pub fn free_blocks(&self) -> u64 {
         self.by_size.iter().map(|&(count, _)| count).sum()
@@ -114,64 +114,47 @@ impl BlockAllocator {
         self.by_pos.len()
     }
 
-    /// Blocks in the **largest** free extent — the gauge that decides whether
-    /// a checkpoint's window will land in a hole or grow the tail, and so the
-    /// trigger for defragmentation
-    /// ([RFC 0042](../../../rfcs/0042-free-space-defragmentation.md)).
+    /// The lowest-addressed free extent of at least `min` blocks lying wholly
+    /// below `limit` — where compaction looks for room to move a run down
+    /// ([RFC 0069](../../../rfcs/0069-compaction-into-the-holes.md)).
     #[must_use]
-    pub fn largest_free_extent(&self) -> u64 {
-        self.by_size
-            .iter()
-            .next_back()
-            .map_or(0, |&(count, _)| count)
+    pub fn lowest_hole(&self, min: u64, limit: u64) -> Option<Run> {
+        self.holes_below(limit).find(|run| run.count >= min)
     }
 
-    /// Free blocks immediately before and immediately after `run` — how much
-    /// would coalesce if `run` moved away.
-    #[must_use]
-    pub fn free_neighbours(&self, run: Run) -> (u64, u64) {
-        let before = self
-            .by_pos
-            .range(..run.start)
-            .next_back()
-            .filter(|&(&start, &count)| start + count == run.start)
-            .map_or(0, |(_, &count)| count);
-        let after = self.by_pos.get(&run.end()).copied().unwrap_or(0);
-        (before, after)
+    /// Every free extent lying wholly below `limit`, lowest first.
+    pub fn holes_below(&self, limit: u64) -> impl Iterator<Item = Run> + '_ {
+        self.by_pos
+            .range(..limit)
+            .map(|(&start, &count)| Run::new(start, count))
+            .filter(move |run| run.end() <= limit)
     }
 
-    /// Allocate `count` blocks **at the tail**, never from a hole.
+    /// Allocate `count` blocks from the **lowest-addressed** hole that holds
+    /// them and ends at or before `limit`; `None` when no hole does.
     ///
-    /// The defragmenter relocates live runs with this: best-fit would happily
-    /// drop a page back beside the hole it was meant to vacate, which defeats
-    /// the point. Writing forward instead leaves the vacated neighbourhood to
-    /// coalesce into the large window ordinary checkpoints then consume.
-    ///
-    /// # Panics
-    /// Panics if `count == 0`.
-    pub fn alloc_tail(&mut self, count: u64) -> Run {
-        assert!(count > 0, "cannot allocate a zero-length run");
-        // Consume the trailing free extent first — it *is* the tail; leaving
-        // it stranded behind the new run would fragment on purpose.
-        match self.by_pos.iter().next_back() {
-            Some((&start, &n))
-                if start + n == self.total_blocks
-                    && !self.is_protected(Run::new(start, count.min(n))) =>
-            {
-                self.remove_extent(start, n);
-                if n > count {
-                    self.insert_extent(start + count, n - count);
-                } else {
-                    self.total_blocks = start + count;
-                }
-                Run::new(start, count)
-            }
-            _ => {
-                let start = self.total_blocks;
-                self.total_blocks += count;
-                Run::new(start, count)
-            }
+    /// Compaction's placement. Best-fit takes the smallest hole wherever it
+    /// lies, which could put a run back *above* where it was; first-fit by
+    /// address only ever moves it down, and fills the front of the file
+    /// first — which is what gathers the free space at the tail, where
+    /// [`truncate`](Self::truncate) can give it back.
+    pub fn alloc_below(&mut self, count: u64, limit: u64) -> Option<Run> {
+        let hole = self.lowest_hole(count.max(1), limit)?;
+        self.remove_extent(hole.start, hole.count);
+        if hole.count > count {
+            self.insert_extent(hole.start + count, hole.count - count);
         }
+        Some(Run::new(hole.start, count))
+    }
+
+    /// Allocate `count` blocks from the lowest-addressed hole that holds
+    /// them, growing the file only when none does.
+    pub fn alloc_lowest(&mut self, count: u64) -> Run {
+        self.alloc_below(count, u64::MAX).unwrap_or_else(|| {
+            let start = self.total_blocks;
+            self.total_blocks += count;
+            Run::new(start, count)
+        })
     }
 
     /// Allocate a contiguous run of `count` blocks (best-fit; grows the file
