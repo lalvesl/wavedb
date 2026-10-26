@@ -33,7 +33,10 @@
 //!
 //! [RFC 0052]: https://github.com/wavedb/wavedb/blob/main/rfcs/0052-segment-size-as-the-pagination-unit.md
 
-#![allow(clippy::cast_possible_truncation)] // row counts, bounded by the test
+#![allow(clippy::cast_possible_truncation)]
+// row counts, bounded by the test
+// The engine is used from one thread; its futures are not `Send` (lib.rs).
+#![allow(clippy::future_not_send)]
 
 use futures::TryStreamExt;
 use futures::executor::block_on;
