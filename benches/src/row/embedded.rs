@@ -136,7 +136,7 @@ where
     let engine_after = wavedb_adapter::open(&data, d)?;
     quiesce(&engine_after, &points)?;
     points.take(Point::Settled)?;
-    Engineish::defragment(&engine_after, DEFRAG_BUDGET_BLOCKS)?;
+    Engineish::compact(&engine_after)?;
     quiesce(&engine_after, &points)?;
     points.take(Point::Compacted)?;
     Engineish::close(engine_after);
@@ -156,10 +156,6 @@ where
         },
     ))
 }
-
-/// Defrag budget: generous enough that one pass is the compaction, since the
-/// point of the `compacted` footprint is the floor, not a partial move.
-const DEFRAG_BUDGET_BLOCKS: u64 = 1 << 20;
 
 /// Drain and checkpoint **until the footprint stops moving**.
 ///
