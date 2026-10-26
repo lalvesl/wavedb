@@ -39,9 +39,13 @@ enum Placement {
     /// The allocator's best fit: a recycled hole when one holds the whole
     /// round, the tail otherwise. Every ordinary settle.
     BestFit,
-    /// Always fresh tail blocks — the defragmenter, which must not land back
-    /// in the neighbourhood it is trying to vacate.
-    Tail,
+    /// The lowest-addressed hole that holds the round and ends at or before
+    /// this block — compaction's move, which must only ever go down. No such
+    /// hole means no round.
+    Below(u64),
+    /// A full addressing snapshot even if no page moves, in the lowest hole
+    /// that holds it — compaction dropping the chain it has outgrown.
+    Snapshot,
 }
 
 /// Where a placed image's descriptor is installed once the window is written.
@@ -78,25 +82,37 @@ impl PageStore {
         for (idx, records) in work {
             plans.push(self.plan_slot(idx, records)?);
         }
-        self.place_in(plans, Placement::BestFit)
+        self.place_in(plans, Placement::BestFit).map(|_| ())
     }
 
-    /// Write already-serialised pages to **fresh tail blocks** and repoint
-    /// their buckets — the defragmenter's move
-    /// ([RFC 0042](../../../rfcs/0042-free-space-defragmentation.md)).
-    ///
-    /// Identical to a settle round except for where the window lands: best-fit
-    /// would happily reuse the very hole the move is meant to enlarge.
+    /// Write already-serialised images into the lowest hole that ends at or
+    /// before `limit`, and repoint them — compaction's move
+    /// ([RFC 0069](../../../rfcs/0069-compaction-into-the-holes.md)).
+    /// `false`, with nothing changed, when no such hole holds the round.
     ///
     /// # Errors
     /// Propagates the window write fault; nothing is repointed if it fails.
-    pub(crate) fn relocate(&self, plans: Vec<SlotPlan>) -> StorageResult<()> {
-        self.place_in(plans, Placement::Tail)
+    pub(crate) fn relocate(
+        &self,
+        plans: Vec<SlotPlan>,
+        limit: u64,
+    ) -> StorageResult<bool> {
+        self.place_in(plans, Placement::Below(limit))
+    }
+
+    /// Rewrite the addressing log as one snapshot in the lowest hole that
+    /// holds it, releasing every chunk before it.
+    ///
+    /// # Errors
+    /// Propagates the window write fault.
+    pub(crate) fn rewrite_addressing(&self) -> StorageResult<()> {
+        self.place_in(Vec::new(), Placement::Snapshot).map(|_| ())
     }
 
     /// Phases 2–4 + 6: carve one window for every planned image *and* the
     /// round's edit chunk, write it, swap the descriptors in, and release the
-    /// superseded runs.
+    /// superseded runs. `false` only for a [`Placement::Below`] no hole fits,
+    /// and then nothing has happened.
     ///
     /// # Errors
     /// The window write's fault, or [`StorageError::Corrupt`] if the filled
@@ -111,17 +127,18 @@ impl PageStore {
         &self,
         mut plans: Vec<SlotPlan>,
         placement: Placement,
-    ) -> StorageResult<()> {
+    ) -> StorageResult<bool> {
+        let snapshot = matches!(placement, Placement::Snapshot);
         let mut targets = targets_of(&plans);
-        if targets.is_empty() {
-            return Ok(());
+        if targets.is_empty() && !snapshot {
+            return Ok(true);
         }
         let mut alloc = self.alloc.borrow_mut();
         let mut meta = self.meta.borrow_mut();
 
         // Pass one: the chunk's shape fixes its length, so a skeleton built
         // from the same plans reserves exactly what the filled one needs.
-        let full = meta.wants_snapshot();
+        let full = snapshot || meta.wants_snapshot();
         // A snapshot stands alone, so it ends the chain rather than extending
         // it (RFC 0048). `prev` is known before the carve and is a fixed 8
         // bytes, so it does not disturb the shape both passes agree on.
@@ -140,10 +157,15 @@ impl PageStore {
             .collect();
         let total: u64 = sizes.iter().sum();
 
-        let window = (total > 0).then(|| match placement {
-            Placement::BestFit => alloc.alloc(total),
-            Placement::Tail => alloc.alloc_tail(total),
-        });
+        let window = match placement {
+            _ if total == 0 => None,
+            Placement::BestFit => Some(alloc.alloc(total)),
+            Placement::Snapshot => Some(alloc.alloc_lowest(total)),
+            Placement::Below(limit) => match alloc.alloc_below(total, limit) {
+                Some(run) => Some(run),
+                None => return Ok(false),
+            },
+        };
         let runs = window
             .map_or_else(|| vec![None; targets.len()], |w| carve(w, &sizes));
         let freed = install(&mut plans, &targets, &runs);
@@ -161,6 +183,9 @@ impl PageStore {
             self.file.write_run(window, &buf)?; // the round's one write
         }
         for run in freed {
+            // No directory names it any more, so no read will ask for it:
+            // its image goes now rather than when the budget pushes it out.
+            self.file.page_cache().invalidate(run);
             alloc.free(run);
         }
         if let Some(run) = runs.last().copied().flatten() {
@@ -170,7 +195,7 @@ impl PageStore {
             }
         }
         self.publish(plans, &dicts, &mut alloc);
-        Ok(())
+        Ok(true)
     }
 
     /// Phase 4: adopt the working directories and the new dictionary runs.
