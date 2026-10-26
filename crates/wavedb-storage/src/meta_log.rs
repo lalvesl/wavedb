@@ -106,24 +106,24 @@ mod tests {
         assert!(!log.wants_snapshot(), "an empty log needs no snapshot");
         // Below the floor a small database keeps appending deltas.
         for start in 0..15 {
-            log.record(BlockDescriptor::new(start, 1, 0), false);
+            log.record(BlockDescriptor::new(start, 1), false);
         }
         assert!(!log.wants_snapshot());
-        log.record(BlockDescriptor::new(100, 1, 0), false);
+        log.record(BlockDescriptor::new(100, 1), false);
         assert!(log.wants_snapshot(), "16 blocks of deltas hits the floor");
 
         // Snapshotting frees everything before it and resets the count.
-        let stale = log.record(BlockDescriptor::new(200, 64, 0), true);
+        let stale = log.record(BlockDescriptor::new(200, 64), true);
         assert_eq!(stale.len(), 16, "every delta chunk is superseded");
         assert!(!log.wants_snapshot());
         assert_eq!(log.runs().len(), 1, "only the snapshot is live");
 
         // Now the ratio rules: 64 blocks of snapshot want 64 of deltas.
         for start in 0..63 {
-            log.record(BlockDescriptor::new(1000 + start, 1, 0), false);
+            log.record(BlockDescriptor::new(1000 + start, 1), false);
         }
         assert!(!log.wants_snapshot());
-        log.record(BlockDescriptor::new(2000, 1, 0), false);
+        log.record(BlockDescriptor::new(2000, 1), false);
         assert!(log.wants_snapshot());
     }
 
@@ -133,12 +133,12 @@ mod tests {
     #[test]
     fn the_frame_is_the_head_however_long_the_log() {
         let mut log = MetaLog::default();
-        log.record(BlockDescriptor::new(10, 2, 0), true);
-        assert_eq!(log.head(), BlockDescriptor::new(10, 2, 0).raw());
+        log.record(BlockDescriptor::new(10, 2), true);
+        assert_eq!(log.head(), BlockDescriptor::new(10, 2).raw());
 
-        let mut chain = vec![BlockDescriptor::new(10, 2, 0)];
+        let mut chain = vec![BlockDescriptor::new(10, 2)];
         for start in 0..40 {
-            let desc = BlockDescriptor::new(20 + start, 1, 0);
+            let desc = BlockDescriptor::new(20 + start, 1);
             log.record(desc, false);
             chain.push(desc);
             assert_eq!(log.head(), desc.raw(), "the head is always the newest");
@@ -157,7 +157,7 @@ mod tests {
     fn a_chain_that_never_snapshotted_restores_whole() {
         let mut log = MetaLog::default();
         let chain: Vec<BlockDescriptor> = (0..3)
-            .map(|start| BlockDescriptor::new(100 + start, 1, 0))
+            .map(|start| BlockDescriptor::new(100 + start, 1))
             .collect();
         for desc in &chain {
             log.record(*desc, false);
