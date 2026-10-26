@@ -221,10 +221,10 @@ mod tests {
         assert_eq!(stored.latest(), &[0xAB; 100][..]);
 
         // Placing the image hands back the superseded descriptor.
-        let first = BlockDescriptor::from_run_used(Run::new(7, 1), 128);
+        let first = BlockDescriptor::from_run(Run::new(7, 1));
         assert!(!on.repoint(first).is_allocated());
         assert_eq!(on.descriptor(), first);
-        let second = BlockDescriptor::from_run_used(Run::new(9, 1), 160);
+        let second = BlockDescriptor::from_run(Run::new(9, 1));
         assert_eq!(on.repoint(second), first, "the old run comes back to free");
 
         let mut off = DictState::new(false);
