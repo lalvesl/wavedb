@@ -94,10 +94,7 @@ mod tests {
 
         let run = Run::new(RESERVED_BLOCKS, 1);
         file.write_run(run, &bytes).unwrap();
-        dir.set_descriptor(
-            0,
-            BlockDescriptor::from_run_used(run, bytes.len() as u64),
-        );
+        dir.set_descriptor(0, BlockDescriptor::from_run(run));
 
         assert_eq!(
             dir.get_record(SH, &file, rec_id(1), &dict).unwrap(),
@@ -128,10 +125,7 @@ mod tests {
         let bytes = page.to_bytes(dict.dictionary(), dict.enabled()).unwrap();
         let run = Run::new(RESERVED_BLOCKS, 1);
         file.write_run(run, &bytes).unwrap();
-        dir.set_descriptor(
-            0,
-            BlockDescriptor::from_run_used(run, bytes.len() as u64),
-        );
+        dir.set_descriptor(0, BlockDescriptor::from_run(run));
 
         let before = file.io().snapshot().0;
         assert_eq!(
