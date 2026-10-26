@@ -587,7 +587,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0055](0055-sparse-index-merge-PLANNED-LOW.md) | Sparse-index merge and root collapse | Planned (low) |
 | [0056](0056-fuzzy-string-search-WIP.md) | Fuzzy string search | In progress |
 | [0057](0057-page-arena-and-checkpoint-staging.md) | The page arena and checkpoint staging | Planned |
-| [0059](0059-object-storage-capacity-tier-PLANNED.md) | Object storage as the capacity tier | Planned |
+| [0059](0059-object-storage-capacity-tier-PLANNED.md) | Object storage as the capacity tier (§1 archive lane; §2–§5 superseded by 0070) | Planned |
 | [0061](0061-relaxed-durability-window.md) | Relaxed durability: a group-commit window | Implemented |
 | [0062](0062-relaxed-mode-refinements-PLANNED.md) | Relaxed mode refinements | Planned |
 | [0063](0063-engine-yield-map-and-interruptible-engine-PLANNED.md) | The yield map, and an interruptible engine | Planned |
@@ -597,6 +597,7 @@ _A snapshot for orientation; each RFC's status header is authoritative._
 | [0067](0067-thread-per-core-shards-WIP.md) | Thread per core: the shard as a database, the thread as placement | In progress (steps 1–5, the fsync helper and parallel recovery landed; one executor per thread decided; step 6, measuring, next) |
 | [0068](0068-record-cache-as-a-log-WIP.md) | The record cache as a log | WIP |
 | [0069](0069-compaction-into-the-holes.md) | Compaction into the holes | Implemented |
+| [0070](0070-object-storage-backend-WIP.md) | Object storage as a page backend (three modes) | WIP (phase 1) |
 
 ### Deprecated / superseded
 | # | Title | Superseded by |

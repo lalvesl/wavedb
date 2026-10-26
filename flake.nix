@@ -137,6 +137,11 @@
 
             # Testing
             cargo-nextest
+            # The object store the object-backed modes are tested against
+            # (RFC 0070): an S3 gateway over a plain directory, so each test
+            # owns its own, with the conditional PUTs the journal and `1start`
+            # need.
+            versitygw
 
             # WASM
             wasm-pack

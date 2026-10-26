@@ -12,7 +12,7 @@ write pipeline. This is where most of WaveDB's engineering energy lives.
 
 | Module            | Responsibility                                                                                                                                       |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `block`           | `BlockDescriptor` (u40·u20·u4) + `Run` + `BlockAllocator` — alloc/free/coalesce runs of 4 KiB blocks.                                                |
+| `block`           | `BlockDescriptor` (u43·u20·u1) + `Run` + `BlockAllocator` — alloc/free/coalesce runs of 4 KiB blocks.                                                |
 | `block_file`      | `data.bin` as a block-addressed file: superblock (block 0), positioned run I/O, grow/truncate, fsync.                                                |
 | `dictionary`      | Per-`STRUCT_HASH` raw-content zstd dictionary (`Dictionary` + `DictState`): capped append-only buffer, version = prefix length, own run persistence. |
 | `directory`       | The per-`STRUCT_HASH` page directory container + the linear-hashing addressing math (pure addressing).                                               |
@@ -106,7 +106,7 @@ layout language records use. No structure gets its own bespoke byte format:
 - **superblock body** (version + seed) — a plain `WaveWire` struct behind the
   magic. The 8-byte magic itself stays a raw prefix _outside_ the wire payload:
   it must be checkable before any decode is attempted;
-- **block descriptor** (`start u40 · count u20 · occupation u4`, exact-packed
+- **block descriptor** (`start u43 · count u20 · flag u1`, exact-packed
   into one `u64` — see the table below) — wire-encodes as that `u64`;
 - **page / dictionary directories** (`Vec<u64>` of descriptors) — the standard
   `WaveWire` `Vec` encoding;
@@ -149,13 +149,12 @@ descriptor — there is no second format:
 
 | Bits   | Field         | Width | Meaning                                                         |
 | ------ | ------------- | ----- | --------------------------------------------------------------- |
-| 63..24 | `start_block` | `u40` | First 4 KiB block in `data.bin` (2⁴⁰ × 4 KiB ≈ **4 PiB**/file). |
-| 23..4  | `block_count` | `u20` | Contiguous blocks (1 ≤ n ≤ 2²⁰ ⇒ ≤ **~4 GiB** per page/run).    |
-| 3..0   | `occupation`  | `u4`  | Coarse fill gauge in 1/16ths (0 = empty, 15 = full).            |
+| 63..21 | `start_block` | `u43` | First 4 KiB block (2⁴³ × 4 KiB ≈ **32 PiB** of address).        |
+| 20..1  | `block_count` | `u20` | Contiguous blocks (1 ≤ n ≤ 2²⁰ ⇒ ≤ **~4 GiB** per page/run).    |
+| 0      | `flag`        | `u1`  | Reserved for the object-store backend (RFC 0070); zero today.   |
 
-`40 + 20 + 4 = 64` — exact fit. `occupation` is a cached summary the directory
-can read **without touching the page** — enough to decide "this page must grow /
-split" from the directory alone.
+`43 + 20 + 1 = 64` — exact fit. (A 4-bit fill gauge used to sit in the low bits;
+nothing ever read it, so its bits went to the address and the flag.)
 
 ### The `Id` hash
 
@@ -222,7 +221,7 @@ pub fn split_next(&mut self, file: &BlockFile) -> StorageResult<()> {
 
 | Growth           | Trigger                                   | Cost                                                                                                                |
 | ---------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| **Page grow**    | a bucket's `occupation` crosses the limit | allocate a larger run, copy the page, free the old run, rewrite **one** descriptor. No keys move.                   |
+| **Page grow**    | a bucket's page outgrows its run          | allocate a larger run, copy the page, free the old run, rewrite **one** descriptor. No keys move.                   |
 | **Bucket split** | the warning limit trips                   | `split_next` splits one bucket by the next hash bit and appends one directory slot. Scoped to one type, one bucket. |
 
 **Page grow is the cheap, common case** — relocate one contiguous run to a bigger
