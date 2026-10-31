@@ -82,8 +82,27 @@ impl Shape {
         self.size_factor
     }
 
-    const fn size_bits(self) -> u8 {
+    /// Width of the size field: what the address field leaves of 16 bits.
+    #[must_use]
+    pub const fn size_bits(self) -> u8 {
         16 - self.address_bits
+    }
+
+    /// The four bytes a header records the shape as.
+    #[must_use]
+    pub const fn to_bytes(self) -> [u8; 4] {
+        [
+            self.key_shift,
+            self.address_bits,
+            self.address_factor,
+            self.size_factor,
+        ]
+    }
+
+    /// The shape `bytes` record, if they are one.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 4]) -> Option<Self> {
+        Self::new(bytes[0], bytes[1], bytes[2], bytes[3])
     }
 
     /// The address field's hole marker, all ones.
@@ -96,12 +115,29 @@ impl Shape {
         Self { key_shift, ..self }
     }
 
-    /// The same shape with a size unit large enough for `blocks`, if one
+    /// The size unit a page of `blocks` takes: one block while the size
+    /// field can count it, else the least unit that brings it within the
+    /// field. Every shape of one index shares the field's width, so this is
+    /// the index's rule, whatever range the page lands in.
+    #[must_use]
+    pub const fn unit_for(self, blocks: u64) -> u64 {
+        let units = 1u64 << self.size_bits();
+        let need = blocks.div_ceil(units);
+        if need == 0 { 1 } else { need }
+    }
+
+    /// `blocks` rounded up to whole units of [`unit_for`](Self::unit_for):
+    /// the blocks a page is given, so an entry names its run exactly.
+    #[must_use]
+    pub const fn canonical(self, blocks: u64) -> u64 {
+        let unit = self.unit_for(blocks);
+        blocks.div_ceil(unit) * unit
+    }
+
+    /// The same shape with the size unit a page of `blocks` takes, if it
     /// fits in a `u8`.
     pub(crate) fn sized_for(self, blocks: u64) -> Option<Self> {
-        let units = 1u64 << self.size_bits();
-        let need = blocks.div_ceil(units).max(u64::from(self.size_factor));
-        let size_factor = u8::try_from(need).ok()?;
+        let size_factor = u8::try_from(self.unit_for(blocks)).ok()?;
         Some(Self {
             size_factor,
             ..self
@@ -171,17 +207,22 @@ impl SubHeader {
         self.first_key.checked_add(offset)
     }
 
-    /// The entry for a page at quantum `q`, if this range can address it.
+    /// The entry for a page at quantum `q`, if this range can address it —
+    /// and name its run exactly: `blocks` a whole number of size units.
     #[must_use]
     pub fn encode(&self, q: u16, address: u64, blocks: u64) -> Option<u32> {
         let shape = self.shape;
         let offset = address.checked_sub(self.base_block)?;
         let factor = u64::from(shape.address_factor);
-        if blocks == 0 || offset % factor != 0 {
+        let size = u64::from(shape.size_factor);
+        if blocks == 0
+            || !offset.is_multiple_of(factor)
+            || !blocks.is_multiple_of(size)
+        {
             return None;
         }
         let unit = offset / factor;
-        let units = blocks.div_ceil(u64::from(shape.size_factor));
+        let units = blocks / size;
         if unit >= u64::from(shape.hole()) || units > 1 << shape.size_bits() {
             return None;
         }
@@ -271,12 +312,27 @@ mod tests {
     fn an_entry_round_trips_its_page() {
         let shape = Shape::new(0, 10, 2, 4).unwrap();
         let h = head(0, b"", shape);
-        let entry = h.encode(7, 1000 + 2 * 33, 9).unwrap();
+        let entry = h.encode(7, 1000 + 2 * 33, 12).unwrap();
         assert_eq!(q_of(entry), 7);
-        // 9 blocks take three units of four.
         assert_eq!(h.decode(entry), Some((1066, 12)));
         assert_eq!(h.decode(h.hole(3)), None);
         assert_eq!(q_of(with_q(entry, 2)), 2);
+        // A run that is not whole units would be named wrong: refused.
+        assert!(h.encode(7, 1000, 9).is_none());
+    }
+
+    #[test]
+    fn a_canonical_size_is_whole_units_of_the_index_rule() {
+        let shape = Shape::new(0, 12, 1, 1).unwrap();
+        assert_eq!(shape.canonical(5), 5);
+        assert_eq!(shape.canonical(16), 16);
+        // Past 16 blocks the unit grows: 17 takes units of two.
+        assert_eq!(shape.canonical(17), 18);
+        assert_eq!(shape.canonical(33), 33);
+        assert_eq!(shape.canonical(35), 36);
+        let sized = shape.sized_for(35).unwrap();
+        let h = head(0, b"", sized);
+        assert!(h.encode(0, 1000, shape.canonical(35)).is_some());
     }
 
     #[test]
