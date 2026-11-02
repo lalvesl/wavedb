@@ -156,57 +156,77 @@ impl Shape {
 pub struct SubHeader {
     /// First block the entries' addresses count from.
     pub base_block: u64,
-    /// The 8 bytes at `depth` of the range's first key.
-    pub first_key: u64,
-    /// The bytes every key in the range shares; its length is the depth.
+    /// The bits every key in the range shares, in
+    /// `prefix_bits.div_ceil(8)` bytes; the bits past them zero.
     pub prefix: Box<[u8]>,
+    /// The prefix's length in bits; the quantum is the 16 bits after it.
+    pub prefix_bits: u16,
+    /// The quantum the range begins at.
+    pub start: u16,
     pub shape: Shape,
 }
 
 impl SubHeader {
-    /// Bytes of key every key in the range shares.
+    /// The range whose prefix is `key`'s first `prefix_bits` bits, starting
+    /// at `key`'s quantum, its entries read by `shape` from `base_block`.
     #[must_use]
-    pub fn depth(&self) -> usize {
-        self.prefix.len()
+    pub fn at_key(
+        key: &[u8],
+        prefix_bits: u16,
+        base_block: u64,
+        shape: Shape,
+    ) -> Self {
+        let bits = usize::from(prefix_bits);
+        let mut prefix = join(key, bits, 0);
+        prefix.truncate(bits.div_ceil(8));
+        Self {
+            base_block,
+            prefix: prefix.into_boxed_slice(),
+            prefix_bits,
+            start: bits_at(key, bits),
+            shape,
+        }
     }
 
-    /// Where the range starts: its prefix, then its first slice.
+    fn bits(&self) -> usize {
+        usize::from(self.prefix_bits)
+    }
+
+    /// Where the range starts: its prefix, then its first quantum.
     #[must_use]
     pub fn start(&self) -> Vec<u8> {
-        let mut start = self.prefix.to_vec();
-        start.extend_from_slice(&self.first_key.to_be_bytes());
-        start
+        self.key_at(self.start)
+    }
+
+    /// The first key of quantum `q`: the prefix, then `q`.
+    #[must_use]
+    pub fn key_at(&self, q: u16) -> Vec<u8> {
+        join(&self.prefix, self.bits(), q)
     }
 
     /// Where the range starts against `key`, both padded with zeros.
     #[must_use]
     pub fn start_cmp(&self, key: &[u8]) -> Ordering {
-        let head = &key[..key.len().min(self.depth())];
-        match cmp_padded(&self.prefix, head) {
-            Ordering::Equal => self.first_key.cmp(&slice(key, self.depth())),
-            unequal => unequal,
-        }
+        cmp_joined(&self.prefix, self.bits(), self.start, key)
     }
 
     /// The quantum `key` falls in, if the range can express it: the key
-    /// shares the prefix and lies within 65 536 quanta of the start.
+    /// shares the prefix and lies at or past the start.
     #[must_use]
     pub fn quantum(&self, key: &[u8]) -> Option<u16> {
-        let head = &key[..key.len().min(self.depth())];
-        if cmp_padded(&self.prefix, head) != Ordering::Equal {
+        if !has_prefix(key, &self.prefix, self.bits()) {
             return None;
         }
-        let offset = slice(key, self.depth()).checked_sub(self.first_key)?;
-        u16::try_from(offset >> self.shape.key_shift).ok()
+        let q = bits_at(key, self.bits());
+        (q >= self.start).then_some(q)
     }
 
-    /// The first slice of quantum `q`, if it is not past the end of keys.
+    /// The same range starting at quantum `q`.
     #[must_use]
-    pub fn quantum_start(&self, q: u32) -> Option<u64> {
-        let offset =
-            u64::from(q).checked_shl(u32::from(self.shape.key_shift))?;
-        if offset >> self.shape.key_shift != u64::from(q) {
-            return None;
+    pub fn from_quantum(&self, q: u16) -> Self {
+        Self {
+            start: q,
+            ..self.clone()
         }
         self.first_key.checked_add(offset)
     }
