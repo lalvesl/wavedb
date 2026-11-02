@@ -228,7 +228,19 @@ impl SubHeader {
             start: q,
             ..self.clone()
         }
-        self.first_key.checked_add(offset)
+    }
+
+    /// The range of quantum `q` alone, quantized 16 bits deeper: its prefix
+    /// is this one's and `q`, and it starts at its first quantum. `None`
+    /// past the deepest prefix a `u16` counts.
+    #[must_use]
+    pub fn refined(&self, q: u16) -> Option<Self> {
+        Some(Self {
+            prefix: self.key_at(q).into_boxed_slice(),
+            prefix_bits: self.prefix_bits.checked_add(16)?,
+            start: 0,
+            ..self.clone()
+        })
     }
 
     /// The entry for a page at quantum `q`, if this range can address it —
@@ -293,43 +305,63 @@ pub const fn with_q(entry: u32, q: u16) -> u32 {
 mod tests {
     use super::*;
 
-    fn head(first_key: u64, prefix: &[u8], shape: Shape) -> SubHeader {
+    fn head(prefix: &[u8], prefix_bits: u16, start: u16) -> SubHeader {
         SubHeader {
             base_block: 1000,
-            first_key,
             prefix: prefix.into(),
-            shape,
+            prefix_bits,
+            start,
+            shape: Shape::new(8, 1, 1).unwrap(),
         }
     }
 
     #[test]
     fn a_shape_refuses_what_it_cannot_read() {
-        assert!(Shape::new(49, 8, 1, 1).is_none());
-        assert!(Shape::new(0, 0, 1, 1).is_none());
-        assert!(Shape::new(0, 16, 1, 1).is_none());
-        assert!(Shape::new(0, 8, 0, 1).is_none());
-        assert!(Shape::new(20, 15, 2, 2).is_some());
+        assert!(Shape::new(0, 1, 1).is_none());
+        assert!(Shape::new(16, 1, 1).is_none());
+        assert!(Shape::new(8, 0, 1).is_none());
+        assert!(Shape::new(8, 1, 0).is_none());
+        assert!(Shape::new(15, 2, 2).is_some());
+        let shape = Shape::new(10, 2, 4).unwrap();
+        assert_eq!(Shape::from_bytes(shape.to_bytes()), Some(shape));
     }
 
     #[test]
-    fn a_key_quantizes_from_the_range_start() {
-        let shape = Shape::new(4, 8, 1, 1).unwrap();
-        let h = head(0x100, b"", shape);
-        assert_eq!(h.quantum(&0x100u64.to_be_bytes()), Some(0));
-        assert_eq!(h.quantum(&0x10Fu64.to_be_bytes()), Some(0));
-        assert_eq!(h.quantum(&0x110u64.to_be_bytes()), Some(1));
-        assert_eq!(h.quantum(&0xFFu64.to_be_bytes()), None);
-        assert_eq!(h.quantum(&(0x100u64 + (1 << 20)).to_be_bytes()), None);
-    }
-
-    #[test]
-    fn a_key_outside_the_prefix_has_no_quantum() {
-        let shape = Shape::new(0, 8, 1, 1).unwrap();
-        let h = head(0, b"ab", shape);
-        assert_eq!(h.quantum(b"ab\0\0\0\0\0\0\0\x05"), Some(5));
-        assert_eq!(h.quantum(b"ac"), None);
+    fn a_key_quantizes_by_the_sixteen_bits_after_the_prefix() {
+        let h = head(b"ab", 16, 0x0100);
+        assert_eq!(h.quantum(b"ab\x01\x00"), Some(0x0100));
+        assert_eq!(h.quantum(b"ab\x01\x00\xFF\xFF"), Some(0x0100));
+        assert_eq!(h.quantum(b"ab\x01\x01"), Some(0x0101));
+        assert_eq!(h.quantum(b"ab\x00\xFF"), None, "before the start");
+        assert_eq!(h.quantum(b"ac"), None, "outside the prefix");
         assert_eq!(h.start_cmp(b"ac"), Ordering::Less);
-        assert_eq!(h.start_cmp(b"aa"), Ordering::Greater);
+        assert_eq!(h.start_cmp(b"ab\x01"), Ordering::Equal);
+        assert_eq!(h.start_cmp(b"ab\x00\xFF"), Ordering::Greater);
+    }
+
+    #[test]
+    fn a_prefix_may_end_inside_a_byte() {
+        let h = SubHeader::at_key(&[0xAB, 0xCD, 0xEF], 4, 0, Shape::DISK);
+        assert_eq!(&*h.prefix, [0xA0]);
+        assert_eq!(h.start, 0xBCDE);
+        assert_eq!(h.quantum(&[0xAB, 0xCD, 0xEF]), Some(0xBCDE));
+        assert_eq!(h.quantum(&[0xBB, 0xCD]), None);
+        assert_eq!(h.start(), [0xAB, 0xCD, 0xE0]);
+    }
+
+    #[test]
+    fn a_refined_range_is_one_quantum_sixteen_bits_deeper() {
+        let h = head(b"a", 8, 0);
+        let deeper = h.refined(0x1234).unwrap();
+        assert_eq!((deeper.prefix_bits, deeper.start), (24, 0));
+        assert_eq!(&*deeper.prefix, b"a\x12\x34");
+        let (start, key) = (deeper.start(), h.key_at(0x1234));
+        assert_eq!(
+            super::super::key::cmp_padded(&start, &key),
+            Ordering::Equal
+        );
+        assert_eq!(deeper.quantum(b"a\x12\x34\x56\x78"), Some(0x5678));
+        assert_eq!(deeper.quantum(b"a\x12\x35"), None);
     }
 
     #[test]
