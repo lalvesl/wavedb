@@ -40,9 +40,11 @@ use std::collections::BTreeSet;
 
 use futures::stream::{self, StreamExt, TryStreamExt};
 
-use crate::block::BlockDescriptor;
+use crate::block::Run;
 use crate::error::{StorageError, StorageResult};
+use crate::ordered::Shape;
 use crate::page_store::PageStore;
+use crate::pages::run_of;
 use crate::recover::{newest_cut, newest_file};
 use crate::recover_headers::Headers;
 use crate::remote::{FILE_BLOCKS, Remote, file_of};
@@ -227,28 +229,27 @@ impl PageStore {
             return false;
         };
         let moving = object.moving.borrow();
-        let left = |desc: BlockDescriptor| {
-            desc.is_allocated() && moving.contains(&file_of(desc.start()))
-        };
+        let left = |start: u64| moving.contains(&file_of(start));
         self.types.iter().any(|slot| {
-            left(slot.remote_dict().get())
+            let dict = slot.remote_dict().get();
+            (dict.is_allocated() && left(dict.start()))
                 || slot
                     .remote_directory()
                     .borrow()
                     .iter()
-                    .any(|dir| dir.buckets().any(|(_, d)| left(d)))
+                    .any(|index| index.pages().any(|(_, p)| left(p.address)))
         })
     }
 
-    /// The remote buckets of slot `idx`, and whether its dictionary, an
-    /// upload carries forward out of the files being emptied — up to
+    /// The remote pages of slot `idx` — a key finding each, and its run —
+    /// and whether its dictionary, an upload carries forward out of the files being emptied — up to
     /// `budget` blocks, which it spends.
     pub(crate) fn moves_of(
         &self,
         idx: usize,
         budget: &mut u64,
-    ) -> (BTreeSet<usize>, bool) {
-        let mut moved = BTreeSet::new();
+    ) -> (Vec<(Vec<u8>, Run)>, bool) {
+        let mut moved = Vec::new();
         let Some(object) = &self.object else {
             return (moved, false);
         };
@@ -260,16 +261,16 @@ impl PageStore {
         let dict = slot.remote_dict().get();
         let move_dict =
             dict.is_allocated() && moving.contains(&file_of(dict.start()));
-        if let Some(dir) = slot.remote_directory().borrow().as_ref() {
-            for (bucket, desc) in dir.buckets() {
+        if let Some(index) = slot.remote_directory().borrow().as_ref() {
+            for (at, page) in index.pages() {
                 if *budget == 0 {
                     break;
                 }
-                if desc.is_allocated()
-                    && moving.contains(&file_of(desc.start()))
+                if moving.contains(&file_of(page.address))
+                    && let Some(key) = index.key_of(at)
                 {
-                    moved.insert(bucket);
-                    *budget = budget.saturating_sub(desc.count());
+                    moved.push((key, run_of(page)));
+                    *budget = budget.saturating_sub(page.blocks);
                 }
             }
         }
@@ -292,13 +293,16 @@ async fn survey(
     else {
         return Ok(None);
     };
-    let walked = walk(&mut headers, &top, registered, Lane::Types).await?;
+    let walked =
+        walk(&mut headers, &top, registered, Lane::Types, Shape::REMOTE)
+            .await?;
     let mut named = BTreeSet::new();
     for w in walked {
-        for desc in w.slots.into_iter().chain(w.dict) {
-            if desc.is_allocated() {
-                named.insert(file_of(desc.start()));
-            }
+        if let Some(index) = &w.index {
+            named.extend(index.pages().map(|(_, p)| file_of(p.address)));
+        }
+        if let Some(dict) = w.dict.filter(|d| d.is_allocated()) {
+            named.insert(file_of(dict.start()));
         }
     }
     Ok(Some(Survey {
@@ -314,8 +318,8 @@ mod tests {
     use wavedb_platform::s3::test_server::TestServer;
 
     use super::survey;
-    use crate::block::BlockDescriptor;
     use crate::header::{Header, NO_FILE, TypeEntry};
+    use crate::ordered::{RangeRecord, Shape, WholeRange};
     use crate::recover_headers::file_bytes;
     use crate::remote::{FILE_BLOCKS, Remote};
     use crate::upload_file::{FIRST_PAGE, SECTION};
@@ -327,13 +331,17 @@ mod tests {
         file * FILE_BLOCKS + SECTION
     }
 
-    /// A one-block page at the head of file `file`.
-    /// A page of one block at the head of file `file`, one of the two
-    /// buckets of a depth-1 directory.
-    fn page(file: u64) -> u64 {
-        BlockDescriptor::new(file * FILE_BLOCKS + FIRST_PAGE, 1)
-            .with_depth(1)
-            .raw()
+    /// Range `range` (0 or 1) of a two-range index, whole: one page of one
+    /// block at the head of file `file`.
+    fn whole(range: u64, file: u64) -> RangeRecord {
+        RangeRecord::Whole(WholeRange {
+            prefix: Vec::new(),
+            first_key: range << 63,
+            base_block: file * FILE_BLOCKS + FIRST_PAGE,
+            shape: u32::from_le_bytes(Shape::REMOTE.to_bytes()),
+            pages: vec![0],
+            meta: vec![0],
+        })
     }
 
     /// PUT file `file`, a whole batch of its own, naming `changed` for a
@@ -342,7 +350,7 @@ mod tests {
         remote: &Remote,
         file: u64,
         last: Option<u64>,
-        changed: Vec<(u32, u64)>,
+        changed: Vec<RangeRecord>,
     ) {
         let header = Header {
             at: at(file),
@@ -353,7 +361,7 @@ mod tests {
             end_of_batch: true,
             types: vec![TypeEntry {
                 struct_hash: SH,
-                depth: Some(1),
+                ranges: 2,
                 last: last.map_or(NO_FILE, at),
                 dict: None,
                 changed,
@@ -370,22 +378,22 @@ mod tests {
     }
 
     /// A recovery reads the newest whole batch, the header ending the batch
-    /// before, and back along the type's chain until every bucket is known:
+    /// before, and back along the type's chain until every range is known:
     /// the lowest of those is the horizon, and a header restating every
-    /// bucket raises it to the batch before it.
+    /// range raises it to the batch before it.
     #[test]
     fn the_horizon_is_the_lowest_header_a_recovery_reads() {
         let dir = tempfile::tempdir().unwrap();
         let server = TestServer::start(dir.path());
         let remote = Remote::new(server.bucket(), "t/");
-        put(&remote, 0, None, vec![(1, page(0))]);
-        put(&remote, 1, Some(0), vec![(0, page(1))]);
-        put(&remote, 2, Some(1), vec![(0, page(2))]);
+        put(&remote, 0, None, vec![whole(1, 0)]);
+        put(&remote, 1, Some(0), vec![whole(0, 1)]);
+        put(&remote, 2, Some(1), vec![whole(0, 2)]);
         let s = block_on(survey(&remote, &[SH], 0)).unwrap().unwrap();
-        assert_eq!(s.horizon, 0, "bucket 1 is only known from file 0");
+        assert_eq!(s.horizon, 0, "range 1 is only known from file 0");
         assert_eq!(s.named.iter().copied().collect::<Vec<_>>(), [0, 2]);
 
-        put(&remote, 3, Some(2), vec![(0, page(2)), (1, page(0))]);
+        put(&remote, 3, Some(2), vec![whole(0, 2), whole(1, 0)]);
         let s = block_on(survey(&remote, &[SH], 0)).unwrap().unwrap();
         assert_eq!(
             s.horizon, 2,
