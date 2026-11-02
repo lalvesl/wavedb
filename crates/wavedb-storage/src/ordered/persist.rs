@@ -29,8 +29,12 @@ use crate::error::{StorageError, StorageResult};
 #[derive(Debug, Clone, PartialEq, Eq, WaveWire)]
 pub enum RangeRecord {
     Whole(WholeRange),
+    /// Some entries of a range: its base and shape restated, so the
+    /// entries decode on their own.
     Entries {
         start: Vec<u8>,
+        base_block: u64,
+        shape: u32,
         entries: Vec<(u32, u8)>,
     },
     Gone {
@@ -64,6 +68,32 @@ impl RangeRecord {
             Self::Whole(w) => trimmed_start(&w.prefix, w.first_key),
             Self::Entries { start, .. } | Self::Gone { start } => start.clone(),
         }
+    }
+
+    /// The pages it names, `(address, blocks)` — holes left out; none for
+    /// a record whose shape is not one.
+    #[must_use]
+    pub fn pages(&self) -> Vec<(u64, u64)> {
+        let (base_block, shape, entries): (u64, u32, Vec<u32>) = match self {
+            Self::Whole(w) => (w.base_block, w.shape, w.pages.clone()),
+            Self::Entries {
+                base_block,
+                shape,
+                entries,
+                ..
+            } => (*base_block, *shape, entries.iter().map(|e| e.0).collect()),
+            Self::Gone { .. } => return Vec::new(),
+        };
+        let Some(shape) = Shape::from_bytes(shape.to_le_bytes()) else {
+            return Vec::new();
+        };
+        let head = SubHeader {
+            base_block,
+            first_key: 0,
+            prefix: Box::default(),
+            shape,
+        };
+        entries.iter().filter_map(|&e| head.decode(e)).collect()
     }
 }
 
