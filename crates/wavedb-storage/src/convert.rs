@@ -27,10 +27,10 @@ use std::path::Path;
 use futures::executor::block_on;
 
 use crate::block::BlockDescriptor;
-use crate::directory::Directory;
 use crate::error::{StorageError, StorageResult};
 use crate::manifest;
 use crate::page_store::{PageStore, StoreOptions};
+use crate::pages::{EVICTED, PENDING};
 use crate::recover::newest_file;
 use crate::shard_set::open_shards_with;
 use crate::struct_storage::StructStorage;
@@ -124,7 +124,7 @@ fn to_disk(
 
 impl PageStore {
     /// Flag every page on disk "not uploaded yet", and make it durable: a
-    /// batch whose headers name every bucket names the flags.
+    /// batch whose headers name every range names the flags.
     fn flag_every_page(&self) -> StorageResult<()> {
         // Everything committed into the pages first: a settle round after
         // this would write pages without the flag.
@@ -145,16 +145,18 @@ impl PageStore {
 
     fn set_every_flag(&self, pending: bool) {
         for slot in &self.types {
-            let mut dir = slot.directory().borrow_mut();
-            let Some(dir) = dir.as_mut() else { continue };
-            let buckets: Vec<_> = dir.buckets().collect();
-            for (bucket, desc) in buckets {
-                if desc.is_allocated() {
-                    dir.set_descriptor(
-                        bucket,
-                        desc.with_pending_upload(pending),
-                    );
-                }
+            let mut index = slot.directory().borrow_mut();
+            let Some(index) = index.as_mut() else {
+                continue;
+            };
+            let pages: Vec<_> = index.pages().collect();
+            for (at, page) in pages {
+                let flags = if pending {
+                    page.meta | PENDING
+                } else {
+                    page.meta & !PENDING
+                };
+                index.set_meta(at, flags);
             }
         }
     }
@@ -162,27 +164,33 @@ impl PageStore {
     /// Bring every evicted page back from the object store.
     async fn restore_every_page(&self) -> StorageResult<()> {
         for idx in 0..self.types.len() {
-            let evicted: Vec<usize> = self.types[idx]
+            let evicted: Vec<Vec<u8>> = self.types[idx]
                 .directory()
                 .borrow()
                 .iter()
-                .flat_map(Directory::buckets)
-                .filter(|(_, desc)| desc.is_evicted())
-                .map(|(bucket, _)| bucket)
+                .flat_map(|index| {
+                    index
+                        .pages()
+                        .filter(|(_, p)| p.meta & EVICTED != 0)
+                        .filter_map(|(at, _)| index.key_of(at))
+                        .collect::<Vec<_>>()
+                })
                 .collect();
-            for bucket in evicted {
-                self.restore(idx, bucket).await?;
+            for key in evicted {
+                self.restore(idx, &key).await?;
             }
         }
         Ok(())
     }
 
-    /// A disk-only store keeps no remote directory: a database converted to
-    /// the disk drops the ones its headers still name, and the next headers
+    /// A disk-only store keeps no remote index: a database converted to the
+    /// disk drops the ones its headers still name, and the next headers
     /// leave them out.
     pub(crate) fn forget_remote(&self) {
         for slot in &self.types {
             *slot.remote_directory().borrow_mut() = None;
+            *slot.remote_journal().borrow_mut() =
+                crate::ordered::Journal::new();
             slot.remote_dict().set(BlockDescriptor::EMPTY);
         }
     }
