@@ -14,8 +14,7 @@
 
 use wavedb_core::Id;
 
-use crate::directory::hash_of;
-use crate::record_index::{Loc, RecordIndex};
+use crate::record_index::{Loc, RecordIndex, hash_of};
 use crate::record_log::TypeLog;
 
 /// What the cache knows about one record.
