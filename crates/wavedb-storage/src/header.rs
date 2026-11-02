@@ -2,10 +2,10 @@
 //! every uploaded file ([RFC 0070] §5–§6) — and the chain the headers form,
 //! which a reconstruction walks.
 //!
-//! - **A header names the types its batch changed**, each with its bucket
-//!   count, its dictionary, the addresses that changed, and `last` — the
-//!   header before it with entries for that type. Following `last`, a type's
-//!   addresses are gathered newest first.
+//! - **A header names the types its batch changed**, each with the ranges
+//!   its index holds, its dictionary, the ranges that changed (RFC 0078 §6),
+//!   and `last` — the header before it with entries for that type.
+//!   Following `last`, a type's index is rebuilt newest first.
 //! - **Spare room restates old addresses** (`crate::upload_file`): the type
 //!   restated longest ago gets its addresses rewritten from a rotating
 //!   cursor, so every type — one never written included — keeps appearing
@@ -34,8 +34,8 @@ use wavedb_core::wire::{
     CRC_PREFIX_LEN, WaveWire, from_wire_checked, to_wire_checked,
 };
 
-use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
+use crate::ordered::RangeRecord;
 
 /// "No such header" in a link.
 pub const NO_FILE: u64 = u64::MAX;
@@ -78,34 +78,23 @@ pub struct Header {
 #[derive(Debug, Clone, PartialEq, Eq, WaveWire)]
 pub struct TypeEntry {
     pub struct_hash: u64,
-    /// The directory's global depth: `2^depth` entries; `None` for a type
-    /// with no directory yet ([RFC 0074]).
+    /// The ranges the type's index holds as of this header ([RFC 0078]):
+    /// a rebuild is done once it knows that many.
     ///
-    /// [RFC 0074]: ../../../rfcs/0074-extendible-hashing.md
-    pub depth: Option<u8>,
+    /// [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
+    pub ranges: u32,
     /// The header before this one with entries for this type
     /// ([`NO_FILE`]).
     pub last: u64,
     /// The type's dictionary image, if any.
     pub dict: Option<u64>,
-    /// `(bucket, address)`: what the batch changed, and what is restated —
-    /// buckets only, never an alias: the address's depth says which entries
-    /// it fills.
-    pub changed: Vec<(u32, u64)>,
+    /// The ranges the batch changed, then those the spare room restates.
+    pub changed: Vec<RangeRecord>,
 }
 
-/// The depth a header records for a directory of `slots` entries.
-#[must_use]
-pub fn depth_of(slots: &[BlockDescriptor]) -> Option<u8> {
-    (!slots.is_empty()).then(|| slots.len().trailing_zeros() as u8)
-}
-
-/// Bytes a type's entry takes with no `changed` items, at most: its
-/// dictionary's address and its depth on the heap.
-pub const ENTRY_BYTES: usize = TypeEntry::STACK_SIZE + 8 + 1;
-
-/// Bytes one `changed` item takes.
-pub const ITEM_BYTES: usize = <(u32, u64)>::STACK_SIZE;
+/// Bytes a type's entry takes with no `changed` record, at most: its
+/// dictionary's address on the heap.
+pub const ENTRY_BYTES: usize = TypeEntry::STACK_SIZE + 8;
 
 /// A header's encoded length with no type in it.
 pub const BARE_BYTES: usize = 4 + CRC_PREFIX_LEN + Header::STACK_SIZE;
@@ -145,12 +134,13 @@ impl Header {
 
 /// Where a type stands in the chain of headers. RAM only but `last`, which
 /// the newest headers record; after a reopen the rotation starts over.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rotation {
     /// The newest header with entries for the type.
     pub last: u64,
-    /// Where its next restated addresses begin.
-    pub shift: usize,
+    /// The start of the range restated last: the next restates from the
+    /// one after it (`None`: from the first).
+    pub cursor: Option<Vec<u8>>,
     /// The header in which spare room last restated it — what the spare
     /// room is handed out by, the oldest first. `None`: never.
     pub shifted: Option<u64>,
@@ -166,7 +156,7 @@ impl Default for Rotation {
     fn default() -> Self {
         Self {
             last: NO_FILE,
-            shift: 0,
+            cursor: None,
             shifted: None,
             began: None,
             covered: None,
@@ -251,9 +241,8 @@ impl Chain {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        BARE_BYTES, ENTRY_BYTES, Header, ITEM_BYTES, NO_FILE, TypeEntry,
-    };
+    use super::{BARE_BYTES, ENTRY_BYTES, Header, NO_FILE, TypeEntry};
+    use crate::ordered::RangeRecord;
 
     fn header() -> Header {
         Header {
@@ -265,10 +254,15 @@ mod tests {
             end_of_batch: true,
             types: vec![TypeEntry {
                 struct_hash: 5,
-                depth: Some(2),
+                ranges: 1,
                 last: NO_FILE,
                 dict: Some(42),
-                changed: vec![(0, 1), (2, 3)],
+                changed: vec![RangeRecord::Entries {
+                    start: vec![1, 2],
+                    base_block: 9,
+                    shape: 0x0101_0c30,
+                    entries: vec![(3, 0), (4, 1)],
+                }],
             }],
             remote: Vec::new(),
             chain: None,
@@ -294,14 +288,17 @@ mod tests {
         assert_eq!(h.encode().len(), BARE_BYTES);
         h.types.push(TypeEntry {
             struct_hash: 1,
-            depth: Some(0),
+            ranges: 0,
             last: NO_FILE,
             dict: Some(0),
             changed: Vec::new(),
         });
         assert_eq!(h.encoded_len(), BARE_BYTES + ENTRY_BYTES);
-        h.types[0].changed.push((1, 1));
-        assert_eq!(h.encoded_len(), BARE_BYTES + ENTRY_BYTES + ITEM_BYTES);
+        let record = RangeRecord::Gone { start: vec![9; 5] };
+        let len = record.wire_len();
+        h.types[0].changed.push(record);
+        assert_eq!(h.encoded_len(), BARE_BYTES + ENTRY_BYTES + len);
+        assert_eq!(h.encode().len(), h.encoded_len());
     }
 
     #[test]
