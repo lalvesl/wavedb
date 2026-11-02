@@ -4,7 +4,7 @@
 //! `Pivot`/`Chain` layer in [`wavedb_core`] runs over. It ties together the
 //! pieces built below it:
 //!
-//! - one slot **per registered type** — that type's own [`Directory`] over
+//! - one slot **per registered type** — that type's own page index (RFC 0078) over
 //!   the shared [`BlockFile`] and its dictionary. The types are the
 //!   `#[wavedb]`-generated [`StructStorage`] declarations handed in as an
 //!   explicit registry at [`open`](PageStore::open): a compile-time list,
@@ -34,7 +34,7 @@
 //!
 //! The record cache answers when it indexes the id (bytes, or `None` for a
 //! remove not yet settled); otherwise the settled page does
-//! ([`Directory::get_record`]), and in an object-backed store an evicted
+//! (`crate::read_through`), and in an object-backed store an evicted
 //! page's copy in the object store (`crate::read_through`). Only settled
 //! chunks leave the cache, so a fallback sees the newest settled state.
 //!
@@ -55,7 +55,6 @@ use std::path::Path;
 use std::cell::RefCell;
 
 use crate::block_file::BlockFile;
-use crate::directory::Directory;
 use crate::error::StorageResult;
 use crate::manifest::Manifest;
 use crate::struct_storage::{StructStorage, TypeSlot};
@@ -93,7 +92,6 @@ pub struct PageStore {
     /// The registered types' state, sorted by `STRUCT_HASH` (deduped) — a
     /// lock-free, read-only route table after open.
     pub(crate) types: Vec<TypeSlot>,
-    pub(crate) seed: [u64; 4],
     pub(crate) target_blocks_per_bucket: u64,
     /// Committed records, per type, in commit order — what reads serve from
     /// and a cycle settles ([`crate::record_cache`]).
@@ -241,7 +239,6 @@ impl PageStore {
     ) -> Self {
         let type_count = types.len();
         Self {
-            seed: file.seed(),
             file,
             storage,
             chain: RefCell::default(),
@@ -285,15 +282,14 @@ impl PageStore {
         self.cache.borrow().footprint()
     }
 
-    /// Bucket (page) count of one type's directory (`0` while nothing
-    /// settled) — pages, not entries: aliases count once.
+    /// Page count of one type's index (`0` while nothing settled).
     #[must_use]
     pub fn bucket_count(&self, struct_hash: u64) -> usize {
         self.slot_of(struct_hash).map_or(0, |slot| {
             slot.directory()
-                .borrow_mut()
+                .borrow()
                 .as_ref()
-                .map_or(0, Directory::pages)
+                .map_or(0, |index| index.pages().count())
         })
     }
 
