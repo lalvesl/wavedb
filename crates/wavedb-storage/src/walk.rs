@@ -2,8 +2,9 @@
 //! [RFC 0070] §6) — split from [`crate::recover`], which finds where it
 //! starts.
 //!
-//! Each type is followed along its `last` until every entry of its
-//! directory is known — each named bucket filling its aliases (RFC 0074); the
+//! Each type is followed along its `last` until every range of its index is
+//! known (RFC 0078 §6: newest first, a range closed at its first whole or
+//! gone record, as many as the newest header naming the type counts); the
 //! way down by `prev`, for a registered type no header met yet names, stops
 //! at the root's [`Header::horizon`]: every type that existed when the root
 //! was written is named at or above it, so one still unnamed there was
@@ -17,9 +18,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::block::BlockDescriptor;
-use crate::directory::D_MAX;
 use crate::error::{StorageError, StorageResult};
 use crate::header::{Header, NO_FILE, TypeEntry};
+use crate::ordered::{Rebuild, Shape};
+use crate::pages::Pages;
 
 /// Where a walk reads its headers from: the object store's files
 /// (`crate::recover_headers`) or the disk's windows (`crate::reopen`).
@@ -46,12 +48,9 @@ impl Lane {
     }
 }
 
-/// One type's directory being gathered.
+/// One type's index being gathered.
 struct Gathering {
-    /// `2^depth` entries, as the newest header naming the type sizes them.
-    slots: Vec<Option<u64>>,
-    depth: u8,
-    missing: usize,
+    rebuild: Rebuild,
     dict: Option<u64>,
     /// The next header with entries for it ([`NO_FILE`] once the chain
     /// ends).
@@ -61,41 +60,17 @@ struct Gathering {
 }
 
 impl Gathering {
-    /// Take `changed` — the pages not known yet, each filling every entry
-    /// of its bucket still unknown ([RFC 0074]) — and follow on to `last`.
-    ///
-    /// Newest first, the first naming an entry meets is its page now: the
-    /// split that made that page was the last change to the entry, and the
-    /// round of it named it.
-    ///
-    /// [RFC 0074]: ../../../rfcs/0074-extendible-hashing.md
-    fn take(&mut self, changed: &[(u32, u64)], last: u64) -> StorageResult<()> {
-        for &(bucket, raw) in changed {
-            let depth = BlockDescriptor::from_raw(raw).depth();
-            let bucket = bucket as usize;
-            if depth > self.depth || bucket >> depth != 0 {
-                return Err(StorageError::Corrupt(
-                    "a header names no bucket of its directory",
-                ));
-            }
-            for entry in (bucket..self.slots.len()).step_by(1 << depth) {
-                if let Some(slot) = self.slots.get_mut(entry)
-                    && slot.is_none()
-                {
-                    *slot = Some(raw);
-                    self.missing -= 1;
-                }
-            }
-        }
-        self.next = last;
-        Ok(())
+    /// Whether a range is still unknown.
+    const fn missing(&self) -> bool {
+        !self.rebuild.is_done()
     }
 }
 
 /// One type as a walk rebuilt it.
 pub struct Walked {
     pub struct_hash: u64,
-    pub slots: Vec<BlockDescriptor>,
+    /// Its index; `None` for a type with no range.
+    pub index: Option<Pages>,
     pub dict: Option<BlockDescriptor>,
     /// The newest header naming it.
     pub newest: u64,
@@ -116,6 +91,7 @@ pub async fn walk<S: HeaderSource>(
     top: &Header,
     registered: &[u64],
     lane: Lane,
+    seed: Shape,
 ) -> StorageResult<Vec<Walked>> {
     let mut types: BTreeMap<u64, Gathering> = BTreeMap::new();
     let mut unnamed: BTreeSet<u64> = registered.iter().copied().collect();
@@ -125,7 +101,7 @@ pub async fn walk<S: HeaderSource>(
     loop {
         let chained = types
             .values()
-            .filter(|t| t.missing > 0 && t.next != NO_FILE)
+            .filter(|t| t.missing() && t.next != NO_FILE)
             .map(|t| t.next)
             .max();
         let down =
@@ -156,30 +132,24 @@ pub async fn walk<S: HeaderSource>(
             };
         }
         gather(&mut types, &mut unnamed, &header, lane)?;
-        if types.values().any(|t| t.missing > 0 && t.next == file) {
+        if types.values().any(|t| t.missing() && t.next == file) {
             return Err(StorageError::Corrupt(
                 "a chain names a file without it",
             ));
         }
     }
-    Ok(types
+    types
         .into_iter()
-        .map(|(hash, t)| Walked {
-            struct_hash: hash,
-            slots: t
-                .slots
-                .into_iter()
-                .map(|raw| {
-                    raw.map_or(
-                        BlockDescriptor::EMPTY,
-                        BlockDescriptor::from_raw,
-                    )
-                })
-                .collect(),
-            dict: t.dict.map(BlockDescriptor::from_raw),
-            newest: t.newest,
+        .map(|(hash, t)| {
+            let index = t.rebuild.finish(seed)?;
+            Ok(Walked {
+                struct_hash: hash,
+                index: (index.range_count() > 0).then_some(index),
+                dict: t.dict.map(BlockDescriptor::from_raw),
+                newest: t.newest,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Fold `header` in: the types already followed take what it holds for
@@ -194,24 +164,18 @@ fn gather(
     for entry in lane.of(header) {
         if let Some(t) = types.get_mut(&entry.struct_hash) {
             if t.next == header.at {
-                t.take(&entry.changed, entry.last)?;
+                t.rebuild.take(&entry.changed)?;
+                t.next = entry.last;
             }
             continue;
         }
-        let depth = entry.depth.unwrap_or(0);
-        if depth > D_MAX {
-            return Err(StorageError::Corrupt("a directory past its depth"));
-        }
-        let n = entry.depth.map_or(0, |d| 1usize << d);
         let mut t = Gathering {
-            slots: vec![None; n],
-            depth,
-            missing: n,
+            rebuild: Rebuild::new(entry.ranges),
             dict: entry.dict,
-            next: NO_FILE,
+            next: entry.last,
             newest: header.at,
         };
-        t.take(&entry.changed, entry.last)?;
+        t.rebuild.take(&entry.changed)?;
         types.insert(entry.struct_hash, t);
         unnamed.remove(&entry.struct_hash);
     }
