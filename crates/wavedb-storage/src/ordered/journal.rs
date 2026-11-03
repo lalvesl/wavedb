@@ -73,7 +73,7 @@ impl<M: Copy + Default> PageIndex<M> {
     /// The start of range `range`, as records name it.
     pub(super) fn start_of(&self, range: usize) -> Vec<u8> {
         let head = &self.ranges[range].head;
-        trimmed_start(&head.prefix, head.first_key)
+        trimmed_start(&head.prefix, head.prefix_bits, head.start)
     }
 
     /// Range `range` changed shape: a header names it whole — or gone, if
@@ -100,7 +100,7 @@ impl<M: Copy + Default> PageIndex<M> {
     fn range_at(&self, start: &[u8]) -> Option<usize> {
         self.ranges
             .binary_search_by(|r| {
-                trimmed_start(&r.head.prefix, r.head.first_key)
+                trimmed_start(&r.head.prefix, r.head.prefix_bits, r.head.start)
                     .as_slice()
                     .cmp(start)
             })
@@ -116,7 +116,7 @@ impl<M: Copy + Default> PageIndex<M> {
             return (!self.ranges.is_empty()).then_some(0);
         };
         let at = self.ranges.partition_point(|r| {
-            trimmed_start(&r.head.prefix, r.head.first_key)
+            trimmed_start(&r.head.prefix, r.head.prefix_bits, r.head.start)
                 .as_slice()
                 .cmp(cursor)
                 != Ordering::Greater
@@ -212,7 +212,7 @@ impl PageIndex<u8> {
                 RangeRecord::Entries {
                     start: start.to_vec(),
                     base_block: r.head.base_block,
-                    shape: u32::from_le_bytes(r.head.shape.to_bytes()),
+                    shape: r.head.shape.to_bytes(),
                     entries,
                     counts,
                 }

@@ -13,7 +13,7 @@ use std::cmp::Ordering;
 
 use super::head::{QUANTA, Shape, SubHeader, q_of, with_q};
 use super::journal::Journal;
-use super::key::{prefix, shared_prefix, slice};
+use super::key::shared_prefix;
 
 /// The entries under one sub-header, ascending by quantum.
 ///
@@ -75,14 +75,10 @@ impl<M: Copy> Entries<M> {
         }
     }
 
-    /// The entries from `i` on, moved `by` quanta down.
-    pub(super) fn tail(&self, i: usize, by: u32) -> Self {
-        let pages = self.pages[i..]
-            .iter()
-            .map(|&e| with_q(e, (u32::from(q_of(e)) - by) as u16))
-            .collect();
+    /// The entries from `i` on.
+    pub(super) fn tail(&self, i: usize) -> Self {
         Self {
-            pages,
+            pages: self.pages[i..].to_vec(),
             meta: self.meta[i..].to_vec(),
             counts: self.counts.as_ref().map(|c| c[i..].to_vec()),
         }
@@ -254,28 +250,30 @@ impl<M: Copy + Default> PageIndex<M> {
         }
     }
 
-    /// Open a range at `key` holding `page` alone, quantized as the seed
-    /// says.
+    /// Open a range at `key` holding `page` alone, its entries read as the
+    /// seed says.
     ///
-    /// It continues at the depth of the range before it when the key shares
-    /// that range's prefix — a stream running past its range's end — and
-    /// otherwise starts where the key leaves that prefix. Either way its
-    /// start lies after the range before and no later than `key`, so the
-    /// ranges stay sorted. The shape is the seed's, not the range before's:
-    /// that one may have been refined for a dense spot the stream has left.
+    /// No range expresses the key, so the one before it — if any — has a
+    /// prefix the key leaves: the new range's prefix is the whole bytes the
+    /// key shares with that one, and it starts at the key's quantum under
+    /// it. The key leaves the prefix within those bytes' next one, inside
+    /// the quantum, so the start lies after the range before and no later
+    /// than `key`: the ranges stay sorted. The shape is the seed's, not the
+    /// range before's.
     fn open(&mut self, key: &[u8], page: Placed<M>) -> Option<Slot> {
         let before = self.range_of(key);
-        let depth = before.map_or(0, |i| {
+        let bits = before.map_or(0, |i| {
             let prev = &self.ranges[i].head;
-            shared_prefix(key, &prev.prefix).min(prev.depth())
+            let shared = 8 * shared_prefix(key, &prev.prefix);
+            shared.min(usize::from(prev.prefix_bits)) / 8 * 8
         });
-        let head = SubHeader {
-            base_block: page.address,
-            first_key: slice(key, depth),
-            prefix: prefix(key, depth),
-            shape: self.seed.sized_for(page.blocks)?,
-        };
-        let entry = head.encode(0, page.address, page.blocks)?;
+        let head = SubHeader::at_key(
+            key,
+            u16::try_from(bits).ok()?,
+            page.address,
+            self.seed.sized_for(page.blocks)?,
+        );
+        let entry = head.encode(head.start, page.address, page.blocks)?;
         let range = before.map_or(0, |i| i + 1);
         self.ranges.insert(
             range,
@@ -335,7 +333,7 @@ impl<M: Copy + Default> PageIndex<M> {
         let r = &mut self.ranges[at.range];
         r.entries.remove(at.entry);
         match r.entries.pages.first_mut() {
-            Some(first) => *first = with_q(*first, 0),
+            Some(first) => *first = with_q(*first, r.head.start),
             None => {
                 self.ranges.remove(at.range);
             }
