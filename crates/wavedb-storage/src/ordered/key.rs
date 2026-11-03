@@ -1,16 +1,78 @@
 //! Keys as the index reads them: bytes compared as if padded with zeros
-//! forever, and the 8 bytes at a depth read as one big-endian `u64`.
+//! forever, and read as a string of bits — a prefix of some bits, then the
+//! 16 after it.
 //!
 //! The padding is what makes a sub-header's start comparable with a key of
-//! any length: a start is its prefix and its first slice, `depth + 8` bytes,
-//! and a key is whatever its encoding made it. Two keys equal under the
-//! padding — `ab` and `ab\0` — are the same key to the index, so the
-//! encodings it serves never produce such a pair (every order-preserving key
-//! here ends in a fixed-width anchor or `Id`).
+//! any length: a start is its prefix's bits and its first quantum, and a key
+//! is whatever its encoding made it. Two keys equal under the padding — `ab`
+//! and `ab\0` — are the same key to the index, so the encodings it serves
+//! never produce such a pair (every order-preserving key here ends in a
+//! fixed-width anchor or `Id`).
 
 use std::cmp::Ordering;
 
-/// The 8 bytes of `key` from `depth`, big-endian, zero past its end.
+/// Byte `i` of `key`, zero past its end.
+fn byte(key: &[u8], i: usize) -> u8 {
+    key.get(i).copied().unwrap_or(0)
+}
+
+/// The 16 bits of `key` from bit `at` (bit 0 the first byte's highest),
+/// zero past its end.
+#[must_use]
+pub fn bits_at(key: &[u8], at: usize) -> u16 {
+    let (i, skew) = (at / 8, at % 8);
+    let wide = u32::from_be_bytes([
+        byte(key, i),
+        byte(key, i + 1),
+        byte(key, i + 2),
+        0,
+    ]);
+    // The window's 16 bits start `skew` bits into its 24.
+    ((wide << skew) >> 16) as u16
+}
+
+/// Whether `key`'s first `bits` bits are `prefix`'s (`prefix` padded too).
+#[must_use]
+pub fn has_prefix(key: &[u8], prefix: &[u8], bits: usize) -> bool {
+    let whole = bits / 8;
+    if (0..whole).any(|i| byte(key, i) != byte(prefix, i)) {
+        return false;
+    }
+    let rest = bits % 8;
+    let mask = !(0xFFu8 >> rest);
+    rest == 0 || (byte(key, whole) & mask) == (byte(prefix, whole) & mask)
+}
+
+/// The bytes holding `prefix`'s first `bits` bits, then `q`'s 16: the first
+/// key of quantum `q` under that prefix, `(bits + 16).div_ceil(8)` bytes.
+#[must_use]
+pub fn join(prefix: &[u8], bits: usize, q: u16) -> Vec<u8> {
+    let len = (bits + 16).div_ceil(8);
+    (0..len).map(|i| joined_byte(prefix, bits, q, i)).collect()
+}
+
+/// Byte `i` of what [`join`] builds from `prefix`, `bits` and `q`, zero
+/// past its end.
+fn joined_byte(prefix: &[u8], bits: usize, q: u16, i: usize) -> u8 {
+    let (at, skew) = (bits / 8, bits % 8);
+    // Bits of the prefix past `bits` are not its own.
+    let own = match i.cmp(&at) {
+        Ordering::Less => byte(prefix, i),
+        Ordering::Equal => byte(prefix, i) & !(0xFFu8 >> skew),
+        Ordering::Greater => 0,
+    };
+    // `q`'s 16 bits, `skew` bits into the three bytes from `at`.
+    let wide = ((u32::from(q) << 8) >> skew).to_be_bytes();
+    let ours = i
+        .checked_sub(at)
+        .and_then(|k| wide.get(k + 1))
+        .copied()
+        .unwrap_or(0);
+    own | ours
+}
+
+/// What [`join`] builds from `prefix`, `bits` and `q`, against `key`, both
+/// padded with zeros — without building it.
 #[must_use]
 pub fn slice(key: &[u8], depth: usize) -> u64 {
     let mut bytes = [0u8; 8];
