@@ -74,13 +74,19 @@ fn joined_byte(prefix: &[u8], bits: usize, q: u16, i: usize) -> u8 {
 /// What [`join`] builds from `prefix`, `bits` and `q`, against `key`, both
 /// padded with zeros — without building it.
 #[must_use]
-pub fn slice(key: &[u8], depth: usize) -> u64 {
-    let mut bytes = [0u8; 8];
-    if let Some(tail) = key.get(depth..) {
-        let n = tail.len().min(8);
-        bytes[..n].copy_from_slice(&tail[..n]);
+pub fn cmp_joined(prefix: &[u8], bits: usize, q: u16, key: &[u8]) -> Ordering {
+    let len = (bits + 16).div_ceil(8);
+    for i in 0..len {
+        match joined_byte(prefix, bits, q, i).cmp(&byte(key, i)) {
+            Ordering::Equal => {}
+            unequal => return unequal,
+        }
     }
-    u64::from_be_bytes(bytes)
+    if key.iter().skip(len).any(|&b| b != 0) {
+        Ordering::Less
+    } else {
+        Ordering::Equal
+    }
 }
 
 /// Compare `a` and `b` as if each were padded with zeros forever.
@@ -104,20 +110,16 @@ pub fn cmp_padded(a: &[u8], b: &[u8]) -> Ordering {
 /// the longer of the two.
 #[must_use]
 pub fn shared_prefix(a: &[u8], b: &[u8]) -> usize {
-    let at = |k: &[u8], i: usize| k.get(i).copied().unwrap_or(0);
     let longest = a.len().max(b.len());
     (0..longest)
-        .find(|&i| at(a, i) != at(b, i))
+        .find(|&i| byte(a, i) != byte(b, i))
         .unwrap_or(longest)
 }
 
 /// `key`'s first `depth` bytes, zero past its end.
 #[must_use]
 pub fn prefix(key: &[u8], depth: usize) -> Box<[u8]> {
-    let mut out = vec![0u8; depth];
-    let n = key.len().min(depth);
-    out[..n].copy_from_slice(&key[..n]);
-    out.into_boxed_slice()
+    (0..depth).map(|i| byte(key, i)).collect()
 }
 
 #[cfg(test)]
@@ -125,13 +127,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_slice_is_big_endian_and_zero_padded() {
-        assert_eq!(slice(&[1, 2], 0), 0x0102_0000_0000_0000);
-        assert_eq!(
-            slice(&[9, 1, 2, 3, 4, 5, 6, 7, 8, 9], 1),
-            0x0102_0304_0506_0708
-        );
-        assert_eq!(slice(&[1, 2], 5), 0);
+    fn sixteen_bits_read_across_bytes_and_past_the_end() {
+        assert_eq!(bits_at(&[0x12, 0x34, 0x56], 0), 0x1234);
+        assert_eq!(bits_at(&[0x12, 0x34, 0x56], 4), 0x2345);
+        assert_eq!(bits_at(&[0x12, 0x34, 0x56], 8), 0x3456);
+        assert_eq!(bits_at(&[0x12, 0x34], 12), 0x4000);
+        assert_eq!(bits_at(&[0x12], 40), 0);
+    }
+
+    #[test]
+    fn a_prefix_of_bits_masks_its_last_byte() {
+        assert!(has_prefix(&[0xAB, 0xCF], &[0xAB, 0xC0], 12));
+        assert!(!has_prefix(&[0xAB, 0xDF], &[0xAB, 0xC0], 12));
+        assert!(has_prefix(b"ab", b"", 0));
+        assert!(has_prefix(b"a", b"a\0", 16), "padded with zeros");
+        assert!(!has_prefix(b"a", b"a\x01", 16));
+    }
+
+    #[test]
+    fn a_quantum_joins_its_prefix_at_any_bit() {
+        assert_eq!(join(b"", 0, 0x1234), [0x12, 0x34]);
+        assert_eq!(join(&[0xAB], 8, 0x1234), [0xAB, 0x12, 0x34]);
+        // Four bits of prefix: the quantum starts mid-byte, and the
+        // prefix's own bits past its four are dropped.
+        assert_eq!(join(&[0xAF], 4, 0x1234), [0xA1, 0x23, 0x40]);
+        assert_eq!(join(&[0xAB, 0xCD, 0xEF], 8, 0x1234), [0xAB, 0x12, 0x34]);
+        for at in 0..24 {
+            let key = join(&[0xFF, 0xFF, 0xFF], at, 0xBEEF);
+            assert_eq!(bits_at(&key, at), 0xBEEF, "at {at}");
+            assert!(has_prefix(&key, &[0xFF, 0xFF, 0xFF], at));
+        }
+    }
+
+    #[test]
+    fn a_join_compares_as_the_bytes_it_builds() {
+        let keys: [&[u8]; 6] = [
+            b"",
+            b"\xAB",
+            b"\xAB\x12\x34",
+            b"\xAB\x12\x34\0",
+            b"\xAB\x12\x35",
+            b"\xFF",
+        ];
+        for key in keys {
+            for (prefix, bits, q) in [
+                (&[0xABu8][..], 8, 0x1234),
+                (&[0xA0], 4, 0xB123),
+                (&[], 0, 0),
+            ] {
+                assert_eq!(
+                    cmp_joined(prefix, bits, q, key),
+                    cmp_padded(&join(prefix, bits, q), key),
+                    "{prefix:?} {bits} {q:#x} against {key:?}"
+                );
+            }
+        }
     }
 
     #[test]
