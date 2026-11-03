@@ -27,7 +27,7 @@ mod reshape;
 
 pub use access::{COUNT_SATURATED, MAX_RANGE_ENTRIES};
 pub use fold::SCATTERED;
-pub use head::{MAX_SHIFT, QUANTA, Shape, SubHeader, q_of};
+pub use head::{QUANTA, Shape, SubHeader, q_of};
 pub use index::{Entries, Found, PageIndex, Placed, Slot};
 pub use journal::Journal;
 pub use persist::{RangeRecord, Rebuild, WholeRange, trimmed_start};
@@ -45,18 +45,12 @@ mod tests {
     use super::key::cmp_padded;
     use super::*;
 
-    fn shape(
-        key_shift: u8,
-        address_bits: u8,
-        address_factor: u8,
-        size_factor: u8,
-    ) -> Shape {
-        Shape::new(key_shift, address_bits, address_factor, size_factor)
-            .unwrap()
+    fn shape(address_bits: u8, address_factor: u8, size_factor: u8) -> Shape {
+        Shape::new(address_bits, address_factor, size_factor).unwrap()
     }
 
     /// Ranges sorted and disjoint by start; every range non-empty, its first
-    /// entry at quantum 0 and the rest ascending.
+    /// entry at its start and the rest ascending.
     fn check<M: Copy + Default + std::fmt::Debug>(ix: &PageIndex<M>) {
         for pair in ix.ranges.windows(2) {
             let order =
@@ -73,7 +67,11 @@ mod tests {
             let qs: Vec<u16> =
                 r.entries.pages.iter().map(|&e| q_of(e)).collect();
             assert_eq!(r.entries.pages.len(), r.entries.meta.len());
-            assert_eq!(qs.first(), Some(&0), "a range starts at quantum 0");
+            assert_eq!(
+                qs.first(),
+                Some(&r.head.start),
+                "a range's first entry is at its start"
+            );
             assert!(qs.windows(2).all(|w| w[0] < w[1]), "quanta ascend");
         }
     }
@@ -306,7 +304,7 @@ mod tests {
     fn a_time_stream_keeps_every_key_findable() {
         let mut rng = Rng(7);
         let keys = time_keys(&mut rng, 4000);
-        let mut lane = Lane::new(shape(21, 6, 1, 1), 16, 3);
+        let mut lane = Lane::new(shape(6, 1, 1), 16, 3);
         lane.run(&keys, 1500);
     }
 
@@ -314,7 +312,7 @@ mod tests {
     fn uniform_keys_keep_every_key_findable() {
         let mut rng = Rng(11);
         let keys: Vec<_> = (0..4000).map(|_| rng.bytes(16)).collect();
-        let mut lane = Lane::new(shape(48, 12, 1, 1), 16, 3);
+        let mut lane = Lane::new(shape(12, 1, 1), 16, 3);
         lane.run(&keys, 1500);
     }
 
@@ -334,9 +332,9 @@ mod tests {
                 k
             })
             .collect();
-        let mut lane = Lane::new(shape(40, 10, 1, 1), 12, 2);
+        let mut lane = Lane::new(shape(10, 1, 1), 12, 2);
         lane.run(&keys, 1000);
-        assert!(lane.ix.sub_headers().any(|h| h.depth() >= 8));
+        assert!(lane.ix.sub_headers().any(|h| h.prefix_bits >= 64));
     }
 
     #[test]
@@ -352,7 +350,7 @@ mod tests {
                 k
             })
             .collect();
-        let mut lane = Lane::new(shape(32, 14, 1, 1), 12, 2);
+        let mut lane = Lane::new(shape(14, 1, 1), 12, 2);
         lane.run(&keys, 1000);
     }
 
@@ -361,14 +359,14 @@ mod tests {
         let mut rng = Rng(19);
         let keys = time_keys(&mut rng, 2000);
         // One size bit: a page past two blocks needs a larger unit.
-        let mut lane = Lane::new(shape(20, 15, 1, 1), 16, 9);
+        let mut lane = Lane::new(shape(15, 1, 1), 16, 9);
         lane.run(&keys, 500);
         assert!(lane.ix.sub_headers().any(|h| h.shape.size_factor() > 1));
     }
 
     #[test]
     fn a_rewrite_outside_the_window_isolates_the_page() {
-        let mut ix = PageIndex::new(shape(8, 4, 1, 1));
+        let mut ix = PageIndex::new(shape(4, 1, 1));
         let page = |address| Placed {
             address,
             blocks: 1,
@@ -395,7 +393,7 @@ mod tests {
 
     #[test]
     fn equal_keys_are_inseparable() {
-        let mut ix = PageIndex::new(shape(0, 8, 1, 1));
+        let mut ix = PageIndex::new(shape(8, 1, 1));
         let page = |address| Placed {
             address,
             blocks: 1,
@@ -413,7 +411,7 @@ mod tests {
 
     #[test]
     fn removing_the_first_page_hands_its_quanta_on() {
-        let mut ix = PageIndex::new(shape(0, 8, 1, 1));
+        let mut ix = PageIndex::new(shape(8, 1, 1));
         let page = |address| Placed {
             address,
             blocks: 1,
@@ -441,7 +439,7 @@ mod tests {
 
     /// A range as the tests compare it: start, base, shape, entries, meta,
     /// counts.
-    type Seen = (Vec<u8>, u64, [u8; 4], Vec<u32>, Vec<u8>, Option<Vec<u8>>);
+    type Seen = (Vec<u8>, u64, [u8; 3], Vec<u32>, Vec<u8>, Option<Vec<u8>>);
 
     /// The ranges of `ix`, comparable.
     fn ranges_of(ix: &PageIndex<u8>) -> Vec<Seen> {
@@ -510,10 +508,10 @@ mod tests {
     fn a_rebuild_from_every_header_is_the_index() {
         let mut rng = Rng(23);
         let keys = time_keys(&mut rng, 3000);
-        let lane = Lane::new(shape(21, 6, 1, 1), 16, 3);
+        let lane = Lane::new(shape(6, 1, 1), 16, 3);
         persisted_lane(lane, &keys, 7, usize::MAX);
         let keys: Vec<_> = (0..3000).map(|_| rng.bytes(16)).collect();
-        let lane = Lane::new(shape(48, 12, 1, 1), 16, 3);
+        let lane = Lane::new(shape(12, 1, 1), 16, 3);
         persisted_lane(lane, &keys, 5, usize::MAX);
     }
 
@@ -524,14 +522,14 @@ mod tests {
     fn a_counted_lane_keeps_its_counts_through_a_rebuild() {
         let mut rng = Rng(37);
         let keys = time_keys(&mut rng, 3000);
-        let mut lane = Lane::counted(shape(21, 6, 1, 1), 16, 3);
+        let mut lane = Lane::counted(shape(6, 1, 1), 16, 3);
         lane.run(&keys, 1000);
-        let lane = Lane::counted(shape(21, 6, 1, 1), 16, 3);
+        let lane = Lane::counted(shape(6, 1, 1), 16, 3);
         persisted_lane(lane, &keys, 7, usize::MAX);
         let keys: Vec<_> = (0..2000).map(|_| rng.bytes(16)).collect();
-        let mut lane = Lane::counted(shape(48, 12, 1, 1), 12, 2);
+        let mut lane = Lane::counted(shape(12, 1, 1), 12, 2);
         lane.run(&keys, 700);
-        let lane = Lane::counted(shape(48, 12, 1, 1), 16, 3);
+        let lane = Lane::counted(shape(12, 1, 1), 16, 3);
         persisted_lane(lane, &keys, 3, 600);
     }
 
@@ -540,13 +538,13 @@ mod tests {
         let mut rng = Rng(29);
         let keys: Vec<_> = (0..2000).map(|_| rng.bytes(16)).collect();
         // A room of about two whole ranges: most changes wait.
-        let lane = Lane::new(shape(48, 12, 1, 1), 16, 3);
+        let lane = Lane::new(shape(12, 1, 1), 16, 3);
         persisted_lane(lane, &keys, 3, 600);
     }
 
     #[test]
     fn a_rewrite_in_place_is_recorded_as_its_entry() {
-        let mut ix: PageIndex<u8> = PageIndex::new(shape(0, 12, 1, 1));
+        let mut ix: PageIndex<u8> = PageIndex::new(shape(12, 1, 1));
         let page = |address, meta| Placed {
             address,
             blocks: 1,
@@ -567,7 +565,7 @@ mod tests {
 
     #[test]
     fn a_range_gone_is_recorded_gone() {
-        let mut ix: PageIndex<u8> = PageIndex::new(shape(0, 12, 1, 1));
+        let mut ix: PageIndex<u8> = PageIndex::new(shape(12, 1, 1));
         let page = Placed {
             address: 10,
             blocks: 1,
@@ -583,11 +581,40 @@ mod tests {
     }
 
     #[test]
+    fn a_range_whose_prefix_is_not_its_bits_is_corrupt() {
+        let whole = |prefix: Vec<u8>, prefix_bits: u16| {
+            RangeRecord::Whole(WholeRange {
+                prefix,
+                prefix_bits,
+                start: 7,
+                base_block: 0,
+                shape: shape(12, 1, 1).to_bytes(),
+                pages: vec![7 << 16],
+                meta: vec![0],
+                counts: Vec::new(),
+            })
+        };
+        let rebuild = |record| {
+            let mut rebuild = Rebuild::new(1);
+            rebuild.take(&[record])?;
+            rebuild.finish(shape(12, 1, 1))
+        };
+        // Twelve bits take two bytes.
+        let ix = rebuild(whole(vec![0xAB, 0xC0], 12)).unwrap();
+        let head = ix.sub_headers().next().unwrap();
+        assert_eq!((head.prefix_bits, head.start), (12, 7));
+        assert!(matches!(
+            rebuild(whole(vec![0xAB], 12)),
+            Err(crate::StorageError::Corrupt("a range's prefix"))
+        ));
+    }
+
+    #[test]
     fn a_long_range_splits_and_every_key_stays_findable() {
         let mut rng = Rng(31);
         let keys = time_keys(&mut rng, 6000);
         // Pages of four keys: well past a range's entries.
-        let mut lane = Lane::new(shape(30, 12, 1, 1), 4, 1);
+        let mut lane = Lane::new(shape(12, 1, 1), 4, 1);
         for key in &keys {
             lane.insert(key.clone());
         }
