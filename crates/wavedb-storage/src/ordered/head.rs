@@ -366,8 +366,10 @@ mod tests {
 
     #[test]
     fn an_entry_round_trips_its_page() {
-        let shape = Shape::new(0, 10, 2, 4).unwrap();
-        let h = head(0, b"", shape);
+        let h = SubHeader {
+            shape: Shape::new(10, 2, 4).unwrap(),
+            ..head(b"", 0, 0)
+        };
         let entry = h.encode(7, 1000 + 2 * 33, 12).unwrap();
         assert_eq!(q_of(entry), 7);
         assert_eq!(h.decode(entry), Some((1066, 12)));
@@ -379,22 +381,26 @@ mod tests {
 
     #[test]
     fn a_canonical_size_is_whole_units_of_the_index_rule() {
-        let shape = Shape::new(0, 12, 1, 1).unwrap();
+        let shape = Shape::new(12, 1, 1).unwrap();
         assert_eq!(shape.canonical(5), 5);
         assert_eq!(shape.canonical(16), 16);
         // Past 16 blocks the unit grows: 17 takes units of two.
         assert_eq!(shape.canonical(17), 18);
         assert_eq!(shape.canonical(33), 33);
         assert_eq!(shape.canonical(35), 36);
-        let sized = shape.sized_for(35).unwrap();
-        let h = head(0, b"", sized);
+        let h = SubHeader {
+            shape: shape.sized_for(35).unwrap(),
+            ..head(b"", 0, 0)
+        };
         assert!(h.encode(0, 1000, shape.canonical(35)).is_some());
     }
 
     #[test]
     fn an_entry_refuses_what_its_fields_cannot_hold() {
-        let shape = Shape::new(0, 4, 2, 1).unwrap();
-        let h = head(0, b"", shape);
+        let h = SubHeader {
+            shape: Shape::new(4, 2, 1).unwrap(),
+            ..head(b"", 0, 0)
+        };
         // Below the base, off the factor, at the hole marker, too large.
         assert!(h.encode(0, 999, 1).is_none());
         assert!(h.encode(0, 1001, 1).is_none());
@@ -405,7 +411,7 @@ mod tests {
 
     #[test]
     fn a_shape_grows_its_size_unit_for_a_large_page() {
-        let shape = Shape::new(0, 14, 1, 1).unwrap();
+        let shape = Shape::new(14, 1, 1).unwrap();
         assert_eq!(shape.sized_for(4).unwrap().size_factor(), 1);
         assert_eq!(shape.sized_for(5).unwrap().size_factor(), 2);
         assert_eq!(shape.sized_for(4 * 255).unwrap().size_factor(), 255);
