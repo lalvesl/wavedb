@@ -349,12 +349,15 @@ mod tests {
     /// Range `range` (0 or 1) of a two-range index, whole: one page of one
     /// block at the head of file `file`.
     fn whole(range: u64, file: u64) -> RangeRecord {
+        // The second range starts halfway through the keys: quantum 2^15.
+        let start = if range == 0 { 0 } else { 1u16 << 15 };
         RangeRecord::Whole(WholeRange {
             prefix: Vec::new(),
-            first_key: range << 63,
+            prefix_bits: 0,
+            start,
             base_block: file * FILE_BLOCKS + FIRST_PAGE,
-            shape: u32::from_le_bytes(Shape::REMOTE.to_bytes()),
-            pages: vec![0],
+            shape: Shape::REMOTE.to_bytes(),
+            pages: vec![u32::from(start) << 16],
             meta: vec![0],
             counts: Vec::new(),
         })

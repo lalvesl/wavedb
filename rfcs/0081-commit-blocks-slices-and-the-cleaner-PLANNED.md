@@ -420,7 +420,11 @@ a torn last block.
 1. **The rightmost split** (§8). Independent and small.
 2. **The sub-header in bits** (§3a). `prefix_bits` and `start` replace
    `first_key` and `key_shift`, in RAM and in `SubHeaderRecord`; the refine
-   has one case. No behaviour changes.
+   has one case. No behaviour changes. **Landed:** an entry's `q` is the
+   absolute quantum, so a range cut, refined or split keeps its entries as
+   they are, and two ranges fold by joining them; a fresh range opens at
+   the whole bytes it shares with the one before (as the old depth did).
+   `Shape` lost `key_shift` and is three bytes on disk.
 3. **Clipped reads** (§3). Every reader clips a page to its entry's
    interval less its slices; `SubHeader` gains `slices`, empty. No behaviour
    changes yet.

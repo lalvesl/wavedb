@@ -310,9 +310,10 @@ mod tests {
     fn whole(file: u64) -> RangeRecord {
         RangeRecord::Whole(WholeRange {
             prefix: Vec::new(),
-            first_key: 0,
+            prefix_bits: 0,
+            start: 0,
             base_block: page(file),
-            shape: u32::from_le_bytes(Shape::REMOTE.to_bytes()),
+            shape: Shape::REMOTE.to_bytes(),
             pages: vec![0],
             meta: vec![0],
             counts: Vec::new(),

@@ -167,6 +167,13 @@ quanta `[q_p, q_{p+1})` of its sub-header. That makes the index exact:
 
 ### 3. The index in RAM
 
+> **Revised by [RFC 0081](0081-commit-blocks-slices-and-the-cleaner-PLANNED.md)
+> §3a (landed):** `first_key` and `key_shift` are gone. A range's prefix is a
+> string of bits (`prefix_bits`), its quantum the 16 bits after it, and
+> `start` the quantum it begins at; an entry's `q` is that quantum itself,
+> and a refine adds 16 to `prefix_bits`, always. The form below is the one
+> this RFC landed with.
+
 ```rust
 /// One range of a lane's keys, and how its entries are read.
 struct SubHeader {
