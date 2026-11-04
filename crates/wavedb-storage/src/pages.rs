@@ -88,6 +88,38 @@ pub fn coverage(pages: &Pages, at: Slot) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
     Some((lo, hi))
 }
 
+/// `page` as the entry at `at` reads it: the records its coverage holds.
+///
+/// A page may hold keys its entry no longer covers — another entry names
+/// them now, from a newer run (RFC 0081 §2–§3) — so whatever takes a page's
+/// records to write them again takes them through its entry, or it would
+/// bring back what the newer run replaced. A point lookup needs no clip: the
+/// index routes the key to the entry covering it.
+///
+/// # Errors
+/// [`StorageError::Corrupt`](crate::StorageError::Corrupt) for an entry
+/// with no key.
+pub fn clip(
+    page: SlotPage,
+    pages: &Pages,
+    at: Slot,
+) -> StorageResult<SlotPage> {
+    let (lo, hi) = coverage(pages, at)
+        .ok_or(crate::StorageError::Corrupt("an entry without a key"))?;
+    let hi = hi.as_deref();
+    let inside = |key: Option<&[u8]>| key.is_none_or(|k| within(k, &lo, hi));
+    if inside(page.iter().next().map(|r| r.0))
+        && inside(page.iter().last().map(|r| r.0))
+    {
+        return Ok(page);
+    }
+    let mut own = SlotPage::new(page.struct_hash());
+    for (key, bytes) in page.iter().filter(|(k, _)| within(k, &lo, hi)) {
+        own.upsert(key, bytes.to_vec());
+    }
+    Ok(own)
+}
+
 /// Whether `key` lies in `[lo, hi)`.
 #[must_use]
 pub fn within(key: &[u8], lo: &[u8], hi: Option<&[u8]>) -> bool {
@@ -159,4 +191,92 @@ pub fn read_page(
     dict: &DictState,
 ) -> StorageResult<SlotPage> {
     with_page(file, run, dict, SlotPage::clone)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Pages, clip, disk_pages};
+    use crate::StorageResult;
+    use crate::ordered::{Cut, CutOutcome, Found, Placed};
+    use crate::page::SlotPage;
+    use crate::shape::{Rules, shape};
+
+    const SH: u64 = 0x5EED_0081_0003_0001;
+
+    fn page(address: u64) -> Placed<u8> {
+        Placed {
+            address,
+            blocks: 1,
+            meta: 0,
+        }
+    }
+
+    fn key(n: u8) -> Vec<u8> {
+        vec![n, 0]
+    }
+
+    fn of(keys: &[u8]) -> SlotPage {
+        let mut p = SlotPage::new(SH);
+        for &k in keys {
+            p.upsert(&key(k), vec![k]);
+        }
+        p
+    }
+
+    /// Two entries: keys from 1 at page 10, keys from 5 at page 20.
+    fn two() -> Pages {
+        let mut ix = disk_pages(false);
+        let at = ix.place(&key(1), page(10)).unwrap();
+        let cut = Cut {
+            first: &key(1),
+            left_last: &key(4),
+            right_first: &key(5),
+            last: &key(9),
+        };
+        assert!(matches!(ix.cut(at, &cut, page(20)), CutOutcome::Cut(_)));
+        ix
+    }
+
+    fn keys(p: &SlotPage) -> Vec<u8> {
+        p.iter().map(|(k, _)| k[0]).collect()
+    }
+
+    #[test]
+    fn a_page_is_read_through_its_entry() {
+        let ix = two();
+        let Found::Page { at, .. } = ix.find(&key(1)) else {
+            panic!("a page");
+        };
+        // Page 10 still holds 5 and 6, which the second entry covers now.
+        assert_eq!(keys(&clip(of(&[1, 3, 5, 6]), &ix, at).unwrap()), [1, 3]);
+        assert_eq!(keys(&clip(of(&[1, 3]), &ix, at).unwrap()), [1, 3]);
+    }
+
+    #[test]
+    fn a_round_rewrites_a_page_without_what_its_entry_gave_up() {
+        let mut ix = two();
+        let rules = Rules {
+            target_blocks: 16,
+            keep_holes: false,
+        };
+        let load = |p: Placed<u8>| -> StorageResult<SlotPage> {
+            Ok(if p.address == 10 {
+                of(&[1, 5])
+            } else {
+                of(&[5, 6])
+            })
+        };
+        let records = vec![(key(2), Some(vec![2]))];
+        let dict = crate::dictionary::Dictionary::new();
+        let shaped = shape(&mut ix, records, &rules, SH, load, |p| {
+            p.to_bytes(&dict, false)
+        })
+        .unwrap();
+        let written: Vec<Vec<u8>> = shaped
+            .pages
+            .iter()
+            .map(|p| keys(p.decoded.as_ref().unwrap()))
+            .collect();
+        assert_eq!(written, [vec![1, 2]], "5 is the second page's");
+    }
 }
