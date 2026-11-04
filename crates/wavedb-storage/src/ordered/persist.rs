@@ -1,7 +1,7 @@
 //! An index as the headers record it ([RFC 0078] §6), and its rebuilding
 //! from them, newest header first.
 //!
-//! A range is named by its **start**: its prefix and first slice, trailing
+//! A range is named by its **start**: its prefix and first quantum, trailing
 //! zero bytes trimmed — the same start however deep its sub-header reads
 //! it. Three records name a range:
 //! - [`RangeRecord::Whole`]: the sub-header and every entry — what any
@@ -23,6 +23,7 @@ use wavedb_core::wire::WaveWire;
 
 use super::head::{Shape, SubHeader, q_of};
 use super::index::{Entries, PageIndex, Range};
+use super::key::join;
 use crate::error::{StorageError, StorageResult};
 
 /// One range's record in a header.
@@ -35,7 +36,7 @@ pub enum RangeRecord {
     Entries {
         start: Vec<u8>,
         base_block: u64,
-        shape: u32,
+        shape: [u8; 3],
         entries: Vec<(u32, u8)>,
         counts: Vec<u8>,
     },
@@ -47,11 +48,14 @@ pub enum RangeRecord {
 /// A range in full: its sub-header and its entries.
 #[derive(Debug, Clone, PartialEq, Eq, WaveWire)]
 pub struct WholeRange {
+    /// The prefix's bytes, `prefix_bits.div_ceil(8)` of them.
     pub prefix: Vec<u8>,
-    pub first_key: u64,
+    pub prefix_bits: u16,
+    /// The quantum the range starts at: its first entry's.
+    pub start: u16,
     pub base_block: u64,
-    /// [`Shape::to_bytes`], as a `u32` (little-endian bytes).
-    pub shape: u32,
+    /// [`Shape::to_bytes`].
+    pub shape: [u8; 3],
     pub pages: Vec<u32>,
     pub meta: Vec<u8>,
     /// Each page's count in a counted index; empty otherwise.
@@ -69,7 +73,7 @@ impl RangeRecord {
     #[must_use]
     pub fn start(&self) -> Vec<u8> {
         match self {
-            Self::Whole(w) => trimmed_start(&w.prefix, w.first_key),
+            Self::Whole(w) => trimmed_start(&w.prefix, w.prefix_bits, w.start),
             Self::Entries { start, .. } | Self::Gone { start } => start.clone(),
         }
     }
@@ -78,7 +82,8 @@ impl RangeRecord {
     /// a record whose shape is not one.
     #[must_use]
     pub fn pages(&self) -> Vec<(u64, u64)> {
-        let (base_block, shape, entries): (u64, u32, Vec<u32>) = match self {
+        let (base_block, shape, entries): (u64, [u8; 3], Vec<u32>) = match self
+        {
             Self::Whole(w) => (w.base_block, w.shape, w.pages.clone()),
             Self::Entries {
                 base_block,
@@ -88,25 +93,26 @@ impl RangeRecord {
             } => (*base_block, *shape, entries.iter().map(|e| e.0).collect()),
             Self::Gone { .. } => return Vec::new(),
         };
-        let Some(shape) = Shape::from_bytes(shape.to_le_bytes()) else {
+        let Some(shape) = Shape::from_bytes(shape) else {
             return Vec::new();
         };
         let head = SubHeader {
             base_block,
-            first_key: 0,
             prefix: Box::default(),
+            prefix_bits: 0,
+            start: 0,
             shape,
         };
         entries.iter().filter_map(|&e| head.decode(e)).collect()
     }
 }
 
-/// A range's start: `prefix ++ first_key` big-endian, trailing zeros
-/// trimmed.
+/// A range's start: its prefix's `prefix_bits` bits, then `start`'s 16,
+/// trailing zero bytes trimmed — one start however deep its sub-header
+/// reads it.
 #[must_use]
-pub fn trimmed_start(prefix: &[u8], first_key: u64) -> Vec<u8> {
-    let mut start = prefix.to_vec();
-    start.extend_from_slice(&first_key.to_be_bytes());
+pub fn trimmed_start(prefix: &[u8], prefix_bits: u16, start: u16) -> Vec<u8> {
+    let mut start = join(prefix, usize::from(prefix_bits), start);
     let len = start.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
     start.truncate(len);
     start
@@ -116,9 +122,10 @@ pub fn trimmed_start(prefix: &[u8], first_key: u64) -> Vec<u8> {
 pub(super) fn whole_of(range: &Range<u8>) -> RangeRecord {
     RangeRecord::Whole(WholeRange {
         prefix: range.head.prefix.to_vec(),
-        first_key: range.head.first_key,
+        prefix_bits: range.head.prefix_bits,
+        start: range.head.start,
         base_block: range.head.base_block,
-        shape: u32::from_le_bytes(range.head.shape.to_bytes()),
+        shape: range.head.shape.to_bytes(),
         pages: range.entries.pages.clone(),
         meta: range.entries.meta.clone(),
         counts: range.entries.counts.clone().unwrap_or_default(),
@@ -250,8 +257,11 @@ fn range_of(
     whole: &WholeRange,
     newer: &BTreeMap<u16, Restated>,
 ) -> StorageResult<Range<u8>> {
-    let shape = Shape::from_bytes(whole.shape.to_le_bytes())
+    let shape = Shape::from_bytes(whole.shape)
         .ok_or(StorageError::Corrupt("a range's shape"))?;
+    if whole.prefix.len() != usize::from(whole.prefix_bits).div_ceil(8) {
+        return Err(StorageError::Corrupt("a range's prefix"));
+    }
     let n = whole.pages.len();
     let counted = !whole.counts.is_empty();
     if n == 0 || whole.meta.len() != n || (counted && whole.counts.len() != n) {
@@ -272,14 +282,15 @@ fn range_of(
         }
     }
     let ascending = entries.pages.windows(2).all(|w| q_of(w[0]) < q_of(w[1]));
-    if q_of(entries.pages[0]) != 0 || !ascending {
+    if q_of(entries.pages[0]) != whole.start || !ascending {
         return Err(StorageError::Corrupt("a range's quanta"));
     }
     Ok(Range {
         head: SubHeader {
             base_block: whole.base_block,
-            first_key: whole.first_key,
             prefix: whole.prefix.clone().into_boxed_slice(),
+            prefix_bits: whole.prefix_bits,
+            start: whole.start,
             shape,
         },
         entries,

@@ -11,7 +11,7 @@
 
 use std::cmp::Ordering;
 
-use super::head::{MAX_SHIFT, QUANTA, SubHeader, q_of, with_q};
+use super::head::{SubHeader, q_of, with_q};
 use super::index::{Entries, PageIndex, Placed, Range, Slot};
 use super::key::cmp_padded;
 
@@ -101,30 +101,12 @@ impl<M: Copy + Default> PageIndex<M> {
     }
 
     /// Give quantum `q` of `at`'s range a range of its own holding `at`'s
-    /// page alone — the page's keys all lie in `q`. The new range quantizes
-    /// 16 bits finer, or, at a shift of 0, starts 8 bytes deeper. The page's
-    /// other quanta become holes on either side. Returns the page's slot.
+    /// page alone — the page's keys all lie in `q`. The new range's prefix
+    /// is 16 bits longer: this one's and `q`. The page's other quanta become
+    /// holes on either side. Returns the page's slot.
     fn refine(&mut self, at: Slot, q: u16) -> Option<Slot> {
         let Range { head, entries } = self.ranges.get(at.range)?;
-        let shift = head.shape.key_shift();
-        let start = head.quantum_start(u32::from(q))?;
-        let middle_head = if shift > 0 {
-            SubHeader {
-                first_key: start,
-                prefix: head.prefix.clone(),
-                shape: head.shape.with_shift(shift.saturating_sub(16)),
-                ..head.clone()
-            }
-        } else {
-            let mut prefix = head.prefix.to_vec();
-            prefix.extend_from_slice(&start.to_be_bytes());
-            SubHeader {
-                first_key: 0,
-                prefix: prefix.into(),
-                shape: head.shape.with_shift(MAX_SHIFT),
-                ..head.clone()
-            }
-        };
+        let middle_head = head.refined(q)?;
         let page = entries.pages[at.entry];
         let middle = Range {
             head: middle_head,
@@ -157,15 +139,14 @@ impl<M: Copy + Default> PageIndex<M> {
         page: Placed<M>,
     ) -> Option<Slot> {
         let Range { head, entries } = self.ranges.get(at.range)?;
-        let own = u32::from(q_of(*entries.pages.get(at.entry)?));
+        let own = q_of(*entries.pages.get(at.entry)?);
         let end = entries.end_of(at.entry);
         let middle_head = SubHeader {
             base_block: page.address,
-            first_key: head.quantum_start(own)?,
-            prefix: head.prefix.clone(),
             shape: head.shape.sized_for(page.blocks)?,
+            ..head.from_quantum(own)
         };
-        let entry = middle_head.encode(0, page.address, page.blocks)?;
+        let entry = middle_head.encode(own, page.address, page.blocks)?;
         let middle = Range {
             head: middle_head,
             // The page moves, its entries with it.
@@ -179,8 +160,8 @@ impl<M: Copy + Default> PageIndex<M> {
 
     /// The part of `at`'s range from quantum `from` on: a hole up to `end`
     /// (where `at`'s entry stopped covering) when `from` is short of it,
-    /// then the entries after `at`, moved down by `from`. `None` when that
-    /// leaves nothing, or `from` is past the end of keys.
+    /// then the entries after `at`. `None` when that leaves nothing, or
+    /// `from` is past the prefix's last quantum.
     ///
     /// A part holding only a hole is kept: a key arriving there later fills
     /// it with this range's quantization, where a range opened afresh could
@@ -193,22 +174,20 @@ impl<M: Copy + Default> PageIndex<M> {
     fn right_of(&self, at: Slot, from: u32, end: u32) -> Option<Range<M>> {
         let Range { head, entries } = &self.ranges[at.range];
         let tail = at.entry + 1 < entries.len();
-        if from >= QUANTA || (from >= end && !tail) {
+        if from >= end && !tail {
             return None;
         }
-        let right_head = SubHeader {
-            first_key: head.quantum_start(from)?,
-            ..head.clone()
-        };
+        let from = u16::try_from(from).ok()?;
+        let right_head = head.from_quantum(from);
         let shadowed = self.ranges.get(at.range + 1).is_some_and(|next| {
             next.head.start_cmp(&right_head.start()) != Ordering::Greater
         });
         if !tail && shadowed {
             return None;
         }
-        let mut right = entries.tail(at.entry + 1, from);
-        if from < end {
-            right.insert(0, right_head.hole(0), M::default());
+        let mut right = entries.tail(at.entry + 1);
+        if u32::from(from) < end {
+            right.insert(0, right_head.hole(from), M::default());
         }
         Some(Range {
             head: right_head,
