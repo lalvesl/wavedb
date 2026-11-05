@@ -439,6 +439,20 @@ a torn last block.
    run; the counts are derived at open and kept at install.
 5. **The commit block** (§1, §2). The format, sections inline, fragments
    for appends, the header and the `Roots` of `Own` folded in.
+   **Landed first, fragments as pages of their own** (`fragment.rs`): a
+   settle's round whose records for a page all lie past its last key leaves
+   the page and writes them under a new entry cut at the quantum boundary
+   between them — taking along the page's keys of the quantum they share,
+   the page keeping them past its entry. A page of one block is rewritten
+   instead (the fragment would cost the same block and an entry more), so a
+   fragment grows to two blocks before the next one starts; a merge and an
+   upload take no fragments. A durable append of 1 KiB past a ten-block page
+   (`tests/fragments.rs`) went from 8.9 blocks to 3.3: the fragment, the
+   header, the roots block. Packing the round's fragments into one section
+   block, with counted references (phase 4), and the header into it, come
+   next. A finding on the way: while a type's dictionary grows, every round
+   writes it whole again (11 blocks a round in that test, compressed) — §9's
+   case for no dictionary in the hot path.
 6. **Slices** (§3, §4). Updates, middle inserts, removals, with their counts.
 7. **The index budget and inline consolidation** (§6).
 8. **The cleaner's phases and triggers** (§7, §8).
