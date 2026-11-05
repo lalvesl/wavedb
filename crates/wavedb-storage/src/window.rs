@@ -15,8 +15,31 @@ use crate::shape::weight;
 
 /// What a placed image becomes once the window is written.
 pub enum Target {
-    Page { plan: usize, page: usize },
-    Dict { plan: usize },
+    Page {
+        plan: usize,
+        page: usize,
+    },
+    Dict {
+        plan: usize,
+    },
+    /// Small pages of several plans in one run, `image` the pack holding
+    /// them (`crate::pack`): every member's entry names the run.
+    Pack {
+        members: Vec<(usize, usize)>,
+        image: Vec<u8>,
+    },
+}
+
+impl Target {
+    /// The planned pages it places, as `(plan, page)`.
+    #[must_use]
+    pub fn pages(&self) -> Vec<(usize, usize)> {
+        match self {
+            Self::Page { plan, page } => vec![(*plan, *page)],
+            Self::Dict { .. } => Vec::new(),
+            Self::Pack { members, .. } => members.clone(),
+        }
+    }
 }
 
 /// A round's plans and what its window holds, between its reservations and
@@ -68,6 +91,11 @@ pub fn size_of(plans: &[SlotPlan], target: &Target) -> u64 {
             .dict
             .as_deref()
             .map_or(0, |d| blocks_for(d.len())),
+        Target::Pack { members, image } => {
+            members.first().map_or(0, |&(plan, _)| {
+                plans[plan].index.canonical(blocks_for(image.len()))
+            })
+        }
     }
 }
 
@@ -100,12 +128,14 @@ pub fn install(
     flags: Option<u8>,
 ) -> StorageResult<u64> {
     let mut pending = 0;
-    for (target, run) in targets.iter().zip(runs) {
-        let (Target::Page { plan, page }, Some(run)) = (target, run) else {
-            continue;
-        };
-        let work = &mut plans[*plan];
-        let planned = &work.pages[*page];
+    let placed = targets.iter().zip(runs).flat_map(|(target, run)| {
+        run.map(|run| target.pages().into_iter().map(move |p| (p, run)))
+            .into_iter()
+            .flatten()
+    });
+    for ((plan, page), run) in placed {
+        let work = &mut plans[plan];
+        let planned = &work.pages[page];
         let meta = flags.unwrap_or(planned.flags);
         let at = match work.index.find(&planned.key) {
             Found::Page { at, .. } | Found::Hole(at) => at,
@@ -168,6 +198,7 @@ pub fn assemble(
             Target::Dict { plan } => {
                 plans[*plan].dict.as_deref().unwrap_or(&[])
             }
+            Target::Pack { image, .. } => image,
         };
         let at = ((run.start - window.start) * BLOCK_SIZE as u64) as usize;
         buf[at..at + bytes.len()].copy_from_slice(bytes);
