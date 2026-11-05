@@ -267,22 +267,34 @@ fn range_of(
     if n == 0 || whole.meta.len() != n || (counted && whole.counts.len() != n) {
         return Err(StorageError::Corrupt("a range's entries"));
     }
+    // The newer entries over the range's own, by quantum: a quantum the
+    // range did not have is an entry added since — a cut, a span — which
+    // changed no sub-header.
+    let mut by_q: BTreeMap<u16, Restated> = (0..n)
+        .map(|i| {
+            let count = counted.then(|| whole.counts[i]);
+            (q_of(whole.pages[i]), (whole.pages[i], whole.meta[i], count))
+        })
+        .collect();
+    for (&q, &(entry, meta, count)) in newer {
+        let held = by_q
+            .entry(q)
+            .or_insert_with(|| (entry, meta, count.or(Some(0))));
+        *held = (entry, meta, count.or(held.2));
+    }
     let mut entries = Entries {
-        pages: whole.pages.clone(),
-        meta: whole.meta.clone(),
-        counts: counted.then(|| whole.counts.clone()),
+        pages: Vec::with_capacity(by_q.len()),
+        meta: Vec::with_capacity(by_q.len()),
+        counts: counted.then(|| Vec::with_capacity(by_q.len())),
     };
-    for (i, entry) in entries.pages.iter_mut().enumerate() {
-        if let Some(&(newer, meta, count)) = newer.get(&q_of(*entry)) {
-            *entry = newer;
-            entries.meta[i] = meta;
-            if let (Some(counts), Some(count)) = (&mut entries.counts, count) {
-                counts[i] = count;
-            }
+    for (entry, meta, count) in by_q.into_values() {
+        entries.pages.push(entry);
+        entries.meta.push(meta);
+        if let Some(counts) = &mut entries.counts {
+            counts.push(count.unwrap_or(0));
         }
     }
-    let ascending = entries.pages.windows(2).all(|w| q_of(w[0]) < q_of(w[1]));
-    if q_of(entries.pages[0]) != whole.start || !ascending {
+    if q_of(entries.pages[0]) != whole.start {
         return Err(StorageError::Corrupt("a range's quanta"));
     }
     Ok(Range {

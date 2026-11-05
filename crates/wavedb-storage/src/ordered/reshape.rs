@@ -92,7 +92,8 @@ impl<M: Copy + Default> PageIndex<M> {
         };
         if let Some(entry) = r.head.encode(q, page.address, page.blocks) {
             r.entries.insert(slot.entry, entry, page.meta);
-            self.note_whole(at.range);
+            // The sub-header is as it was: a header names the entry alone.
+            self.note_entry(slot);
             return Some(slot);
         }
         let hole = r.head.hole(q);

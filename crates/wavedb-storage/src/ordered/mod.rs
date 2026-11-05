@@ -563,6 +563,35 @@ mod tests {
         assert_eq!(ranges_of(&again), ranges_of(&ix));
     }
 
+    /// A cut that adds an entry leaves the sub-header as it was: a header
+    /// names the new entry alone, and a rebuild puts it among the range's.
+    #[test]
+    fn a_cut_is_recorded_as_its_new_entry() {
+        let mut ix: PageIndex<u8> = PageIndex::new(shape(12, 1, 1));
+        let page = |address| Placed {
+            address,
+            blocks: 1,
+            meta: 0,
+        };
+        let key = |b: u8| [b, 0];
+        let at = ix.place(&key(1), page(10)).unwrap();
+        let (first, _) = ix.drain(usize::MAX);
+        let cut = Cut {
+            first: &key(1),
+            left_last: &key(1),
+            right_first: &key(9),
+            last: &key(9),
+        };
+        assert!(matches!(ix.cut(at, &cut, page(11)), CutOutcome::Cut(_)));
+        let (second, _) = ix.drain(usize::MAX);
+        assert!(
+            matches!(&second[..], [RangeRecord::Entries { entries, .. }] if entries.len() == 1),
+            "{second:?}"
+        );
+        let again = rebuilt(&[(1, first), (1, second)], ix.seed());
+        assert_eq!(ranges_of(&again), ranges_of(&ix));
+    }
+
     #[test]
     fn a_range_gone_is_recorded_gone() {
         let mut ix: PageIndex<u8> = PageIndex::new(shape(12, 1, 1));
