@@ -18,6 +18,7 @@
 //!
 //! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
+use crate::cut::collection;
 use crate::error::{StorageError, StorageResult};
 use crate::ordered::{Found, Placed};
 use crate::page::SlotPage;
@@ -25,7 +26,7 @@ use crate::page_store::PageStore;
 use crate::pages::{EVICTED, Pages, clip, read_page, run_of, take_page};
 use crate::plan::{SlotPlan, image_of};
 use crate::record_cache::Records;
-use crate::shape::{Rules, collection, shape, weight};
+use crate::shape::{Rules, shape, weight};
 
 /// Runs a merge round takes at most.
 const ROUND_RUNS: usize = 64;
@@ -133,6 +134,7 @@ impl PageStore {
         let rules = Rules {
             target_blocks: self.target_blocks_per_bucket,
             keep_holes: self.object.is_some(),
+            fragments: false,
         };
         let shaped = shape(
             &mut index,

@@ -92,6 +92,7 @@ impl PageStore {
         let rules = Rules {
             target_blocks: self.target_blocks_per_bucket,
             keep_holes: self.object.is_some(),
+            fragments: true,
         };
         let shaped = shape(
             &mut index,
