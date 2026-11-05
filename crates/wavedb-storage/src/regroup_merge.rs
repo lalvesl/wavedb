@@ -136,7 +136,7 @@ impl PageStore {
         let rules = Rules {
             target_blocks: self.target_blocks_per_bucket,
             keep_holes: self.object.is_some(),
-            fragments: false,
+            partial: false,
         };
         let shaped = shape(
             &mut index,
@@ -155,6 +155,7 @@ impl PageStore {
             pages: shaped.pages,
             dict: None,
             retired,
+            named: shaped.named,
             unpended: unpended + shaped.unpended,
             punched: shaped.punched,
         }))
@@ -203,21 +204,32 @@ impl PageStore {
 fn small_runs(index: &Pages, most: u64) -> Vec<Vec<Vec<u8>>> {
     let mut out = Vec::new();
     let mut run: Vec<Vec<u8>> = Vec::new();
+    // A run named by several entries of the group — a page around a span
+    // rewritten apart (`crate::partial`) — is read and rewritten once.
+    let mut seen = std::collections::BTreeSet::new();
     let (mut blocks, mut last) = (0, None);
     for (at, page) in index.pages() {
         let beside = last.is_some_and(|(range, entry)| {
             range == at.range && entry + 1 == at.entry
         });
-        if !beside || blocks + page.blocks > most || page.meta & EVICTED != 0 {
+        let more = if seen.contains(&page.address) {
+            0
+        } else {
+            page.blocks
+        };
+        if !beside || blocks + more > most || page.meta & EVICTED != 0 {
             if run.len() >= 2 {
                 out.push(std::mem::take(&mut run));
             }
             run.clear();
+            seen.clear();
             blocks = 0;
         }
         last = Some((at.range, at.entry));
         if page.blocks <= most && page.meta & EVICTED == 0 {
-            blocks += page.blocks;
+            if seen.insert(page.address) {
+                blocks += page.blocks;
+            }
             run.extend(index.key_of(at));
         }
     }

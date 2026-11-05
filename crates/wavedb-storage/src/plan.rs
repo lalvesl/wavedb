@@ -34,6 +34,8 @@ pub struct SlotPlan {
     pub(crate) dict: Option<Vec<u8>>,
     /// Runs the plan stops naming, freed once the window is written.
     pub(crate) retired: Vec<Run>,
+    /// Runs it names once more: a page rewritten in part (`crate::partial`).
+    pub(crate) named: Vec<Run>,
     /// Pending blocks the retired pages took with them.
     pub(crate) unpended: u64,
     /// Holes left pending — removals the object store must learn.
@@ -50,6 +52,7 @@ impl SlotPlan {
             pages: Vec::new(),
             dict: None,
             retired: Vec::new(),
+            named: Vec::new(),
             unpended: 0,
             punched: 0,
         }
@@ -92,7 +95,7 @@ impl PageStore {
         let rules = Rules {
             target_blocks: self.target_blocks_per_bucket,
             keep_holes: self.object.is_some(),
-            fragments: true,
+            partial: true,
         };
         let shaped = shape(
             &mut index,
@@ -110,6 +113,7 @@ impl PageStore {
             pages: shaped.pages,
             dict: grew.then(|| dict.image()),
             retired: shaped.retired,
+            named: shaped.named,
             unpended: shaped.unpended,
             punched: shaped.punched,
         })

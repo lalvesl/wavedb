@@ -27,10 +27,10 @@ use std::collections::BTreeMap;
 use crate::block::{BLOCK_SIZE, Run};
 use crate::cut::{cut_at, halves};
 use crate::error::{StorageError, StorageResult};
-use crate::fragment::appended;
 use crate::ordered::{Found, Placed, Slot};
 use crate::page::SlotPage;
 use crate::pages::{EVICTED, PENDING, Pages, clip, run_of};
+use crate::partial::partial;
 use crate::record_cache::Records;
 
 /// A page a round writes.
@@ -50,6 +50,9 @@ pub struct Shaped {
     pub(crate) pages: Vec<PlannedPage>,
     /// Runs the index stops naming: every page the round rewrote or dropped.
     pub(crate) retired: Vec<Run>,
+    /// Runs the index names once more: a page the round rewrote in part,
+    /// named before and after the part (`crate::partial`).
+    pub(crate) named: Vec<Run>,
     /// Pending blocks those took with them.
     pub(crate) unpended: u64,
     /// Holes left pending: a removal another store must learn.
@@ -62,21 +65,19 @@ pub struct Rules {
     pub(crate) target_blocks: u64,
     /// An emptied page becomes a [`PENDING`] hole rather than going.
     pub(crate) keep_holes: bool,
-    /// Appends past a page go to a fragment rather than into it
-    /// (`crate::fragment`): a settle's rounds, not a merge's or an upload's.
-    pub(crate) fragments: bool,
+    /// A page the round changes in part is rewritten in that part
+    /// (`crate::partial`): a settle's rounds, not a merge's or an upload's.
+    pub(crate) partial: bool,
 }
 
 /// One staged page: where it came from, and what it now holds.
 pub struct Staged {
     pub(crate) old: Option<Placed<u8>>,
     pub(crate) page: SlotPage,
-    /// The page's last key, when it takes its appends as a fragment.
-    pub(crate) last: Option<Vec<u8>>,
-    /// The round's records past `last`, in key order.
-    pub(crate) tail: Vec<(Vec<u8>, Vec<u8>)>,
-    /// Whether the round changed what the page holds.
-    pub(crate) touched: bool,
+    /// The keys the round put or removed in it, in order.
+    pub(crate) changed: Vec<Vec<u8>>,
+    /// The bytes of the records it held as read.
+    pub(crate) held: u64,
 }
 
 /// Blocks an encoded image takes before rounding.
@@ -131,7 +132,12 @@ where
                         ));
                     }
                     let loaded = clip(load(page)?, index, at)?;
-                    vacant.insert(Staged::stored(page, loaded, rules));
+                    vacant.insert(Staged {
+                        old: Some(page),
+                        held: crate::partial::bytes(&loaded, 0, usize::MAX),
+                        page: loaded,
+                        changed: Vec::new(),
+                    });
                 }
                 at
             }
@@ -160,26 +166,25 @@ where
         let entry = staged.entry(sk).or_insert_with(|| Staged {
             old: None,
             page: SlotPage::new(struct_hash),
-            last: None,
-            tail: Vec::new(),
-            touched: true,
+            changed: Vec::new(),
+            held: 0,
         });
-        match bytes {
-            Some(bytes) if entry.last.as_ref().is_some_and(|l| key > *l) => {
-                entry.tail.push((key, bytes));
-            }
+        let changed = match bytes {
             Some(bytes) => {
                 entry.page.upsert(&key, bytes);
-                entry.touched = true;
+                true
             }
-            None => entry.touched |= entry.page.remove(&key),
+            None => entry.page.remove(&key),
+        };
+        if changed {
+            entry.changed.push(key);
         }
     }
     let mut shaped = Shaped::default();
     for (sk, st) in staged.into_iter().rev() {
-        let Some(st) = appended(index, st, rules, &mut encode, &mut shaped)?
+        let Some(st) = partial(index, st, rules, &mut encode, &mut shaped)?
         else {
-            continue; // the page stays, its appends a fragment
+            continue; // the page stays, rewritten in part or not at all
         };
         if let Some(old) = st.old {
             shaped.retired.push(run_of(old));
