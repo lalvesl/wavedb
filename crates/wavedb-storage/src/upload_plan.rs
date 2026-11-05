@@ -217,6 +217,7 @@ impl PageStore {
         let rules = Rules {
             target_blocks: REMOTE_TARGET_BLOCKS,
             keep_holes: false,
+            fragments: false,
         };
         let fetched = &work.fetched;
         let mut shaped = shape(
