@@ -56,8 +56,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::block::Run;
-use crate::block_file::BlockFile;
-use crate::error::StorageResult;
 use crate::page::SlotPage;
 
 /// Bytes of decoded pages held by default.
@@ -77,8 +75,9 @@ pub enum Lane {
     Remote,
 }
 
-/// A run in its lane.
-type Key = (Lane, u64);
+/// A run in its lane, and the slot whose page it holds — a pack holds
+/// several (`crate::pack`).
+type Key = (Lane, u64, u64);
 
 struct Entry {
     /// Blocks the run spans, so an overlap test needs only the map.
@@ -132,10 +131,11 @@ impl PageCache {
         &self,
         lane: Lane,
         run: Run,
+        slot: u64,
         read: F,
     ) -> Result<R, F> {
         let inner = self.inner.borrow();
-        match inner.pages.get(&(lane, run.start)) {
+        match inner.pages.get(&(lane, run.start, slot)) {
             Some(e) if e.blocks == run.count => Ok(read(&e.page)),
             _ => Err(read),
         }
@@ -143,13 +143,11 @@ impl PageCache {
 
     /// Take `run`'s page out, if held — for a caller about to rewrite it
     /// elsewhere, which leaves the run dead anyway.
-    pub fn take(&self, lane: Lane, run: Run) -> Option<SlotPage> {
+    pub fn take(&self, lane: Lane, run: Run, slot: u64) -> Option<SlotPage> {
+        let key = (lane, run.start, slot);
         let mut inner = self.inner.borrow_mut();
-        let held = inner
-            .pages
-            .get(&(lane, run.start))
-            .is_some_and(|e| e.blocks == run.count);
-        let entry = held.then(|| inner.remove((lane, run.start))).flatten();
+        let held = inner.pages.get(&key).is_some_and(|e| e.blocks == run.count);
+        let entry = held.then(|| inner.remove(key)).flatten();
         inner.tidy();
         entry.map(|e| e.page)
     }
@@ -163,12 +161,12 @@ impl PageCache {
     // no reader may observe that. Releasing early — the lint's suggestion —
     // would make the over-budget window visible.
     #[allow(clippy::significant_drop_tightening)]
-    pub fn insert(&self, lane: Lane, run: Run, page: SlotPage) {
+    pub fn insert(&self, lane: Lane, run: Run, slot: u64, page: SlotPage) {
         let bytes = page.footprint();
         if self.budget == 0 || bytes > self.budget {
             return;
         }
-        let key = (lane, run.start);
+        let key = (lane, run.start, slot);
         let mut inner = self.inner.borrow_mut();
         inner.drop_at(key);
         inner.stamp += 1;
@@ -205,9 +203,9 @@ impl PageCache {
         let end = run.end();
         let doomed: Vec<Key> = inner
             .pages
-            .range((Lane::Disk, 0)..(Lane::Disk, end))
+            .range((Lane::Disk, 0, 0)..(Lane::Disk, end, 0))
             .rev()
-            .take_while(|((_, start), e)| *start + e.blocks > run.start)
+            .take_while(|((_, start, _), e)| *start + e.blocks > run.start)
             .map(|(key, _)| *key)
             .collect();
         for start in doomed {
@@ -276,65 +274,6 @@ impl Inner {
     }
 }
 
-/// The page cache on the data files' read path.
-impl BlockFile {
-    /// The page at `run`, lent to `read` — held by the page cache, or read,
-    /// decoded by `decode` and then held, decoded (RFC 0044): a hit costs no
-    /// read and no decompression. `read` must not reach the cache itself.
-    /// Pages only: the dictionary image, the headers and compaction's
-    /// buffers are read once and want the stored bytes
-    /// ([`read_run`](BlockFile::read_run)).
-    ///
-    /// # Errors
-    /// The same faults as [`read_run`](BlockFile::read_run), and `decode`'s. A
-    /// cache hit cannot fault at all, which is the point.
-    pub fn with_page<R>(
-        &self,
-        run: Run,
-        decode: impl FnOnce(&[u8]) -> StorageResult<SlotPage>,
-        read: impl FnOnce(&SlotPage) -> R,
-    ) -> StorageResult<R> {
-        let read = match self.cache.with(Lane::Disk, run, read) {
-            Ok(done) => {
-                #[cfg(feature = "probe")]
-                crate::probe::page_hit();
-                return Ok(done);
-            }
-            Err(read) => read,
-        };
-        #[cfg(feature = "probe")]
-        let page = crate::probe::page_miss(|| self.read_run(run), decode)?;
-        #[cfg(not(feature = "probe"))]
-        let page = decode(&self.read_run(run)?)?;
-        let done = read(&page);
-        self.cache.insert(Lane::Disk, run, page);
-        Ok(done)
-    }
-
-    /// The page at `run`, owned — taken out of the page cache, or read and
-    /// decoded — for a settle about to rewrite it into a new run, which
-    /// leaves this one dead anyway.
-    ///
-    /// # Errors
-    /// As [`with_page`](Self::with_page).
-    pub fn take_page(
-        &self,
-        run: Run,
-        decode: impl FnOnce(&[u8]) -> StorageResult<SlotPage>,
-    ) -> StorageResult<SlotPage> {
-        match self.cache.take(Lane::Disk, run) {
-            Some(page) => Ok(page),
-            None => decode(&self.read_run(run)?),
-        }
-    }
-
-    /// The page cache backing [`with_page`](Self::with_page).
-    #[must_use]
-    pub const fn page_cache(&self) -> &PageCache {
-        &self.cache
-    }
-}
-
 /// Its size, never its contents. A derived `Debug` on a cache of pages
 /// would dump the database into whatever printed the `BlockFile` holding it.
 impl std::fmt::Debug for PageCache {
@@ -370,11 +309,11 @@ mod tests {
     }
 
     fn insert(cache: &PageCache, run: Run, len: usize, fill: u8) {
-        cache.insert(Lane::Disk, run, page(len, fill));
+        cache.insert(Lane::Disk, run, 0, page(len, fill));
     }
 
     fn copy(cache: &PageCache, run: Run) -> Option<SlotPage> {
-        cache.with(Lane::Disk, run, SlotPage::clone).ok()
+        cache.with(Lane::Disk, run, 0, SlotPage::clone).ok()
     }
 
     #[test]
@@ -402,10 +341,10 @@ mod tests {
         let cache = PageCache::new(DEFAULT_BUDGET_BYTES);
         let run = Run::new(8, 2);
         insert(&cache, run, 10, 1);
-        cache.insert(Lane::Remote, run, page(10, 2));
+        cache.insert(Lane::Remote, run, 0, page(10, 2));
         assert_eq!(copy(&cache, run), Some(page(10, 1)));
         assert_eq!(
-            cache.with(Lane::Remote, run, SlotPage::clone).ok(),
+            cache.with(Lane::Remote, run, 0, SlotPage::clone).ok(),
             Some(page(10, 2))
         );
         cache.invalidate(run);
@@ -414,7 +353,7 @@ mod tests {
             "a disk write forgets the disk's"
         );
         assert!(
-            cache.with(Lane::Remote, run, |_| ()).is_ok(),
+            cache.with(Lane::Remote, run, 0, |_| ()).is_ok(),
             "and never the object store's"
         );
     }
@@ -499,11 +438,11 @@ mod tests {
         let cache = PageCache::new(DEFAULT_BUDGET_BYTES);
         let run = Run::new(4, 1);
         insert(&cache, run, 30, 2);
-        assert!(cache.take(Lane::Disk, Run::new(4, 2)).is_none());
-        assert_eq!(cache.take(Lane::Disk, run), Some(page(30, 2)));
+        assert!(cache.take(Lane::Disk, Run::new(4, 2), 0).is_none());
+        assert_eq!(cache.take(Lane::Disk, run, 0), Some(page(30, 2)));
         assert!(cache.is_empty());
         assert_eq!(cache.bytes(), 0);
-        assert!(cache.take(Lane::Disk, run).is_none());
+        assert!(cache.take(Lane::Disk, run, 0).is_none());
     }
 
     /// A run invalidated and held again is queued twice; the stale queue
@@ -545,8 +484,8 @@ mod tests {
         let run = Run::new(2, 1);
         insert(&cache, run, 64, 9);
         let ptr = |p: &SlotPage| std::ptr::from_ref(p) as usize;
-        let a = cache.with(Lane::Disk, run, ptr).ok();
-        let b = cache.with(Lane::Disk, run, ptr).ok();
+        let a = cache.with(Lane::Disk, run, 0, ptr).ok();
+        let b = cache.with(Lane::Disk, run, 0, ptr).ok();
         assert!(a.is_some() && a == b, "each read copied the page");
     }
 }
