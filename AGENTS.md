@@ -209,7 +209,10 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   and its own — found through sorted sub-headers over one `u32` entry per
   page — a quantized first key, address and size — plus a flag byte, and in
   a declared list's lane, `StructStorage::counted`, a count byte; a page over
-  target is cut on a quantum boundary in the round that rewrites it; a lane
+  target is cut on a quantum boundary in the round that rewrites it, and a
+  round that only appends past a page of more than one block leaves it and
+  writes a **fragment** under a new entry (RFC 0081 §2) — a page is read
+  through its entry, which may cover less than it holds; a lane
   scan merges the pages with the record cache's ordered keys, and passes a
   counted page the span covers whole by its count when the cache holds
   nothing of it unsettled, 255 meaning "read it"), `SlotPage`
