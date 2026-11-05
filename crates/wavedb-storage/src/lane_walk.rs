@@ -212,8 +212,9 @@ impl Walk<'_> {
                 let store = self.store;
                 let run = run_of(placed);
                 store.touch(self.idx, run.start);
-                let dict = store.types[self.idx].dictionary().borrow();
-                with_page(&store.file, run, &dict, |p| {
+                let slot = &store.types[self.idx];
+                let dict = slot.dictionary().borrow();
+                with_page(&store.file, run, slot.struct_hash(), &dict, |p| {
                     self.take(p.iter().collect(), lo, hi, rev, need);
                 })?;
             }

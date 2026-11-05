@@ -146,9 +146,8 @@ impl PageStore {
             };
             let run = run_of(page);
             index.set_meta(at, page.meta | EVICTED);
-            self.file.page_cache().invalidate(run);
             object.heat.borrow_mut().forget(idx, run.start);
-            self.retire_run(run);
+            self.release(run);
             live = live.saturating_sub(run.count);
             evicted += run.count;
         }

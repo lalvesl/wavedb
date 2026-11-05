@@ -253,7 +253,11 @@ impl PageStore {
         if m.page.is_none() {
             return Ok(self.types[m.slot].dictionary().borrow().image());
         }
-        let mut buf = self.file.read_run(m.run)?;
+        let run = self.file.read_run(m.run)?;
+        // A pack's section moves as a page of its own: every slot naming
+        // the pack carries its own out, and the pack goes with the last.
+        let hash = self.types[m.slot].struct_hash();
+        let mut buf = crate::pack::page_image(&run, hash)?.into_owned();
         let len = buf
             .get(..4)
             .and_then(|s| s.try_into().ok())

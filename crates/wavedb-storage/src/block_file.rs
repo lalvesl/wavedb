@@ -380,7 +380,7 @@ mod tests {
         let byte = u8::try_from(start % 251).unwrap();
         bf.write_run(0, run, &vec![byte; run.byte_len() as usize])
             .unwrap();
-        bf.with_page(run, as_page, |_| ()).unwrap();
+        bf.with_page(run, 0, as_page, |_| ()).unwrap();
     }
 
     /// The caller's budget is kept by **evicting**, not by refusing to cache:
@@ -398,13 +398,13 @@ mod tests {
         assert!(bf.page_cache().bytes() <= budget);
         assert!(
             bf.page_cache()
-                .with(Lane::Disk, Run::new(8, 1), |_| ())
+                .with(Lane::Disk, Run::new(8, 1), 0, |_| ())
                 .is_ok(),
             "the newest read must be the one kept"
         );
         assert!(
             bf.page_cache()
-                .with(Lane::Disk, Run::new(1, 1), |_| ())
+                .with(Lane::Disk, Run::new(1, 1), 0, |_| ())
                 .is_err(),
             "the oldest must have been evicted"
         );
@@ -419,7 +419,7 @@ mod tests {
         let run = Run::new(1, 2);
         let payload = vec![0xA5; run.byte_len() as usize];
         bf.write_run(0, run, &payload).unwrap();
-        let read = bf.with_page(run, as_page, |p| {
+        let read = bf.with_page(run, 0, as_page, |p| {
             p.get(&id().raw().to_be_bytes()).map(<[u8]>::to_vec)
         });
         assert_eq!(read.unwrap(), Some(payload));

@@ -237,6 +237,16 @@ impl PageStore {
         }
     }
 
+    /// An entry stopped naming the page run `run`: its images go from the
+    /// page cache, and the run is retired once no entry names it — a pack's
+    /// is named once per section (`crate::shares`).
+    pub(crate) fn release(&self, run: Run) {
+        self.file.page_cache().invalidate(run);
+        if self.shares.borrow_mut().release(run.start) {
+            self.retire_run(run);
+        }
+    }
+
     /// A run no directory names any more: on disk, freed once the batch
     /// that stopped naming it is durable (`crate::alloc`) — through a
     /// storage thread, by the batch's seal; in RAM, at once.

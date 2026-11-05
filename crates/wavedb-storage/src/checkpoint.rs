@@ -24,15 +24,13 @@ use std::collections::BTreeMap;
 use crate::block::{BlockDescriptor, Run};
 use crate::error::StorageResult;
 use crate::header::HeaderLink;
-use crate::page_cache::Lane;
 use crate::page_store::PageStore;
 use crate::pages::PENDING;
 use crate::plan::SlotPlan;
 use crate::record_cache::Records;
 use crate::roots::ROOTS_BLOCKS;
 use crate::window::{
-    Round, Target, assemble, carve, dict_descriptors, install, size_of,
-    targets_of,
+    Round, assemble, carve, dict_descriptors, install, size_of, targets_of,
 };
 
 /// What a window writes — which decides the "not uploaded yet" flag of the
@@ -154,7 +152,15 @@ impl PageStore {
         // Object mode keeps no header: nothing reopens from RAM (RFC 0070
         // §9), so a window holds its images and nothing else.
         let logged = self.has_disk();
-        let targets = targets_of(&plans);
+        let targets = match placement {
+            // A settle's round packs its small pages (`crate::window_pack`).
+            Placement::Settle => {
+                crate::window_pack::packed(&plans, targets_of(&plans), |plan| {
+                    self.types[plans[plan].idx].struct_hash()
+                })
+            }
+            Placement::Move | Placement::Restore => targets_of(&plans),
+        };
         if targets.is_empty() && !(logged && (end || self.has_unrecorded())) {
             return Ok(false);
         }
@@ -279,30 +285,22 @@ impl PageStore {
             self.fail();
             return Err(e); // the round's one write
         }
-        // The pages just written are the ones read next: held decoded under
-        // their new runs (RFC 0044) — after the write, which forgot the
-        // window.
-        for (target, run) in targets.iter().zip(&runs) {
-            if let (Target::Page { plan, page }, Some(run)) = (target, run)
-                && let Some(decoded) = plans[*plan].pages[*page].decoded.take()
-            {
-                self.file.page_cache().insert(Lane::Disk, *run, decoded);
-            }
-        }
+        self.hold_written(&mut plans, &targets, &runs);
         for run in plans
             .iter_mut()
             .flat_map(|p| std::mem::take(&mut p.retired))
         {
-            // No index names it any more, so no read will ask for it: its
-            // image goes now rather than when the budget pushes it out.
-            self.file.page_cache().invalidate(run);
-            self.retire_run(run);
+            // An entry stopped naming it, so no read through that entry
+            // will ask for it: its image goes now rather than when the
+            // budget pushes it out — the run itself once no entry names it.
+            self.release(run);
         }
         if flags.is_some() {
             // A page written for use — settled or brought back — is hot.
             for (target, run) in targets.iter().zip(&runs) {
-                if let (Target::Page { plan, .. }, Some(run)) = (target, run) {
-                    self.touch(plans[*plan].idx, run.start);
+                let Some(run) = run else { continue };
+                for (plan, _) in target.pages() {
+                    self.touch(plans[plan].idx, run.start);
                 }
             }
         }
