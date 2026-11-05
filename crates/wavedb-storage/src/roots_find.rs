@@ -29,7 +29,6 @@ use crate::error::StorageResult;
 use crate::header::{Header, NO_FILE};
 use crate::header_room::MAX_HEADER_BLOCKS;
 use crate::ordered::RangeRecord;
-use crate::page::SlotPage;
 use crate::reopen::DiskHeaders;
 use crate::roots::{Mark, ROOTS_BLOCKS, Roots};
 use crate::trailer;
@@ -148,7 +147,7 @@ fn whole(
             let pages = entry.changed.iter().flat_map(RangeRecord::pages);
             for (start, count) in pages {
                 if let Some(run) = placed(start, count)
-                    && !SlotPage::intact(&headers.file.read_run(run)?)
+                    && !crate::pack::intact(&headers.file.read_run(run)?)
                 {
                     return Ok(Err(base));
                 }

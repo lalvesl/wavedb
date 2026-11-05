@@ -106,7 +106,9 @@ impl PageStore {
         let (mut retired, mut unpended) = (Vec::new(), 0);
         let mut records: Records = Vec::new();
         for keys in runs {
-            let Some(pages) = self.still_small(&index, keys, &dict)? else {
+            let Some(pages) =
+                self.still_small(&index, keys, slot.struct_hash(), &dict)?
+            else {
                 continue;
             };
             // The later pages' entries go, their quanta to the first's;
@@ -141,7 +143,9 @@ impl PageStore {
             records,
             &rules,
             slot.struct_hash(),
-            |page| take_page(&self.file, run_of(page), &dict),
+            |page| {
+                take_page(&self.file, run_of(page), slot.struct_hash(), &dict)
+            },
             |page| image_of(page, &dict),
         )?;
         retired.extend(shaped.retired);
@@ -162,6 +166,7 @@ impl PageStore {
         &self,
         index: &Pages,
         keys: &[Vec<u8>],
+        hash: u64,
         dict: &crate::dictionary::DictState,
     ) -> StorageResult<Option<Vec<SlotPage>>> {
         let mut found: Vec<(crate::ordered::Slot, Placed<u8>)> = Vec::new();
@@ -179,7 +184,7 @@ impl PageStore {
         }
         let mut pages = Vec::with_capacity(found.len());
         for &(at, page) in &found {
-            let read = read_page(&self.file, run_of(page), dict)?;
+            let read = read_page(&self.file, run_of(page), hash, dict)?;
             pages.push(clip(read, index, at)?);
         }
         let ends: Vec<Option<&[u8]>> = pages

@@ -28,7 +28,7 @@ use crate::disk_chain::DiskChain;
 use crate::error::{StorageError, StorageResult};
 use crate::header::{ChainRecord, Header, HeaderLink, Rotation};
 use crate::ordered::Shape;
-use crate::pages::{EVICTED, run_of};
+use crate::pages::disk_runs;
 use crate::roots::ROOTS_BLOCKS;
 use crate::roots_find::find_roots;
 use crate::struct_storage::TypeSlot;
@@ -237,13 +237,7 @@ pub fn rebuild(
         let slot = slot_of(types, w.struct_hash)?;
         chain.types.insert(w.struct_hash, rotation(w.newest));
         if let Some(index) = &w.index {
-            // An evicted page's run went back to the files.
-            used.extend(
-                index
-                    .pages()
-                    .filter(|(_, p)| p.meta & EVICTED == 0)
-                    .map(|(_, p)| run_of(p)),
-            );
+            used.extend(disk_runs(index));
         }
         *slot.directory().borrow_mut() = w.index;
         if let Some(desc) = w.dict.filter(|d| d.is_allocated()) {
