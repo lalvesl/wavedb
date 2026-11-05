@@ -60,13 +60,26 @@ where
     let (Some(lo), Some(hi)) = (st.changed.first(), st.changed.last()) else {
         return Ok(None);
     };
-    if !rules.partial || old.blocks < 2 {
+    // The page's own blocks: its run's, or — a section of a pack, whose run
+    // holds other slots' pages too — what its bytes take.
+    let blocks = old.blocks.min(crate::plan::blocks_for(st.held as usize));
+    if !rules.partial || blocks < 2 {
         return Ok(Some(st));
     }
     let keys: Vec<Vec<u8>> = st.page.iter().map(|(k, _)| k.to_vec()).collect();
+    // Where the span's run lands, its range must name it: a range of its
+    // own for every span would cost a sub-header each (RFC 0081 §3).
+    let reached = rules.next.is_none_or(|next| {
+        keys.first()
+            .and_then(|k| entry(index, k).ok())
+            .is_some_and(|at| index.reaches(at, next))
+    });
+    if !reached {
+        return Ok(Some(st));
+    }
     let i0 = keys.partition_point(|k| k < lo);
     let j0 = keys.partition_point(|k| k <= hi);
-    if keys.is_empty() || !worth(&st, (i0, j0), old.blocks) {
+    if keys.is_empty() || !worth(&st, (i0, j0), blocks) {
         return Ok(Some(st));
     }
     let bounds = Bounds {
@@ -239,10 +252,15 @@ mod tests {
 
     const SH: u64 = 0x5EED_0081_0005_0001;
 
+    /// A record of 2.5 KB: two of them take a page past one block.
+    fn value(k: &[u8; 3]) -> Vec<u8> {
+        vec![k[1]; 2500]
+    }
+
     fn of(keys: &[[u8; 3]]) -> SlotPage {
         let mut p = SlotPage::new(SH);
         for k in keys {
-            p.upsert(k, k.to_vec());
+            p.upsert(k, value(k));
         }
         p
     }
@@ -255,10 +273,38 @@ mod tests {
         changes(keys, &puts)
     }
 
+    fn rules(next: Option<u64>) -> Rules {
+        Rules {
+            target_blocks: 16,
+            keep_holes: false,
+            partial: true,
+            next,
+        }
+    }
+
     /// As [`round`], the round putting (`true`) or removing each key.
     fn changes(
         keys: &[[u8; 3]],
         records: &[([u8; 3], bool)],
+    ) -> (Pages, Shaped) {
+        changes_with(keys, records, None)
+    }
+
+    /// As [`round`], the round's pages landing about `next`.
+    fn round_with(
+        keys: &[[u8; 3]],
+        records: &[[u8; 3]],
+        next: Option<u64>,
+    ) -> (Pages, Shaped) {
+        let puts: Vec<([u8; 3], bool)> =
+            records.iter().map(|&k| (k, true)).collect();
+        changes_with(keys, &puts, next)
+    }
+
+    fn changes_with(
+        keys: &[[u8; 3]],
+        records: &[([u8; 3], bool)],
+        next: Option<u64>,
     ) -> (Pages, Shaped) {
         let mut ix = disk_pages(true);
         let page = Placed {
@@ -268,16 +314,12 @@ mod tests {
         };
         let at = ix.place(&keys[0], page).unwrap();
         ix.set_count(at, keys.len()).unwrap();
-        let rules = Rules {
-            target_blocks: 16,
-            keep_holes: false,
-            partial: true,
-        };
+        let rules = rules(next);
         let held = of(keys);
         let load = |_| -> StorageResult<SlotPage> { Ok(held.clone()) };
         let records = records
             .iter()
-            .map(|(k, put)| (k.to_vec(), put.then(|| k.to_vec())))
+            .map(|(k, put)| (k.to_vec(), put.then(|| value(k))))
             .collect();
         let dict = Dictionary::new();
         let shaped = shape(&mut ix, records, &rules, SH, load, |p| {
@@ -409,5 +451,39 @@ mod tests {
         let (_, shaped) = changes(&nine(), &gone);
         assert_eq!(shaped.retired.len(), 1, "the page is rewritten");
         assert_eq!(written(&shaped), [vec![[0, 1, 0], [0, 8, 0], [0, 9, 0]]]);
+    }
+
+    /// A pack's section names the pack's run, two blocks here, but holds
+    /// one small page: it is rewritten whole, appends and all.
+    #[test]
+    fn a_small_page_in_a_large_run_is_rewritten() {
+        let mut ix = disk_pages(false);
+        let run = Placed {
+            address: 10,
+            blocks: 2,
+            meta: 0,
+        };
+        ix.place(&[0, 1, 0], run).unwrap();
+        let mut small = SlotPage::new(SH);
+        small.upsert(&[0, 1, 0], vec![1; 40]);
+        let load = |_| -> StorageResult<SlotPage> { Ok(small.clone()) };
+        let records = vec![(vec![0, 2, 0], Some(vec![2; 40]))];
+        let dict = Dictionary::new();
+        let shaped = shape(&mut ix, records, &rules(None), SH, load, |p| {
+            p.to_bytes(&dict, false)
+        })
+        .unwrap();
+        assert_eq!(shaped.retired.len(), 1, "rewritten whole");
+        assert_eq!(written(&shaped), [vec![[0, 1, 0], [0, 2, 0]]]);
+    }
+
+    /// A page whose range cannot name a run where the round's pages land
+    /// is rewritten whole: a span there would need a range of its own.
+    #[test]
+    fn a_page_its_range_cannot_reach_is_rewritten() {
+        let (_, near) = round_with(&nine(), &[[0, 5, 0]], Some(100));
+        assert!(near.retired.is_empty(), "within the window: a span");
+        let (_, far) = round_with(&nine(), &[[0, 5, 0]], Some(1 << 20));
+        assert_eq!(far.retired.len(), 1, "past the window: rewritten");
     }
 }

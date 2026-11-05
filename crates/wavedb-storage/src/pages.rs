@@ -278,6 +278,7 @@ mod tests {
             target_blocks: 16,
             keep_holes: false,
             partial: false,
+            next: None,
         };
         let load = |p: Placed<u8>| -> StorageResult<SlotPage> {
             Ok(if p.address == 10 {
