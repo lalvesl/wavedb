@@ -205,6 +205,19 @@ impl<M: Copy + Default> PageIndex<M> {
         Some(Slot { range, entry })
     }
 
+    /// Whether `at`'s range can name a page placed about `address`: past
+    /// its base, with a quarter of its window to spare for where in a
+    /// window the page lands.
+    #[must_use]
+    pub fn reaches(&self, at: Slot, address: u64) -> bool {
+        self.ranges.get(at.range).is_some_and(|r| {
+            let window = r.head.shape.window();
+            address
+                .checked_sub(r.head.base_block)
+                .is_some_and(|ahead| ahead + window / 4 < window)
+        })
+    }
+
     /// The page at `at`, if a page is there.
     #[must_use]
     pub fn page_at(&self, at: Slot) -> Option<Placed<M>> {

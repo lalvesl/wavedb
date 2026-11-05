@@ -193,6 +193,14 @@ impl PageCache {
         inner.tidy();
     }
 
+    /// Forget slot `slot`'s page at `run` — a run other entries still name,
+    /// whose other images stay (a pack's other sections).
+    pub fn forget(&self, lane: Lane, run: Run, slot: u64) {
+        let mut inner = self.inner.borrow_mut();
+        inner.drop_at((lane, run.start, slot));
+        inner.tidy();
+    }
+
     /// Forget every page overlapping the disk's `run`.
     ///
     /// Called wherever a run stops being what the cache remembers: a round

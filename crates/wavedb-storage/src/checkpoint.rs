@@ -291,14 +291,15 @@ impl PageStore {
         for run in plans.iter_mut().flat_map(|p| std::mem::take(&mut p.named)) {
             self.shares.borrow_mut().share(run.start, 2);
         }
-        for run in plans
-            .iter_mut()
-            .flat_map(|p| std::mem::take(&mut p.retired))
-        {
-            // An entry stopped naming it, so no read through that entry
-            // will ask for it: its image goes now rather than when the
-            // budget pushes it out — the run itself once no entry names it.
-            self.release(run);
+        for plan in &mut plans {
+            let hash = self.types[plan.idx].struct_hash();
+            for run in std::mem::take(&mut plan.retired) {
+                // An entry stopped naming it, so no read through that entry
+                // will ask for it: its image goes now rather than when the
+                // budget pushes it out — the run itself once no entry names
+                // it.
+                self.release(run, hash);
+            }
         }
         if flags.is_some() {
             // A page written for use — settled or brought back — is hot.

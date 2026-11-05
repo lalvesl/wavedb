@@ -147,7 +147,7 @@ impl PageStore {
             let run = run_of(page);
             index.set_meta(at, page.meta | EVICTED);
             object.heat.borrow_mut().forget(idx, run.start);
-            self.release(run);
+            self.release(run, self.types[idx].struct_hash());
             live = live.saturating_sub(run.count);
             evicted += run.count;
         }

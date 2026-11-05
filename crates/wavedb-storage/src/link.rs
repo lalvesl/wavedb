@@ -25,6 +25,7 @@ use crate::block::{BlockAllocator, Run};
 use crate::compact::Space;
 use crate::error::{StorageError, StorageResult};
 use crate::header::HeaderLink;
+use crate::page_cache::Lane;
 use crate::page_store::PageStore;
 use crate::storage_shard::{Msg, Seal};
 
@@ -49,6 +50,8 @@ pub struct Link {
     urgent: Cell<bool>,
     /// The storage shard's space, as the last answer told it.
     space: Cell<Space>,
+    /// Where the last window reserved ended: about where the next lands.
+    reached: Cell<u64>,
 }
 
 impl Link {
@@ -62,6 +65,7 @@ impl Link {
             frees: RefCell::new(Vec::new()),
             urgent: Cell::new(false),
             space: Cell::new(Space::default()),
+            reached: Cell::new(0),
         }
     }
 
@@ -119,8 +123,20 @@ impl PageStore {
             self.file.forget_file(file);
         }
         link.space.set(reserved.space);
+        link.reached.set(reserved.run.end());
         self.chain.borrow_mut().roots.newest = Some(reserved.roots);
         Ok(reserved.run)
+    }
+
+    /// About where the next window lands: its own files' end, or the end of
+    /// the window a storage thread last reserved it — `None` before any.
+    pub(crate) fn next_address(&self) -> Option<u64> {
+        match &self.storage {
+            Storage::Own(alloc) => Some(alloc.borrow().next_start()),
+            Storage::Shared(link) => {
+                Some(link.reached.get()).filter(|&r| r > 0)
+            }
+        }
     }
 
     /// This data shard's share of its storage shard's space: its own
@@ -237,13 +253,18 @@ impl PageStore {
         }
     }
 
-    /// An entry stopped naming the page run `run`: its images go from the
-    /// page cache, and the run is retired once no entry names it — a pack's
-    /// is named once per section (`crate::shares`).
-    pub(crate) fn release(&self, run: Run) {
-        self.file.page_cache().invalidate(run);
+    /// An entry of slot `slot` stopped naming the page run `run`: that
+    /// slot's image of it goes from the page cache, and the run is retired
+    /// once no entry names it — a pack's is named once per section, a page
+    /// around a span by an entry either side (`crate::shares`) — its
+    /// images with it.
+    pub(crate) fn release(&self, run: Run, slot: u64) {
+        let cache = self.file.page_cache();
         if self.shares.borrow_mut().release(run.start) {
+            cache.invalidate(run);
             self.retire_run(run);
+        } else {
+            cache.forget(Lane::Disk, run, slot);
         }
     }
 
