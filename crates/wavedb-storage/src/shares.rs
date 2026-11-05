@@ -56,6 +56,13 @@ impl Shares {
         }
     }
 
+    /// Whether every run is named once.
+    #[cfg(test)]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.extra.is_empty()
+    }
+
     /// How many entries name the run at `start`, as counted.
     #[cfg(test)]
     #[must_use]
