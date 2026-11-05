@@ -32,7 +32,6 @@ mod disk_header;
 pub mod error;
 mod evict;
 mod file_space;
-mod fragment;
 mod header;
 mod header_room;
 mod lane_read;
@@ -47,6 +46,7 @@ pub mod page_cache;
 mod page_read;
 pub mod page_store;
 pub mod pages;
+mod partial;
 mod plan;
 #[cfg(feature = "probe")]
 mod probe;
