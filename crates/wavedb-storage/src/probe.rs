@@ -59,6 +59,13 @@ pub fn round(
             Target::Dict { .. } => {
                 let _ = write!(line, " | dict blocks={blocks}");
             }
+            // The pack's blocks once, each section as a page of none.
+            Target::Pack { members, .. } => {
+                let _ = write!(line, " | pack blocks={blocks}");
+                for &(plan, at) in members {
+                    page(&mut line, types, &plans[plan], at, 0);
+                }
+            }
         }
     }
     if header > 0 {

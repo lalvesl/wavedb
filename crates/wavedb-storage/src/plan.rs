@@ -99,7 +99,9 @@ impl PageStore {
             records,
             &rules,
             slot.struct_hash(),
-            |page| take_page(&self.file, run_of(page), dict),
+            |page| {
+                take_page(&self.file, run_of(page), slot.struct_hash(), dict)
+            },
             |page| image_of(page, dict),
         )?;
         Ok(SlotPlan {

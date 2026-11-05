@@ -21,6 +21,7 @@ use crate::dictionary::DictState;
 use crate::error::StorageResult;
 use crate::ordered::key::cmp_padded;
 use crate::ordered::{Found, PageIndex, Placed, Shape, Slot};
+use crate::pack::page_image;
 use crate::page::SlotPage;
 
 /// A type's page index, its flags beside each page.
@@ -57,6 +58,15 @@ pub const fn key_of_id(id: Id) -> [u8; 16] {
 #[must_use]
 pub const fn run_of(page: Placed<u8>) -> Run {
     Run::new(page.address, page.blocks)
+}
+
+/// The runs `pages` names on disk, once per entry naming each: an evicted
+/// page's run went back to the files.
+pub fn disk_runs(pages: &Pages) -> impl Iterator<Item = Run> + '_ {
+    pages
+        .pages()
+        .filter(|(_, p)| p.meta & EVICTED == 0)
+        .map(|(_, p)| run_of(p))
 }
 
 /// Where a key's page is.
@@ -149,7 +159,7 @@ pub fn entries_between(
     out
 }
 
-/// Lend the page at `run` to `read`, through the page cache (RFC 0044): a
+/// Lend slot `slot`'s page at `run` to `read`, through the page cache (RFC 0044): a
 /// run is immutable for as long as it is allocated — page writes are
 /// copy-on-write — so a hit needs no validation.
 ///
@@ -158,39 +168,48 @@ pub fn entries_between(
 pub fn with_page<R>(
     file: &BlockFile,
     run: Run,
+    slot: u64,
     dict: &DictState,
     read: impl FnOnce(&SlotPage) -> R,
 ) -> StorageResult<R> {
-    file.with_page(
-        run,
-        |image| SlotPage::from_bytes(image, dict.dictionary()),
-        read,
-    )
+    file.with_page(run, slot, |image| decode(image, slot, dict), read)
 }
 
-/// The page at `run`, owned: taken out of the page cache, or read — for a
-/// round about to rewrite it into a new run.
+/// The page of slot `slot` at `run`, owned: taken out of the page cache, or
+/// read — for a round about to rewrite it into a new run.
 ///
 /// # Errors
 /// As [`with_page`].
 pub fn take_page(
     file: &BlockFile,
     run: Run,
+    slot: u64,
     dict: &DictState,
 ) -> StorageResult<SlotPage> {
-    file.take_page(run, |image| SlotPage::from_bytes(image, dict.dictionary()))
+    file.take_page(run, slot, |image| decode(image, slot, dict))
 }
 
-/// The page at `run`, owned — a copy of the held one.
+/// The page of slot `slot` at `run`, owned — a copy of the held one.
 ///
 /// # Errors
 /// As [`with_page`].
 pub fn read_page(
     file: &BlockFile,
     run: Run,
+    slot: u64,
     dict: &DictState,
 ) -> StorageResult<SlotPage> {
-    with_page(file, run, dict, SlotPage::clone)
+    with_page(file, run, slot, dict, SlotPage::clone)
+}
+
+/// Slot `slot`'s page in the run's bytes `image`: the page, or its section
+/// of a pack (`crate::pack`).
+fn decode(
+    image: &[u8],
+    slot: u64,
+    dict: &DictState,
+) -> StorageResult<SlotPage> {
+    SlotPage::from_bytes(&page_image(image, slot)?, dict.dictionary())
 }
 
 #[cfg(test)]

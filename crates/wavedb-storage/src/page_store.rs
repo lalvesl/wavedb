@@ -116,6 +116,8 @@ pub struct PageStore {
         RefCell<std::collections::VecDeque<(usize, Vec<Vec<u8>>)>>,
     /// Blocks cut off the data files since open ([`reclaim`](Self::reclaim)).
     pub(crate) reclaimed: std::cell::Cell<u64>,
+    /// Runs more than one entry names: a pack's (RFC 0081 §5).
+    pub(crate) shares: RefCell<crate::shares::Shares>,
     /// The free share that makes a data file worth emptying (RFC 0071 §7).
     pub(crate) victim_free_percent: u8,
     /// The object store's side, when the pages live there (RFC 0070).
@@ -242,6 +244,13 @@ impl PageStore {
         options: StoreOptions,
     ) -> Self {
         let type_count = types.len();
+        let shares = crate::shares::Shares::of(types.iter().flat_map(|slot| {
+            slot.directory()
+                .borrow()
+                .iter()
+                .flat_map(crate::pages::disk_runs)
+                .collect::<Vec<_>>()
+        }));
         Self {
             file,
             storage,
@@ -263,6 +272,7 @@ impl PageStore {
             victims: RefCell::default(),
             regroup: RefCell::default(),
             reclaimed: std::cell::Cell::default(),
+            shares: RefCell::new(shares),
             victim_free_percent: options.victim_free_percent,
             object: options.remote.map(crate::remote::ObjectState::new),
         }

@@ -65,9 +65,10 @@ impl PageStore {
         }
         self.touch(idx, run.start);
         let dict = slot.dictionary().borrow();
-        let bytes = with_page(&self.file, run, &dict, |p| {
-            p.get(key).map(<[u8]>::to_vec)
-        })?;
+        let bytes =
+            with_page(&self.file, run, slot.struct_hash(), &dict, |p| {
+                p.get(key).map(<[u8]>::to_vec)
+            })?;
         Ok(Settled::Found(bytes))
     }
 
@@ -273,14 +274,15 @@ impl PageStore {
         read: impl FnOnce(&SlotPage) -> R,
     ) -> StorageResult<R> {
         let cache = self.file.page_cache();
-        let read = match cache.with(Lane::Remote, run, read) {
+        let hash = self.types[idx].struct_hash();
+        let read = match cache.with(Lane::Remote, run, hash, read) {
             Ok(done) => return Ok(done),
             Err(read) => read,
         };
         let image = self.fetch_image(run).await?;
         let page = self.decode_remote(idx, &image)?;
         let done = read(&page);
-        cache.insert(Lane::Remote, run, page);
+        cache.insert(Lane::Remote, run, hash, page);
         Ok(done)
     }
 
