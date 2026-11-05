@@ -427,7 +427,14 @@ a torn last block.
    `Shape` lost `key_shift` and is three bytes on disk.
 3. **Clipped reads** (§3). Every reader clips a page to its entry's
    interval less its slices; `SubHeader` gains `slices`, empty. No behaviour
-   changes yet.
+   changes yet. **Landed, the clip by coverage:** whatever takes a page's
+   records to write them again — a round's routing, the regroup's merge,
+   the upload — reads them through its entry (`pages::clip`); scans and the
+   eviction already kept to the coverage, and a point lookup is routed. A
+   fragment needs it before any slice exists: when the round's first new key
+   shares a quantum with the tail page's last, the fragment takes that
+   quantum and the tail page keeps keys its entry gave up. The `slices`
+   field comes with phase 6, which uses it.
 4. **Counted references** (§5). Several entries and slices may name one
    run; the counts are derived at open and kept at install.
 5. **The commit block** (§1, §2). The format, sections inline, fragments

@@ -28,7 +28,7 @@ use crate::block::{BLOCK_SIZE, Run};
 use crate::error::{StorageError, StorageResult};
 use crate::ordered::{Cut, CutOutcome, Found, Placed, Slot};
 use crate::page::SlotPage;
-use crate::pages::{EVICTED, PENDING, Pages, run_of};
+use crate::pages::{EVICTED, PENDING, Pages, clip, run_of};
 use crate::record_cache::Records;
 
 /// A page a round writes.
@@ -121,7 +121,7 @@ where
                     }
                     vacant.insert(Staged {
                         old: Some(page),
-                        page: load(page)?,
+                        page: clip(load(page)?, index, at)?,
                     });
                 }
                 at

@@ -22,7 +22,7 @@ use crate::page_store::PageStore;
 use futures::stream::{self, StreamExt, TryStreamExt};
 
 use crate::pages::{
-    PENDING, Pages, coverage, entries_between, read_page, run_of, within,
+    PENDING, Pages, clip, coverage, entries_between, read_page, run_of, within,
 };
 use crate::plan::{PlannedPage, image_of};
 use crate::record_cache::Records;
@@ -138,9 +138,11 @@ impl PageStore {
                         StorageError::Corrupt("a flagged entry without a key"),
                     )?;
                     let records = match page {
-                        Some(page) => {
-                            read_page(&self.file, run_of(page), &dict)?
-                        }
+                        Some(page) => clip(
+                            read_page(&self.file, run_of(page), &dict)?,
+                            disk,
+                            at,
+                        )?,
                         None => SlotPage::new(slot.struct_hash()),
                     };
                     taken += weight(flags, page.map_or(0, |p| p.blocks));

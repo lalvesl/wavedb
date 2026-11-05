@@ -22,7 +22,7 @@ use crate::error::{StorageError, StorageResult};
 use crate::ordered::{Found, Placed};
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
-use crate::pages::{EVICTED, Pages, read_page, run_of, take_page};
+use crate::pages::{EVICTED, Pages, clip, read_page, run_of, take_page};
 use crate::plan::{SlotPlan, image_of};
 use crate::record_cache::Records;
 use crate::shape::{Rules, collection, shape, weight};
@@ -176,8 +176,9 @@ impl PageStore {
             found.push((at, page));
         }
         let mut pages = Vec::with_capacity(found.len());
-        for (_, page) in &found {
-            pages.push(read_page(&self.file, run_of(*page), dict)?);
+        for &(at, page) in &found {
+            let read = read_page(&self.file, run_of(page), dict)?;
+            pages.push(clip(read, index, at)?);
         }
         let ends: Vec<Option<&[u8]>> = pages
             .iter()
