@@ -436,7 +436,12 @@ a torn last block.
    quantum and the tail page keeps keys its entry gave up. The `slices`
    field comes with phase 6, which uses it.
 4. **Counted references** (§5). Several entries and slices may name one
-   run; the counts are derived at open and kept at install.
+   run; the counts are derived at open and kept at install. **Landed with
+   the packs** (`shares.rs`): a map of the runs named more than once — the
+   names past the first — counted from the indexes at every open, raised by
+   the round that places a pack, and lowered by `release`, which every
+   page run an entry stops naming goes through (a round's retired runs, an
+   eviction); the run is retired when the last name goes.
 5. **The commit block** (§1, §2). The format, sections inline, fragments
    for appends, the header and the `Roots` of `Own` folded in.
    **Landed first, fragments as pages of their own** (`fragment.rs`): a
@@ -448,9 +453,23 @@ a torn last block.
    fragment grows to two blocks before the next one starts; a merge and an
    upload take no fragments. A durable append of 1 KiB past a ten-block page
    (`tests/fragments.rs`) went from 8.9 blocks to 3.3: the fragment, the
-   header, the roots block. Packing the round's fragments into one section
-   block, with counted references (phase 4), and the header into it, come
-   next. A finding on the way: while a type's dictionary grows, every round
+   header, the roots block.
+   **Then the sections, as packs** (`pack.rs`, `window_pack.rs`): of a
+   settle round's pages that fit one block, the smallest of each slot's go
+   into one run — a section per slot, each a whole page image with its own
+   crc, as many as take fewer blocks together than apart — and every
+   member's entry names the pack. A run starting with a tag no page length
+   can have is a pack; every reader takes a page through `page_image`, by
+   its slot, and the page cache keys a page by run and slot. A compaction
+   carries a pack out a section at a time, each as a page of its own, so
+   no move repoints several slots at once. The micro row's durable insert
+   (probe, 4 000 rows, NVMe) is three blocks a round — the pack of the
+   anchor's, the recency's and the secondary's pages, the header, the roots
+   block: 12.1 KiB, from ~80 KiB of the engine's own before fragments
+   (25 KiB with fragments alone). A durable update is still 137 KiB: the
+   anchor page rewritten for the record in its middle, which slices take.
+   Folding the header into the pack, and the roots block of `Own` into the
+   header, come next. A finding on the way: while a type's dictionary grows, every round
    writes it whole again (11 blocks a round in that test, compressed) — §9's
    case for no dictionary in the hot path.
 6. **Slices** (§3, §4). Updates, middle inserts, removals, with their counts.
