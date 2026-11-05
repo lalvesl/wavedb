@@ -9,6 +9,11 @@
 //! write grows past target again, are not merged back only to be cut once
 //! more.
 //!
+//! It also consolidates: a page a round rewrote in part (`crate::partial`)
+//! is named either side of the span, holding dead records under it; its
+//! run of entries, from its first name to its last, is merged whatever its
+//! size, and the page goes with its last name (RFC 0081 §7).
+//!
 //! A merge is a settle round over what it already holds: the entries of
 //! the run's later pages go, their quanta handed to the first page's
 //! (`PageIndex::remove`), and their records are shaped into it
@@ -202,13 +207,21 @@ impl PageStore {
 /// Runs of neighbouring pages in one range, two or more, together at most
 /// `most` blocks; each named by its pages' keys.
 fn small_runs(index: &Pages, most: u64) -> Vec<Vec<Vec<u8>>> {
+    let pages: Vec<_> = index.pages().collect();
+    // Where each run is named last: a page named either side of a span
+    // (`crate::partial`) is consolidated — its group runs on to its last
+    // name, whatever its size, and the page goes with its spans.
+    let mut last_name = std::collections::BTreeMap::new();
+    for (i, (_, page)) in pages.iter().enumerate() {
+        last_name.insert(page.address, i);
+    }
     let mut out = Vec::new();
     let mut run: Vec<Vec<u8>> = Vec::new();
-    // A run named by several entries of the group — a page around a span
-    // rewritten apart (`crate::partial`) — is read and rewritten once.
+    // A run named by several entries of the group is read and rewritten
+    // once.
     let mut seen = std::collections::BTreeSet::new();
-    let (mut blocks, mut last) = (0, None);
-    for (at, page) in index.pages() {
+    let (mut blocks, mut last, mut until) = (0, None, None);
+    for (i, &(at, page)) in pages.iter().enumerate() {
         let beside = last.is_some_and(|(range, entry)| {
             range == at.range && entry + 1 == at.entry
         });
@@ -217,18 +230,26 @@ fn small_runs(index: &Pages, most: u64) -> Vec<Vec<Vec<u8>>> {
         } else {
             page.blocks
         };
-        if !beside || blocks + more > most || page.meta & EVICTED != 0 {
+        let held = until.is_some_and(|u| i <= u);
+        let evicted = page.meta & EVICTED != 0;
+        if !beside || evicted || (!held && blocks + more > most) {
             if run.len() >= 2 {
                 out.push(std::mem::take(&mut run));
             }
             run.clear();
             seen.clear();
-            blocks = 0;
+            (blocks, until) = (0, None);
         }
         last = Some((at.range, at.entry));
-        if page.blocks <= most && page.meta & EVICTED == 0 {
+        let named_again = last_name.get(&page.address).is_some_and(|&l| l > i);
+        let fits =
+            page.blocks <= most || named_again || seen.contains(&page.address);
+        if fits && !evicted {
             if seen.insert(page.address) {
                 blocks += page.blocks;
+            }
+            if named_again {
+                until = until.max(last_name.get(&page.address).copied());
             }
             run.extend(index.key_of(at));
         }
@@ -310,5 +331,48 @@ mod tests {
         let s = PageStore::open(d.path(), &[&SLOT]).unwrap();
         assert_eq!(s.bucket_count(SH), after);
         assert_records(&s);
+    }
+
+    /// Durable updates in the middle of pages leave each named either side
+    /// of its span; a compaction consolidates them — no run is named twice
+    /// after it — and every record reads, through a reopen too.
+    #[test]
+    fn a_compaction_consolidates_the_pages_spans_left_named_twice() {
+        let d = tempfile::tempdir().unwrap();
+        let s = PageStore::open(d.path(), &[&SLOT]).unwrap();
+        let updated = |k: u64| k % 97 == 13;
+        let want = |k: u64| {
+            if updated(k) {
+                record(k + RECORDS)
+            } else {
+                record(k)
+            }
+        };
+        block_on(async {
+            for k in 0..RECORDS {
+                s.apply(&[Write::Put(id(k), record(k))]).await.unwrap();
+            }
+            s.drain().unwrap();
+            for k in (0..RECORDS).filter(|&k| updated(k)) {
+                let put = Write::Put(id(k), record(k + RECORDS));
+                s.apply_durable(&[put]).await.unwrap();
+            }
+        });
+        assert!(!s.shares.borrow().is_empty(), "spans name pages twice");
+        s.compact().unwrap();
+        assert!(s.shares.borrow().is_empty(), "consolidated");
+        let check = |s: &PageStore| {
+            s.evict_settled(0);
+            for k in 0..RECORDS {
+                assert_eq!(
+                    block_on(s.get_of(SH, id(k))).unwrap(),
+                    Some(want(k)),
+                    "{k}"
+                );
+            }
+        };
+        check(&s);
+        drop(s);
+        check(&PageStore::open(d.path(), &[&SLOT]).unwrap());
     }
 }
