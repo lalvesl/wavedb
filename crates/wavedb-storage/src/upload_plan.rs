@@ -139,7 +139,12 @@ impl PageStore {
                     )?;
                     let records = match page {
                         Some(page) => clip(
-                            read_page(&self.file, run_of(page), &dict)?,
+                            read_page(
+                                &self.file,
+                                run_of(page),
+                                slot.struct_hash(),
+                                &dict,
+                            )?,
                             disk,
                             at,
                         )?,
