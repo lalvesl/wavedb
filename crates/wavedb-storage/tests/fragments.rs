@@ -124,3 +124,55 @@ fn an_update_inside_the_page_takes_the_appends_with_it() {
         assert_eq!(read(&store, k), want, "{k}");
     }
 }
+
+/// Durable updates in the middle of a ten-block page write the span they
+/// change, not the page; the page, named either side of each span, reads
+/// back through reopens — which count its names again — and a compaction.
+#[test]
+fn a_durable_update_in_a_page_writes_its_span() {
+    const FILLED: u64 = 40;
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().join("db");
+    let version = |k: u64, v: u64| noise(k + 1_000 * v);
+    {
+        let store = PageStore::open(&dir, &[&SLOT]).unwrap();
+        for k in 0..FILLED {
+            block_on(store.apply(&[Write::Put(id(k), noise(k))])).unwrap();
+        }
+        store.drain().unwrap();
+        let before = blocks(&dir);
+        for k in [5, 17, 29] {
+            block_on(store.apply_durable(&[Write::Put(id(k), version(k, 1))]))
+                .unwrap();
+        }
+        let written = blocks(&dir) - before;
+        assert!(written < 5 * 3, "{written} blocks for 3 durable updates");
+    }
+    {
+        let store = PageStore::open(&dir, &[&SLOT]).unwrap();
+        for k in [4, 6, 18, 30, 5] {
+            block_on(store.apply_durable(&[Write::Put(id(k), version(k, 2))]))
+                .unwrap();
+        }
+        block_on(store.apply_durable(&[Write::Remove(SH, id(16))])).unwrap();
+    }
+    let want = |k: u64| match k {
+        4 | 5 | 6 | 18 | 30 => Some(version(k, 2)),
+        17 | 29 => Some(version(k, 1)),
+        16 => None,
+        _ => Some(noise(k)),
+    };
+    let store = PageStore::open(&dir, &[&SLOT]).unwrap();
+    for k in 0..FILLED {
+        assert_eq!(read(&store, k), want(k), "{k}");
+    }
+    store.compact().unwrap();
+    for k in 0..FILLED {
+        assert_eq!(read(&store, k), want(k), "{k} compacted");
+    }
+    drop(store);
+    let store = PageStore::open(&dir, &[&SLOT]).unwrap();
+    for k in 0..FILLED {
+        assert_eq!(read(&store, k), want(k), "{k} compacted, reopened");
+    }
+}

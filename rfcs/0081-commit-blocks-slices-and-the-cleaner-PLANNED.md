@@ -473,6 +473,30 @@ a torn last block.
    writes it whole again (11 blocks a round in that test, compressed) — §9's
    case for no dictionary in the hot path.
 6. **Slices** (§3, §4). Updates, middle inserts, removals, with their counts.
+   **Landed — as entries, not an overlay** (`partial.rs`; for review). A
+   round that changes a page in one span of its keys writes that span
+   alone, under an entry of its own, and the page stays named by the entry
+   before the span and by a new one after it. Two entries cost what a
+   `Slice` would (~5–6 bytes each against ~12–16), and nothing new reads
+   them: a lookup is routed by entries, whatever walks a page's records
+   takes it through its entry (phase 3), counts are per entry, the journal
+   records and restates them as it does any entry, the upload, the
+   eviction and the moves already handle them, and a page named twice is
+   what the counted references count. Fragments (phase 5) are the span past
+   the last key. A span widens to a quantum boundary where a cut cannot
+   part two keys; one emptied by removals is a hole (never dropped: its
+   quanta would go back to an entry naming the page). A page of one block
+   is rewritten whole, so is one whose span would not take fewer blocks,
+   and so is one that would keep less than half of what it held live — the
+   bound on the dead space a span leaves in its page until the cleaner
+   (phase 8). Two costs to know: a run named by two entries of one slot is
+   carried twice by a compaction's move, a copy each, until the cleaner;
+   and every new entry changes its range's shape, so its range is recorded
+   whole in the round's header (up to 1 024 entries, ~6 KiB) — the micro
+   row's headers grow from 4 to ~7.6 KiB a round. The index diff of §1 —
+   entries inserted, not ranges restated — is where that goes.
+   The micro row's durable update (probe, 4 000 rows) is 19.1 KiB a round,
+   from 137: the pack, the header, the roots block.
 7. **The index budget and inline consolidation** (§6).
 8. **The cleaner's phases and triggers** (§7, §8).
 9. **Compression** (§9), as phase 0 decides.
