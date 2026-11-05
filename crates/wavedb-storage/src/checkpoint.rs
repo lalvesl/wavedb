@@ -286,6 +286,11 @@ impl PageStore {
             return Err(e); // the round's one write
         }
         self.hold_written(&mut plans, &targets, &runs);
+        // Named once more before any name goes: a page a round rewrote in
+        // part is named either side of the part, whatever else it retired.
+        for run in plans.iter_mut().flat_map(|p| std::mem::take(&mut p.named)) {
+            self.shares.borrow_mut().share(run.start, 2);
+        }
         for run in plans
             .iter_mut()
             .flat_map(|p| std::mem::take(&mut p.retired))

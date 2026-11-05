@@ -210,9 +210,12 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   page — a quantized first key, address and size — plus a flag byte, and in
   a declared list's lane, `StructStorage::counted`, a count byte; a page over
   target is cut on a quantum boundary in the round that rewrites it, and a
-  round that only appends past a page of more than one block leaves it and
-  writes a **fragment** under a new entry (RFC 0081 §2) — a page is read
-  through its entry, which may cover less than it holds; a lane
+  round that changes a page of more than one block in one span — appends
+  past it, an update or a removal in it — writes the span alone under an
+  entry of its own, the page named either side (RFC 0081 §2–§3, `partial`;
+  a run named twice, or a pack's, is counted in RAM, `shares`) — a page is
+  read through its entry, which may cover less than it holds; a round's
+  small pages share one run, a section per slot (`pack`); a lane
   scan merges the pages with the record cache's ordered keys, and passes a
   counted page the span covers whole by its count when the cache holds
   nothing of it unsettled, 255 meaning "read it"), `SlotPage`
