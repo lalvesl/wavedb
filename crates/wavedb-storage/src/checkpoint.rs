@@ -23,12 +23,10 @@ use std::collections::BTreeMap;
 
 use crate::block::{BlockDescriptor, Run};
 use crate::error::StorageResult;
-use crate::header::HeaderLink;
 use crate::page_store::PageStore;
 use crate::pages::PENDING;
 use crate::plan::SlotPlan;
 use crate::record_cache::Records;
-use crate::roots::ROOTS_BLOCKS;
 use crate::window::{
     Round, assemble, carve, dict_descriptors, install, size_of, targets_of,
 };
@@ -235,13 +233,10 @@ impl PageStore {
         }
         self.note_dicts(round.dicts.keys().map(|&p| round.plans[p].idx));
         let size = self.header_size(&round.plans, &round.dicts, body);
-        // A storage thread ends its own writes with one (RFC 0073 §4).
-        let roots = if round.end && self.own().is_some() {
-            ROOTS_BLOCKS
-        } else {
-            0
-        };
-        let run = self.reserve(u64::from(size.blocks) + roots).await?;
+        // No roots block: a store of its own files roots in its newest whole
+        // batch's ending header, and a storage thread ends its own writes
+        // with one (RFC 0073 §4, RFC 0081 §1).
+        let run = self.reserve(u64::from(size.blocks)).await?;
         round.marks = Some((run, size));
         Ok(())
     }
@@ -267,15 +262,9 @@ impl PageStore {
         }
         let mut ended = false;
         let marked = if let Some((run, size)) = marks {
-            let (mut bytes, e) =
+            let (bytes, e) =
                 self.header_at((run.start, size), &mut plans, &dicts, end)?;
             ended = e;
-            let header = u64::from(size.blocks);
-            if run.count > header {
-                let link = HeaderLink::new(run.start, size.blocks);
-                let roots = self.roots_at(run.start + header, link, ended)?;
-                bytes.extend_from_slice(&roots);
-            }
             Some((run, bytes))
         } else {
             None

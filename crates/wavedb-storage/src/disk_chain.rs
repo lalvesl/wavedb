@@ -4,7 +4,7 @@
 //!
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use crate::block::BlockDescriptor;
@@ -72,15 +72,13 @@ pub struct DiskChain {
     pub(crate) restated_at: Option<Instant>,
 }
 
-/// Where the roots blocks stand: the newest, and those a reconstruction
-/// may still read.
+/// Where a storage thread's roots blocks stand. A store writing its own
+/// files writes none (RFC 0081 §1).
 #[derive(Debug, Default)]
 pub struct RootsChain {
-    /// The newest roots block written.
+    /// The newest roots block its storage thread wrote, as its last
+    /// reservation told it: every header names it (RFC 0073 §5).
     pub(crate) newest: Option<u64>,
-    /// The roots blocks not freed yet: the newest durable one and any
-    /// written since.
-    pub(crate) live: BTreeSet<u64>,
 }
 
 impl DiskChain {

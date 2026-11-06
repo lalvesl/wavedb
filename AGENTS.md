@@ -236,7 +236,9 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   inline); everything committed before a durable write on the same store is
   durable with it — on a node, the same shard.
   On open, nothing is replayed: the newest whole batch's header — found from
-  the newest data file's last block, a roots block or a header's trailer —
+  the newest data file's last block: a storage thread's roots block, or a
+  header's trailer, back by `prev` to the newest header ending a batch in a
+  store writing its own files, which writes no roots block (RFC 0081 §1) —
   roots a walk back along each type's `last` and down by `prev` (every link
   to a header carries its size: one read each) while a registered type is unnamed, never
   below the root's `horizon` (a type unnamed there is new, and empty); only
