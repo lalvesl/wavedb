@@ -101,8 +101,13 @@ impl PageStore {
                 let (records, bytes) =
                     with_page(&self.file, run_of(page), hash, &dict, |p| {
                         let held = clip(p.clone(), index, at)?;
-                        let bytes = held.iter().map(|(k, v)| (k.len() + v.len()) as u64);
-                        Ok::<_, crate::StorageError>((held.len() as u64, bytes.sum()))
+                        let bytes = held
+                            .iter()
+                            .map(|(k, v)| (k.len() + v.len()) as u64);
+                        Ok::<_, crate::StorageError>((
+                            held.len() as u64,
+                            bytes.sum::<u64>(),
+                        ))
                     })??;
                 c.records += records;
                 c.record_bytes += bytes;

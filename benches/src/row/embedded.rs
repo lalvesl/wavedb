@@ -27,7 +27,7 @@ use wavedb_storage::PageStore;
 use super::RowRun;
 use super::micro::{Meta, materialise, path_of, record, workload};
 use super::points::{Points, sqlite_is_log, wavedb_is_log};
-use crate::corpus::RowRecord;
+use crate::corpus::{CensusRecord, RowRecord};
 use crate::footprint::Point;
 use crate::systems::drivers;
 use crate::systems::engine::{Engine, Engineish};
@@ -173,7 +173,7 @@ where
         let stores = super::opens::timed("written", &data, &mut opens, || {
             wavedb_adapter::open_shards(&data, consumers)
         })?;
-        compact_all(stores, &mut points)?;
+        let census = compact_all(stores, &mut points)?;
         drop(super::opens::timed("compacted", &data, &mut opens, || {
             wavedb_adapter::open_shards(&data, consumers)
         })?);
@@ -192,6 +192,7 @@ where
             },
         );
         row.opens = opens;
+        row.census = census;
         return Ok(row);
     }
 
@@ -204,7 +205,7 @@ where
         super::opens::timed("written", &data, &mut opens, || {
             wavedb_adapter::open(&data)
         })?;
-    compact_all(vec![engine_after], &mut points)?;
+    let census = compact_all(vec![engine_after], &mut points)?;
     let compacted =
         super::opens::timed("compacted", &data, &mut opens, || {
             wavedb_adapter::open(&data)
@@ -226,6 +227,7 @@ where
         },
     );
     row.opens = opens;
+    row.census = census;
     Ok(row)
 }
 
@@ -265,7 +267,7 @@ pub(super) fn quiesce<E: Engineish>(
 pub(super) fn compact_all(
     stores: Vec<PageStore>,
     points: &mut Points,
-) -> Result<(), String> {
+) -> Result<Vec<CensusRecord>, String> {
     quiesce(&stores, points)?;
     points.take(Point::Settled)?;
     for store in &stores {
@@ -273,10 +275,40 @@ pub(super) fn compact_all(
     }
     quiesce(&stores, points)?;
     points.take(Point::Compacted)?;
+    let census = census_of(&stores)?;
     for store in stores {
         Engineish::close(store);
     }
-    Ok(())
+    Ok(census)
+}
+
+/// The census of `stores` (RFC 0081 phase 0), each slot's summed over
+/// them — a sharded row's data shards hold the same slots.
+fn census_of(stores: &[PageStore]) -> Result<Vec<CensusRecord>, String> {
+    let mut by_slot: std::collections::BTreeMap<u64, CensusRecord> =
+        std::collections::BTreeMap::new();
+    for store in stores {
+        for c in store.census().map_err(|e| format!("census: {e}"))? {
+            let sum =
+                by_slot
+                    .entry(c.struct_hash)
+                    .or_insert_with(|| CensusRecord {
+                        slot: format!("{:016x}", c.struct_hash),
+                        ..CensusRecord::default()
+                    });
+            sum.ranges += c.ranges;
+            sum.pages += c.pages;
+            sum.holes += c.holes;
+            sum.evicted += c.evicted;
+            sum.runs += c.runs;
+            sum.shared_runs += c.shared_runs;
+            sum.blocks += c.blocks;
+            sum.records += c.records;
+            sum.record_bytes += c.record_bytes;
+            sum.index_bytes += c.index_bytes;
+        }
+    }
+    Ok(by_slot.into_values().collect())
 }
 
 /// The multi row's notes: the single row's, and how it splits the dataset.

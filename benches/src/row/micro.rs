@@ -140,6 +140,7 @@ pub(super) fn record(
         phases: phases.into_iter().map(phase_record).collect(),
         footprints: meta.footprints,
         opens: Vec::new(),
+        census: Vec::new(),
         live_records: run.cfg.rows,
         logical_bytes: logical_bytes(run.cfg.rows, run.cfg.seed),
         notes,

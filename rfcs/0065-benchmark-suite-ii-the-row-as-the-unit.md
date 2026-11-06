@@ -588,6 +588,27 @@ store, and the gateway's own reads are its process's, outside `read_bytes`.
 Sixteen opens a run, then: the single row's eight (two points, cold and
 warm, two durabilities) and the object row's eight (two points, two
 sources, two durabilities), with the multi row's `written` beside them.
+(Since the multi and shop rows took their compacted point, they time
+their opens compacted too.)
+
+### 13. The census (added 2026-11-12, RFC 0081 phase 0)
+
+At the compacted point every embedded WaveDB row — micro single and
+multi, shop single and multi — records a census of its stores under
+`census`, one entry per slot (its `STRUCT_HASH`, summed over a sharded
+row's data shards), from `PageStore::census`:
+- `ranges`, `pages`, `holes`, `evicted` — the index: sub-headers, and
+  entries naming a page, none, or one the object store holds;
+- `runs`, `shared_runs`, `blocks` — the distinct runs the pages take, how
+  many more than one entry names (a pack's, a page either side of a span),
+  and their blocks;
+- `records`, `record_bytes` — what the pages hold through their entries,
+  decoded: against `blocks` it is how full they are, against the target
+  how far from it;
+- `index_bytes` — the index's RAM, estimated from its parts.
+
+It reads every page once, after the footprint is taken, so it costs the
+point nothing. The object row and every peer's row have none.
 
 ## Alternatives
 

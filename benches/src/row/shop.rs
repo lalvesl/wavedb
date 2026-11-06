@@ -211,7 +211,7 @@ where
     let mut opens = Vec::new();
     let open = || crate::systems::shop::wavedb::open_measured(&dir, shards);
     let stores = super::opens::timed("written", &dir, &mut opens, open)?;
-    super::embedded::compact_all(stores, &mut points)?;
+    let census = super::embedded::compact_all(stores, &mut points)?;
     drop(super::opens::timed("compacted", &dir, &mut opens, open)?);
 
     let mut row = record(
@@ -270,6 +270,7 @@ where
         },
     );
     row.opens = opens;
+    row.census = census;
     Ok(row)
 }
 

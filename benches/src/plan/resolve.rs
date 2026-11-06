@@ -324,6 +324,7 @@ mod tests {
             phases: Vec::new(),
             footprints: Vec::new(),
             opens: Vec::new(),
+            census: Vec::new(),
             live_records: 0,
             logical_bytes: 0,
             notes: Vec::new(),
