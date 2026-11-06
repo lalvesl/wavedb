@@ -223,6 +223,7 @@ impl PageStore {
             target_blocks: REMOTE_TARGET_BLOCKS,
             keep_holes: false,
             partial: false,
+            next: None,
         };
         let fetched = &work.fetched;
         let mut shaped = shape(

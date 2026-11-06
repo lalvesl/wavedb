@@ -497,6 +497,26 @@ a torn last block.
    entries inserted, not ranges restated — is where that goes.
    The micro row's durable update (probe, 4 000 rows) is 19.1 KiB a round,
    from 137: the pack, the header, the roots block.
+   **What entries cannot do, and the guard for it.** An entry addresses
+   12 bits of blocks from its range's base, 16 MiB. A span's run lands at
+   the end of the active file; the page it lies over may be far behind.
+   Then no entry of the range can name the span, `isolate` gives it a range
+   of its own — the page's range cut in three — and a store of cold pages
+   updated at random grew a range per update (580 for 2 000 records and
+   666 updates, from 7; the compaction then could not merge across them).
+   That is this RFC's own argument for the slice's `offset`, which a run
+   anywhere ahead fits, and the entries do not have it. So a span is taken
+   only where the range reaches where the round's pages land
+   (`PageIndex::reaches`, a quarter of the window to spare): a page farther
+   behind is rewritten whole as before, which brings it near, and its next
+   changes are spans. The same 666 updates wrote 20 939 blocks against
+   33 157 without spans, in 4 ranges. The overlay with a wide offset is the
+   way to have spans over cold pages too; it is left for after this phase.
+   Two read-path fixes came with it: a round reads the pages it loads out
+   of the page cache instead of taking them out (a page rewritten in part
+   stays, and is read next), and a run an entry stops naming while others
+   still do loses only that slot's image from the cache — a durable micro
+   row's cold reads had 170 page misses of 2 000, now none.
 7. **The index budget and inline consolidation** (§6).
 8. **The cleaner's phases and triggers** (§7, §8).
 9. **Compression** (§9), as phase 0 decides.

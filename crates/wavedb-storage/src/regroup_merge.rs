@@ -142,6 +142,7 @@ impl PageStore {
             target_blocks: self.target_blocks_per_bucket,
             keep_holes: self.object.is_some(),
             partial: false,
+            next: None,
         };
         let shaped = shape(
             &mut index,

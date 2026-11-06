@@ -68,6 +68,10 @@ pub struct Rules {
     /// A page the round changes in part is rewritten in that part
     /// (`crate::partial`): a settle's rounds, not a merge's or an upload's.
     pub(crate) partial: bool,
+    /// About where the round's pages land, if known: a page is rewritten
+    /// in part only where its range can name a run there
+    /// (`PageIndex::reaches`).
+    pub(crate) next: Option<u64>,
 }
 
 /// One staged page: where it came from, and what it now holds.

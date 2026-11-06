@@ -16,7 +16,7 @@ use crate::dictionary::DictState;
 use crate::error::StorageResult;
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
-use crate::pages::{Pages, run_of, take_page};
+use crate::pages::{Pages, read_page, run_of};
 use crate::record_cache::Records;
 pub use crate::shape::{PlannedPage, blocks_for};
 use crate::shape::{Rules, shape};
@@ -96,14 +96,17 @@ impl PageStore {
             target_blocks: self.target_blocks_per_bucket,
             keep_holes: self.object.is_some(),
             partial: true,
+            next: self.next_address(),
         };
         let shaped = shape(
             &mut index,
             records,
             &rules,
             slot.struct_hash(),
+            // Read, not taken out of the page cache: a round that rewrites a
+            // page in part (`crate::partial`) leaves it, and it is read next.
             |page| {
-                take_page(&self.file, run_of(page), slot.struct_hash(), dict)
+                read_page(&self.file, run_of(page), slot.struct_hash(), dict)
             },
             |page| image_of(page, dict),
         )?;
