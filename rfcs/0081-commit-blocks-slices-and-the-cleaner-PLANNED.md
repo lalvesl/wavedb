@@ -416,7 +416,9 @@ a torn last block.
 0. **Measure.** A census of pages at the compacted point of every WaveDB row
    (pages, fill against the target, ranges, sub-headers, index bytes, bytes
    per block, by lane). The compacted point of the multi and shop rows. The
-   compression experiment of §9.
+   compression experiment of §9. **Landed:** the compacted point of the
+   multi and shop rows, and the census (`PageStore::census`, the rows'
+   `census`, RFC 0065 §13); the compression experiment is still to do.
 1. **The rightmost split** (§8). Independent and small.
 2. **The sub-header in bits** (§3a). `prefix_bits` and `start` replace
    `first_key` and `key_shift`, in RAM and in `SubHeaderRecord`; the refine
