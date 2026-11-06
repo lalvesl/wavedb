@@ -192,6 +192,28 @@ pub struct OpenRecord {
     pub deletes: u64,
 }
 
+/// One slot of a WaveDB store at its compacted point (RFC 0081 phase 0):
+/// its index — ranges, entries naming pages and holes — the distinct runs
+/// its pages take and how many more than one entry names, their blocks,
+/// and the records and bytes the pages hold through their entries. Summed
+/// over the shards of a sharded row.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CensusRecord {
+    /// The slot's `STRUCT_HASH`, 16 hex digits.
+    pub slot: String,
+    pub ranges: u64,
+    pub pages: u64,
+    pub holes: u64,
+    pub evicted: u64,
+    pub runs: u64,
+    pub shared_runs: u64,
+    pub blocks: u64,
+    pub records: u64,
+    pub record_bytes: u64,
+    /// The index's RAM, estimated.
+    pub index_bytes: u64,
+}
+
 /// One row: its identity, how it was taken, and what it measured.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RowRecord {
@@ -212,6 +234,9 @@ pub struct RowRecord {
     pub footprints: Vec<(String, FootprintRecord)>,
     /// The store's opens, timed — WaveDB's rows only, empty elsewhere.
     pub opens: Vec<OpenRecord>,
+    /// The census of its pages at the compacted point — WaveDB's rows
+    /// only, empty elsewhere.
+    pub census: Vec<CensusRecord>,
     pub live_records: u64,
     pub logical_bytes: u64,
     pub notes: Vec<String>,
@@ -291,6 +316,23 @@ impl RowRecord {
                         j.num("puts", o.puts);
                         j.num("lists", o.lists);
                         j.num("deletes", o.deletes);
+                    });
+                }
+            });
+            j.arr(Some("census"), |j| {
+                for c in &self.census {
+                    j.obj(None, |j| {
+                        j.str("slot", &c.slot);
+                        j.num("ranges", c.ranges);
+                        j.num("pages", c.pages);
+                        j.num("holes", c.holes);
+                        j.num("evicted", c.evicted);
+                        j.num("runs", c.runs);
+                        j.num("shared_runs", c.shared_runs);
+                        j.num("blocks", c.blocks);
+                        j.num("records", c.records);
+                        j.num("record_bytes", c.record_bytes);
+                        j.num("index_bytes", c.index_bytes);
                     });
                 }
             });

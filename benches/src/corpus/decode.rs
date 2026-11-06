@@ -11,7 +11,8 @@
 //! something else, and serving it as a measurement would launder that.
 
 use super::record::{
-    FootprintRecord, OpenRecord, PhaseRecord, RowKey, RowRecord, SCHEMA,
+    CensusRecord, FootprintRecord, OpenRecord, PhaseRecord, RowKey, RowRecord,
+    SCHEMA,
 };
 use crate::json::{Value, parse};
 
@@ -73,6 +74,13 @@ pub fn from_json(text: &str) -> Result<RowRecord, String> {
             .unwrap_or_default()
             .iter()
             .map(open_from)
+            .collect(),
+        census: v
+            .get("census")
+            .and_then(Value::as_arr)
+            .unwrap_or_default()
+            .iter()
+            .map(census_from)
             .collect(),
         live_records: num_at(&v, "live_records"),
         logical_bytes: num_at(&v, "logical_bytes"),
@@ -158,6 +166,22 @@ fn open_from(v: &Value) -> OpenRecord {
     }
 }
 
+fn census_from(v: &Value) -> CensusRecord {
+    CensusRecord {
+        slot: str_at(v, "slot"),
+        ranges: num_at(v, "ranges"),
+        pages: num_at(v, "pages"),
+        holes: num_at(v, "holes"),
+        evicted: num_at(v, "evicted"),
+        runs: num_at(v, "runs"),
+        shared_runs: num_at(v, "shared_runs"),
+        blocks: num_at(v, "blocks"),
+        records: num_at(v, "records"),
+        record_bytes: num_at(v, "record_bytes"),
+        index_bytes: num_at(v, "index_bytes"),
+    }
+}
+
 fn settings_from(v: Option<&Value>) -> Vec<(String, String)> {
     match v {
         Some(Value::Obj(pairs)) => pairs
@@ -191,7 +215,8 @@ fn bool_at(v: Option<&Value>, key: &str) -> bool {
 mod tests {
     use super::from_json;
     use crate::corpus::{
-        FootprintRecord, OpenRecord, PhaseRecord, RowKey, RowRecord,
+        CensusRecord, FootprintRecord, OpenRecord, PhaseRecord, RowKey,
+        RowRecord,
     };
 
     fn wavedb_key() -> RowKey {
@@ -268,6 +293,19 @@ mod tests {
                 puts: 0,
                 lists: 2,
                 deletes: 0,
+            }],
+            census: vec![CensusRecord {
+                slot: "00810005f4a60001".into(),
+                ranges: 3,
+                pages: 40,
+                holes: 2,
+                evicted: 0,
+                runs: 39,
+                shared_runs: 1,
+                blocks: 120,
+                records: 4000,
+                record_bytes: 400_000,
+                index_bytes: 900,
             }],
             live_records: 860_384,
             logical_bytes: 27_500_000,
