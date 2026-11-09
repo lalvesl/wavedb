@@ -198,9 +198,15 @@ where
             return Err(StorageError::Corrupt("a staged page lost its entry"));
         };
         if st.page.is_empty() {
-            if rules.keep_holes && st.old.is_some() {
-                index.punch(at, PENDING);
-                shaped.punched += 1;
+            // Its entry stays, a hole, while its range holds others: its
+            // quanta would go to a neighbour whose page may hold keys there
+            // past its entry — a page either side of a span, one a fragment
+            // took a quantum from (`crate::partial`) — and they would come
+            // back.
+            let pending = rules.keep_holes && st.old.is_some();
+            if pending || !index.is_alone(at) {
+                index.punch(at, if pending { PENDING } else { 0 });
+                shaped.punched += u64::from(pending);
             } else {
                 index.remove(at);
             }

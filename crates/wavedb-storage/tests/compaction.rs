@@ -307,3 +307,42 @@ fn a_window_past_the_ceiling_lands_whole() {
         assert_eq!(block_on(s.get_of(SH, id(k))).unwrap(), Some(record(k, 0)));
     }
 }
+
+/// Removals over part of every page leave each page named either side of
+/// a span, holding the removed keys under it; a compaction's merge of such
+/// a run must not read the page through the coverage it widens, or the
+/// removed keys come back (they did: 151 to 158 of every 300).
+#[test]
+fn a_merge_does_not_bring_back_what_a_span_removed() {
+    let d = tempfile::tempdir().unwrap();
+    let s = open(d.path());
+    let removed = |k: u64| !k.is_multiple_of(3) && k % 100 < 60;
+    block_on(async {
+        for k in 0..RECORDS {
+            s.apply(&[Write::Put(id(k), record(k, 0))]).await.unwrap();
+            if k % 100 == 99 {
+                s.drain().unwrap();
+            }
+        }
+        for k in (0..RECORDS).filter(|&k| removed(k)) {
+            s.apply(&[Write::Remove(SH, id(k))]).await.unwrap();
+        }
+        s.drain().unwrap();
+    });
+    let check = |s: &PageStore, when: &str| {
+        s.evict_settled(0);
+        for k in 0..RECORDS {
+            let want = (!removed(k)).then(|| record(k, 0));
+            assert_eq!(
+                block_on(s.get_of(SH, id(k))).unwrap(),
+                want,
+                "{k} {when}"
+            );
+        }
+    };
+    check(&s, "before");
+    s.compact().unwrap();
+    check(&s, "compacted");
+    drop(s);
+    check(&open(d.path()), "reopened");
+}

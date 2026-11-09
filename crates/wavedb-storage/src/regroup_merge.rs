@@ -14,12 +14,13 @@
 //! run of entries, from its first name to its last, is merged whatever its
 //! size, and the page goes with its last name (RFC 0081 §7).
 //!
-//! A merge is a settle round over what it already holds: the entries of
-//! the run's later pages go, their quanta handed to the first page's
-//! (`PageIndex::remove`), and their records are shaped into it
-//! (`crate::shape`) — read, rebuilt, counted and encoded as any round's
-//! page, at the end of the active file. Their runs are freed when the
-//! compaction seals.
+//! A merge is a settle round over what it already holds: the run's pages
+//! are read, each through its entry; the first entry becomes a hole and the
+//! later ones go, their quanta handed to it (`PageIndex::remove`); and
+//! the records are shaped into it (`crate::shape`) — rebuilt, counted and
+//! encoded as any round's pages, at the end of the active file. No page is
+//! read through a coverage the merge widened. Their runs are freed when
+//! the compaction seals.
 //!
 //! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
@@ -116,17 +117,24 @@ impl PageStore {
             else {
                 continue;
             };
-            // The later pages' entries go, their quanta to the first's;
-            // their records are shaped into it.
-            for (key, page) in keys.iter().zip(&pages).skip(1) {
+            // Every page of the run goes: the first entry becomes a hole, the
+            // later ones go, their quanta to it, and the records — read
+            // through each entry first — are shaped into it afresh. No page
+            // is read through a coverage the merge widened: a page named
+            // either side of a span still holds the keys under it
+            // (`crate::partial`), and they would come back.
+            for (i, (key, page)) in keys.iter().zip(&pages).enumerate() {
                 let Found::Page { at, page: placed } = index.find(key) else {
                     return Err(StorageError::Corrupt(
                         "a merged page lost its entry",
                     ));
                 };
-                index
-                    .remove(at)
-                    .ok_or(StorageError::Corrupt("a merged entry refused"))?;
+                let gone = if i == 0 {
+                    index.punch(at, 0)
+                } else {
+                    index.remove(at)
+                };
+                gone.ok_or(StorageError::Corrupt("a merged entry refused"))?;
                 retired.push(run_of(placed));
                 unpended += weight(placed.meta, placed.blocks);
                 records.extend(

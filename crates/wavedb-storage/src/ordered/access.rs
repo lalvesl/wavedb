@@ -205,6 +205,15 @@ impl<M: Copy + Default> PageIndex<M> {
         Some(Slot { range, entry })
     }
 
+    /// Whether `at` is its range's only entry: removing it removes the
+    /// range, and gives its quanta to no other entry.
+    #[must_use]
+    pub fn is_alone(&self, at: Slot) -> bool {
+        self.ranges
+            .get(at.range)
+            .is_some_and(|r| r.entries.len() == 1)
+    }
+
     /// Whether `at`'s range can name a page placed about `address`: past
     /// its base, with a quarter of its window to spare for where in a
     /// window the page lands.
