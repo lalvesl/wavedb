@@ -105,6 +105,7 @@ pub fn finish(
         let room = file.header as usize * BLOCK_SIZE;
         let mut header = Header {
             at: file.base,
+            blocks,
             prev: chain.tail.unwrap_or(HeaderLink::NONE),
             horizon: 0,
             shard: position,

@@ -470,8 +470,16 @@ a torn last block.
    block: 12.1 KiB, from ~80 KiB of the engine's own before fragments
    (25 KiB with fragments alone). A durable update is still 137 KiB: the
    anchor page rewritten for the record in its middle, which slices take.
-   Folding the header into the pack, and the roots block of `Own` into the
-   header, come next. A finding on the way: while a type's dictionary grows, every round
+   **The roots block of `Own`, gone** (`roots_find::find_own_root`): a store
+   writing its own files roots in its newest whole batch's ending header,
+   found back from the header its files end with by `prev` — a header the
+   walk cannot read is the newest write cut, and the walk looks below it;
+   a header records its own size (`Header::blocks`) so the one found from
+   the files' end can be named. A storage thread still ends each write
+   with one roots block for all its data shards. The micro row's durable
+   insert is two blocks a round, the pack and the header: 8–10 KiB; its
+   durable update 13.6 KiB. Folding the header into the pack — one block —
+   is what is left of the commit block. A finding on the way: while a type's dictionary grows, every round
    writes it whole again (11 blocks a round in that test, compressed) — §9's
    case for no dictionary in the hot path.
 6. **Slices** (§3, §4). Updates, middle inserts, removals, with their counts.

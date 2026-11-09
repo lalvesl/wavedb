@@ -74,7 +74,7 @@ fn a_round_of_two_types_writes_their_pages_in_one_block() {
     let s = plain();
     let before = blocks(&db);
     block_on(s.apply_durable(&[put(A, 1, 1), put(B, 1, 1)])).unwrap();
-    assert_eq!(blocks(&db) - before, 3, "pack, header, roots block");
+    assert_eq!(blocks(&db) - before, 2, "pack, header");
     drop(s);
     let s = plain();
     assert_eq!(read(&s, A, 1), Some(record(A, 1, 1)));
