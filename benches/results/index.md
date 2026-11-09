@@ -376,3 +376,93 @@ no `shop` row recorded one.
 Rows `3b16318e0152eaf1`, `43a1243fb8608f11`, `d68c7324f15ef342`,
 `9efa278f0718f566`, `46b4c0986de612b1`, `913c247891b70d51`,
 `5ede10e2c99d02e4`, `b070b078a2aa2638`.
+
+## `2026-11-13` · intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-kingston-sa400s3-crypt4096-xfs-9485 · `60d8d88` and `54a7aad`
+
+The first run on the dedicated SATA disk (KINGSTON SA400S37240G, LUKS2 4096
+sectors, XFS; the host key names it, so this is the `-9485` lane, not
+comparable with the earlier btrfs lanes). `micro` and `shop`, `small` tier,
+caged (500 MB), clock pinned at 2.3 GHz, not forced. Two code states, one
+disk, one night:
+
+- **`60d8d88`**, before RFC 0081: every system, 29 rows (the baseline for
+  the new lane). Postgres, MySQL and Valkey failed their first pass, a Unix
+  socket path over 107 characters under the long mount path; they were run
+  again through a short symlink to the same mount (same lane key).
+- **`54a7aad`**, RFC 0081 phases 0, 2–6 (sub-header in bits, clip by
+  coverage, packs, spans as entries, merge consolidation, Own writes no
+  roots block): WaveDB only, 8 rows. Phase 9 (no dictionaries) is not in
+  it.
+
+Two rows are missing, both killed by the cage's memory bound (exit 137,
+SIGKILL under the 500 MB `memory.max`): `wavedb/object durable micro` on
+both code states (the baseline's left an orphan `bwrap` for 2 h 22 until it
+was killed by pid), and **`wavedb/single durable micro` on `54a7aad` only**,
+which fits on `60d8d88`. That one is a lead for RFC 0081, not yet explained:
+the probe build is the way to see what the row holds in RAM.
+
+Peak MB is the largest footprint the row recorded (`hot` or `settled`),
+compacted MB the one at the compacted point; `—` where the code did not
+record one (multi and shop on `60d8d88`, RFC 0081 phase 0).
+
+### micro
+
+| system | durability | code | row | insert/s | read_hot/s | read_cold/s | update/s | KiB/insert | KiB/update | peak MB | compacted MB |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| mongodb/- | durable | — | 7b91f024 | 344.1 | 5333.1 | 5275.8 | 533.4 | 4.5 | 821.3 | 270 | 239.5 |
+| mongodb/- | relaxed | — | 857262be | 5198.2 | 5310.7 | 5243.7 | 3815.3 | 0.5 | 2.6 | 264 | 257.5 |
+| mysql/- | durable | — | ddc2d881 | 510.5 | 14102 | 9950.7 | 467.5 | 10.3 | 40.8 | 290 | 280.8 |
+| mysql/- | relaxed | — | 9ba47903 | 7890.8 | 14026.8 | 10321.9 | 5482.4 | 2 | 7 | 290 | 280.8 |
+| postgres/- | durable | — | f507b0c3 | 772.8 | 21730.6 | 19519.9 | 774 | 895.5 | 905.2 | 221 | 208.3 |
+| postgres/- | relaxed | — | 7ae0797a | 17762.7 | 21050.8 | 19991.5 | 14911 | 1.6 | 0.7 | 283 | 243.9 |
+| sqlite/- | durable | — | 871e20d5 | 764.4 | 109077.8 | 108202.3 | 768.1 | 15.3 | 20.8 | 68 | 56.8 |
+| sqlite/- | relaxed | — | 7cfbbd85 | 12554.3 | 109523.1 | 111634.6 | 9175.1 | 11.3 | 16.8 | 68 | 56.8 |
+| valkey/- | durable | — | eca5ee46 | 424.6 | 38166.1 | 38834.1 | 375.5 | 4.4 | 4.5 | 241 | 45.4 |
+| valkey/- | relaxed | — | 04ad5dd1 | 20747.7 | 35489.6 | 38484.7 | 13444.8 | 0.4 | 0.5 | 223 | 45.4 |
+| wavedb/multi | durable | `54a7aad` | e86e0b5d | 373.4 | 529493.5 | 106004 | 313.1 | 12.8 | 21.3 | 3713 | 40.3 |
+| wavedb/multi | durable | `60d8d88` | 0de03365 | 267.3 | 970029.9 | 284883.8 | 271.3 | 79 | 83.7 | 9771 | — |
+| wavedb/multi | relaxed | `54a7aad` | 9019e69e | 38225 | 1962234.3 | 720505.2 | 8599.1 | 0.1 | 1.6 | 95 | 19.1 |
+| wavedb/multi | relaxed | `60d8d88` | 504d0b27 | 34066.8 | 1852694.3 | 740987.5 | 7855.4 | 0.1 | 1.8 | 110 | — |
+| wavedb/object | relaxed | `54a7aad` | 75a687f6 | 8792.8 | 543241.9 | 217535.3 | 984 | 0.1 | 4.4 | 245 | 24.4 |
+| wavedb/object | relaxed | `60d8d88` | ea99b6ec | 8980.1 | 541981.4 | 215501.9 | 1097.4 | 0.1 | 4.3 | 241 | 18 |
+| wavedb/single | durable | `60d8d88` | 5f38023a | 111.6 | 325657.3 | 104333.8 | 116.2 | 80.5 | 85.3 | 20858 | 36.3 |
+| wavedb/single | relaxed | `54a7aad` | 2d827785 | 9741.7 | 561007.9 | 223037.3 | 2289.5 | 0.1 | 3.9 | 220 | 21.1 |
+| wavedb/single | relaxed | `60d8d88` | ef31117e | 11706.8 | 551954.7 | 223555.8 | 2606.8 | 0.1 | 3.6 | 203 | 17.7 |
+
+Against `60d8d88`, durable (WaveDB multi, the only durable pair with both
+rows): insert 267.3 → 373.4 /s (+40%), update 271.3 → 313.1 /s (+15%), KiB
+written per insert 79 → 12.8 and per update 83.7 → 21.3, peak footprint
+9 771 → 3 713 MB. Relaxed is within noise (single insert 11 707 → 9 742 /s,
+multi 34 067 → 38 225 /s): the target of RFC 0081 is the durable round.
+
+### shop
+
+| system | durability | code | row | signup/s | checkout/s | profile/s | order_page/s | order_detail/s | KiB/checkout | peak MB | compacted MB |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| mongodb/- | durable | — | f3c1c7fc | 452.8 | 359.5 | 4183.9 | 1226.7 | 555.1 | 4.9 | 337 | 337.2 |
+| mongodb/- | relaxed | — | 681b2078 | 2869.1 | 513.7 | 4225.9 | 1300.7 | 644.7 | 0.7 | 337 | 337.3 |
+| mysql/- | durable | — | 5b05e737 | 745.7 | 402.5 | 13114.8 | 2915.6 | 1858 | 88.9 | 359 | 345.8 |
+| mysql/- | relaxed | — | 092773e5 | 9048.3 | 2484 | 13465.3 | 3039.2 | 1767.2 | 1.1 | 359 | 345.8 |
+| postgres/- | durable | — | 7d89d0c2 | 681.9 | 684.5 | 21875.5 | 5300.3 | 4370.9 | 1024.4 | 418 | 358.4 |
+| postgres/- | relaxed | — | 9e8d0158 | 9005.9 | 3925.9 | 21195.1 | 5039.6 | 4252.8 | 0.4 | 418 | 358.5 |
+| sqlite/- | durable | — | 6264ccf8 | 161.3 | 239.3 | 141813.6 | 23750.4 | 22038.7 | 25.9 | 47 | 44.1 |
+| sqlite/- | relaxed | — | 6fc8cc21 | 1064.1 | 15816.7 | 144830.7 | 23863.9 | 21417.9 | 21.9 | 47 | 44.1 |
+| valkey/- | durable | — | b642aa89 | 421.3 | 426.1 | 33937.8 | 12560 | 10181.9 | 4.8 | 178 | 97.8 |
+| valkey/- | relaxed | — | 34fcf3e4 | 26863.3 | 13330.3 | 33673.8 | 12598.9 | 10210.4 | 0 | 178 | 97.8 |
+| wavedb/multi | durable | `54a7aad` | 81be1baa | 281.5 | 247 | 1536946.8 | 45159.6 | 8860.7 | 41.2 | 82 | 89.5 |
+| wavedb/multi | durable | `60d8d88` | 775f2686 | 237.2 | 187.5 | 1796210.2 | 49175.2 | 9363.7 | 116.9 | 112 | — |
+| wavedb/multi | relaxed | `54a7aad` | 6df41395 | 59230.8 | 9219.1 | 1472065.7 | 26719.1 | 9122.1 | 9.8 | 67 | 73.7 |
+| wavedb/multi | relaxed | `60d8d88` | 8db90b82 | 140733.9 | 3194.4 | 1838865.7 | 26929.7 | 9204.6 | 24.9 | 81 | — |
+| wavedb/single | durable | `54a7aad` | 27608490 | 189.2 | 102.1 | 456327.6 | 13739 | 3169 | 32.7 | 68 | 71.9 |
+| wavedb/single | durable | `60d8d88` | 6352cea3 | 149.9 | 104.4 | 506868.5 | 14288.2 | 3312.2 | 90.4 | 97 | — |
+| wavedb/single | relaxed | `54a7aad` | ba5951f2 | 156040.6 | 2992.6 | 461293.2 | 16114.1 | 3362.4 | 21 | 65 | 68.3 |
+| wavedb/single | relaxed | `60d8d88` | 5489cbd7 | 102543.4 | 1160.2 | 465410.9 | 14960.1 | 3396.5 | 21.1 | 76 | — |
+
+Against `60d8d88`, durable checkout: single 104.4 → 102.1 /s (equal), multi
+187.5 → 247.0 /s (+32%); KiB written per checkout 90.4 → 32.7 (single) and
+116.9 → 41.2 (multi). Reads move by up to ~15% either way (WaveDB multi profile 1.80 M → 1.54 M
+/s, order page 49 175 → 45 160 /s); the run is one pass, so that is
+indicative, not a trend.
+
+Rows: every digest in the tables above (`row`), under
+`benches/results/rows/intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-kingston-sa400s3-crypt4096-xfs-9485/`.
