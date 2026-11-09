@@ -47,3 +47,7 @@ criterion = "0.8.2"
 [[bench]]
 name = "page"
 harness = false
+
+[[bench]]
+name = "compression"
+harness = false

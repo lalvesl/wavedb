@@ -386,6 +386,24 @@ time — with a dictionary, without one, raw — over real pages of 4, 16, 32 an
 128 KiB. If a dictionary still wins much on cleaner pages, it stays there
 alone, trained by the cleaner, off the hot path.
 
+**Measured** (`cargo bench -p wavedb-storage --bench compression`, the
+micro workload's records, the dictionary sampled from other records of
+theirs, 64 KiB; 2.3 GHz):
+
+| page | stored / records: dict · none · raw | encode: dict · none · raw | decode: dict · none · raw |
+|---|---|---|---|
+| 4 KiB | 0.251 · 0.271 · 1.023 | 248 · 36 · 4.2 µs | 13.1 · 10.0 · 0.69 µs |
+| 16 KiB | 0.221 · 0.223 · 1.015 | 362 · 120 · 20 µs | 42 · 34 · 2.3 µs |
+| 32 KiB | 0.214 · 0.213 · 1.013 | 472 · 208 · 53 µs | 76 · 62 · 4.7 µs |
+| 128 KiB | 0.210 · 0.215 · 1.012 | 1 136 · 799 · 274 µs | 272 · 224 · 19 µs |
+
+The dictionary buys nothing from 16 KiB up and 8% at 4 KiB, and costs at
+every size: about 210 µs a page to encode — the compressor loads the 64 KiB
+dictionary every call, seven times the encode of a 4 KiB page — a quarter
+more to decode, and its image written whole by every round it grows (7 to
+11 blocks a round while a type is young, in the micro row's probe). So no
+dictionary, on cleaner pages either: they are the 32 and 128 KiB rows.
+
 ### 10. The object store
 
 Nothing changes in the object store's files. The upload rebuilds 128 KiB
@@ -418,7 +436,8 @@ a torn last block.
    per block, by lane). The compacted point of the multi and shop rows. The
    compression experiment of §9. **Landed:** the compacted point of the
    multi and shop rows, and the census (`PageStore::census`, the rows'
-   `census`, RFC 0065 §13); the compression experiment is still to do.
+   `census`, RFC 0065 §13), and the compression experiment
+   (`benches/compression.rs`, §9: no dictionary).
 1. **The rightmost split** (§8). Independent and small.
 2. **The sub-header in bits** (§3a). `prefix_bits` and `start` replace
    `first_key` and `key_shift`, in RAM and in `SubHeaderRecord`; the refine
