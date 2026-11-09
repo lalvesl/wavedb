@@ -4,20 +4,23 @@
 //! every directory, dictionary and the allocator come out of it. Nothing is
 //! replayed; the caches start empty.
 //!
-//! 1. **The roots block** a reconstruction roots in: the newest whose
-//!    storage write is whole (`crate::roots_find`).
+//! 1. **The root** a reconstruction roots in: through a storage thread,
+//!    the newest roots block whose storage write is whole; in a store
+//!    writing its own files, which writes none, the newest whole batch's
+//!    ending header, found back from the files' newest header
+//!    (`crate::roots_find`).
 //! 2. **The walk** (`crate::walk`), per data shard ([`rebuild`]), rebuilds
 //!    its directories — and in disk + object mode the object store's, from
 //!    the same headers — reading through its own handles.
 //! 3. **The allocator** is the files' layout, every run the data shards'
 //!    directories and dictionaries name, every header their walks read and
-//!    the roots block; the rest is holes, and the tail past the root — what
+//!    the roots block, if any; the rest is holes, and the tail past the root — what
 //!    a crash left — is cut.
 //!
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 //! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use futures::FutureExt;
 
@@ -29,8 +32,7 @@ use crate::error::{StorageError, StorageResult};
 use crate::header::{ChainRecord, Header, HeaderLink, Rotation};
 use crate::ordered::Shape;
 use crate::pages::disk_runs;
-use crate::roots::ROOTS_BLOCKS;
-use crate::roots_find::find_roots;
+use crate::roots_find::find_own_root;
 use crate::struct_storage::TypeSlot;
 use crate::walk::{HeaderSource, Lane, walk};
 
@@ -168,17 +170,9 @@ pub fn reopen(
     object_backed: bool,
 ) -> StorageResult<Reopened> {
     let mut headers = DiskHeaders::new(file);
-    let found = find_roots(&mut headers, 1)?;
-    let root = found
-        .as_ref()
-        .and_then(|r| r.root(0))
+    let root = find_own_root(&mut headers)?
         .and_then(|link| Some((headers.read(link)?, link)));
-    let mut rebuilt = rebuild(&mut headers, types, object_backed, root)?;
-    if let Some(roots) = found {
-        rebuilt.used.push(Run::new(roots.at, ROOTS_BLOCKS));
-        rebuilt.chain.roots.newest = Some(roots.at);
-        rebuilt.chain.roots.live = BTreeSet::from([roots.at]);
-    }
+    let rebuilt = rebuild(&mut headers, types, object_backed, root)?;
     Ok(Reopened {
         alloc: cut_tails(file, &rebuilt.used, file_bytes)?,
         chain: rebuilt.chain,
@@ -321,6 +315,7 @@ mod tests {
     fn header(at: u64) -> Header {
         Header {
             at,
+            blocks: 1,
             prev: at
                 .checked_sub(1)
                 .map_or(HeaderLink::NONE, |p| HeaderLink::new(p, 1)),

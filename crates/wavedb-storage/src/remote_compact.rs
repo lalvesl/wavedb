@@ -373,6 +373,7 @@ mod tests {
     ) {
         let header = Header {
             at: at(file),
+            blocks: 1,
             prev: file.checked_sub(1).map_or(HeaderLink::NONE, link),
             horizon: 0,
             shard: 0,

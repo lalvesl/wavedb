@@ -87,6 +87,7 @@ impl PageStore {
         let dict_of = self.dicts_after(plans, dicts);
         let bare = Header {
             at: 0,
+            blocks: 0,
             prev: HeaderLink::NONE,
             horizon: 0,
             shard: 0,

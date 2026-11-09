@@ -99,6 +99,9 @@ pub struct Header {
     /// Where this header is — the file's own number: a copy of it under
     /// another key is not it.
     pub at: u64,
+    /// The blocks it takes, its trailer in the last: with `at`, the link that
+    /// names it, for a reconstruction that found it from the file's end.
+    pub blocks: u16,
     /// The header before this one ([`HeaderLink::NONE`] for the first).
     pub prev: HeaderLink,
     /// The lowest header a walk rooted here reads: every type that existed
@@ -315,6 +318,7 @@ mod tests {
     fn header() -> Header {
         Header {
             at: 7,
+            blocks: 1,
             prev: HeaderLink::new(6, 8),
             horizon: 0,
             shard: 0,

@@ -26,7 +26,7 @@ use crate::block::{BLOCK_SIZE, BlockDescriptor, Run};
 use crate::block_file::BlockFile;
 use crate::dictionary::Dictionary;
 use crate::error::StorageResult;
-use crate::header::{Header, NO_FILE};
+use crate::header::{Header, HeaderLink, NO_FILE};
 use crate::header_room::MAX_HEADER_BLOCKS;
 use crate::ordered::RangeRecord;
 use crate::reopen::DiskHeaders;
@@ -80,6 +80,52 @@ pub fn find_roots(
             }
             // The write this block ends was cut: the one before is durable.
             at = roots.prev;
+        }
+    }
+}
+
+/// The newest whole batch's end in a store writing its own files, which
+/// writes no roots block (RFC 0081 §1): from the newest header the files
+/// end with, back by `prev` to the newest header ending a batch — the root
+/// a roots block named — and that batch checked whole, or the one before
+/// it. A header the walk cannot read is the newest write cut: the walk
+/// looks below it. `None` when nothing is durable yet.
+///
+/// # Errors
+/// Read faults.
+pub fn find_own_root(
+    headers: &mut DiskHeaders<'_>,
+) -> StorageResult<Option<HeaderLink>> {
+    let mut limit = u64::MAX;
+    'below: loop {
+        let Some(mark) = newest_below(headers.file, limit)? else {
+            return Ok(None);
+        };
+        let mut header = match mark {
+            Mark::Header(h) => h,
+            // Not a store of its own files' block: below it.
+            Mark::Roots(r) => {
+                limit = r.at;
+                continue;
+            }
+        };
+        let mut link = HeaderLink::new(header.at, header.blocks);
+        let mut ends = header.end_of_batch;
+        loop {
+            if ends && whole(headers, &header)?.is_ok() {
+                return Ok(Some(link));
+            }
+            // Not an end, or an end of a batch cut: the header before.
+            let prev = header.prev;
+            if !prev.is_some() {
+                return Ok(None); // nothing ended before it
+            }
+            let Some(before) = headers.read(prev) else {
+                limit = prev.at;
+                continue 'below;
+            };
+            ends = before.end_of_batch;
+            (header, link) = (before, prev);
         }
     }
 }
@@ -229,6 +275,7 @@ mod tests {
     fn header(at: u64, blocks: u16) -> Vec<u8> {
         let mut bytes = Header {
             at,
+            blocks,
             prev: HeaderLink::NONE,
             horizon: 0,
             shard: 0,
@@ -286,5 +333,50 @@ mod tests {
         assert_eq!(found(&file), Some(1), "its bytes are whole");
         file.write_run(0, Run::new(1, 1), &[0; BLOCK_SIZE]).unwrap();
         assert_eq!(found(&file), Some(0));
+    }
+
+    /// A one-block header at `at`, after the one at `prev`, ending a batch
+    /// or not.
+    fn chained(at: u64, prev: Option<u64>, end_of_batch: bool) -> Vec<u8> {
+        let mut bytes = Header {
+            at,
+            blocks: 1,
+            prev: prev.map_or(HeaderLink::NONE, |p| HeaderLink::new(p, 1)),
+            horizon: 0,
+            shard: 0,
+            roots: NO_FILE,
+            end_of_batch,
+            types: Vec::new(),
+            remote: Vec::new(),
+            chain: None,
+        }
+        .encode();
+        bytes.resize(BLOCK_SIZE, 0);
+        trailer::close(&mut bytes, 1);
+        bytes
+    }
+
+    fn own_root(file: &BlockFile) -> Option<u64> {
+        let mut headers = crate::reopen::DiskHeaders::new(file);
+        super::find_own_root(&mut headers).unwrap().map(|l| l.at)
+    }
+
+    /// A store of its own files roots in the newest header ending a batch,
+    /// walking back from the newest header; a header in the walk it cannot
+    /// read is the newest write cut, and it roots below it.
+    #[test]
+    fn a_store_of_its_own_files_roots_in_its_newest_batch_end() {
+        let d = tempfile::tempdir().unwrap();
+        let file = BlockFile::open(d.path(), [1, 2, 3, 4], false, 0).unwrap();
+        file.write_run(0, Run::new(0, 1), &chained(0, None, true))
+            .unwrap();
+        file.write_run(0, Run::new(1, 1), &chained(1, Some(0), false))
+            .unwrap();
+        assert_eq!(own_root(&file), Some(0), "a batch not ended yet");
+        file.write_run(0, Run::new(2, 1), &chained(2, Some(1), true))
+            .unwrap();
+        assert_eq!(own_root(&file), Some(2));
+        file.write_run(0, Run::new(1, 1), &[0; BLOCK_SIZE]).unwrap();
+        assert_eq!(own_root(&file), Some(0), "the batch torn in its middle");
     }
 }

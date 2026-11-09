@@ -331,6 +331,7 @@ mod tests {
         let prev = prev.map_or(HeaderLink::NONE, link);
         Header {
             at: at(file),
+            blocks: 1,
             prev,
             horizon: 0,
             shard: 0,
