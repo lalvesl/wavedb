@@ -1,0 +1,235 @@
+
+{
+  "schema": "wavedb-bench/2",
+  "digest": "2d8277851c75be8f",
+  "timestamp": "2026-11-13T05-32Z",
+  "key": {
+    "system": "wavedb",
+    "system_version": "0.1.0",
+    "variant": "single",
+    "durability": "relaxed",
+    "workload": "micro",
+    "tier": "small",
+    "dataset_revision": 1,
+    "generator_seed": 42,
+    "consumers": 1,
+    "host_key": "intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-kingston-sa400s3-crypt4096-xfs-9485",
+    "cage_revision": 1,
+    "wavedb_git_sha": "54a7aad",
+    "seeded": false
+  },
+  "provenance": {
+    "dirty": false,
+    "caged": true,
+    "forced": false
+  },
+  "bracket": "embedded",
+  "compression": "zstd (per-type dictionaries)",
+  "retains_history": true,
+  "live_records": 200000,
+  "logical_bytes": 50800000,
+  "materialise_ms": 0,
+  "seed_path": "",
+  "settings": {
+    "mode": "PageStore (in-process, one thread)",
+    "consumers": "1",
+    "threads": "1 consumer (everything there)",
+    "barrier": "standard writes: a settle per elapsed 1s or past half the record budget (pressure), its fsync on a helper, never awaited",
+    "block_size": "4096"
+  },
+  "phases": [
+    {
+      "name": "insert",
+      "count": 200000,
+      "wall_ns": 20530331162,
+      "total_ns": 13564638716,
+      "p50_ns": 73381,
+      "p95_ns": 165464,
+      "p99_ns": 179335,
+      "max_ns": 906140,
+      "bytes_written": 21020672,
+      "read_bytes": 0,
+      "rchar": 102,
+      "ops_per_sec": 9741.684
+    },
+    {
+      "name": "read_hot",
+      "count": 50000,
+      "wall_ns": 89125298,
+      "total_ns": 52700718,
+      "p50_ns": 915,
+      "p95_ns": 1528,
+      "p99_ns": 1905,
+      "max_ns": 288915,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 110703,
+      "ops_per_sec": 561007.942
+    },
+    {
+      "name": "read_cold",
+      "count": 50000,
+      "wall_ns": 224177726,
+      "total_ns": 180979778,
+      "p50_ns": 1458,
+      "p95_ns": 1824,
+      "p99_ns": 7738,
+      "max_ns": 519290,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 10506352,
+      "ops_per_sec": 223037.324
+    },
+    {
+      "name": "update",
+      "count": 50000,
+      "wall_ns": 21839241608,
+      "total_ns": 12707724526,
+      "p50_ns": 216160,
+      "p95_ns": 500451,
+      "p99_ns": 609011,
+      "max_ns": 1465057,
+      "bytes_written": 198787072,
+      "read_bytes": 0,
+      "rchar": 214073458,
+      "ops_per_sec": 2289.457
+    }
+  ],
+  "footprints": [
+    {
+      "point": "hot",
+      "apparent_bytes": 189366329,
+      "allocated_bytes": 189370368,
+      "log_bytes": 0,
+      "files": 2
+    },
+    {
+      "point": "settled",
+      "apparent_bytes": 219807801,
+      "allocated_bytes": 219811840,
+      "log_bytes": 0,
+      "files": 2
+    },
+    {
+      "point": "compacted",
+      "apparent_bytes": 21135417,
+      "allocated_bytes": 21139456,
+      "log_bytes": 0,
+      "files": 2
+    }
+  ],
+  "opens": [
+    {
+      "point": "written",
+      "cache": "cold",
+      "from": "disk",
+      "wall_ns": 715706989,
+      "read_bytes": 30736384,
+      "rchar": 37871792,
+      "read_calls": 1974,
+      "gets": 0,
+      "puts": 0,
+      "lists": 0,
+      "deletes": 0
+    },
+    {
+      "point": "written",
+      "cache": "warm",
+      "from": "disk",
+      "wall_ns": 19317470,
+      "read_bytes": 0,
+      "rchar": 37871799,
+      "read_calls": 1974,
+      "gets": 0,
+      "puts": 0,
+      "lists": 0,
+      "deletes": 0
+    },
+    {
+      "point": "compacted",
+      "cache": "cold",
+      "from": "disk",
+      "wall_ns": 183562496,
+      "read_bytes": 21139456,
+      "rchar": 114122935,
+      "read_calls": 6407,
+      "gets": 0,
+      "puts": 0,
+      "lists": 0,
+      "deletes": 0
+    },
+    {
+      "point": "compacted",
+      "cache": "warm",
+      "from": "disk",
+      "wall_ns": 32612159,
+      "read_bytes": 0,
+      "rchar": 114122935,
+      "read_calls": 6407,
+      "gets": 0,
+      "puts": 0,
+      "lists": 0,
+      "deletes": 0
+    }
+  ],
+  "census": [
+    {
+      "slot": "230639205664c829",
+      "ranges": 118,
+      "pages": 1073,
+      "holes": 41,
+      "evicted": 0,
+      "runs": 1073,
+      "shared_runs": 0,
+      "blocks": 4216,
+      "records": 250000,
+      "record_bytes": 80680945,
+      "index_bytes": 9888
+    },
+    {
+      "slot": "a58d5b04e284db59",
+      "ranges": 18,
+      "pages": 52,
+      "holes": 17,
+      "evicted": 0,
+      "runs": 52,
+      "shared_runs": 0,
+      "blocks": 247,
+      "records": 200000,
+      "record_bytes": 7000000,
+      "index_bytes": 1103
+    },
+    {
+      "slot": "d3f6ee47a3419214",
+      "ranges": 1,
+      "pages": 1,
+      "holes": 0,
+      "evicted": 0,
+      "runs": 1,
+      "shared_runs": 0,
+      "blocks": 1,
+      "records": 1,
+      "record_bytes": 25,
+      "index_bytes": 37
+    },
+    {
+      "slot": "dcb8fc987e468bf8",
+      "ranges": 20,
+      "pages": 38,
+      "holes": 18,
+      "evicted": 0,
+      "runs": 38,
+      "shared_runs": 0,
+      "blocks": 174,
+      "records": 200000,
+      "record_bytes": 7200000,
+      "index_bytes": 1144
+    }
+  ],
+  "notes": [
+    "Every collection op is one apply batch. The durable row writes through the `_durable` operations, one fsync per batch; the relaxed row through the standard ones, one fsync per elapsed window (RFC 0072), the counterpart of the others' relaxed knobs.",
+    "Retains every superseded version; the other systems retain none. Read the update row beside the footprint, never alone.",
+    "Barrier count is not recorded: PageStore exposes no public IoCounts accessor and RFC 0060 forbids changing a shipped crate.",
+    "Measured on the RFC 0065 producer/consumer harness: `wall_ns` is the phase's wall clock, `total_ns` is the sum of the timed windows, and the percentiles are pooled across every consumer. Read counters are absent (phase 4)."
+  ]
+}
