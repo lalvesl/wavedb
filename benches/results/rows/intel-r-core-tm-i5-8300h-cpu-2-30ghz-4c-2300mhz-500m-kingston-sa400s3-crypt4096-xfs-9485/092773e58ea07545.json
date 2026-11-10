@@ -1,0 +1,149 @@
+
+{
+  "schema": "wavedb-bench/2",
+  "digest": "092773e58ea07545",
+  "timestamp": "2026-11-13T07-27Z",
+  "key": {
+    "system": "mysql",
+    "system_version": "8.4.11",
+    "variant": "-",
+    "durability": "relaxed",
+    "workload": "shop",
+    "tier": "small",
+    "dataset_revision": 1,
+    "generator_seed": 42,
+    "consumers": 1,
+    "host_key": "intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-kingston-sa400s3-crypt4096-xfs-9485",
+    "cage_revision": 1,
+    "wavedb_git_sha": "",
+    "seeded": false
+  },
+  "provenance": {
+    "dirty": true,
+    "caged": true,
+    "forced": false
+  },
+  "bracket": "server",
+  "compression": "none",
+  "retains_history": false,
+  "live_records": 200000,
+  "logical_bytes": 50800000,
+  "materialise_ms": 0,
+  "seed_path": "",
+  "settings": {
+    "innodb_flush_log_at_trx_commit": "2",
+    "innodb_buffer_pool_size": "256M",
+    "tenancy": "user_id column + index",
+    "transaction": "one per checkout",
+    "performance_schema": "OFF",
+    "innodb_log_buffer_size": "16M",
+    "log_bin": "OFF"
+  },
+  "phases": [
+    {
+      "name": "signup",
+      "count": 100,
+      "wall_ns": 11051829,
+      "total_ns": 9688938,
+      "p50_ns": 86953,
+      "p95_ns": 135437,
+      "p99_ns": 172922,
+      "max_ns": 310694,
+      "bytes_written": 24576,
+      "read_bytes": 0,
+      "rchar": 0,
+      "ops_per_sec": 9048.276
+    },
+    {
+      "name": "checkout",
+      "count": 200,
+      "wall_ns": 80515631,
+      "total_ns": 80431128,
+      "p50_ns": 391464,
+      "p95_ns": 627302,
+      "p99_ns": 761684,
+      "max_ns": 1057418,
+      "bytes_written": 221184,
+      "read_bytes": 0,
+      "rchar": 0,
+      "ops_per_sec": 2483.990
+    },
+    {
+      "name": "profile",
+      "count": 10000,
+      "wall_ns": 742649181,
+      "total_ns": 720015525,
+      "p50_ns": 65120,
+      "p95_ns": 82672,
+      "p99_ns": 291433,
+      "max_ns": 1516194,
+      "bytes_written": 8192,
+      "read_bytes": 17170432,
+      "rchar": 17138688,
+      "ops_per_sec": 13465.308
+    },
+    {
+      "name": "order_page",
+      "count": 1000,
+      "wall_ns": 329029103,
+      "total_ns": 327086923,
+      "p50_ns": 230750,
+      "p95_ns": 632894,
+      "p99_ns": 779954,
+      "max_ns": 5969928,
+      "bytes_written": 24576,
+      "read_bytes": 5668864,
+      "rchar": 5668864,
+      "ops_per_sec": 3039.245
+    },
+    {
+      "name": "order_detail",
+      "count": 1000,
+      "wall_ns": 565880778,
+      "total_ns": 563990516,
+      "p50_ns": 587958,
+      "p95_ns": 974442,
+      "p99_ns": 1175996,
+      "max_ns": 14344566,
+      "bytes_written": 278528,
+      "read_bytes": 11124736,
+      "rchar": 11124736,
+      "ops_per_sec": 1767.157
+    }
+  ],
+  "footprints": [
+    {
+      "point": "baseline",
+      "apparent_bytes": 210081734,
+      "allocated_bytes": 210337792,
+      "log_bytes": 155197440,
+      "files": 180
+    },
+    {
+      "point": "hot",
+      "apparent_bytes": 358993602,
+      "allocated_bytes": 359256064,
+      "log_bytes": 171986944,
+      "files": 183
+    },
+    {
+      "point": "settled",
+      "apparent_bytes": 345582032,
+      "allocated_bytes": 345845760,
+      "log_bytes": 171978752,
+      "files": 172
+    },
+    {
+      "point": "compacted",
+      "apparent_bytes": 345575975,
+      "allocated_bytes": 345841664,
+      "log_bytes": 171974656,
+      "files": 172
+    }
+  ],
+  "opens": [],
+  "notes": [
+    "The order page is ORDER BY … LIMIT 10 OFFSET n over an index, not a materialised list.",
+    "Measured on the RFC 0065 producer/consumer harness: `wall_ns` is the phase's wall clock, `total_ns` is the sum of the timed windows, and the percentiles are pooled across every consumer. Read counters are absent (phase 4)."
+  ]
+}
