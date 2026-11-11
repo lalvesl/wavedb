@@ -1,0 +1,148 @@
+
+{
+  "schema": "wavedb-bench/2",
+  "digest": "681b2078f312b532",
+  "timestamp": "2026-11-13T02-06Z",
+  "key": {
+    "system": "mongodb",
+    "system_version": "8.2.12",
+    "variant": "-",
+    "durability": "relaxed",
+    "workload": "shop",
+    "tier": "small",
+    "dataset_revision": 1,
+    "generator_seed": 42,
+    "consumers": 1,
+    "host_key": "intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-kingston-sa400s3-crypt4096-xfs-9485",
+    "cage_revision": 1,
+    "wavedb_git_sha": "",
+    "seeded": false
+  },
+  "provenance": {
+    "dirty": false,
+    "caged": true,
+    "forced": false
+  },
+  "bracket": "server",
+  "compression": "snappy (WiredTiger default)",
+  "retains_history": false,
+  "live_records": 200000,
+  "logical_bytes": 50800000,
+  "materialise_ms": 0,
+  "seed_path": "",
+  "settings": {
+    "writeConcern": "{ w: 1, j: false }",
+    "wiredTigerCacheSizeGB": "0.25",
+    "topology": "one-node replica set",
+    "tenancy": "user_id field + index",
+    "transaction": "one per checkout"
+  },
+  "phases": [
+    {
+      "name": "signup",
+      "count": 100,
+      "wall_ns": 34854066,
+      "total_ns": 34754709,
+      "p50_ns": 301457,
+      "p95_ns": 510384,
+      "p99_ns": 586950,
+      "max_ns": 2190781,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 0,
+      "ops_per_sec": 2869.106
+    },
+    {
+      "name": "checkout",
+      "count": 200,
+      "wall_ns": 389338797,
+      "total_ns": 389158872,
+      "p50_ns": 1955971,
+      "p95_ns": 2366984,
+      "p99_ns": 2486528,
+      "max_ns": 2521436,
+      "bytes_written": 151552,
+      "read_bytes": 0,
+      "rchar": 1253376,
+      "ops_per_sec": 513.691
+    },
+    {
+      "name": "profile",
+      "count": 10000,
+      "wall_ns": 2366383968,
+      "total_ns": 2332995033,
+      "p50_ns": 213306,
+      "p95_ns": 300733,
+      "p99_ns": 377622,
+      "max_ns": 18378033,
+      "bytes_written": 57344,
+      "read_bytes": 237568,
+      "rchar": 2638416,
+      "ops_per_sec": 4225.857
+    },
+    {
+      "name": "order_page",
+      "count": 1000,
+      "wall_ns": 768833802,
+      "total_ns": 766583941,
+      "p50_ns": 609750,
+      "p95_ns": 1445410,
+      "p99_ns": 1836281,
+      "max_ns": 16359655,
+      "bytes_written": 0,
+      "read_bytes": 4145152,
+      "rchar": 18272543,
+      "ops_per_sec": 1300.671
+    },
+    {
+      "name": "order_detail",
+      "count": 1000,
+      "wall_ns": 1551084843,
+      "total_ns": 1548732659,
+      "p50_ns": 1450045,
+      "p95_ns": 2446495,
+      "p99_ns": 2715433,
+      "max_ns": 10257906,
+      "bytes_written": 0,
+      "read_bytes": 22675456,
+      "rchar": 37007934,
+      "ops_per_sec": 644.710
+    }
+  ],
+  "footprints": [
+    {
+      "point": "baseline",
+      "apparent_bytes": 210250879,
+      "allocated_bytes": 210309120,
+      "log_bytes": 209715200,
+      "files": 48
+    },
+    {
+      "point": "hot",
+      "apparent_bytes": 337142702,
+      "allocated_bytes": 337231872,
+      "log_bytes": 209854464,
+      "files": 62
+    },
+    {
+      "point": "settled",
+      "apparent_bytes": 337292255,
+      "allocated_bytes": 337321984,
+      "log_bytes": 209887232,
+      "files": 62
+    },
+    {
+      "point": "compacted",
+      "apparent_bytes": 337300781,
+      "allocated_bytes": 337334272,
+      "log_bytes": 209965056,
+      "files": 63
+    }
+  ],
+  "opens": [],
+  "notes": [
+    "References, not an embedded line-item array: the shape of the data is held equal across all five so the numbers compare storage and access paths rather than modelling choices.",
+    "A one-node replica set, because a multi-document transaction needs one. The micro MongoDB row is standalone.",
+    "Measured on the RFC 0065 producer/consumer harness: `wall_ns` is the phase's wall clock, `total_ns` is the sum of the timed windows, and the percentiles are pooled across every consumer. Read counters are absent (phase 4)."
+  ]
+}
