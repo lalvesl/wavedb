@@ -1,0 +1,315 @@
+
+{
+  "schema": "wavedb-bench/2",
+  "digest": "6df41395d1b228c4",
+  "timestamp": "2026-11-13T05-32Z",
+  "key": {
+    "system": "wavedb",
+    "system_version": "0.1.0",
+    "variant": "multi",
+    "durability": "relaxed",
+    "workload": "shop",
+    "tier": "small",
+    "dataset_revision": 1,
+    "generator_seed": 42,
+    "consumers": 3,
+    "host_key": "intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-kingston-sa400s3-crypt4096-xfs-9485",
+    "cage_revision": 1,
+    "wavedb_git_sha": "54a7aad",
+    "seeded": false
+  },
+  "provenance": {
+    "dirty": false,
+    "caged": true,
+    "forced": false
+  },
+  "bracket": "embedded",
+  "compression": "zstd (per-type dictionaries)",
+  "retains_history": true,
+  "live_records": 200000,
+  "logical_bytes": 50800000,
+  "materialise_ms": 0,
+  "seed_path": "",
+  "settings": {
+    "tenancy": "one tenant per user",
+    "list": "Shopping by bought_at, page = 10",
+    "transaction": "none: one op is one batch",
+    "consumers": "3",
+    "mode": "one PageStore per consumer thread (RFC 0067)",
+    "storage_shards": "1 — every data shard writes through it: one write and one fsync per tick (RFC 0073)",
+    "barrier": "standard writes: a settle per elapsed 1s or past half the record budget (pressure), its fsync on a helper, never awaited"
+  },
+  "phases": [
+    {
+      "name": "signup",
+      "count": 100,
+      "wall_ns": 1688311,
+      "total_ns": 1735009,
+      "p50_ns": 2787,
+      "p95_ns": 3972,
+      "p99_ns": 486867,
+      "max_ns": 534805,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 73844,
+      "ops_per_sec": 59230.793
+    },
+    {
+      "name": "checkout",
+      "count": 200,
+      "wall_ns": 21694140,
+      "total_ns": 61035977,
+      "p50_ns": 162071,
+      "p95_ns": 1131451,
+      "p99_ns": 1483213,
+      "max_ns": 1774321,
+      "bytes_written": 2011136,
+      "read_bytes": 0,
+      "rchar": 1745012,
+      "ops_per_sec": 9219.079
+    },
+    {
+      "name": "profile",
+      "count": 10000,
+      "wall_ns": 6793175,
+      "total_ns": 13317216,
+      "p50_ns": 1285,
+      "p95_ns": 1620,
+      "p99_ns": 1942,
+      "max_ns": 18539,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 116,
+      "ops_per_sec": 1472065.713
+    },
+    {
+      "name": "order_page",
+      "count": 1000,
+      "wall_ns": 37426439,
+      "total_ns": 92324346,
+      "p50_ns": 35470,
+      "p95_ns": 395459,
+      "p99_ns": 433279,
+      "max_ns": 525155,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 5140596,
+      "ops_per_sec": 26719.080
+    },
+    {
+      "name": "order_detail",
+      "count": 1000,
+      "wall_ns": 109624425,
+      "total_ns": 308267919,
+      "p50_ns": 297069,
+      "p95_ns": 645843,
+      "p99_ns": 829675,
+      "max_ns": 937914,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 21618804,
+      "ops_per_sec": 9122.055
+    }
+  ],
+  "footprints": [
+    {
+      "point": "hot",
+      "apparent_bytes": 65425465,
+      "allocated_bytes": 65429504,
+      "log_bytes": 0,
+      "files": 2
+    },
+    {
+      "point": "settled",
+      "apparent_bytes": 66838585,
+      "allocated_bytes": 66842624,
+      "log_bytes": 0,
+      "files": 2
+    },
+    {
+      "point": "compacted",
+      "apparent_bytes": 73744441,
+      "allocated_bytes": 73748480,
+      "log_bytes": 0,
+      "files": 2
+    }
+  ],
+  "opens": [
+    {
+      "point": "written",
+      "cache": "cold",
+      "from": "disk",
+      "wall_ns": 54665592,
+      "read_bytes": 5283840,
+      "rchar": 5415242,
+      "read_calls": 121,
+      "gets": 0,
+      "puts": 0,
+      "lists": 0,
+      "deletes": 0
+    },
+    {
+      "point": "written",
+      "cache": "warm",
+      "from": "disk",
+      "wall_ns": 6589811,
+      "read_bytes": 0,
+      "rchar": 5415248,
+      "read_calls": 121,
+      "gets": 0,
+      "puts": 0,
+      "lists": 0,
+      "deletes": 0
+    },
+    {
+      "point": "compacted",
+      "cache": "cold",
+      "from": "disk",
+      "wall_ns": 54675891,
+      "read_bytes": 7929856,
+      "rchar": 13873490,
+      "read_calls": 223,
+      "gets": 0,
+      "puts": 0,
+      "lists": 0,
+      "deletes": 0
+    },
+    {
+      "point": "compacted",
+      "cache": "warm",
+      "from": "disk",
+      "wall_ns": 9774034,
+      "read_bytes": 0,
+      "rchar": 13873490,
+      "read_calls": 223,
+      "gets": 0,
+      "puts": 0,
+      "lists": 0,
+      "deletes": 0
+    }
+  ],
+  "census": [
+    {
+      "slot": "1ad3bfa14feb2caf",
+      "ranges": 6,
+      "pages": 12,
+      "holes": 3,
+      "evicted": 0,
+      "runs": 12,
+      "shared_runs": 0,
+      "blocks": 58,
+      "records": 20100,
+      "record_bytes": 502500,
+      "index_bytes": 273
+    },
+    {
+      "slot": "32ecea0739b47ade",
+      "ranges": 34,
+      "pages": 1044,
+      "holes": 6,
+      "evicted": 0,
+      "runs": 1044,
+      "shared_runs": 0,
+      "blocks": 5398,
+      "records": 631065,
+      "record_bytes": 75094199,
+      "index_bytes": 7500
+    },
+    {
+      "slot": "38ed90f36f9283ed",
+      "ranges": 59,
+      "pages": 99,
+      "holes": 8,
+      "evicted": 0,
+      "runs": 93,
+      "shared_runs": 6,
+      "blocks": 323,
+      "records": 210115,
+      "record_bytes": 7354025,
+      "index_bytes": 2629
+    },
+    {
+      "slot": "60c82a88ebc78619",
+      "ranges": 33,
+      "pages": 156,
+      "holes": 6,
+      "evicted": 0,
+      "runs": 156,
+      "shared_runs": 0,
+      "blocks": 629,
+      "records": 631065,
+      "record_bytes": 22087275,
+      "index_bytes": 1972
+    },
+    {
+      "slot": "9c15cba9e1bc03a3",
+      "ranges": 207,
+      "pages": 492,
+      "holes": 21,
+      "evicted": 0,
+      "runs": 456,
+      "shared_runs": 36,
+      "blocks": 2303,
+      "records": 210115,
+      "record_bytes": 25634030,
+      "index_bytes": 10612
+    },
+    {
+      "slot": "a1ea6440e2f24530",
+      "ranges": 30,
+      "pages": 30,
+      "holes": 27,
+      "evicted": 0,
+      "runs": 30,
+      "shared_runs": 0,
+      "blocks": 162,
+      "records": 20100,
+      "record_bytes": 3108202,
+      "index_bytes": 1407
+    },
+    {
+      "slot": "dde97aef90314fce",
+      "ranges": 34,
+      "pages": 561,
+      "holes": 6,
+      "evicted": 0,
+      "runs": 561,
+      "shared_runs": 0,
+      "blocks": 3148,
+      "records": 631065,
+      "record_bytes": 58056712,
+      "index_bytes": 4035
+    },
+    {
+      "slot": "e887df6add21c00c",
+      "ranges": 34,
+      "pages": 204,
+      "holes": 6,
+      "evicted": 0,
+      "runs": 204,
+      "shared_runs": 0,
+      "blocks": 1244,
+      "records": 210115,
+      "record_bytes": 20801385,
+      "index_bytes": 2250
+    },
+    {
+      "slot": "ec261e198cdf9dc5",
+      "ranges": 33,
+      "pages": 60,
+      "holes": 6,
+      "evicted": 0,
+      "runs": 60,
+      "shared_runs": 0,
+      "blocks": 284,
+      "records": 210115,
+      "record_bytes": 5252875,
+      "index_bytes": 1480
+    }
+  ],
+  "notes": [
+    "A checkout is one order plus its line items, and WaveDB has no multi-record transaction: each record is its own atomic batch. The durable row makes the whole checkout durable once, at its end (RFC 0072) — one barrier, as the other four commit once.",
+    "Retains every superseded version; the other four retain none. Read the write phases beside the footprint, never alone.",
+    "Measured on the RFC 0065 producer/consumer harness: `wall_ns` is the phase's wall clock, `total_ns` is the sum of the timed windows, and the percentiles are pooled across every consumer. Read counters are absent (phase 4)."
+  ]
+}
