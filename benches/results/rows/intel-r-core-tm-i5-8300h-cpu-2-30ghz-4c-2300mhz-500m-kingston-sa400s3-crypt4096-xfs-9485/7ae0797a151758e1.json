@@ -1,0 +1,132 @@
+
+{
+  "schema": "wavedb-bench/2",
+  "digest": "7ae0797a151758e1",
+  "timestamp": "2026-11-13T07-27Z",
+  "key": {
+    "system": "postgres",
+    "system_version": "18.6",
+    "variant": "-",
+    "durability": "relaxed",
+    "workload": "micro",
+    "tier": "small",
+    "dataset_revision": 1,
+    "generator_seed": 42,
+    "consumers": 1,
+    "host_key": "intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-kingston-sa400s3-crypt4096-xfs-9485",
+    "cage_revision": 1,
+    "wavedb_git_sha": "",
+    "seeded": false
+  },
+  "provenance": {
+    "dirty": true,
+    "caged": true,
+    "forced": false
+  },
+  "bracket": "server",
+  "compression": "none",
+  "retains_history": false,
+  "live_records": 200000,
+  "logical_bytes": 50800000,
+  "materialise_ms": 0,
+  "seed_path": "",
+  "settings": {
+    "synchronous_commit": "off",
+    "shared_buffers": "256MB",
+    "transport": "unix socket",
+    "statements": "server-side prepared"
+  },
+  "phases": [
+    {
+      "name": "insert",
+      "count": 200000,
+      "wall_ns": 11259528759,
+      "total_ns": 10848427169,
+      "p50_ns": 51408,
+      "p95_ns": 76147,
+      "p99_ns": 97975,
+      "max_ns": 2203972,
+      "bytes_written": 336797696,
+      "read_bytes": 0,
+      "rchar": 1112131,
+      "ops_per_sec": 17762.733
+    },
+    {
+      "name": "read_hot",
+      "count": 50000,
+      "wall_ns": 2375211111,
+      "total_ns": 2274103524,
+      "p50_ns": 43609,
+      "p95_ns": 51224,
+      "p99_ns": 65898,
+      "max_ns": 2050603,
+      "bytes_written": 85000192,
+      "read_bytes": 0,
+      "rchar": 64256,
+      "ops_per_sec": 21050.760
+    },
+    {
+      "name": "read_cold",
+      "count": 50000,
+      "wall_ns": 2501062611,
+      "total_ns": 2399339557,
+      "p50_ns": 43848,
+      "p95_ns": 66007,
+      "p99_ns": 77957,
+      "max_ns": 862484,
+      "bytes_written": 72351744,
+      "read_bytes": 0,
+      "rchar": 65149568,
+      "ops_per_sec": 19991.503
+    },
+    {
+      "name": "update",
+      "count": 50000,
+      "wall_ns": 3353238309,
+      "total_ns": 3252480532,
+      "p50_ns": 62390,
+      "p95_ns": 74843,
+      "p99_ns": 112564,
+      "max_ns": 1389000,
+      "bytes_written": 37339136,
+      "read_bytes": 0,
+      "rchar": 2149888,
+      "ops_per_sec": 14910.959
+    }
+  ],
+  "footprints": [
+    {
+      "point": "baseline",
+      "apparent_bytes": 40677169,
+      "allocated_bytes": 42934272,
+      "log_bytes": 16777216,
+      "files": 973
+    },
+    {
+      "point": "hot",
+      "apparent_bytes": 211013425,
+      "allocated_bytes": 282124288,
+      "log_bytes": 117440512,
+      "files": 985
+    },
+    {
+      "point": "settled",
+      "apparent_bytes": 211346364,
+      "allocated_bytes": 282562560,
+      "log_bytes": 117440512,
+      "files": 985
+    },
+    {
+      "point": "compacted",
+      "apparent_bytes": 240570554,
+      "allocated_bytes": 243945472,
+      "log_bytes": 150994944,
+      "files": 903
+    }
+  ],
+  "opens": [],
+  "notes": [
+    "Retains no superseded versions once vacuumed: an UPDATE writes a new tuple and the dead one is reclaimed.",
+    "Measured on the RFC 0065 producer/consumer harness: `wall_ns` is the phase's wall clock, `total_ns` is the sum of the timed windows, and the percentiles are pooled across every consumer. Read counters are absent (phase 4)."
+  ]
+}
