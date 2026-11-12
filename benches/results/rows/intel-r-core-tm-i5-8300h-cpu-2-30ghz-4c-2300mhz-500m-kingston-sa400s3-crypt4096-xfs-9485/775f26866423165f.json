@@ -1,0 +1,136 @@
+
+{
+  "schema": "wavedb-bench/2",
+  "digest": "775f26866423165f",
+  "timestamp": "2026-11-13T02-06Z",
+  "key": {
+    "system": "wavedb",
+    "system_version": "0.1.0",
+    "variant": "multi",
+    "durability": "durable",
+    "workload": "shop",
+    "tier": "small",
+    "dataset_revision": 1,
+    "generator_seed": 42,
+    "consumers": 3,
+    "host_key": "intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-kingston-sa400s3-crypt4096-xfs-9485",
+    "cage_revision": 1,
+    "wavedb_git_sha": "60d8d88",
+    "seeded": false
+  },
+  "provenance": {
+    "dirty": false,
+    "caged": true,
+    "forced": false
+  },
+  "bracket": "embedded",
+  "compression": "zstd (per-type dictionaries)",
+  "retains_history": true,
+  "live_records": 200000,
+  "logical_bytes": 50800000,
+  "materialise_ms": 0,
+  "seed_path": "",
+  "settings": {
+    "tenancy": "one tenant per user",
+    "list": "Shopping by bought_at, page = 10",
+    "transaction": "none: one op is one batch",
+    "consumers": "3",
+    "mode": "one PageStore per consumer thread (RFC 0067)",
+    "storage_shards": "1 — every data shard writes through it: one write and one fsync per tick (RFC 0073)",
+    "barrier": "`_durable` writes: a settle and its fsync each (RFC 0072)"
+  },
+  "phases": [
+    {
+      "name": "signup",
+      "count": 100,
+      "wall_ns": 421506477,
+      "total_ns": 1241212240,
+      "p50_ns": 11286827,
+      "p95_ns": 12489923,
+      "p99_ns": 51623369,
+      "max_ns": 51667469,
+      "bytes_written": 12148736,
+      "read_bytes": 0,
+      "rchar": 159860,
+      "ops_per_sec": 237.244
+    },
+    {
+      "name": "checkout",
+      "count": 200,
+      "wall_ns": 1066517815,
+      "total_ns": 3017265844,
+      "p50_ns": 15016923,
+      "p95_ns": 17304628,
+      "p99_ns": 21609187,
+      "max_ns": 23890909,
+      "bytes_written": 23932928,
+      "read_bytes": 0,
+      "rchar": 5513332,
+      "ops_per_sec": 187.526
+    },
+    {
+      "name": "profile",
+      "count": 10000,
+      "wall_ns": 5567277,
+      "total_ns": 10478580,
+      "p50_ns": 1012,
+      "p95_ns": 1316,
+      "p99_ns": 1575,
+      "max_ns": 17459,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 118,
+      "ops_per_sec": 1796210.248
+    },
+    {
+      "name": "order_page",
+      "count": 1000,
+      "wall_ns": 20335463,
+      "total_ns": 59551722,
+      "p50_ns": 33206,
+      "p95_ns": 270407,
+      "p99_ns": 345344,
+      "max_ns": 458349,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 2891894,
+      "ops_per_sec": 49175.177
+    },
+    {
+      "name": "order_detail",
+      "count": 1000,
+      "wall_ns": 106794914,
+      "total_ns": 310731298,
+      "p50_ns": 311538,
+      "p95_ns": 671167,
+      "p99_ns": 819046,
+      "max_ns": 1006219,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 21340278,
+      "ops_per_sec": 9363.742
+    }
+  ],
+  "footprints": [
+    {
+      "point": "hot",
+      "apparent_bytes": 111730745,
+      "allocated_bytes": 111734784,
+      "log_bytes": 0,
+      "files": 2
+    },
+    {
+      "point": "settled",
+      "apparent_bytes": 111730745,
+      "allocated_bytes": 111734784,
+      "log_bytes": 0,
+      "files": 2
+    }
+  ],
+  "opens": [],
+  "notes": [
+    "A checkout is one order plus its line items, and WaveDB has no multi-record transaction: each record is its own atomic batch. The durable row makes the whole checkout durable once, at its end (RFC 0072) — one barrier, as the other four commit once.",
+    "Retains every superseded version; the other four retain none. Read the write phases beside the footprint, never alone.",
+    "Measured on the RFC 0065 producer/consumer harness: `wall_ns` is the phase's wall clock, `total_ns` is the sum of the timed windows, and the percentiles are pooled across every consumer. Read counters are absent (phase 4)."
+  ]
+}
