@@ -2,8 +2,8 @@
 //! [`crate::disk_header`], which writes it.
 //!
 //! - **What it names, in whole blocks.** A window's header is sized once
-//!   its pages are placed: what every index journaled and every dictionary
-//!   moved, exactly as the header will drain it, and its trailer, rounded
+//!   its pages are placed: what every index journaled, exactly as the
+//!   header will drain it, and its trailer, rounded
 //!   up to whole blocks and capped at [`MAX_HEADER_BLOCKS`]. What does not
 //!   fit waits for the next header, as it always did. The rest of the last
 //!   block is spare room: the rotation restates into it for free.
@@ -22,10 +22,9 @@
 //! [RFC 0079]: ../../../rfcs/0079-headers-sized-to-their-change-WIP.md
 
 use std::cell::Ref;
-use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use crate::block::{BLOCK_SIZE, BlockDescriptor};
+use crate::block::BLOCK_SIZE;
 use crate::disk_chain::DiskChain;
 use crate::header::{ENTRY_BYTES, Header, HeaderLink};
 use crate::page_store::PageStore;
@@ -76,15 +75,12 @@ impl HeaderSize {
 
 impl PageStore {
     /// The length of the header of a round whose pages, `body` blocks of
-    /// them, are placed in `plans`, its grown dictionaries `dicts` (see the
-    /// module docs).
+    /// them, are placed in `plans` (see the module docs).
     pub(crate) fn header_size(
         &self,
         plans: &[SlotPlan],
-        dicts: &BTreeMap<usize, BlockDescriptor>,
         body: u64,
     ) -> HeaderSize {
-        let dict_of = self.dicts_after(plans, dicts);
         let bare = Header {
             at: 0,
             blocks: 0,
@@ -104,7 +100,7 @@ impl PageStore {
         }
         let restating = self.restate_due(body);
         if restating {
-            need += self.restate_len(plans, &dict_of);
+            need += self.restate_len(plans);
         }
         let blocks = need.div_ceil(BLOCK_SIZE).max(1);
         HeaderSize {
@@ -124,12 +120,6 @@ impl PageStore {
         plans: &[SlotPlan],
     ) -> usize {
         let slot = &self.types[idx];
-        let dict_moved = self.unrecorded.borrow().slots.get(&idx).is_some_and(
-            |t| match side {
-                Side::Disk => t.dict,
-                Side::Remote => t.remote_dict,
-            },
-        );
         let journaled = match side {
             Side::Disk => plans.iter().find(|p| p.idx == idx).map_or_else(
                 || pending(slot.directory().borrow().as_ref()),
@@ -145,10 +135,7 @@ impl PageStore {
                 })
             }
         };
-        match journaled {
-            None if !dict_moved => 0,
-            journaled => ENTRY_BYTES + journaled.unwrap_or(0),
-        }
+        journaled.map_or(0, |bytes| ENTRY_BYTES + bytes)
     }
 
     /// Whether the next header is a restating one (see the module docs).
@@ -164,11 +151,7 @@ impl PageStore {
 
     /// Bytes a restating header spends: a pass over every index, whole, up
     /// to its ceiling.
-    fn restate_len(
-        &self,
-        plans: &[SlotPlan],
-        dict_of: &[Option<u64>],
-    ) -> usize {
+    fn restate_len(&self, plans: &[SlotPlan]) -> usize {
         let disk: Vec<_> =
             self.types.iter().map(|s| s.directory().borrow()).collect();
         let remote: Vec<_> = self
@@ -176,7 +159,7 @@ impl PageStore {
             .iter()
             .map(|s| s.remote_directory().borrow())
             .collect();
-        let views = self.views_of(&disk, plans, dict_of);
+        let views = self.views_of(&disk, plans);
         let remote_views = self.remote_views_of(&remote);
         pass_len(views.iter().chain(&remote_views).filter_map(|v| v.index))
     }
@@ -186,7 +169,6 @@ impl PageStore {
         &self,
         disk: &'a [Ref<'_, Option<Pages>>],
         plans: &'a [SlotPlan],
-        dict_of: &[Option<u64>],
     ) -> Vec<TypeView<'a>> {
         self.types
             .iter()
@@ -198,7 +180,6 @@ impl PageStore {
                 TypeView {
                     struct_hash: slot.struct_hash(),
                     index,
-                    dict: dict_of[idx],
                 }
             })
             .collect()
@@ -215,13 +196,9 @@ impl PageStore {
         self.types
             .iter()
             .enumerate()
-            .map(|(idx, slot)| {
-                let dict = slot.remote_dict().get();
-                TypeView {
-                    struct_hash: slot.struct_hash(),
-                    index: remote[idx].as_ref(),
-                    dict: dict.is_allocated().then_some(dict.raw()),
-                }
+            .map(|(idx, slot)| TypeView {
+                struct_hash: slot.struct_hash(),
+                index: remote[idx].as_ref(),
             })
             .collect()
     }
