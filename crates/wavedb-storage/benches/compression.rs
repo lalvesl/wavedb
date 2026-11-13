@@ -1,11 +1,11 @@
-//! How a page compresses (RFC 0081 §9, phase 0): with the type's
-//! dictionary, with none, and raw, over pages of 4, 16, 32 and 128 KiB of
-//! the micro workload's records — the ratio, the encode and the decode.
+//! How a page compresses (RFC 0081 §9): zstd and raw, over pages of 4, 16,
+//! 32 and 128 KiB of the micro workload's records — the ratio, the encode
+//! and the decode. (Phase 0 measured a per-type dictionary here too; it
+//! bought nothing from 16 KiB up and cost at every size, and phase 9
+//! removed it — the numbers are in the RFC.)
 //!
-//! The dictionary is sampled from other records of the same shape, as the
-//! store samples one from what it settled before; a page's own records
-//! would flatter it. The ratios print once, before the timings: stored
-//! bytes over the records' bytes.
+//! The ratios print once, before the timings: stored bytes over the
+//! records' bytes.
 //!
 //! `cargo bench -p wavedb-storage --bench compression`, the clock pinned.
 
@@ -16,7 +16,7 @@ use criterion::{
     BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
 };
 use wavedb_core::{Id, U48};
-use wavedb_storage::{Dictionary, SlotPage};
+use wavedb_storage::SlotPage;
 use wavedb_wire::to_wire;
 
 /// Bytes ahead of a record's body: its `STRUCT_HASH`, the metadata length
@@ -70,15 +70,6 @@ fn key(n: u64) -> [u8; 16] {
     .to_be_bytes()
 }
 
-/// A dictionary sampled from records the pages do not hold.
-fn trained() -> Dictionary {
-    let mut dict = Dictionary::new();
-    for n in 1_000_000..1_004_000 {
-        dict.sample(&record(n));
-    }
-    dict
-}
-
 /// A page of about `kib` KiB of records, and their bytes.
 fn page_of(kib: usize) -> (SlotPage, usize) {
     let mut page = SlotPage::new(STRUCT_HASH);
@@ -92,25 +83,17 @@ fn page_of(kib: usize) -> (SlotPage, usize) {
     (page, bytes)
 }
 
-/// The three ways a page is stored: its dictionary (`None` raw) and
-/// whether it compresses.
-fn modes(dict: &Dictionary) -> [(&'static str, Dictionary, bool); 3] {
-    [
-        ("dict", dict.clone(), true),
-        ("no-dict", Dictionary::new(), true),
-        ("raw", Dictionary::new(), false),
-    ]
-}
+/// The two ways a page is stored: whether it compresses.
+const MODES: [(&str, bool); 2] = [("zstd", true), ("raw", false)];
 
 fn compression(c: &mut Criterion) {
-    let dict = trained();
-    eprintln!("stored/records — the dictionary {} bytes", dict.len());
+    eprintln!("stored/records");
     for kib in SIZES {
         let (mut page, bytes) = page_of(kib);
-        let line: Vec<String> = modes(&dict)
+        let line: Vec<String> = MODES
             .iter()
-            .map(|(name, d, compress)| {
-                let stored = page.to_bytes(d, *compress).expect("encodes");
+            .map(|&(name, compress)| {
+                let stored = page.to_bytes(compress).expect("encodes");
                 // Stored over the records' bytes, to three places.
                 let milli = stored.len() * 1000 / bytes;
                 format!("{name} {}.{:03}", milli / 1000, milli % 1000)
@@ -118,16 +101,16 @@ fn compression(c: &mut Criterion) {
             .collect();
         eprintln!("{kib:>4} KiB: {}", line.join("  "));
     }
-    encode_group(c, &dict);
+    encode_group(c);
     let mut decode = c.benchmark_group("decode");
     decode.measurement_time(Duration::from_secs(3));
     for kib in SIZES {
         let (mut page, bytes) = page_of(kib);
         decode.throughput(Throughput::Bytes(bytes as u64));
-        for (name, d, compress) in modes(&dict) {
-            let stored = page.to_bytes(&d, compress).expect("encodes");
+        for (name, compress) in MODES {
+            let stored = page.to_bytes(compress).expect("encodes");
             decode.bench_function(BenchmarkId::new(name, kib), |b| {
-                b.iter(|| SlotPage::from_bytes(black_box(&stored), &d));
+                b.iter(|| SlotPage::from_bytes(black_box(&stored)));
             });
         }
     }
@@ -136,13 +119,13 @@ fn compression(c: &mut Criterion) {
 
 /// The encodes, a group of their own: the group holds the criterion it
 /// borrows only as long as it measures.
-fn encode_group(c: &mut Criterion, dict: &Dictionary) {
+fn encode_group(c: &mut Criterion) {
     let mut encode = c.benchmark_group("encode");
     encode.measurement_time(Duration::from_secs(3));
     for kib in SIZES {
         let (page, bytes) = page_of(kib);
         encode.throughput(Throughput::Bytes(bytes as u64));
-        for (name, d, compress) in modes(dict) {
+        for (name, compress) in MODES {
             encode.bench_function(BenchmarkId::new(name, kib), |b| {
                 b.iter(|| {
                     // A copy with its records as changes, as a round seals.
@@ -150,7 +133,7 @@ fn encode_group(c: &mut Criterion, dict: &Dictionary) {
                     for (k, v) in page.iter() {
                         fresh.upsert(k, v.to_vec());
                     }
-                    fresh.to_bytes(black_box(&d), compress)
+                    fresh.to_bytes(black_box(compress))
                 });
             });
         }

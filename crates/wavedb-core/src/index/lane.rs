@@ -6,7 +6,7 @@
 /// Which ordered lane of a user type a chain lives in.
 ///
 /// One lane per kind of chain per user type, so a page stays homogeneous
-/// and the lane's zstd dictionary models one kind of content. Every
+/// and compresses as one kind of content. Every
 /// collection of the type shares its lanes: a collection's chain is the key
 /// range under its Pivot, and a declaration's under the Pivot and its
 /// index.

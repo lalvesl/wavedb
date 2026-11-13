@@ -183,7 +183,7 @@ where
             Meta {
                 bracket: "embedded",
                 settings: settings(engine, d, used),
-                compression: "zstd (per-type dictionaries)",
+                compression: "zstd (per page)",
                 retains_history: true,
                 notes: multi_notes(used),
                 seed_path: None,
@@ -218,7 +218,7 @@ where
         Meta {
             bracket: "embedded",
             settings: settings(engine, d, used),
-            compression: "zstd (per-type dictionaries)",
+            compression: "zstd (per page)",
             retains_history: true,
             notes: wavedb_adapter::notes(seeded),
             seed_path: path_of(cfg.seed_wavedb.as_ref()),

@@ -394,7 +394,7 @@ encoding, then the record's anchor as 10 bytes. The recency chain, the
 removal log, each `#[wavedb::pivot]` secondary and each `#[wavedb::fuzzy]`
 posting set are `Chain<()>`: keys and anchors, no payload. A
 `#[wavedb::list]` is `Chain<Vec<u8>>`, the only kind holding whole records.
-Each kind has a lane of its own (its own pages and dictionary), and a
+Each kind has a lane of its own (its own pages), and a
 collection's chains need nothing created: a chain is found by its prefix.
 
 ```rust

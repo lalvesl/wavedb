@@ -6,7 +6,7 @@
 //! `collection_remove`).
 //!
 //! Every read here resolves records **by address**: the index yields anchors and
-//! each one is fetched with `get_of`. That is one page read and one dictionary
+//! each one is fetched with `get_of`. That is one page read and one
 //! decompression per record — the cost a declared list exists to collapse,
 //! by holding the records inline in its own order.
 //!

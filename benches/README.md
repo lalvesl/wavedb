@@ -248,8 +248,8 @@ Five things the numbers do not mean without their context:
 - **The relaxed row is asymmetric on purpose.** WaveDB has no relaxed
   durability mode to offer — one op is one batch is one `fsync`, always. The
   gap in that row is the measured price of the missing group commit.
-- **Small `--rows` exaggerates fixed overhead.** Superblock, directory pages,
-  dictionaries and B+tree nodes are constant; at a few thousand rows they
+- **Small `--rows` exaggerates fixed overhead.** Superblock, page indexes
+  and B+tree nodes are constant; at a few thousand rows they
   dominate the footprint ratio.
 
 ## Guards

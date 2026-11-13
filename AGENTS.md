@@ -219,7 +219,7 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   scan merges the pages with the record cache's ordered keys, and passes a
   counted page the span covers whole by its count when the cache holds
   nothing of it unsettled, 255 meaning "read it"), `SlotPage`
-  (checked-wire envelope, per-type zstd dictionaries with version = prefix length;
+  (checked-wire envelope, zstd per page with no dictionary — RFC 0081 §9;
   the body columns — keys (one width, or their ends), value ends, values —
   held as read, one buffer, with
   the writes since beside it until an encode seals them, RFC 0076),
@@ -245,8 +245,8 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   the newest batch can be cut by a crash, its pages checked by crc. A store
   dropped settles what it holds. The same header and walk serve the object
   store. Per-type routing is compile-time (`StructStorage` statics are
-  declarations: hash + compression policy); the per-type state (directory,
-  dictionary) belongs to the open store (RFC 0067 step 1), and so does the
+  declarations: hash + compression policy); the per-type state (its page
+  index) belongs to the open store (RFC 0067 step 1), and so does the
   record cache — one log per type in chunks + one Dashtable-shaped index;
   settledness is a cursor, eviction compacts settled chunks that are mostly
   superseded copies and only then drops settled chunks, and

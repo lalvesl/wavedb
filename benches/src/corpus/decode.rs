@@ -256,7 +256,7 @@ mod tests {
             caged: true,
             forced: false,
             bracket: "embedded".into(),
-            compression: "zstd dictionaries".into(),
+            compression: "zstd (per page)".into(),
             retains_history: true,
             settings: vec![("relax_window".into(), "0ms".into())],
             phases: vec![PhaseRecord {

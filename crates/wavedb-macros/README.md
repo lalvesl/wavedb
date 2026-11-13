@@ -80,7 +80,7 @@ because both compile this crate.
    `T::struct_storage()`, plus `T::storage_entries()` (the declarations —
    record + generated Pivot + lanes — to register at `PageStore::open`). A
    compile-time registry instead of runtime registration; each open store
-   keeps the types' caches, directories and dictionaries itself, one lock per
+   keeps the types' caches and page indexes itself, one lock per
    type (RFC 0067). `#[wavedb(compress = false)]` opts the type's pages out
    of zstd (storage policy — never folded into `STRUCT_HASH`). Consequence: on
    non-wasm targets a schema crate needs `wavedb-storage` as a target-gated

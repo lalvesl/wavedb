@@ -58,7 +58,7 @@ pub fn entries_for(name: &Ident, pivot: Option<&Ident>) -> TokenStream {
     // (RFC 0075, RFC 0078) — each an index of its own, so each needs its own
     // registered slot. Recency and `dead` are separated from the record lane
     // because they hold ids, not records (RFC 0054), and a lane exists so
-    // one dictionary models one kind of thing.
+    // a page holds one kind of thing.
     let (len, list) = pivot.map_or_else(
         || (quote!(1usize), quote!([Self::struct_storage()])),
         |pivot| {
@@ -96,8 +96,8 @@ pub fn entries_for(name: &Ident, pivot: Option<&Ident>) -> TokenStream {
 ///
 /// Each lane is its own ordered index (RFC 0078 §7), which is what keeps a
 /// page homogeneous — fat inline records and skinny `[instant][anchor]`
-/// pairs never share one, so each trains a dictionary on one kind of
-/// content. The hashes are derived at expansion time
+/// pairs never share one, so each page compresses one kind of content.
+/// The hashes are derived at expansion time
 /// ([`struct_hash::lane_hash`]) because a `static` needs a `const` initialiser.
 pub fn lane_statics(name: &Ident, hash: u64) -> TokenStream {
     let records = crate::struct_hash::lane_hash(b"WDB.SEG", hash);

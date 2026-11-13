@@ -252,7 +252,7 @@ where
                     },
                 ),
             ],
-            compression: "zstd (per-type dictionaries)",
+            compression: "zstd (per page)",
             retains_history: true,
             notes: vec![
             "A checkout is one order plus its line items, and WaveDB has no \

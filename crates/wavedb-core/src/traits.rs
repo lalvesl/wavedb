@@ -73,7 +73,7 @@ pub trait WaveDbStruct: WaveWire {
     /// the **recency** chain, the **removal log**, and the **secondary** and
     /// **fuzzy** chains. Recency and `dead` are split from the record lane
     /// because they hold ids rather than records (RFC 0054), and a lane exists
-    /// so one page and one zstd dictionary model one kind of content. A
+    /// so one page holds and compresses one kind of content. A
     /// `Unique` type has no collection and so no lanes, which is the default.
     ///
     /// Derived by the macro at expansion time, because SeaHash is not a

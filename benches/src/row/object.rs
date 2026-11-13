@@ -120,7 +120,7 @@ pub fn wavedb(run: &RowRun, d: Durability) -> Result<RowRecord, String> {
         Meta {
             bracket: "embedded",
             settings,
-            compression: "zstd (per-type dictionaries)",
+            compression: "zstd (per page)",
             retains_history: true,
             notes,
             seed_path: None,
