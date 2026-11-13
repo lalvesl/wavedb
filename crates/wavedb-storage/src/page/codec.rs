@@ -5,7 +5,7 @@
 //! [ payload_len (u32 LE) ][ to_wire_checked(PageEnvelope) ]  … zero-padded to the run
 //!                          └── [ crc32 ][ struct_hash · PagePayload ] ──┘
 //! PagePayload::Raw ( to_wire(PageBody) )                               — stored plain
-//! PagePayload::Zstd { dict_len, raw_len, zstd(to_wire(PageBody)) }     — dictionary-compressed
+//! PagePayload::Zstd { raw_len, zstd(to_wire(PageBody)) }               — compressed
 //! PageBody { keys: [u8], key_width: u32, key_ends: [u32], ends: [u32], data: [u8] }
 //! ```
 //!
@@ -20,16 +20,15 @@ use wavedb_core::wire::{WaveWire, to_wire_checked, view_wire_checked};
 
 use super::body::check;
 use super::{LEN_PREFIX, LEVEL, SlotPage};
-use crate::dictionary::Dictionary;
 use crate::error::{StorageError, StorageResult};
 
 /// The stored envelope: everything needed to open the page, uncompressed.
 #[derive(Debug, Clone, PartialEq, Eq, WaveWire)]
 struct PageEnvelope {
     /// The `STRUCT_HASH` every record in this page shares — readable without
-    /// the dictionary.
+    /// decompressing.
     struct_hash: u64,
-    /// The body, stored plain or dictionary-compressed.
+    /// The body, stored plain or compressed.
     payload: PagePayload,
 }
 
@@ -39,10 +38,8 @@ enum PagePayload {
     /// `to_wire(PageBody)`, plain — compression off for this page's type, or
     /// zstd could not shrink the body.
     Raw(Vec<u8>),
-    /// `to_wire(PageBody)` compressed against `dictionary[..dict_len]`.
+    /// `to_wire(PageBody)`, zstd'd — with no dictionary (RFC 0081 §9).
     Zstd {
-        /// The [`Dictionary`] state (prefix length) the body binds.
-        dict_len: u32,
         /// Decompressed body length (the decompressor's exact capacity).
         raw_len: u32,
         /// The zstd frame.
@@ -53,28 +50,21 @@ enum PagePayload {
 impl SlotPage {
     /// Serialise the page, framed `[len][checked envelope]`, first sealing
     /// its changes into its body, which it keeps: the page encoded is the
-    /// page held. With `compress` the body is zstd'd against `dict`'s
-    /// **latest** state — but stored `Raw` anyway when zstd cannot shrink
-    /// it (a page never grows for having been "compressed"). Without
-    /// `compress` (a hot page type opting out), zstd never runs.
+    /// page held. With `compress` the body is zstd'd — but stored `Raw`
+    /// anyway when zstd cannot shrink it (a page never grows for having
+    /// been "compressed"). Without `compress` (a hot page type opting out),
+    /// zstd never runs.
     ///
     /// # Errors
     /// [`StorageError::Io`] if zstd fails (allocation-class faults only);
     /// [`StorageError::PageTooLarge`] past what the body can index.
-    pub fn to_bytes(
-        &mut self,
-        dict: &Dictionary,
-        compress: bool,
-    ) -> StorageResult<Vec<u8>> {
+    pub fn to_bytes(&mut self, compress: bool) -> StorageResult<Vec<u8>> {
         self.seal()?;
         let raw = &self.body;
         let payload = if compress {
-            let zstd =
-                zstd::bulk::Compressor::with_dictionary(LEVEL, dict.latest())?
-                    .compress(raw)?;
+            let zstd = zstd::bulk::compress(raw, LEVEL)?;
             if zstd.len() < raw.len() {
                 PagePayload::Zstd {
-                    dict_len: dict.len() as u32,
                     raw_len: raw.len() as u32,
                     bytes: zstd,
                 }
@@ -106,14 +96,12 @@ impl SlotPage {
 
     /// Parse a page from bytes (typically a whole zero-padded run): length
     /// prefix, crc + envelope view through the checked codec, then — for a
-    /// `Zstd` payload — decompress against the dictionary state the page
-    /// was written under, into the one buffer the page keeps.
+    /// `Zstd` payload — decompress, into the one buffer the page keeps.
     ///
     /// # Errors
     /// [`StorageError::Corrupt`] on a truncated buffer, an out-of-range
-    /// length, a crc mismatch, an undecodable envelope/body, or a `dict_len`
-    /// stamping a state `dict` never reached.
-    pub fn from_bytes(buf: &[u8], dict: &Dictionary) -> StorageResult<Self> {
+    /// length, a crc mismatch, or an undecodable envelope or body.
+    pub fn from_bytes(buf: &[u8]) -> StorageResult<Self> {
         let env = envelope_bytes(buf)?;
         #[cfg(feature = "probe")]
         let mut lap = crate::probe::Lap::start();
@@ -121,21 +109,15 @@ impl SlotPage {
             .map_err(|_| StorageError::Corrupt("page envelope"))?;
         let body = match envelope.payload {
             PagePayloadRef::Raw(raw) => raw.to_vec(),
-            PagePayloadRef::Zstd {
-                dict_len,
-                raw_len,
-                bytes,
-            } => {
-                let state = dict.state(dict_len as usize).ok_or(
-                    StorageError::Corrupt("page dictionary state unknown"),
-                )?;
+            PagePayloadRef::Zstd { raw_len, bytes } => {
+                // The probe's parts as they were: no dictionary to find, no
+                // decompressor to load it into.
                 #[cfg(feature = "probe")]
-                lap.split(0);
-                let mut d = zstd::bulk::Decompressor::with_dictionary(state)
-                    .map_err(|_| StorageError::Corrupt("page decompress"))?;
-                #[cfg(feature = "probe")]
-                lap.split(1);
-                d.decompress(bytes, raw_len as usize)
+                {
+                    lap.split(0);
+                    lap.split(1);
+                }
+                zstd::bulk::decompress(bytes, raw_len as usize)
                     .map_err(|_| StorageError::Corrupt("page decompress"))?
             }
         };
@@ -172,7 +154,7 @@ fn envelope_bytes(buf: &[u8]) -> StorageResult<&[u8]> {
 mod tests {
     use super::super::body::PageBody;
     use super::{PageEnvelope, PagePayload, SlotPage};
-    use crate::dictionary::Dictionary;
+
     use crate::error::StorageError;
     use wavedb_core::wire::{to_wire, to_wire_checked};
 
@@ -188,7 +170,7 @@ mod tests {
     }
 
     fn opened(body: &PageBody) -> Result<SlotPage, StorageError> {
-        SlotPage::from_bytes(&stored(body), &Dictionary::new())
+        SlotPage::from_bytes(&stored(body))
     }
 
     /// Columns that disagree are refused when the page opens, so no read of

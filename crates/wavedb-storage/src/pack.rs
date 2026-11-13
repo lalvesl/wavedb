@@ -125,14 +125,13 @@ pub fn intact(image: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dictionary::Dictionary;
 
     fn page(hash: u64, keys: &[u8]) -> Vec<u8> {
         let mut p = SlotPage::new(hash);
         for &k in keys {
             p.upsert(&[k], vec![k; 40]);
         }
-        p.to_bytes(&Dictionary::new(), false).unwrap()
+        p.to_bytes(false).unwrap()
     }
 
     #[test]
@@ -149,10 +148,7 @@ mod tests {
             page_image(&run, 3),
             Err(StorageError::Corrupt("a pack without the slot's section"))
         ));
-        let read = SlotPage::from_bytes(
-            &page_image(&run, 2).unwrap(),
-            &Dictionary::new(),
-        );
+        let read = SlotPage::from_bytes(&page_image(&run, 2).unwrap());
         assert_eq!(read.unwrap().len(), 1);
     }
 

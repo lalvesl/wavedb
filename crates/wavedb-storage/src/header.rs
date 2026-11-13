@@ -3,7 +3,7 @@
 //! which a reconstruction walks.
 //!
 //! - **A header names the types its batch changed**, each with the ranges
-//!   its index holds, its dictionary, the ranges that changed (RFC 0078 §6),
+//!   its index holds, the ranges that changed (RFC 0078 §6),
 //!   and `last` — the header before it with entries for that type.
 //!   Following `last`, a type's index is rebuilt newest first.
 //! - **Spare room restates old addresses** (`crate::upload_file`): the type
@@ -142,15 +142,12 @@ pub struct TypeEntry {
     /// The header before this one with entries for this type
     /// ([`HeaderLink::NONE`]).
     pub last: HeaderLink,
-    /// The type's dictionary image, if any.
-    pub dict: Option<u64>,
     /// The ranges the batch changed, then those the spare room restates.
     pub changed: Vec<RangeRecord>,
 }
 
-/// Bytes a type's entry takes with no `changed` record, at most: its
-/// dictionary's address on the heap.
-pub const ENTRY_BYTES: usize = TypeEntry::STACK_SIZE + 8;
+/// Bytes a type's entry takes with no `changed` record.
+pub const ENTRY_BYTES: usize = TypeEntry::STACK_SIZE;
 
 /// A header's encoded length with no type in it.
 pub const BARE_BYTES: usize = 4 + CRC_PREFIX_LEN + Header::STACK_SIZE;
@@ -328,7 +325,6 @@ mod tests {
                 struct_hash: 5,
                 ranges: 1,
                 last: HeaderLink::NONE,
-                dict: Some(42),
                 changed: vec![RangeRecord::Entries {
                     start: vec![1, 2],
                     base_block: 9,
@@ -363,7 +359,6 @@ mod tests {
             struct_hash: 1,
             ranges: 0,
             last: HeaderLink::NONE,
-            dict: Some(0),
             changed: Vec::new(),
         });
         assert_eq!(h.encoded_len(), BARE_BYTES + ENTRY_BYTES);

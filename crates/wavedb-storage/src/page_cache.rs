@@ -45,7 +45,7 @@
 //!
 //! ## Not cached
 //!
-//! Only pages go through here. The dictionary image, the headers and the
+//! Only pages go through here. The headers and the
 //! defragmenter's relocation reads want the stored bytes and are read
 //! straight from the file — caching them would hold bytes that are read once.
 //!
