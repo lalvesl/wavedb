@@ -26,7 +26,6 @@ use std::path::Path;
 
 use futures::executor::block_on;
 
-use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
 use crate::manifest;
 use crate::page_store::{PageStore, StoreOptions};
@@ -191,7 +190,6 @@ impl PageStore {
             *slot.remote_directory().borrow_mut() = None;
             *slot.remote_journal().borrow_mut() =
                 crate::ordered::Journal::new();
-            slot.remote_dict().set(BlockDescriptor::EMPTY);
         }
     }
 }

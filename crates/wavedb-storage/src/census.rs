@@ -73,7 +73,6 @@ impl PageStore {
             let Some(index) = index.as_ref() else {
                 continue;
             };
-            let dict = slot.dictionary().borrow();
             let hash = slot.struct_hash();
             let mut c = SlotCensus {
                 struct_hash: hash,
@@ -99,7 +98,7 @@ impl PageStore {
                 }
                 names.entry(page.address).or_insert((page.blocks, 0)).1 += 1;
                 let (records, bytes) =
-                    with_page(&self.file, run_of(page), hash, &dict, |p| {
+                    with_page(&self.file, run_of(page), hash, |p| {
                         let held = clip(p.clone(), index, at)?;
                         let bytes = held
                             .iter()

@@ -1,8 +1,8 @@
 //! A settle window ([RFC 0041], [RFC 0072] §2–§3) — one allocation, one
 //! write, then the in-memory swap that publishes the new pages.
 //!
-//! Every image [`crate::plan`] produced — the rewritten pages and a grown
-//! dictionary — is placed inside **one contiguous window** at the end of the
+//! Every image [`crate::plan`] produced — the rewritten pages, and a pack
+//! of the small ones — is placed inside **one contiguous window** at the end of the
 //! active data file (writing only ever appends, [RFC 0071]), and on disk the
 //! window ends with its **header**, whole blocks naming the addresses it
 //! changed (`crate::disk_header`), reserved once its pages are placed —
@@ -19,17 +19,13 @@
 //! [RFC 0071]: ../../../rfcs/0071-data-files-by-address.md
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 
-use std::collections::BTreeMap;
-
-use crate::block::{BlockDescriptor, Run};
+use crate::block::Run;
 use crate::error::StorageResult;
 use crate::page_store::PageStore;
 use crate::pages::PENDING;
 use crate::plan::SlotPlan;
 use crate::record_cache::Records;
-use crate::window::{
-    Round, assemble, carve, dict_descriptors, install, size_of, targets_of,
-};
+use crate::window::{Round, assemble, carve, install, size_of, targets_of};
 
 /// What a window writes — which decides the "not uploaded yet" flag of the
 /// pages it places. Every window appends to the active data file.
@@ -83,8 +79,8 @@ impl PageStore {
             .map(|_| ())
     }
 
-    /// Write already-planned images (a recovery's dictionaries) as one
-    /// ordinary window.
+    /// Write already-planned images (a merge's pages) as one ordinary
+    /// window.
     ///
     /// # Errors
     /// Propagates the window write fault.
@@ -123,10 +119,8 @@ impl PageStore {
     }
 
     /// One round through the storage shard ([RFC 0073] §3): size the
-    /// window's pages and dictionaries, **reserve** them, place them; on
-    /// disk, size the header naming them and reserve it, with the roots
-    /// block after it when the round ends a batch of a store writing its
-    /// own files ([RFC 0079] §4); then build the header at its real
+    /// window's pages, **reserve** them, place them; on disk, size the
+    /// header naming them and reserve it ([RFC 0079] §4); then build the header at its real
     /// address, write it all, swap the descriptors in and release the
     /// superseded runs. Whether the header ended the batch.
     ///
@@ -188,7 +182,6 @@ impl PageStore {
             body,
             marks: None,
             added: 0,
-            dicts: BTreeMap::new(),
         };
         let marked = self.mark(&mut round, total).await;
         #[cfg(feature = "probe")]
@@ -226,13 +219,10 @@ impl PageStore {
             &round.runs,
             round.flags,
         )?;
-        round.dicts =
-            dict_descriptors(&round.plans, &round.targets, &round.runs);
         if !self.has_disk() {
             return Ok(());
         }
-        self.note_dicts(round.dicts.keys().map(|&p| round.plans[p].idx));
-        let size = self.header_size(&round.plans, &round.dicts, body);
+        let size = self.header_size(&round.plans, body);
         // No roots block: a store of its own files roots in its newest whole
         // batch's ending header, and a storage thread ends its own writes
         // with one (RFC 0073 §4, RFC 0081 §1).
@@ -253,7 +243,6 @@ impl PageStore {
             body,
             marks,
             added,
-            dicts,
         } = round;
         if let Some(object) = &self.object {
             let punched: u64 = plans.iter().map(|p| p.punched).sum();
@@ -263,7 +252,7 @@ impl PageStore {
         let mut ended = false;
         let marked = if let Some((run, size)) = marks {
             let (bytes, e) =
-                self.header_at((run.start, size), &mut plans, &dicts, end)?;
+                self.header_at((run.start, size), &mut plans, end)?;
             ended = e;
             Some((run, bytes))
         } else {
@@ -299,26 +288,12 @@ impl PageStore {
                 }
             }
         }
-        self.publish(plans, &dicts);
+        self.publish(plans);
         Ok(ended)
     }
 
-    /// Adopt the working indexes and the new dictionary runs.
-    fn publish(
-        &self,
-        plans: Vec<SlotPlan>,
-        dicts: &BTreeMap<usize, BlockDescriptor>,
-    ) {
-        for (plan, work) in plans.iter().enumerate() {
-            let Some(&desc) = dicts.get(&plan) else {
-                continue;
-            };
-            let old =
-                self.types[work.idx].dictionary().borrow_mut().repoint(desc);
-            if old.is_allocated() {
-                self.retire_run(old.run());
-            }
-        }
+    /// Adopt the working indexes.
+    fn publish(&self, plans: Vec<SlotPlan>) {
         for work in plans {
             *self.types[work.idx].directory().borrow_mut() = Some(work.index);
         }

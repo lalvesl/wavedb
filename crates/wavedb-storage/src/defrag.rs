@@ -22,9 +22,10 @@ pub const ROUND_IMAGES: usize = 128;
 #[derive(Clone)]
 pub struct Movable {
     pub slot: usize,
-    /// A key that finds the page, and its flags; `None` for the type's
-    /// dictionary.
-    pub page: Option<(Vec<u8>, u8)>,
+    /// A key that finds the page.
+    pub key: Vec<u8>,
+    /// Its flags.
+    pub flags: u8,
     pub run: Run,
 }
 
@@ -59,7 +60,11 @@ impl PageStore {
             }
             let movable = self.movable_in(&victim);
             if movable.is_empty() {
-                // Nothing left to carry: the sealing frees what it held.
+                // The active file, closed with nothing to carry: the sealing
+                // cuts it. Through a storage thread, nothing left to carry.
+                if self.own().is_some() {
+                    continue;
+                }
                 return Ok((images, blocks, true));
             }
             // The budget bounds the pass, not progress: a pass moves at least
@@ -92,10 +97,7 @@ impl PageStore {
         mut loaded: Vec<(Movable, Vec<u8>)>,
     ) -> StorageResult<()> {
         loaded.sort_by(|(a, _), (b, _)| {
-            a.slot.cmp(&b.slot).then_with(|| match (&a.page, &b.page) {
-                (Some((a, _)), Some((b, _))) => cmp_padded(a, b),
-                (a, b) => a.is_some().cmp(&b.is_some()),
-            })
+            a.slot.cmp(&b.slot).then_with(|| cmp_padded(&a.key, &b.key))
         });
         let mut plans: BTreeMap<usize, SlotPlan> = BTreeMap::new();
         for (m, bytes) in loaded {
@@ -106,28 +108,23 @@ impl PageStore {
             let plan = plans
                 .entry(m.slot)
                 .or_insert_with(|| SlotPlan::verbatim(m.slot, index));
-            match m.page {
-                Some((key, flags)) => {
-                    plan.pages.push(PlannedPage {
-                        key,
-                        image: bytes,
-                        decoded: None,
-                        flags,
-                    });
-                    plan.retired.push(m.run);
-                    // The copy carries the flag; the original takes its
-                    // weight with it.
-                    plan.unpended += weight(flags, m.run.count);
-                }
-                None => plan.dict = Some(bytes),
-            }
+            plan.pages.push(PlannedPage {
+                key: m.key,
+                image: bytes,
+                decoded: None,
+                flags: m.flags,
+            });
+            plan.retired.push(m.run);
+            // The copy carries the flag; the original takes its weight with
+            // it.
+            plan.unpended += weight(m.flags, m.run.count);
         }
         self.relocate(plans.into_values().collect()).await
     }
 
     /// The data file to empty next: of those at least
     /// [`StoreOptions::victim_free_percent`](crate::StoreOptions) free or held
-    /// back, still holding a page or a dictionary, and holding no header a
+    /// back, still holding a page, and holding no header a
     /// reconstruction may read — a header cannot move — the one with the
     /// fewest live blocks, the oldest on a tie.
     ///
@@ -174,14 +171,18 @@ impl PageStore {
         }
     }
 
-    /// The files worth emptying — skipping those holding a live header, if
-    /// `headers` says so.
+    /// The files worth emptying: mostly holes, and holding a run to move,
+    /// or (unless `headers` skips those) a live header, which a restatement
+    /// outlives — or the active file, whose holes no reclaim cuts until it
+    /// closes: a file whose pages all left for the object store holds
+    /// nothing else.
     fn candidates(&self, headers: bool) -> Vec<Victim> {
         let percent = u64::from(self.victim_free_percent);
         let Some(alloc) = self.own() else {
             return Vec::new();
         };
         let alloc = alloc.borrow();
+        let active = alloc.active();
         let mut held: Vec<u64> =
             self.movable_runs().map(|m| m.run.start).collect();
         held.sort_unstable();
@@ -193,11 +194,14 @@ impl PageStore {
                 let size = f.end - f.start;
                 let holds = held.partition_point(|&s| s < f.start)
                     < held.partition_point(|&s| s < f.end);
-                let header = headers
-                    && chain.live.range(f.start..f.end).next().is_some();
-                holds
-                    && !header
-                    && (f.free + f.deferred) * 100 >= size * percent
+                let header = chain.live.range(f.start..f.end).next().is_some();
+                let open = active == Some(f.start);
+                let worth = if headers {
+                    (holds || open) && !header
+                } else {
+                    holds || header || open
+                };
+                worth && (f.free + f.deferred) * 100 >= size * percent
             })
             .map(|f| Victim {
                 start: f.start,
@@ -207,7 +211,7 @@ impl PageStore {
             .collect()
     }
 
-    /// The pages and dictionaries in `victim`, highest first.
+    /// The pages in `victim`, highest first.
     fn movable_in(&self, victim: &Victim) -> Vec<Movable> {
         let mut out: Vec<Movable> = self
             .movable_runs()
@@ -217,7 +221,7 @@ impl PageStore {
         out
     }
 
-    /// Every page and dictionary run on disk.
+    /// Every page run on disk.
     fn movable_runs(&self) -> impl Iterator<Item = Movable> + '_ {
         self.types.iter().enumerate().flat_map(|(slot, ts)| {
             let mut out = Vec::new();
@@ -228,31 +232,20 @@ impl PageStore {
                     {
                         out.push(Movable {
                             slot,
-                            page: Some((key, page.meta)),
+                            key,
+                            flags: page.meta,
                             run: run_of(page),
                         });
                     }
                 }
-            }
-            let dict = ts.dictionary().borrow().descriptor();
-            if dict.is_allocated() {
-                out.push(Movable {
-                    slot,
-                    page: None,
-                    run: dict.run(),
-                });
             }
             out
         })
     }
 
     /// The bytes a move writes: a page as stored, trimmed to its own length
-    /// prefix; a dictionary as it stands (its newest image — growth is
-    /// append-only, so every page's prefix of it is unchanged).
+    /// prefix.
     pub(crate) fn image_of(&self, m: &Movable) -> StorageResult<Vec<u8>> {
-        if m.page.is_none() {
-            return Ok(self.types[m.slot].dictionary().borrow().image());
-        }
         let run = self.file.read_run(m.run)?;
         // A pack's section moves as a page of its own: every slot naming
         // the pack carries its own out, and the pack goes with the last.

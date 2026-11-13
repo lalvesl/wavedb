@@ -5,7 +5,7 @@
 //! Writing only ever appends, so a superseded page leaves a hole in its file
 //! that nothing fills. Compaction picks the files that are mostly holes — at
 //! least `victim_free_percent` free or held back, the fewest live blocks
-//! first — and rewrites their runs, pages and dictionaries, **verbatim**,
+//! first — and rewrites their runs, pages and packs, **verbatim**,
 //! at the end of the active file, highest first, so each file's tail empties
 //! first. The active file itself can be one: it is closed to new runs
 //! first, or a shard smaller than one file would never give anything back.

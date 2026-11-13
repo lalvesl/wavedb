@@ -75,11 +75,10 @@ impl Run {
     }
 }
 
-/// A 64-bit page/dictionary descriptor:
+/// A 64-bit page descriptor:
 /// `start (u46) · flag (u1) · depth (u7) · size (u10)` ([RFC 0074]).
 ///
-/// One format for both pages and dictionary runs (a dictionary's depth is
-/// 0). The flag bit is the object-store backend's (RFC 0070): set on a disk
+/// The flag bit is the object-store backend's (RFC 0070): set on a disk
 /// page the object store has not received yet. It is no part of the run —
 /// [`run`](Self::run) and [`is_allocated`](Self::is_allocated) ignore it — so
 /// an **emptied** bucket still waiting for its upload is `size 0 · flag 1`:

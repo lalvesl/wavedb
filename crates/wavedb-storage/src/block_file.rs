@@ -366,7 +366,7 @@ mod tests {
     }
 
     /// A "page" of the stored bytes as one record — a decode the test can
-    /// check without a dictionary, in the shape a page read takes.
+    /// check, in the shape a page read takes.
     #[allow(clippy::unnecessary_wraps)]
     fn as_page(bytes: &[u8]) -> crate::error::StorageResult<SlotPage> {
         let mut page = SlotPage::new(1);
