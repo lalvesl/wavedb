@@ -2,7 +2,7 @@
 
 The per-node **storage engine**: the block manager, the per-`STRUCT_HASH`
 ordered page index ([RFC 0078](../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md)),
-the page format, dictionaries, and the write pipeline whose settle is the
+the page format, and the write pipeline whose settle is the
 durability point. This is where most of WaveDB's engineering energy lives.
 
 > For the project-wide idea and quickstart see the
@@ -19,7 +19,6 @@ durability point. This is where most of WaveDB's engineering energy lives.
 | `manifest`        | The database's `MANIFEST`: magic, format version, shard count, seed, mode — written once at creation, a copy in the object store.                   |
 | `block_file`      | A shard's data files, named by the block each starts at and found by listing: positioned run I/O, create/cut/delete, the lock, fsync.              |
 | `data_file`       | One data file: its handle and name (16 hex digits), the per-file lock, create/cut/delete.                                                              |
-| `dictionary`      | Per-`STRUCT_HASH` raw-content zstd dictionary (`Dictionary` + `DictState`): capped append-only buffer, version = prefix length, own run persistence. |
 | `ordered`         | The quantized page index of one lane (RFC 0078): sorted sub-headers, one `u32` per page, flags, a list lane's counts; the fold; journal, rebuild. |
 | `pages`           | A type's index as the store addresses it: a key's page, a page's coverage, reads through the page cache.                                          |
 | `shape`           | One round's pages: records routed to the pages their keys fall in, those pages rebuilt and cut on a quantum boundary when over target.          |
@@ -107,7 +106,7 @@ block.
   ([`reclaim`](#write-pipeline--concurrency)); compaction is what empties them.
 
 The allocator is a pure in-memory structure. On open it is rebuilt from the
-runs the reconstruction names — pages, dictionaries, the headers it read;
+runs the reconstruction names — pages, packs, the headers it read;
 what lies past a file's last used run — what a crash cut before its batch
 ended — is cut, and a file no run names is deleted. A freed run becomes a
 hole only once the batch that stopped naming it is durable
@@ -181,7 +180,7 @@ layout language records use. No structure gets its own bespoke byte format:
   it must be checkable before any decode is attempted;
 - **block descriptor** (`start u43 · count u20 · flag u1`, exact-packed
   into one `u64` — see the table below) — wire-encodes as that `u64`;
-- **page / dictionary directories** (`Vec<u64>` of descriptors) — the standard
+- **page directories** (`Vec<u64>` of descriptors) — the standard
   `WaveWire` `Vec` encoding;
 - **page body** (`struct_hash` + the `(id, bytes)` entries) — a plain
   `WaveWire` struct (`PageBody`).
@@ -209,7 +208,7 @@ A shard's pages are **partitioned by type**, and a NonUnique type's chains by
 kind: every registered slot — a type's records, its Pivots, and each of its
 five ordered **lanes** (declared lists, recency, removals, secondary, fuzzy)
 — keeps an index of its own, so unrelated content never shares a page and
-each page compresses against one tight dictionary.
+each page compresses one kind of content.
 
 Keys are bytes, compared in order. An anchor's key is its `Id`'s raw `u128`
 big-endian — `KEY`, `TENANT`, `FLAG | SALT` — so a NonUnique type's records
@@ -257,12 +256,12 @@ the **checked wire encoding** — no page-private byte format:
                          └── [ crc32 (u32 LE) ][ wire bytes ] ──┘
 
 PageEnvelope (plain WaveWire struct):
-    struct_hash: u64                  — identifies the slot; selects the dictionary
+    struct_hash: u64                  — identifies the slot
     payload: PagePayload              — the body, raw or compressed
 
 PagePayload (plain WaveWire enum):
     Raw( body )                       — compression off for this slot, or zstd gained nothing
-    Zstd { dict_len, raw_len, bytes } — zstd(body) against dictionary[..dict_len]
+    Zstd { raw_len, bytes }           — zstd(body), the page alone
 
 body — columns, ascending by key:
     keys back to back, then their width (one for all) or their ends,
@@ -276,7 +275,7 @@ body — columns, ascending by key:
 - **crc + decode** — both the codec's job (`CrcMismatch` before any decode
   runs), surfaced as `StorageError::Corrupt`. The crc covers the **stored**
   bytes, so corruption is caught before zstd runs; `struct_hash` and the
-  payload kind stay readable without the dictionary.
+  payload kind stay readable without decompressing.
 - **per-slot compression policy** — a `#[wavedb(compress = false)]` type's
   pages skip zstd. Even when on, a body zstd cannot shrink is stored `Raw` —
   a page never grows for having been "compressed".
@@ -293,41 +292,15 @@ body — columns, ascending by key:
 
 ---
 
-## Dictionaries
+## Compression
 
-Because a page holds exactly one `STRUCT_HASH`, each type has **one dictionary**
-with nothing foreign to dilute it.
-
-### Raw-content dictionary (no trainer)
-
-zstd accepts **any bytes** as a dictionary, not just a trained `ZDICT` — so the
-dictionary is simply a **capped, append-only buffer of record bytes** for that
-`STRUCT_HASH`. No training pass: as writes settle, record bytes are sampled
-into the buffer until the cap (`DICT_CAP`), then it freezes. Simpler than a
-trainer and naturally incremental.
-
-The dictionary is stored in the data files like a page: a block run handed out by
-the block manager (`[len][to_wire_checked(buf)]`, same framing as everything
-else), tracked by a descriptor in the type's `DictState` — the compression
-slot the open store keeps for the type — and repointed
-with the same crash-safe write-then-free ordering pages use. A compression-off
-type (`#[wavedb(compress = false)]`) never
-samples and never allocates a run.
-
-### Versioning (the one rule)
-
-A page compressed against dictionary state X **must** be decompressed against
-the exact same bytes — the dictionary never mutates under existing pages.
-Because the buffer is **append-only, a state is fully identified by its
-length**: each `Zstd` page stamps `dict_len` at compression time and
-decompresses against `buf[..dict_len]`. Every superseded state is a prefix of
-the same live buffer, so old pages stay readable forever with **no
-recompression and no superseded-run bookkeeping** — one stored buffer serves
-all versions. (A background recompress-cold-pages pass remains possible later
-as a pure space optimisation, not a correctness need.)
-
-On open the dictionary is read back from the run the newest header names, so
-every `dict_len` a page stamps resolves against it.
+A compressing type's page is zstd'd **alone** — no dictionary, nothing a
+page needs besides its own bytes to read back (RFC 0081 §9). A dictionary
+would be state another write must make durable before any page compressed
+against it is; measured on the micro workload's records it bought nothing
+from 16 KiB pages up and about 8% at 4 KiB, and cost at every size (the
+compressor loads it on every call). `benches/compression.rs` measures a
+page compressed and raw.
 
 CPU is free here — there is no join processing competing for it. Per-value
 (strings/blobs) heap compression stays future work.
@@ -376,7 +349,7 @@ mutation → the type's record log (RAM) → (client confirmed)
 6. **Compaction.** Copy-on-write leaves a hole wherever a page used to be,
    and writing only appends, so nothing fills it. Compaction picks the data
    files that are mostly holes (`victim_free_percent`, 50 by default), the
-   fewest live blocks first, and carries their runs — pages and dictionaries,
+   fewest live blocks first, and carries their runs — pages and packs,
    verbatim, highest first — into the active file; the active file itself is
    closed first when it is the one to empty. A header cannot move, so a
    compaction first restates every address: once that batch and the next have
@@ -460,8 +433,7 @@ Todo::storage_entries()     // the declarations to register: [Todo's, TodoPivot'
 ```
 
 An open `PageStore` builds one slot per registered declaration — that type's
-`Directory` **and its compression state** (`DictState`: dictionary + persisted
-run — per-type by nature, since a page holds one type) — and one **record
+page index and its compression policy — and one **record
 cache** (RFC 0068): a log of committed records per type, in chunks that start
 at 512 B and double up to 64 KiB, with one Dashtable-shaped index over all of
 them. The slots and the cache belong to that store, so stores over different

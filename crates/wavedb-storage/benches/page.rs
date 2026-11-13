@@ -1,8 +1,8 @@
 //! A page read from its bytes, and the records read off it (RFC 0076 §4).
 //!
 //! The page is the micro workload's: 391 records of its `Thing`, each
-//! behind a head of the size a stored record carries, zstd'd against a
-//! dictionary sampled from them as the store samples it. `from_bytes` is
+//! behind a head of the size a stored record carries, zstd'd or raw.
+//! `from_bytes` is
 //! the whole read — length, crc, envelope, decompression, the body checked;
 //! `get` and `iter` are what a reader does with the page next.
 //!
@@ -14,7 +14,7 @@ use std::hint::black_box;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use wavedb_core::{Id, U48};
-use wavedb_storage::{Dictionary, SlotPage};
+use wavedb_storage::SlotPage;
 use wavedb_wire::to_wire;
 
 /// The records a micro page holds.
@@ -66,28 +66,24 @@ fn id(n: u64) -> Id {
     )
 }
 
-/// The page, its dictionary, and its bytes, compressed or not.
-fn page(compress: bool) -> (Dictionary, Vec<u8>) {
-    let mut dict = Dictionary::new();
+/// The page's bytes, compressed or not.
+fn page(compress: bool) -> Vec<u8> {
     let mut page = SlotPage::new(STRUCT_HASH);
     for n in 0..RECORDS {
-        let bytes = record(n);
-        dict.sample(&bytes);
-        page.upsert(&id(n).raw().to_be_bytes(), bytes);
+        page.upsert(&id(n).raw().to_be_bytes(), record(n));
     }
-    let bytes = page.to_bytes(&dict, compress).expect("page encodes");
-    (dict, bytes)
+    page.to_bytes(compress).expect("page encodes")
 }
 
 fn reads(c: &mut Criterion) {
     let mut group = c.benchmark_group("page");
     group.throughput(Throughput::Elements(RECORDS));
     for (name, compress) in [("zstd", true), ("raw", false)] {
-        let (dict, bytes) = page(compress);
+        let bytes = page(compress);
         group.bench_function(format!("{name}/from_bytes"), |b| {
-            b.iter(|| SlotPage::from_bytes(black_box(&bytes), &dict));
+            b.iter(|| SlotPage::from_bytes(black_box(&bytes)));
         });
-        let page = SlotPage::from_bytes(&bytes, &dict).expect("page decodes");
+        let page = SlotPage::from_bytes(&bytes).expect("page decodes");
         group.bench_function(format!("{name}/get_all"), |b| {
             b.iter(|| {
                 (0..RECORDS)
