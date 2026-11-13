@@ -1,0 +1,136 @@
+
+{
+  "schema": "wavedb-bench/2",
+  "digest": "8db90b82e6bdef5b",
+  "timestamp": "2026-11-13T02-06Z",
+  "key": {
+    "system": "wavedb",
+    "system_version": "0.1.0",
+    "variant": "multi",
+    "durability": "relaxed",
+    "workload": "shop",
+    "tier": "small",
+    "dataset_revision": 1,
+    "generator_seed": 42,
+    "consumers": 3,
+    "host_key": "intel-r-core-tm-i5-8300h-cpu-2-30ghz-4c-2300mhz-500m-kingston-sa400s3-crypt4096-xfs-9485",
+    "cage_revision": 1,
+    "wavedb_git_sha": "60d8d88",
+    "seeded": false
+  },
+  "provenance": {
+    "dirty": false,
+    "caged": true,
+    "forced": false
+  },
+  "bracket": "embedded",
+  "compression": "zstd (per-type dictionaries)",
+  "retains_history": true,
+  "live_records": 200000,
+  "logical_bytes": 50800000,
+  "materialise_ms": 0,
+  "seed_path": "",
+  "settings": {
+    "tenancy": "one tenant per user",
+    "list": "Shopping by bought_at, page = 10",
+    "transaction": "none: one op is one batch",
+    "consumers": "3",
+    "mode": "one PageStore per consumer thread (RFC 0067)",
+    "storage_shards": "1 — every data shard writes through it: one write and one fsync per tick (RFC 0073)",
+    "barrier": "standard writes: a settle per elapsed 1s or past half the record budget (pressure), its fsync on a helper, never awaited"
+  },
+  "phases": [
+    {
+      "name": "signup",
+      "count": 100,
+      "wall_ns": 710561,
+      "total_ns": 1895735,
+      "p50_ns": 2756,
+      "p95_ns": 8985,
+      "p99_ns": 522877,
+      "max_ns": 534439,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 86132,
+      "ops_per_sec": 140733.871
+    },
+    {
+      "name": "checkout",
+      "count": 200,
+      "wall_ns": 62608865,
+      "total_ns": 101494363,
+      "p50_ns": 231195,
+      "p95_ns": 1486556,
+      "p99_ns": 2331982,
+      "max_ns": 2728763,
+      "bytes_written": 5091328,
+      "read_bytes": 0,
+      "rchar": 1765492,
+      "ops_per_sec": 3194.436
+    },
+    {
+      "name": "profile",
+      "count": 10000,
+      "wall_ns": 5438135,
+      "total_ns": 10542072,
+      "p50_ns": 1012,
+      "p95_ns": 1330,
+      "p99_ns": 1683,
+      "max_ns": 17896,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 116,
+      "ops_per_sec": 1838865.714
+    },
+    {
+      "name": "order_page",
+      "count": 1000,
+      "wall_ns": 37133757,
+      "total_ns": 91765679,
+      "p50_ns": 33763,
+      "p95_ns": 365563,
+      "p99_ns": 432124,
+      "max_ns": 486105,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 5304436,
+      "ops_per_sec": 26929.675
+    },
+    {
+      "name": "order_detail",
+      "count": 1000,
+      "wall_ns": 108641794,
+      "total_ns": 293397317,
+      "p50_ns": 296315,
+      "p95_ns": 650741,
+      "p99_ns": 806969,
+      "max_ns": 938277,
+      "bytes_written": 0,
+      "read_bytes": 0,
+      "rchar": 20725876,
+      "ops_per_sec": 9204.561
+    }
+  ],
+  "footprints": [
+    {
+      "point": "hot",
+      "apparent_bytes": 77344825,
+      "allocated_bytes": 77348864,
+      "log_bytes": 0,
+      "files": 2
+    },
+    {
+      "point": "settled",
+      "apparent_bytes": 80781369,
+      "allocated_bytes": 80785408,
+      "log_bytes": 0,
+      "files": 2
+    }
+  ],
+  "opens": [],
+  "notes": [
+    "A checkout is one order plus its line items, and WaveDB has no multi-record transaction: each record is its own atomic batch. The durable row makes the whole checkout durable once, at its end (RFC 0072) — one barrier, as the other four commit once.",
+    "Retains every superseded version; the other four retain none. Read the write phases beside the footprint, never alone.",
+    "Measured on the RFC 0065 producer/consumer harness: `wall_ns` is the phase's wall clock, `total_ns` is the sum of the timed windows, and the percentiles are pooled across every consumer. Read counters are absent (phase 4)."
+  ]
+}
