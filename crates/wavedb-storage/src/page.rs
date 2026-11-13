@@ -6,10 +6,10 @@
 //! bytes, a chain entry's `[pivot][declaration][key]`. Their encoding lives
 //! in `wavedb_core` and is stored here as ordinary bytes.
 //!
-//! ## Stored — checked wire outside, optionally dictionary-zstd inside
+//! ## Stored — checked wire outside, optionally zstd inside
 //!
 //! The layout is in `page/codec.rs`: a checked envelope (`struct_hash`, then the
-//! body plain or zstd'd against the type's dictionary), the body itself
+//! body plain or zstd'd, with no dictionary — RFC 0081 §9), the body itself
 //! three columns — keys, ends, the records back to back. The envelopes are
 //! plain `WaveWire` structs/enums — no page-private byte format. The order
 //! is deliberate: the crc covers the **stored** bytes, so corruption is
@@ -19,14 +19,10 @@
 //! — a page reads back from a run of whole zero-padded blocks, and the
 //! checked decoder needs the exact payload slice.
 //!
-//! **Not every page compresses.** The caller picks per write
-//! (the type's [`DictState`](crate::dictionary::DictState) carries the policy —
-//! e.g. a `#[wavedb(compress = false)]` type skips zstd), and even
-//! with compression on, a body zstd cannot shrink is stored `Raw` — a page
-//! never grows for having been "compressed". `dict_len` pins a `Zstd` page to
-//! the [`Dictionary`](crate::dictionary::Dictionary) state (an append-only
-//! buffer, so a state is a prefix length) it was compressed against; see
-//! [`crate::dictionary`].
+//! **Not every page compresses.** The caller picks per write (the type's
+//! `StructStorage::compress` — a `#[wavedb(compress = false)]` type skips
+//! zstd), and even with compression on, a body zstd cannot shrink is
+//! stored `Raw` — a page never grows for having been "compressed".
 //!
 //! ## In RAM — the body as read, and the changes on it (RFC 0076)
 //!
@@ -289,7 +285,6 @@ impl<'p> Iterator for Entries<'p> {
 mod tests {
     use super::SlotPage;
     use crate::block::BLOCK_SIZE;
-    use crate::dictionary::Dictionary;
     use crate::error::StorageError;
     use wavedb_core::{Id, U48};
 
@@ -323,65 +318,36 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_with_empty_and_warm_dictionary() {
+    fn roundtrip_compressed_and_plain() {
         let mut p = SlotPage::new(0x1122_3344_5566_7788);
         p.upsert(&id(10), vec![0xAA; 5]);
         p.upsert(&id(20), b"hello world".to_vec());
         p.upsert(&id(30), vec![]); // empty record is legal
-
-        // Cold: no dictionary content yet.
-        let cold = Dictionary::new();
-        let back =
-            SlotPage::from_bytes(&p.to_bytes(&cold, true).unwrap(), &cold)
-                .unwrap();
-        assert_eq!(back, p);
-        assert_eq!(back.struct_hash(), 0x1122_3344_5566_7788);
-
-        // Warm: sampled content participates in the roundtrip.
-        let mut warm = Dictionary::new();
-        warm.sample(b"hello world");
-        warm.sample(&[0xAA; 5]);
-        let back =
-            SlotPage::from_bytes(&p.to_bytes(&warm, true).unwrap(), &warm)
-                .unwrap();
-        assert_eq!(back, p);
+        for compress in [true, false] {
+            let back =
+                SlotPage::from_bytes(&p.to_bytes(compress).unwrap()).unwrap();
+            assert_eq!(back, p);
+            assert_eq!(back.struct_hash(), 0x1122_3344_5566_7788);
+        }
     }
 
-    // The versioning rule: a page stamped at dictionary state N must stay
-    // readable after the dictionary grows — a state is a stable prefix.
+    /// A page zstd shrinks is stored compressed, without a dictionary, and
+    /// reads back.
     #[test]
-    fn old_page_survives_dictionary_growth() {
-        let mut p = SlotPage::new(9);
-        p.upsert(&id(1), b"record one".to_vec());
-
-        let mut dict = Dictionary::new();
-        dict.sample(b"record one");
-        let bytes = p.to_bytes(&dict, true).unwrap(); // stamped at len("record one")
-
-        dict.sample(b"record two arriving later");
-        dict.sample(&[0x55; 1000]);
-        let back = SlotPage::from_bytes(&bytes, &dict).unwrap();
-        assert_eq!(back, p, "grown dictionary broke an old page");
-    }
-
-    // A stamp beyond anything this dictionary ever held (foreign file, or a
-    // replay that diverged) is a typed corruption, not a zstd panic. The page
-    // must be compressible, or the Raw fallback would skip the stamp entirely.
-    #[test]
-    fn unknown_dictionary_state_detected() {
+    fn a_compressible_page_is_stored_smaller() {
         let mut p = SlotPage::new(9);
         for i in 0..20u64 {
             p.upsert(&id(i + 1), vec![0xEE; 200]);
         }
-        let mut big = Dictionary::new();
-        big.sample(&[7u8; 500]);
-        let bytes = p.to_bytes(&big, true).unwrap(); // dict_len = 500
-
-        let small = Dictionary::new(); // never reached state 500
-        assert!(matches!(
-            SlotPage::from_bytes(&bytes, &small),
-            Err(StorageError::Corrupt("page dictionary state unknown"))
-        ));
+        let zstd = p.to_bytes(true).unwrap();
+        let raw = p.to_bytes(false).unwrap();
+        assert!(
+            zstd.len() * 4 < raw.len(),
+            "{} vs {}",
+            zstd.len(),
+            raw.len()
+        );
+        assert_eq!(SlotPage::from_bytes(&zstd).unwrap(), p);
     }
 
     #[test]
@@ -396,42 +362,38 @@ mod tests {
 
     #[test]
     fn empty_page_roundtrips() {
-        let d = Dictionary::new();
         let mut p = SlotPage::new(7);
-        let back =
-            SlotPage::from_bytes(&p.to_bytes(&d, true).unwrap(), &d).unwrap();
+        let back = SlotPage::from_bytes(&p.to_bytes(true).unwrap()).unwrap();
         assert!(back.is_empty());
         assert_eq!(back.struct_hash(), 7);
     }
 
     #[test]
     fn crc_mismatch_detected() {
-        let d = Dictionary::new();
         let mut p = SlotPage::new(1);
         p.upsert(&id(1), vec![1, 2, 3]);
-        let mut bytes = p.to_bytes(&d, true).unwrap();
+        let mut bytes = p.to_bytes(true).unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF; // corrupt the envelope
         assert!(matches!(
-            SlotPage::from_bytes(&bytes, &d),
+            SlotPage::from_bytes(&bytes),
             Err(StorageError::Corrupt(_))
         ));
     }
 
     #[test]
     fn truncated_buffer_detected() {
-        let d = Dictionary::new();
         // Shorter than the length prefix itself.
         assert!(matches!(
-            SlotPage::from_bytes(&[0u8; 2], &d),
+            SlotPage::from_bytes(&[0u8; 2]),
             Err(StorageError::Corrupt(_))
         ));
         // A length that reaches past the buffer.
         let mut p = SlotPage::new(1);
         p.upsert(&id(1), vec![1, 2, 3]);
-        let bytes = p.to_bytes(&d, true).unwrap();
+        let bytes = p.to_bytes(true).unwrap();
         assert!(matches!(
-            SlotPage::from_bytes(&bytes[..bytes.len() - 1], &d),
+            SlotPage::from_bytes(&bytes[..bytes.len() - 1]),
             Err(StorageError::Corrupt("page length out of range"))
         ));
     }
@@ -440,13 +402,12 @@ mod tests {
     fn reads_from_padded_run() {
         // A page on disk occupies whole blocks; the tail past the payload is
         // zero padding. from_bytes must ignore it and still verify the crc.
-        let d = Dictionary::new();
         let mut p = SlotPage::new(5);
         p.upsert(&id(1), vec![1, 2, 3]);
         p.upsert(&id(2), b"abc".to_vec());
-        let mut bytes = p.to_bytes(&d, true).unwrap();
+        let mut bytes = p.to_bytes(true).unwrap();
         bytes.resize(BLOCK_SIZE * 2, 0);
-        let back = SlotPage::from_bytes(&bytes, &d).unwrap();
+        let back = SlotPage::from_bytes(&bytes).unwrap();
         assert_eq!(back, p);
     }
 
@@ -454,13 +415,12 @@ mod tests {
     /// hides a body record, and iteration merges both in id order.
     #[test]
     fn changes_on_a_read_page_win_over_its_body() {
-        let d = Dictionary::new();
         let mut p = SlotPage::new(3);
         for k in [10, 20, 30, 40] {
             p.upsert(&id(k), vec![k as u8; 3]);
         }
         let mut back =
-            SlotPage::from_bytes(&p.to_bytes(&d, true).unwrap(), &d).unwrap();
+            SlotPage::from_bytes(&p.to_bytes(true).unwrap()).unwrap();
         back.upsert(&id(20), b"new".to_vec()); // over a body record
         back.upsert(&id(25), b"mid".to_vec()); // between two
         back.upsert(&id(50), b"end".to_vec()); // past the last
@@ -484,8 +444,8 @@ mod tests {
             ]
         );
         // And it encodes as what it holds.
-        let again = SlotPage::from_bytes(&back.to_bytes(&d, true).unwrap(), &d)
-            .unwrap();
+        let again =
+            SlotPage::from_bytes(&back.to_bytes(true).unwrap()).unwrap();
         assert_eq!(again, back);
     }
 
@@ -493,37 +453,33 @@ mod tests {
     /// per record is left, and the page held is the page written.
     #[test]
     fn an_encoded_page_keeps_one_buffer() {
-        let d = Dictionary::new();
         let mut p = SlotPage::new(4);
         for k in 1..=500 {
             p.upsert(&id(k), vec![7; 40]);
         }
-        let bytes = p.to_bytes(&d, false).unwrap();
+        let bytes = p.to_bytes(false).unwrap();
         // The body alone: four column lengths and the key width, then per
         // record its key, its end and its 40 bytes.
         let body = 5 * 4 + 500 * (16 + 4 + 40);
         assert_eq!(p.footprint(), size_of::<SlotPage>() + body);
         assert_eq!(
-            p.to_bytes(&d, false).unwrap(),
+            p.to_bytes(false).unwrap(),
             bytes,
             "sealing twice changes nothing"
         );
-        let read = SlotPage::from_bytes(&bytes, &d).unwrap();
+        let read = SlotPage::from_bytes(&bytes).unwrap();
         assert_eq!(read.footprint(), p.footprint());
         assert_eq!(read, p);
     }
 
-    // Repetitive records must actually shrink on disk once the dictionary has
-    // seen their shape — the point of the whole mechanism.
+    // Repetitive records must actually shrink on disk, with no dictionary:
+    // a page holds enough of them for zstd to find their shape.
     #[test]
     fn similar_records_compress_well() {
         let record = |i: u64| {
             format!("{{\"kind\":\"invoice\",\"cents\":{i},\"paid\":false}}")
                 .into_bytes()
         };
-        let mut dict = Dictionary::new();
-        dict.sample(&record(0));
-
         let mut p = SlotPage::new(2);
         let mut raw_total = 0usize;
         for i in 0..200u64 {
@@ -531,7 +487,7 @@ mod tests {
             raw_total += r.len();
             p.upsert(&id(i + 1), r);
         }
-        let stored = p.to_bytes(&dict, true).unwrap();
+        let stored = p.to_bytes(true).unwrap();
         assert!(
             stored.len() < raw_total / 2,
             "expected >2x compression on repetitive records: {} vs {raw_total}",

@@ -16,7 +16,7 @@ impl BlockFile {
     /// cache, or read, decoded by `decode` and then held, decoded (RFC
     /// 0044): a hit costs no read and no decompression. `read` must not
     /// reach the cache itself.
-    /// Pages only: the dictionary image, the headers and compaction's
+    /// Pages only: the headers and compaction's
     /// buffers are read once and want the stored bytes
     /// ([`read_run`](BlockFile::read_run)).
     ///
