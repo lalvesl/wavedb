@@ -2,7 +2,7 @@
 //! its pages, naming a page by a key, sizing a page, and keeping a range
 //! within what one header can restate.
 
-use super::head::{Shape, q_of};
+use super::head::{Shape, SubHeader, q_of};
 use super::index::{Found, PageIndex, Placed, Range, Slot};
 use super::journal::Journal;
 
@@ -60,6 +60,27 @@ impl<M: Copy + Default> PageIndex<M> {
     #[must_use]
     pub const fn range_count(&self) -> usize {
         self.ranges.len()
+    }
+
+    /// Bytes an entry takes: its `u32`, what is kept beside it, and in a
+    /// counted index its count byte.
+    #[must_use]
+    pub fn entry_bytes(&self) -> u64 {
+        (size_of::<u32>() + size_of::<M>() + usize::from(self.counted)) as u64
+    }
+
+    /// The RAM the index holds, estimated from its parts: its sub-headers
+    /// and their prefixes, and its entries ([`entry_bytes`](Self::entry_bytes)
+    /// each). O(ranges).
+    #[must_use]
+    pub fn ram_bytes(&self) -> u64 {
+        self.ranges
+            .iter()
+            .map(|r| {
+                (size_of::<SubHeader>() + r.head.prefix.len()) as u64
+                    + self.entry_bytes() * r.entries.len() as u64
+            })
+            .sum()
     }
 
     /// The blocks a page of `blocks` is given, so its entry names its run

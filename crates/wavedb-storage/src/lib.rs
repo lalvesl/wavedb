@@ -22,6 +22,7 @@ pub mod block_file;
 mod census;
 mod checkpoint;
 mod compact;
+mod consolidate;
 mod convert;
 mod cut;
 mod cycle;
@@ -110,7 +111,10 @@ pub use cycle::ROUND_RECORDS;
 pub use error::{StorageError, StorageResult};
 pub use manifest::{MANIFEST, Manifest};
 pub use page::SlotPage;
-pub use page_store::{DEFAULT_RECORD_CACHE_BYTES, PageStore, StoreOptions};
+pub use page_store::{
+    DEFAULT_INDEX_BUDGET_BYTES, DEFAULT_RECORD_CACHE_BYTES, PageStore,
+    StoreOptions,
+};
 pub use remote::Remote;
 pub use remote_compact::{MOVE_BLOCKS, RemoteCompacted};
 pub use settle::Progress;

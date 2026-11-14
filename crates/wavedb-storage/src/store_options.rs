@@ -77,7 +77,18 @@ pub struct StoreOptions {
     /// creation — the `MANIFEST` records it, and a later open's answer is
     /// ignored, as its data shard count is.
     pub storage_shards: usize,
+    /// Bytes of page index the fragments and spans may add past a clean
+    /// index of the same data (RFC 0081 §6),
+    /// [`DEFAULT_INDEX_BUDGET_BYTES`] by default. Past it, a batch's first
+    /// round consolidates the ranges that would give back the most entries
+    /// (`consolidate`), so the index stays within the budget plus
+    /// the clean index of the data.
+    pub index_budget_bytes: usize,
 }
+
+/// Bytes of index past a clean one [`StoreOptions::index_budget_bytes`]
+/// defaults to: ~800 000 entries of fragments and spans.
+pub const DEFAULT_INDEX_BUDGET_BYTES: usize = 4 << 20;
 
 /// Bytes of decoded records [`StoreOptions::record_cache_bytes`] defaults to.
 ///
@@ -111,6 +122,7 @@ impl Default for StoreOptions {
             file_bytes: crate::alloc::DEFAULT_FILE_BYTES,
             victim_free_percent: 50,
             storage_shards: 0,
+            index_budget_bytes: DEFAULT_INDEX_BUDGET_BYTES,
         }
     }
 }

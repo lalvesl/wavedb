@@ -110,6 +110,8 @@ impl PageStore {
         self.cache.borrow_mut().rotate();
         cycle.open = true;
         cycle.current = std::mem::take(&mut cycle.next);
+        drop(cycle);
+        self.plan_consolidation();
         Ok(true)
     }
 
@@ -129,6 +131,12 @@ impl PageStore {
             return Ok(Progress::Done);
         }
         let through = self.gate.enter().await;
+        // Over the index budget, the batch's first round merges what gives
+        // back the most entries (`crate::consolidate`).
+        if let Some(plan) = self.consolidation_round()? {
+            self.place_plans(vec![plan]).await?;
+            return Ok(Progress::Settled);
+        }
         let owes = self.cache.borrow().owes();
         let ended = if owes {
             let mut round = self.cache.borrow().round(budget);

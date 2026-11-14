@@ -49,7 +49,9 @@
 //! store dropped settles what it holds first; a crash loses the batch not
 //! yet durable.
 
-pub use crate::store_options::{DEFAULT_RECORD_CACHE_BYTES, StoreOptions};
+pub use crate::store_options::{
+    DEFAULT_INDEX_BUDGET_BYTES, DEFAULT_RECORD_CACHE_BYTES, StoreOptions,
+};
 use std::path::Path;
 
 use std::cell::RefCell;
@@ -114,6 +116,9 @@ pub struct PageStore {
         RefCell<std::collections::VecDeque<(usize, Vec<Vec<u8>>)>>,
     /// Blocks cut off the data files since open ([`reclaim`](Self::reclaim)).
     pub(crate) reclaimed: std::cell::Cell<u64>,
+    /// The index budget, and the consolidation it asks for
+    /// ([`crate::consolidate`]).
+    pub(crate) budget: crate::consolidate::Budget,
     /// Runs more than one entry names: a pack's (RFC 0081 §5).
     pub(crate) shares: RefCell<crate::shares::Shares>,
     /// The free share that makes a data file worth emptying (RFC 0071 §7).
@@ -270,6 +275,7 @@ impl PageStore {
             regroup: RefCell::default(),
             reclaimed: std::cell::Cell::default(),
             shares: RefCell::new(shares),
+            budget: crate::consolidate::Budget::new(options.index_budget_bytes),
             victim_free_percent: options.victim_free_percent,
             object: options.remote.map(crate::remote::ObjectState::new),
         }

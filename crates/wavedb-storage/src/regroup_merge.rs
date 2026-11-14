@@ -50,7 +50,7 @@ impl PageStore {
         for (slot, ts) in self.types.iter().enumerate() {
             if let Some(index) = ts.directory().borrow().as_ref() {
                 let runs = small_runs(index, most);
-                queue.extend(runs.into_iter().map(|keys| (slot, keys)));
+                queue.extend(runs.into_iter().map(|run| (slot, run.keys)));
             }
         }
     }
@@ -98,7 +98,7 @@ impl PageStore {
     /// Slot `idx`'s round merging `runs`, each named by its pages' keys —
     /// the runs whose pages are still small neighbours of one collection;
     /// `None` when none is.
-    fn plan_merge(
+    pub(crate) fn plan_merge(
         &self,
         idx: usize,
         runs: &[Vec<Vec<u8>>],
@@ -207,9 +207,16 @@ impl PageStore {
     }
 }
 
+/// A run of neighbouring entries to merge: a key finding each, and the
+/// blocks of the distinct runs they name.
+pub struct SmallRun {
+    pub keys: Vec<Vec<u8>>,
+    pub blocks: u64,
+}
+
 /// Runs of neighbouring pages in one range, two or more, together at most
-/// `most` blocks; each named by its pages' keys.
-fn small_runs(index: &Pages, most: u64) -> Vec<Vec<Vec<u8>>> {
+/// `most` blocks — or held together by a page named either side of a span.
+pub fn small_runs(index: &Pages, most: u64) -> Vec<SmallRun> {
     let pages: Vec<_> = index.pages().collect();
     // Where each run is named last: a page named either side of a span
     // (`crate::partial`) is consolidated — its group runs on to its last
@@ -237,7 +244,8 @@ fn small_runs(index: &Pages, most: u64) -> Vec<Vec<Vec<u8>>> {
         let evicted = page.meta & EVICTED != 0;
         if !beside || evicted || (!held && blocks + more > most) {
             if run.len() >= 2 {
-                out.push(std::mem::take(&mut run));
+                let keys = std::mem::take(&mut run);
+                out.push(SmallRun { keys, blocks });
             }
             run.clear();
             seen.clear();
@@ -258,7 +266,7 @@ fn small_runs(index: &Pages, most: u64) -> Vec<Vec<Vec<u8>>> {
         }
     }
     if run.len() >= 2 {
-        out.push(run);
+        out.push(SmallRun { keys: run, blocks });
     }
     out
 }
