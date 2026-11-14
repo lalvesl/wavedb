@@ -12,7 +12,6 @@
 //! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
 use crate::block::Run;
-use crate::dictionary::DictState;
 use crate::error::StorageResult;
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
@@ -30,8 +29,6 @@ pub struct SlotPlan {
     pub(crate) index: Pages,
     /// The pages to write.
     pub(crate) pages: Vec<PlannedPage>,
-    /// The grown dictionary buffer, when sampling extended it this round.
-    pub(crate) dict: Option<Vec<u8>>,
     /// Runs the plan stops naming, freed once the window is written.
     pub(crate) retired: Vec<Run>,
     /// Runs it names once more: a page rewritten in part (`crate::partial`).
@@ -50,7 +47,6 @@ impl SlotPlan {
             idx,
             index,
             pages: Vec::new(),
-            dict: None,
             retired: Vec::new(),
             named: Vec::new(),
             unpended: 0,
@@ -61,8 +57,7 @@ impl SlotPlan {
 
 impl PageStore {
     /// Plan slot `idx`'s pages for a round's `records` (`None` bytes
-    /// remove): sample the dictionary, then route, rebuild, cut and
-    /// serialise (`crate::shape`).
+    /// remove): route, rebuild, cut and serialise (`crate::shape`).
     ///
     /// The index is cloned rather than held: the settle path is the only
     /// writer of an index and runs one round at a time, so the copy cannot
@@ -71,9 +66,6 @@ impl PageStore {
     ///
     /// # Errors
     /// Page read, corruption or compression faults.
-    // The dictionary guard spans the whole plan by design: every page this
-    // slot serialises must bind the same (possibly grown) buffer state.
-    #[allow(clippy::significant_drop_tightening)]
     pub(crate) fn plan_slot(
         &self,
         idx: usize,
@@ -86,18 +78,13 @@ impl PageStore {
             .clone()
             .unwrap_or_else(|| slot.new_pages());
         records.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut dict = slot.dictionary().borrow_mut();
-        let mut grew = false;
-        for bytes in records.iter().filter_map(|(_, b)| b.as_ref()) {
-            grew |= dict.sample(bytes);
-        }
-        let dict = &*dict;
         let rules = Rules {
             target_blocks: self.target_blocks_per_bucket,
             keep_holes: self.object.is_some(),
             partial: true,
             next: self.next_address(),
         };
+        let compress = slot.compresses();
         let shaped = shape(
             &mut index,
             records,
@@ -105,16 +92,13 @@ impl PageStore {
             slot.struct_hash(),
             // Read, not taken out of the page cache: a round that rewrites a
             // page in part (`crate::partial`) leaves it, and it is read next.
-            |page| {
-                read_page(&self.file, run_of(page), slot.struct_hash(), dict)
-            },
-            |page| image_of(page, dict),
+            |page| read_page(&self.file, run_of(page), slot.struct_hash()),
+            |page| image_of(page, compress),
         )?;
         Ok(SlotPlan {
             idx,
             index,
             pages: shaped.pages,
-            dict: grew.then(|| dict.image()),
             retired: shaped.retired,
             named: shaped.named,
             unpended: shaped.unpended,
@@ -123,14 +107,12 @@ impl PageStore {
     }
 }
 
-/// `page` serialised against `dict`.
+/// `page` serialised, compressed if `compress` says (zstd, the page alone:
+/// RFC 0081 §9).
 ///
 /// # Errors
 /// A compression fault, or a page whose records pass what its body can
 /// index.
-pub fn image_of(
-    page: &mut SlotPage,
-    dict: &DictState,
-) -> StorageResult<Vec<u8>> {
-    page.to_bytes(dict.dictionary(), dict.enabled())
+pub fn image_of(page: &mut SlotPage, compress: bool) -> StorageResult<Vec<u8>> {
+    page.to_bytes(compress)
 }

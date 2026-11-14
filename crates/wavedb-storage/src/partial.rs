@@ -244,7 +244,6 @@ fn entry(index: &Pages, key: &[u8]) -> StorageResult<Slot> {
 #[cfg(test)]
 mod tests {
     use crate::StorageResult;
-    use crate::dictionary::Dictionary;
     use crate::ordered::{Found, Placed, Slot};
     use crate::page::SlotPage;
     use crate::pages::{Pages, disk_pages};
@@ -321,11 +320,9 @@ mod tests {
             .iter()
             .map(|(k, put)| (k.to_vec(), put.then(|| value(k))))
             .collect();
-        let dict = Dictionary::new();
-        let shaped = shape(&mut ix, records, &rules, SH, load, |p| {
-            p.to_bytes(&dict, false)
-        })
-        .unwrap();
+        let shaped =
+            shape(&mut ix, records, &rules, SH, load, |p| p.to_bytes(false))
+                .unwrap();
         (ix, shaped)
     }
 
@@ -468,9 +465,8 @@ mod tests {
         small.upsert(&[0, 1, 0], vec![1; 40]);
         let load = |_| -> StorageResult<SlotPage> { Ok(small.clone()) };
         let records = vec![(vec![0, 2, 0], Some(vec![2; 40]))];
-        let dict = Dictionary::new();
         let shaped = shape(&mut ix, records, &rules(None), SH, load, |p| {
-            p.to_bytes(&dict, false)
+            p.to_bytes(false)
         })
         .unwrap();
         assert_eq!(shaped.retired.len(), 1, "rewritten whole");

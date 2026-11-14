@@ -17,7 +17,6 @@ use wavedb_core::Id;
 
 use crate::block::Run;
 use crate::block_file::BlockFile;
-use crate::dictionary::DictState;
 use crate::error::StorageResult;
 use crate::ordered::key::cmp_padded;
 use crate::ordered::{Found, PageIndex, Placed, Shape, Slot};
@@ -169,10 +168,9 @@ pub fn with_page<R>(
     file: &BlockFile,
     run: Run,
     slot: u64,
-    dict: &DictState,
     read: impl FnOnce(&SlotPage) -> R,
 ) -> StorageResult<R> {
-    file.with_page(run, slot, |image| decode(image, slot, dict), read)
+    file.with_page(run, slot, |image| decode(image, slot), read)
 }
 
 /// The page of slot `slot` at `run`, owned: taken out of the page cache, or
@@ -184,9 +182,8 @@ pub fn take_page(
     file: &BlockFile,
     run: Run,
     slot: u64,
-    dict: &DictState,
 ) -> StorageResult<SlotPage> {
-    file.take_page(run, slot, |image| decode(image, slot, dict))
+    file.take_page(run, slot, |image| decode(image, slot))
 }
 
 /// The page of slot `slot` at `run`, owned — a copy of the held one.
@@ -197,19 +194,14 @@ pub fn read_page(
     file: &BlockFile,
     run: Run,
     slot: u64,
-    dict: &DictState,
 ) -> StorageResult<SlotPage> {
-    with_page(file, run, slot, dict, SlotPage::clone)
+    with_page(file, run, slot, SlotPage::clone)
 }
 
 /// Slot `slot`'s page in the run's bytes `image`: the page, or its section
 /// of a pack (`crate::pack`).
-fn decode(
-    image: &[u8],
-    slot: u64,
-    dict: &DictState,
-) -> StorageResult<SlotPage> {
-    SlotPage::from_bytes(&page_image(image, slot)?, dict.dictionary())
+fn decode(image: &[u8], slot: u64) -> StorageResult<SlotPage> {
+    SlotPage::from_bytes(&page_image(image, slot)?)
 }
 
 #[cfg(test)]
@@ -288,11 +280,9 @@ mod tests {
             })
         };
         let records = vec![(key(2), Some(vec![2]))];
-        let dict = crate::dictionary::Dictionary::new();
-        let shaped = shape(&mut ix, records, &rules, SH, load, |p| {
-            p.to_bytes(&dict, false)
-        })
-        .unwrap();
+        let shaped =
+            shape(&mut ix, records, &rules, SH, load, |p| p.to_bytes(false))
+                .unwrap();
         let written: Vec<Vec<u8>> = shaped
             .pages
             .iter()

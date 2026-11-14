@@ -5,7 +5,7 @@
 //! pieces built below it:
 //!
 //! - one slot **per registered type** — that type's own page index (RFC 0078) over
-//!   the shared [`BlockFile`] and its dictionary. The types are the
+//!   the shared [`BlockFile`]. The types are the
 //!   `#[wavedb]`-generated [`StructStorage`] declarations handed in as an
 //!   explicit registry at [`open`](PageStore::open): a compile-time list,
 //!   routed once at open, no runtime registration. The slots belong to this
@@ -85,8 +85,6 @@ pub struct PageStore {
     pub(crate) position: u32,
     /// One round at a time through the directories (`crate::wait`).
     pub(crate) gate: crate::wait::Gate,
-    /// What no header names yet (RFC 0072 §3).
-    pub(crate) unrecorded: RefCell<crate::disk_chain::Unrecorded>,
     /// Where the batches stand (RFC 0072 §2).
     pub(crate) cycle: RefCell<crate::cycle::Cycle>,
     /// The registered types' state, sorted by `STRUCT_HASH` (deduped) — a
@@ -257,7 +255,6 @@ impl PageStore {
             chain: RefCell::default(),
             position: 0,
             gate: crate::wait::Gate::default(),
-            unrecorded: RefCell::default(),
             cycle: RefCell::default(),
             types,
             target_blocks_per_bucket: DEFAULT_TARGET_BLOCKS_PER_BUCKET,
@@ -1082,10 +1079,10 @@ mod tests {
     }
 
     #[test]
-    fn a_reopen_restores_dictionary_compressed_pages() {
+    fn a_reopen_reads_compressed_pages() {
         let d = tempfile::tempdir().unwrap();
-        // Repetitive bodies → the dictionary warms and pages store Zstd, so
-        // reading them back after restore needs the persisted dictionary.
+        // Repetitive bodies → pages store Zstd, read back after the reopen
+        // from their bytes alone.
         let body = |k: u64| {
             let mut v = vec![b'A'; 1024];
             v.extend_from_slice(&k.to_le_bytes());
@@ -1107,7 +1104,7 @@ mod tests {
                 assert_eq!(
                     s.get_of(SH, nonunique(k)).await.unwrap(),
                     Some(body(k)),
-                    "record {k} must decompress against the restored dict"
+                    "record {k} must decompress after the reopen"
                 );
             }
             // The store keeps working: a second batch over the restored
@@ -1144,8 +1141,7 @@ mod tests {
             .collect()
     }
 
-    /// `noise`, at an arbitrary length — bytes the dictionary cannot collapse
-    /// as long as each call gets a distinct seed.
+    /// `noise`, at an arbitrary length — bytes zstd cannot collapse.
     fn incompressible(len: usize, seed: u64) -> Vec<u8> {
         let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
         (0..len)
@@ -1175,8 +1171,8 @@ mod tests {
         let mut big = Vec::new();
         block_on(async {
             for round in 0..4u64 {
-                // A fresh body each round, so the dictionary cannot learn it
-                // and shrink the page out of the interesting range.
+                // A fresh body each round, so zstd cannot shrink the page
+                // out of the interesting range.
                 big = rec(SH, &incompressible(32 * 1024, round + 7));
                 s.apply(&[Write::Put(nonunique(1), big.clone())])
                     .await
