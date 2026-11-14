@@ -6,8 +6,8 @@
 //! `STRUCT_HASH` and the compression policy. The [`PageStore`] receives the
 //! statics as an explicit registry at open — declared, not discovered,
 //! exactly like the exposure lists — and builds a `TypeSlot` for each: that
-//! type's page directory and dictionary, each in a cell of its own, owned by that
-//! store and nothing else. The type's cached records live in its log, in the
+//! type's page directories, each in a cell of its own, owned by that store and
+//! nothing else. The type's cached records live in its log, in the
 //! store's record cache (`crate::record_cache`, RFC 0068), at the same slot
 //! index.
 //!
@@ -20,19 +20,12 @@
 
 use std::cell::RefCell;
 
-use crate::block::BlockDescriptor;
-use crate::dictionary::DictState;
 use crate::ordered::Journal;
 use crate::pages::{Pages, disk_pages, remote_pages};
 
 /// One type's page index (RFC 0078). `None` until the store settles the
 /// type's first page.
 pub(crate) type StructDirectory = RefCell<Option<Pages>>;
-
-/// One type's compression slot: its zstd policy + dictionary + persisted run.
-/// Per-type by nature — a page holds one type, so it compresses against that
-/// type's own dictionary and nothing else.
-pub(crate) type StructDictionary = RefCell<DictState>;
 
 /// One struct's storage declaration: its `STRUCT_HASH` and page compression.
 ///
@@ -108,16 +101,14 @@ impl StructStorage {
         self.resident
     }
 
-    /// Whether this type's pages compress — fixed by the declaration; only the
-    /// dictionary contents change at runtime.
+    /// Whether this type's pages compress — fixed by the declaration.
     #[must_use]
     pub const fn compress(&self) -> bool {
         self.compress
     }
 }
 
-/// One type's state inside one open store — its directory and compression
-/// dictionary.
+/// One type's state inside one open store — its directories.
 #[derive(Debug)]
 pub(crate) struct TypeSlot {
     struct_hash: u64,
@@ -125,20 +116,15 @@ pub(crate) struct TypeSlot {
     resident: bool,
     /// Its pages' entries counted ([`StructStorage::counted`]).
     counted: bool,
+    /// Its pages compressed ([`StructStorage::compress`]).
+    compress: bool,
     dir: StructDirectory,
     /// The object store's index for this type (RFC 0070 §2): 128 KiB
     /// pages, ordered by the same keys. `None` until the first upload.
     remote: StructDirectory,
-    /// Where the object store's copy of the dictionary is — the remote
-    /// descriptor a header names.
-    remote_dict: std::cell::Cell<BlockDescriptor>,
-    /// Bytes of the dictionary the object store holds a copy of — an upload
-    /// carries the dictionary again once it has grown past them.
-    uploaded_dict: std::cell::Cell<usize>,
     /// What of the object store's index the disk's headers have not named
     /// yet: its own journal is the object store's headers' (RFC 0078 §6).
     remote_journal: RefCell<Journal>,
-    dict: StructDictionary,
 }
 
 impl TypeSlot {
@@ -148,12 +134,10 @@ impl TypeSlot {
             struct_hash: declared.struct_hash,
             resident: declared.resident,
             counted: declared.counted,
+            compress: declared.compress,
             dir: RefCell::new(None),
             remote: RefCell::new(None),
-            remote_dict: std::cell::Cell::new(BlockDescriptor::EMPTY),
-            uploaded_dict: std::cell::Cell::new(0),
             remote_journal: RefCell::new(Journal::new()),
-            dict: RefCell::new(DictState::new(declared.compress)),
         }
     }
 
@@ -187,27 +171,15 @@ impl TypeSlot {
         &self.remote
     }
 
-    /// The remote descriptor of the dictionary's uploaded copy.
-    pub(crate) const fn remote_dict(
-        &self,
-    ) -> &std::cell::Cell<BlockDescriptor> {
-        &self.remote_dict
-    }
-
-    /// Bytes of the dictionary already uploaded.
-    pub(crate) const fn uploaded_dict(&self) -> &std::cell::Cell<usize> {
-        &self.uploaded_dict
-    }
-
     /// What of the object store's index the disk's headers still owe.
     pub(crate) const fn remote_journal(&self) -> &RefCell<Journal> {
         &self.remote_journal
     }
 
-    /// This type's compression slot — its own cell: the zstd policy, the raw-content dictionary, and the block run
-    /// the dictionary is persisted in.
-    pub(crate) const fn dictionary(&self) -> &StructDictionary {
-        &self.dict
+    /// Whether this type's pages compress (zstd, each page alone: RFC 0081
+    /// §9).
+    pub(crate) const fn compresses(&self) -> bool {
+        self.compress
     }
 }
 
@@ -253,7 +225,7 @@ mod tests {
     fn two_slots_of_one_type_are_independent() {
         let (a, b) = (TypeSlot::new(&DECLARED), TypeSlot::new(&DECLARED));
         assert_eq!(a.struct_hash(), 0xABCD);
-        assert!(a.dictionary().borrow_mut().enabled());
+        assert!(a.compresses());
 
         *a.directory().borrow_mut() = Some(disk_pages(false));
         assert!(a.directory().borrow_mut().is_some());

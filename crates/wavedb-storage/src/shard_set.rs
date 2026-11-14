@@ -2,7 +2,7 @@
 //!
 //! A `MANIFEST` and `storage/00` … `storage/xx`, one directory of data
 //! files per storage shard, which its data shards write through; each data
-//! shard a [`PageStore`] — its headers, directories and dictionaries.
+//! shard a [`PageStore`] — its headers and page indexes.
 //!
 //! The shard counts are fixed when the database is created and read back
 //! from the `MANIFEST` on every open ([`crate::manifest`]), because they are

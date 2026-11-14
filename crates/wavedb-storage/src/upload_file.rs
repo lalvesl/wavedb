@@ -27,11 +27,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::block::{BLOCK_SIZE, BlockDescriptor, Run};
+use crate::block::{BLOCK_SIZE, Run};
 use crate::pages::Pages;
 use crate::remote::FILE_BLOCKS;
 use crate::roots::ROOTS_BLOCKS;
-use crate::shape::blocks_for;
 
 /// Where a file's section — its header — starts, past the roots block.
 pub const SECTION: u64 = ROOTS_BLOCKS;
@@ -45,15 +44,14 @@ pub const FIRST_PAGE: u64 = ROOTS_BLOCKS + 1;
 pub struct SlotImages {
     /// Encoded pages, each with the blocks its entry names.
     pub(crate) pages: Vec<(Vec<u8>, u64)>,
-    /// The dictionary, when the object store's copy is behind.
-    pub(crate) dict: Option<Vec<u8>>,
 }
 
-/// Where an image landed.
+/// Where a page landed: the work item's, its page, its run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Placed {
-    Page { slot: usize, page: usize, run: Run },
-    Dict { slot: usize, desc: BlockDescriptor },
+pub struct Placed {
+    pub(crate) slot: usize,
+    pub(crate) page: usize,
+    pub(crate) run: Run,
 }
 
 /// One file: its pages laid out, its roots block and header written by
@@ -83,17 +81,16 @@ pub struct Packed {
 }
 
 /// One type as an upload's headers name it: its index in the object store,
-/// as the upload leaves it, and its dictionary there.
+/// as the upload leaves it.
 pub struct Named<'a> {
     pub(crate) struct_hash: u64,
     pub(crate) index: Option<&'a mut Pages>,
-    pub(crate) dict: Option<u64>,
-    /// The dictionary moved in this upload: a header must name it.
-    pub(crate) dict_moved: bool,
 }
 
 /// Lay `slots` out in files from remote block `end` on, the `i`-th file's
-/// header `rooms[i]` blocks long (one past the last given).
+/// header `rooms[i]` blocks long (one past the last given). One file at
+/// least, pages or none: an upload of removals alone still has a header
+/// to write, naming the entries it took out.
 pub fn layout(end: u64, slots: &[SlotImages], rooms: &[u64]) -> Packed {
     let mut packed = Packed {
         files: Vec::new(),
@@ -102,17 +99,13 @@ pub fn layout(end: u64, slots: &[SlotImages], rooms: &[u64]) -> Packed {
         cut: true,
     };
     for (slot, images) in slots.iter().enumerate() {
-        if let Some(dict) = &images.dict {
-            let run = place(&mut packed, dict, blocks_for(dict.len()), rooms);
-            packed.placed.push(Placed::Dict {
-                slot,
-                desc: BlockDescriptor::from_run(run),
-            });
-        }
         for (page, (bytes, blocks)) in images.pages.iter().enumerate() {
             let run = place(&mut packed, bytes, *blocks, rooms);
-            packed.placed.push(Placed::Page { slot, page, run });
+            packed.placed.push(Placed { slot, page, run });
         }
+    }
+    if packed.files.is_empty() {
+        open_file(&mut packed, rooms);
     }
     packed
 }
@@ -125,17 +118,7 @@ fn place(packed: &mut Packed, bytes: &[u8], blocks: u64, rooms: &[u64]) -> Run {
         .last()
         .is_some_and(|file| packed.end < (file.number + 1) * FILE_BLOCKS);
     if !fits {
-        let number = packed.end.div_ceil(FILE_BLOCKS);
-        let header = rooms.get(packed.files.len()).copied().unwrap_or(1);
-        let first = SECTION + header;
-        packed.end = number * FILE_BLOCKS + first;
-        packed.files.push(File {
-            number,
-            base: number * FILE_BLOCKS + SECTION,
-            header,
-            roots: true,
-            bytes: vec![0; first as usize * BLOCK_SIZE],
-        });
+        open_file(packed, rooms);
     }
     let run = Run::new(packed.end, blocks);
     packed.end += blocks;
@@ -145,6 +128,22 @@ fn place(packed: &mut Packed, bytes: &[u8], blocks: u64, rooms: &[u64]) -> Run {
         file.bytes.resize(at + blocks as usize * BLOCK_SIZE, 0);
     }
     run
+}
+
+/// Open the next file at the cursor: its roots block and header, the
+/// header as long as `rooms` asks for it.
+fn open_file(packed: &mut Packed, rooms: &[u64]) {
+    let number = packed.end.div_ceil(FILE_BLOCKS);
+    let header = rooms.get(packed.files.len()).copied().unwrap_or(1);
+    let first = SECTION + header;
+    packed.end = number * FILE_BLOCKS + first;
+    packed.files.push(File {
+        number,
+        base: number * FILE_BLOCKS + SECTION,
+        header,
+        roots: true,
+        bytes: vec![0; first as usize * BLOCK_SIZE],
+    });
 }
 
 /// Move the files laid out from block 0 to the sections a storage shard
@@ -166,18 +165,13 @@ pub fn rebase(packed: &mut Packed, bases: &[u64]) {
             .map_or(start, |&(from, to)| start - from + to)
     };
     for placed in &mut packed.placed {
-        match placed {
-            Placed::Page { run, .. } => run.start = moved(run.start),
-            Placed::Dict { desc, .. } => {
-                *desc = desc.moved_to(moved(desc.start()));
-            }
-        }
+        placed.run.start = moved(placed.run.start);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FIRST_PAGE, Placed, SECTION, SlotImages, layout};
+    use super::{FIRST_PAGE, SECTION, SlotImages, layout};
     use crate::block::{BLOCK_SIZE, Run};
     use crate::remote::FILE_BLOCKS;
 
@@ -187,7 +181,6 @@ mod tests {
                 .iter()
                 .map(|&blocks| (vec![7u8; 10], blocks))
                 .collect(),
-            dict: None,
         }
     }
 
@@ -197,14 +190,7 @@ mod tests {
         let packed = layout(0, &[images(&[2, 1])], &[]);
         assert_eq!(packed.files.len(), 1);
         assert_eq!(packed.files[0].base, SECTION);
-        let runs: Vec<Run> = packed
-            .placed
-            .iter()
-            .filter_map(|p| match p {
-                Placed::Page { run, .. } => Some(*run),
-                Placed::Dict { .. } => None,
-            })
-            .collect();
+        let runs: Vec<Run> = packed.placed.iter().map(|p| p.run).collect();
         assert_eq!(
             runs,
             [Run::new(FIRST_PAGE, 2), Run::new(FIRST_PAGE + 2, 1)]
@@ -228,5 +214,16 @@ mod tests {
     fn an_upload_starts_on_the_next_file_boundary() {
         let packed = layout(FILE_BLOCKS + 5, &[images(&[1])], &[]);
         assert_eq!(packed.files[0].number, 2);
+    }
+
+    /// An upload of removals alone places no page, and still opens a file
+    /// for the header that names them.
+    #[test]
+    fn an_upload_with_no_page_still_opens_a_file() {
+        let packed = layout(FILE_BLOCKS + 5, &[images(&[])], &[]);
+        assert_eq!(packed.files.len(), 1);
+        assert_eq!(packed.files[0].number, 2);
+        assert_eq!(packed.placed.len(), 0);
+        assert_eq!(packed.end, 2 * FILE_BLOCKS + FIRST_PAGE);
     }
 }
