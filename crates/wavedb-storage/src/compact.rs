@@ -157,23 +157,26 @@ impl PageStore {
                         self.compaction.set(Phase::Moving { since });
                         continue;
                     }
-                    if self.own().is_some() {
-                        self.roll_if_worth_emptying();
+                    let emptying = if self.own().is_some() {
+                        self.roll_if_worth_emptying()
                     } else {
                         // The storage shard says which files to empty.
                         let percent = self.victim_free_percent;
                         let victims = self.shared_victims(percent).await?;
-                        if victims.is_empty() {
-                            // No file to empty, so no header to restate.
-                            let Some(phase) = self.reorganizing(since) else {
-                                return Ok(Compacting::Done {
-                                    reclaimed_blocks: 0,
-                                });
-                            };
-                            self.compaction.set(phase);
-                            continue;
-                        }
+                        let any = !victims.is_empty();
                         *self.victims.borrow_mut() = victims;
+                        any
+                    };
+                    if !emptying {
+                        // No file to empty, so no header to restate: the
+                        // merges and the regroup alone.
+                        let Some(phase) = self.reorganizing(since) else {
+                            return Ok(Compacting::Done {
+                                reclaimed_blocks: 0,
+                            });
+                        };
+                        self.compaction.set(phase);
+                        continue;
                     }
                     self.record_all();
                     self.compaction.set(Phase::Restating { since });

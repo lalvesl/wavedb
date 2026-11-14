@@ -358,8 +358,16 @@ mutation → the type's record log (RAM) → (client confirmed)
    cut and the emptied files deleted
    ([RFC 0071](../../rfcs/0071-data-files-by-address.md), superseding
    [RFC 0069](../../rfcs/0069-compaction-into-the-holes-DEPRECATED.md)'s holes).
+   The files go oldest and emptiest first — writing only appends, so an
+   address is an age, weighed as the log-structured cleaner weighs a
+   segment — and what they hold is compressed again at the cleanup's zstd
+   level (19; the write path's is 3). With no file worth emptying, nothing
+   is restated: the merges and the regroup alone run.
    Before the moves it **merges** neighbouring pages that removals left
-   small (of one collection, together at most half a page), and before
+   small (of one collection, together at most half a page — a whole one
+   where the range is cold, every page behind the newest quarter of the
+   files, so no write is about to cut it again), with the holes among
+   them (RFC 0081 §7–§8), and before
    the sealing it **regroups**: a page rewritten far from its range's
    base gets a range of its own, and runs of neighbouring ranges of a few
    pages each have their pages moved the same way, side by side in key
@@ -368,7 +376,8 @@ mutation → the type's record log (RAM) → (client confirmed)
    The object store's compaction regroups its own index the same way, its
    uploads carrying the scattered runs' pages forward side by side.
    It is stepped, a bounded pass at a time; the node starts one on a daily
-   UTC time, a disk ceiling, or a free-space share.
+   UTC time, a disk ceiling, a free-space share, or once a store written to
+   has been quiet for 30 s (`Compaction::after_quiet`).
    The same merge runs **inline** past the index budget
    (`StoreOptions::index_budget_bytes`, 4 MiB by default; RFC 0081 §6): the
    entries fragments and spans add past a clean index are RAM per write,

@@ -33,10 +33,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
 use crate::error::StorageResult;
+use crate::merge_runs::small_runs;
 use crate::page_store::PageStore;
 use crate::pages::Pages;
 use crate::plan::SlotPlan;
-use crate::regroup_merge::small_runs;
 
 /// Runs one consolidation round takes at most — as a compaction's merge.
 const ROUND_RUNS: usize = 64;
@@ -102,7 +102,7 @@ impl PageStore {
     /// Queue every type's runs to merge, the most entries given back first;
     /// the bytes they would give back.
     fn walk_for_merges(&self) -> u64 {
-        let target = self.target_blocks_per_bucket;
+        let (target, cold) = (self.target_blocks_per_bucket, self.cold_line());
         let mut found = Vec::new();
         for (slot, ts) in self.types.iter().enumerate() {
             let index = ts.directory().borrow();
@@ -110,7 +110,7 @@ impl PageStore {
                 continue;
             };
             let entry = index.entry_bytes();
-            for run in small_runs(index, target / 2) {
+            for run in small_runs(index, target, cold) {
                 let after = run.blocks.div_ceil(target.max(1)).max(1);
                 let back = (run.keys.len() as u64).saturating_sub(after);
                 if back > 0 {
@@ -157,7 +157,9 @@ impl PageStore {
                 *queue = rest;
                 (slot, runs)
             };
-            if let Some(plan) = self.plan_merge(batch.0, &batch.1)? {
+            // Inline, in a batch a write may wait on: the write path's
+            // compression.
+            if let Some(plan) = self.plan_merge(batch.0, &batch.1, false)? {
                 return Ok(Some(plan));
             }
         }

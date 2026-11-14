@@ -11,7 +11,7 @@ use crate::block::Run;
 use crate::error::{StorageError, StorageResult};
 use crate::ordered::key::cmp_padded;
 use crate::page_store::PageStore;
-use crate::pages::{EVICTED, run_of};
+use crate::pages::{EVICTED, run_of, take_page};
 use crate::plan::{PlannedPage, SlotPlan, blocks_for};
 use crate::shape::weight;
 
@@ -125,8 +125,11 @@ impl PageStore {
     /// The data file to empty next: of those at least
     /// [`StoreOptions::victim_free_percent`](crate::StoreOptions) free or held
     /// back, still holding a page, and holding no header a
-    /// reconstruction may read — a header cannot move — the one with the
-    /// fewest live blocks, the oldest on a tie.
+    /// reconstruction may read — a header cannot move — the one worth most
+    /// by the log-structured cleaner's measure ([`worth`]): free space, and
+    /// age, which an address is, since writing only appends (RFC 0081 §7).
+    /// An old file's live pages are cold — moved once, they stay put — and
+    /// a young one may still empty by itself.
     ///
     /// Through a storage thread, the evacuation's files instead (RFC 0073
     /// §7): the next one this data shard still holds a run in.
@@ -147,28 +150,26 @@ impl PageStore {
                         && !self.movable_in(v).is_empty()
                 });
         }
+        let newest = self.own()?.borrow().files().last().map_or(0, |f| f.end);
         self.candidates(true)
             .into_iter()
-            .min_by_key(|v| (v.live, v.start))
+            .max_by_key(|v| (worth(v, newest), std::cmp::Reverse(v.start)))
     }
 
     /// Close the active file if it is worth emptying, before a compaction
     /// restates every address: the restatement's headers then land in a new
     /// file, and this one can be emptied too — or a store smaller than one
-    /// file would never shrink.
-    pub(crate) fn roll_if_worth_emptying(&self) {
+    /// file would never shrink. Whether any file is worth emptying.
+    pub(crate) fn roll_if_worth_emptying(&self) -> bool {
         let Some(alloc) = self.own() else {
-            return;
+            return false;
         };
         let active = alloc.borrow().active();
-        if active.is_some()
-            && self
-                .candidates(false)
-                .iter()
-                .any(|v| Some(v.start) == active)
-        {
+        let worth = self.candidates(false);
+        if active.is_some() && worth.iter().any(|v| Some(v.start) == active) {
             alloc.borrow_mut().roll();
         }
+        !worth.is_empty()
     }
 
     /// The files worth emptying: mostly holes, and holding a run to move,
@@ -243,9 +244,16 @@ impl PageStore {
         })
     }
 
-    /// The bytes a move writes: a page as stored, trimmed to its own length
+    /// The bytes a move writes: a page compressed again at the cleanup's
+    /// level (RFC 0081 §9) — its records as stored, none clipped — or, for a
+    /// type that does not compress, as stored, trimmed to its own length
     /// prefix.
     pub(crate) fn image_of(&self, m: &Movable) -> StorageResult<Vec<u8>> {
+        let slot = &self.types[m.slot];
+        if slot.compresses() {
+            let mut page = take_page(&self.file, m.run, slot.struct_hash())?;
+            return page.encode(slot.compression().thorough());
+        }
         let run = self.file.read_run(m.run)?;
         // A pack's section moves as a page of its own: every slot naming
         // the pack carries its own out, and the pack goes with the last.
@@ -259,5 +267,40 @@ impl PageStore {
             .ok_or(StorageError::Corrupt("a page's length prefix"))?;
         buf.truncate(len);
         Ok(buf)
+    }
+}
+
+/// What emptying `v` is worth beside what it costs, as the log-structured
+/// filesystem's cleaner weighs a segment: `(1 − u) · age / (1 + u)`, `u`
+/// the share of its blocks still live and its age the blocks written since
+/// it ended, `newest` the end of the newest file. Scaled to integers.
+fn worth(v: &Victim, newest: u64) -> u128 {
+    let size = u128::from(v.end - v.start);
+    let live = u128::from(v.live);
+    let age = u128::from(newest.saturating_sub(v.end)) + 1;
+    (size - live.min(size)) * age * 1_000 / (size + live).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Victim, worth};
+
+    const fn file(start: u64, live: u64) -> Victim {
+        Victim {
+            start,
+            end: start + 100,
+            live,
+        }
+    }
+
+    /// Emptier is worth more at one age, and older at one emptiness — so an
+    /// old file a little fuller can go before a young one.
+    #[test]
+    fn free_space_and_age_both_count() {
+        let newest = 1_000;
+        assert!(worth(&file(0, 20), newest) > worth(&file(0, 40), newest));
+        assert!(worth(&file(0, 40), newest) > worth(&file(800, 40), newest));
+        assert!(worth(&file(0, 45), newest) > worth(&file(800, 30), newest));
+        assert_eq!(worth(&file(0, 100), newest), 0, "nothing to give back");
     }
 }
