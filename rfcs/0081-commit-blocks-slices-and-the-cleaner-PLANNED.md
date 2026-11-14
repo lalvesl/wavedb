@@ -552,7 +552,23 @@ a torn last block.
    stays, and is read next), and a run an entry stops naming while others
    still do loses only that slot's image from the cache — a durable micro
    row's cold reads had 170 page misses of 2 000, now none.
-7. **The index budget and inline consolidation** (§6).
+7. **The index budget and inline consolidation** (§6). **Landed**
+   (`consolidate.rs`, `StoreOptions::index_budget_bytes`, 4 MiB by
+   default). With spans and fragments as entries, what the budget counts
+   is the index's RAM past a clean index of the same data: the entries a
+   merge would give back — runs of small neighbouring pages, and a page a
+   span left named either side with the spans over it (the compaction's
+   `small_runs`) — at `PageIndex::entry_bytes` each (`ram_bytes` is the
+   whole index's, the census's too). Finding them walks every entry, so a
+   batch does not: a walk notes the clean part (what the index held, less
+   what it found) and the next is due only once the index passes that by
+   the budget. Past it, a batch's first round is a merge round — the
+   compaction's `plan_merge`, up to 64 runs of the slot that gives back
+   most, each checked again — and its records then settle onto the merged
+   pages. One such round a batch: the whole-page rewrites of before the
+   spans, paid only while over budget. A crash after it reopens from the
+   batch before (`tests/index_budget.rs`). Holes are not counted yet: a
+   merge does not take them (still open, with the cleaner).
 8. **The cleaner's phases and triggers** (§7, §8).
 9. **Compression** (§9), as phase 0 decides. **Landed:** no dictionaries
    anywhere — `dictionary.rs`, each type's dictionary state on disk and in
@@ -601,8 +617,8 @@ a torn last block.
 
 1. The commit block's cap, and the size past which a slot's data goes to
    pages of its own.
-2. The index budget's default, and how it is shared among a node's data
-   shards.
+2. The index budget's default (4 MiB a store for now, unmeasured), and how it
+   is shared among a node's data shards.
 3. How many fragments a range may hold before a round consolidates it, even
    under the budget, so scans of hot ranges stay short.
 4. `COMPRESS_MIN`, and whether a dictionary survives on cleaner pages
