@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::block::{BLOCK_SIZE, BlockDescriptor};
+use crate::block::BLOCK_SIZE;
 use crate::error::StorageResult;
 use crate::header::{Chain, NO_FILE};
 use crate::page_store::PageStore;
@@ -24,17 +24,17 @@ use crate::upload_plan::SlotUpload;
 const SIZE_TRIES: usize = 3;
 
 /// An upload's files, laid out and placed: the files, the chain before
-/// their headers, each work item's placed dictionary, and whether the first
+/// their headers, and whether the first
 /// header restates.
-pub type Packing = (Packed, Chain, Vec<Option<BlockDescriptor>>, bool);
+pub type Packing = (Packed, Chain, bool);
 
 impl PageStore {
     /// Lay the upload's `slots` out in files, reserve them through a
     /// storage shard, and point `work`'s remote indexes at them, the
     /// headers sized to what they will name (RFC 0079 §3): laid out with
     /// the rooms the last try asked for, until they fit. The files, the
-    /// chain as they leave it before their headers, each work item's placed
-    /// dictionary, and whether the first header restates.
+    /// chain as they leave it before their headers, and whether the first
+    /// header restates.
     ///
     /// # Errors
     /// A page whose entry the work lost; a remote thread gone.
@@ -75,18 +75,17 @@ impl PageStore {
                 chain.start = chain.start.max(reserved.start);
                 chain.end = reserved.end;
             }
-            let placed_dicts = install_remote(work, &packed)?;
-            let (want, restating) =
-                self.with_named(work, &placed_dicts, |named| {
-                    let restate = restating(&chain, named, body);
-                    let bytes = need(named) + restate.unwrap_or(0);
-                    (rooms_for(bytes, packed.files.len()), restate.is_some())
-                });
+            install_remote(work, &packed)?;
+            let (want, restating) = self.with_named(work, |named| {
+                let restate = restating(&chain, named, body);
+                let bytes = need(named) + restate.unwrap_or(0);
+                (rooms_for(bytes, packed.files.len()), restate.is_some())
+            });
             let fits =
                 packed.files.iter().zip(&want).all(|(f, &w)| w <= f.header);
             tries += 1;
             if fits || tries == SIZE_TRIES {
-                return Ok((packed, chain, placed_dicts, restating));
+                return Ok((packed, chain, restating));
             }
             if let Some(link) = link {
                 link.abandon(packed.files.iter().map(|f| f.base).collect());
@@ -107,7 +106,6 @@ impl PageStore {
     pub(crate) fn with_named<R>(
         &self,
         work: &mut [SlotUpload],
-        placed_dicts: &[Option<BlockDescriptor>],
         f: impl FnOnce(&mut [Named<'_>]) -> R,
     ) -> R {
         let mut guards: Vec<_> = self
@@ -115,31 +113,19 @@ impl PageStore {
             .iter()
             .map(|slot| slot.remote_directory().borrow_mut())
             .collect();
-        let mut by_idx: BTreeMap<
-            usize,
-            (&mut SlotUpload, Option<BlockDescriptor>),
-        > = work
-            .iter_mut()
-            .zip(placed_dicts)
-            .map(|(w, &d)| (w.idx, (w, d)))
-            .collect();
+        let mut by_idx: BTreeMap<usize, &mut SlotUpload> =
+            work.iter_mut().map(|w| (w.idx, w)).collect();
         let mut named = Vec::with_capacity(self.types.len());
         for ((idx, slot), guard) in
             self.types.iter().enumerate().zip(&mut guards)
         {
-            let (index, desc, moved) = match by_idx.remove(&idx) {
-                Some((w, placed)) => (
-                    Some(&mut w.remote),
-                    placed.unwrap_or_else(|| slot.remote_dict().get()),
-                    placed.is_some(),
-                ),
-                None => (guard.as_mut(), slot.remote_dict().get(), false),
+            let index = match by_idx.remove(&idx) {
+                Some(w) => Some(&mut w.remote),
+                None => guard.as_mut(),
             };
             named.push(Named {
                 struct_hash: slot.struct_hash(),
                 index,
-                dict: desc.is_allocated().then_some(desc.raw()),
-                dict_moved: moved,
             });
         }
         f(&mut named)
@@ -202,7 +188,6 @@ mod tests {
             remote,
             fetched: BTreeMap::new(),
             moved: Vec::new(),
-            move_dict: false,
             shaped: Shaped {
                 pages: planned,
                 ..Shaped::default()
@@ -211,16 +196,13 @@ mod tests {
         }];
         let slots = [SlotImages {
             pages: vec![(vec![7; 10], blocks); n as usize],
-            dict: None,
         }];
         let first = layout(0, &slots, &[]);
         install_remote(&mut work, &first).unwrap();
         let second = layout(0, &slots, &[5]);
         install_remote(&mut work, &second).unwrap();
         for placed in &second.placed {
-            let Landed::Page { page, run, .. } = *placed else {
-                continue;
-            };
+            let Landed { page, run, .. } = *placed;
             let Found::Page { page: entry, .. } =
                 work[0].remote.find(&key(page as u64))
             else {

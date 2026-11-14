@@ -2,7 +2,7 @@
 //! split from [`crate::upload_file`], which lays the files out.
 //!
 //! - **Sized to what they name.** A file's header takes whole blocks: what
-//!   the object store's indexes journaled and its dictionaries moved, as the
+//!   the object store's indexes journaled, as the
 //!   headers will drain it ([`need`]), spread over the upload's files
 //!   ([`rooms`]), each capped at [`MAX_HEADER_BLOCKS`]. The rest of a
 //!   header's last block is spare room, restated into for free.
@@ -42,10 +42,7 @@ pub fn need(named: &[Named<'_>]) -> usize {
                 .as_deref()
                 .filter(|i| i.has_unrecorded())
                 .map(|i| i.pending_len_from(i.journal()));
-            match journaled {
-                None if !t.dict_moved => 0,
-                journaled => ENTRY_BYTES + journaled.unwrap_or(0),
-            }
+            journaled.map_or(0, |bytes| ENTRY_BYTES + bytes)
         })
         .sum()
 }
@@ -119,17 +116,15 @@ pub fn finish(
         for t in named.iter_mut() {
             name(t, chain, &mut header.types, &mut left);
         }
-        all = named.iter().all(|t| {
-            !t.dict_moved
-                && t.index.as_ref().is_none_or(|i| !i.has_unrecorded())
-        });
+        all = named
+            .iter()
+            .all(|t| t.index.as_ref().is_none_or(|i| !i.has_unrecorded()));
         header.end_of_batch = packed.cut && all && i + 1 == files;
         let views: Vec<TypeView<'_>> = named
             .iter()
             .map(|t| TypeView {
                 struct_hash: t.struct_hash,
                 index: t.index.as_deref(),
-                dict: t.dict,
             })
             .collect();
         let spare = room.saturating_sub(header.encoded_len());
@@ -199,7 +194,7 @@ fn name(
     room: &mut usize,
 ) {
     let journaled = t.index.as_ref().is_some_and(|i| i.has_unrecorded());
-    if (!journaled && !t.dict_moved) || *room < ENTRY_BYTES {
+    if !journaled || *room < ENTRY_BYTES {
         return;
     }
     *room -= ENTRY_BYTES;
@@ -208,12 +203,10 @@ fn name(
         *room -= used;
         (records, index.range_count() as u32)
     });
-    t.dict_moved = false;
     entries.push(TypeEntry {
         struct_hash: t.struct_hash,
         ranges,
         last: chain.last(t.struct_hash),
-        dict: t.dict,
         changed,
     });
 }
