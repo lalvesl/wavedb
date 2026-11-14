@@ -213,7 +213,9 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   round that changes a page of more than one block in one span — appends
   past it, an update or a removal in it — writes the span alone under an
   entry of its own, the page named either side (RFC 0081 §2–§3, `partial`;
-  a run named twice, or a pack's, is counted in RAM, `shares`) — a page is
+  a run named twice, or a pack's, is counted in RAM, `shares`; past
+  `StoreOptions::index_budget_bytes` of entries a clean index would not
+  hold, a batch's first round merges them, `consolidate`, §6) — a page is
   read through its entry, which may cover less than it holds; a round's
   small pages share one run, a section per slot (`pack`); a lane
   scan merges the pages with the record cache's ordered keys, and passes a

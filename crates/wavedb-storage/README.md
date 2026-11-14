@@ -369,6 +369,12 @@ mutation → the type's record log (RAM) → (client confirmed)
    uploads carrying the scattered runs' pages forward side by side.
    It is stepped, a bounded pass at a time; the node starts one on a daily
    UTC time, a disk ceiling, or a free-space share.
+   The same merge runs **inline** past the index budget
+   (`StoreOptions::index_budget_bytes`, 4 MiB by default; RFC 0081 §6): the
+   entries fragments and spans add past a clean index are RAM per write,
+   so once they pass the budget a batch's first round merges the runs that
+   give back the most of them, and a store written without pause keeps its
+   index within the budget plus the clean index of its data.
 
 7. **The object store** ([RFC 0070](../../rfcs/0070-object-storage-backend.md),
    phases 3–6). A database created with `StoreOptions::remote` keeps its pages

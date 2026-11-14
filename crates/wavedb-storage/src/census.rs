@@ -18,7 +18,6 @@ use std::collections::BTreeMap;
 
 use crate::block::BLOCK_SIZE;
 use crate::error::StorageResult;
-use crate::ordered::SubHeader;
 use crate::page_store::PageStore;
 use crate::pages::{EVICTED, clip, run_of, with_page};
 
@@ -45,7 +44,8 @@ pub struct SlotCensus {
     /// Their keys' and values' bytes, as held decoded.
     pub record_bytes: u64,
     /// The index's RAM, estimated: its sub-headers and their prefixes, and
-    /// a `u32`, a flag byte and (counted) a count byte per entry.
+    /// a `u32`, a flag byte and (counted) a count byte per entry
+    /// (`PageIndex::ram_bytes`).
     pub index_bytes: u64,
 }
 
@@ -79,12 +79,7 @@ impl PageStore {
                 ranges: index.range_count() as u64,
                 ..SlotCensus::default()
             };
-            let per_entry = 5 + u64::from(index.is_counted());
-            c.index_bytes = index
-                .sub_headers()
-                .map(|h| (size_of::<SubHeader>() + h.prefix.len()) as u64)
-                .sum::<u64>()
-                + per_entry * index.entries() as u64;
+            c.index_bytes = index.ram_bytes();
             let mut names: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
             for (at, page) in index.entries_all() {
                 let Some(page) = page else {
