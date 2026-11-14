@@ -64,11 +64,9 @@ impl PageStore {
             return Ok(Settled::Evicted { idx, page });
         }
         self.touch(idx, run.start);
-        let dict = slot.dictionary().borrow();
-        let bytes =
-            with_page(&self.file, run, slot.struct_hash(), &dict, |p| {
-                p.get(key).map(<[u8]>::to_vec)
-            })?;
+        let bytes = with_page(&self.file, run, slot.struct_hash(), |p| {
+            p.get(key).map(<[u8]>::to_vec)
+        })?;
         Ok(Settled::Found(bytes))
     }
 
@@ -212,8 +210,7 @@ impl PageStore {
     /// covering it, filtered to it. `None` when no uploaded page holds it.
     ///
     /// Nothing is borrowed across the request: the descriptor is copied out
-    /// of the remote directory first, and the dictionary is borrowed only to
-    /// decode the bytes that came back (§14).
+    /// of the remote directory first (§14).
     ///
     /// # Errors
     /// An object-store request failing, the object or range missing, or a
@@ -280,7 +277,7 @@ impl PageStore {
             Err(read) => read,
         };
         let image = self.fetch_image(run).await?;
-        let page = self.decode_remote(idx, &image)?;
+        let page = SlotPage::from_bytes(&image)?;
         let done = read(&page);
         cache.insert(Lane::Remote, run, hash, page);
         Ok(done)

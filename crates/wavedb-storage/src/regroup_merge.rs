@@ -98,7 +98,6 @@ impl PageStore {
     /// Slot `idx`'s round merging `runs`, each named by its pages' keys —
     /// the runs whose pages are still small neighbours of one collection;
     /// `None` when none is.
-    #[allow(clippy::significant_drop_tightening)] // the dictionary binds the round
     fn plan_merge(
         &self,
         idx: usize,
@@ -108,12 +107,11 @@ impl PageStore {
         let Some(mut index) = slot.directory().borrow().clone() else {
             return Ok(None);
         };
-        let dict = slot.dictionary().borrow();
         let (mut retired, mut unpended) = (Vec::new(), 0);
         let mut records: Records = Vec::new();
         for keys in runs {
             let Some(pages) =
-                self.still_small(&index, keys, slot.struct_hash(), &dict)?
+                self.still_small(&index, keys, slot.struct_hash())?
             else {
                 continue;
             };
@@ -157,17 +155,14 @@ impl PageStore {
             records,
             &rules,
             slot.struct_hash(),
-            |page| {
-                take_page(&self.file, run_of(page), slot.struct_hash(), &dict)
-            },
-            |page| image_of(page, &dict),
+            |page| take_page(&self.file, run_of(page), slot.struct_hash()),
+            |page| image_of(page, slot.compresses()),
         )?;
         retired.extend(shaped.retired);
         Ok(Some(SlotPlan {
             idx,
             index,
             pages: shaped.pages,
-            dict: None,
             retired,
             named: shaped.named,
             unpended: unpended + shaped.unpended,
@@ -182,7 +177,6 @@ impl PageStore {
         index: &Pages,
         keys: &[Vec<u8>],
         hash: u64,
-        dict: &crate::dictionary::DictState,
     ) -> StorageResult<Option<Vec<SlotPage>>> {
         let mut found: Vec<(crate::ordered::Slot, Placed<u8>)> = Vec::new();
         for key in keys {
@@ -199,7 +193,7 @@ impl PageStore {
         }
         let mut pages = Vec::with_capacity(found.len());
         for &(at, page) in &found {
-            let read = read_page(&self.file, run_of(page), hash, dict)?;
+            let read = read_page(&self.file, run_of(page), hash)?;
             pages.push(clip(read, index, at)?);
         }
         let ends: Vec<Option<&[u8]>> = pages

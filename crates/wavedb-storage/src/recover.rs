@@ -21,24 +21,19 @@
 //!    no header names was never written: it is empty.
 //! 3. **Adoption.** The store opens with the `MANIFEST`'s seed; every bucket
 //!    is evicted, so reads go to the object store and the disk — or, in
-//!    object mode, RAM — fills again as a cache. The dictionaries come
-//!    down, and with a disk, one durable batch naming all of it makes it a
+//!    object mode, RAM — fills again as a cache. With a disk, one durable
+//!    batch naming all of it makes it a
 //!    root of its own.
 //!
 //! [RFC 0070]: ../../../rfcs/0070-object-storage-backend.md
 //! [RFC 0072]: ../../../rfcs/0072-the-settle-is-the-durability-point.md
 //! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
 
-use futures::future::try_join_all;
-
-use crate::block::BlockDescriptor;
-use crate::dictionary::Dictionary;
 use crate::error::{StorageError, StorageResult};
 use crate::header::{Chain, Header, HeaderLink, Rotation};
 use crate::ordered::Shape;
 use crate::page_store::{PageStore, StoreOptions};
 use crate::pages::{EVICTED, Pages};
-use crate::plan::SlotPlan;
 use crate::recover_headers::Headers;
 use crate::remote::{FILE_BLOCKS, Remote};
 use crate::roots::Roots;
@@ -50,11 +45,10 @@ pub struct Found {
     pub types: Vec<FoundType>,
 }
 
-/// One type's remote index, and its dictionary image if it has one.
+/// One type's remote index.
 pub struct FoundType {
     pub struct_hash: u64,
     pub remote: Option<Pages>,
-    pub dict: Option<(BlockDescriptor, Vec<u8>)>,
 }
 
 /// What a store's object store holds, recovered when the store is
@@ -133,18 +127,13 @@ pub async fn recover(
         };
         chain.types.insert(w.struct_hash, rotation);
     }
-    let types = try_join_all(walked.into_iter().map(|w| async move {
-        let dict = match w.dict {
-            Some(desc) => Some((desc, remote.fetch(desc.run()).await?)),
-            None => None,
-        };
-        StorageResult::Ok(FoundType {
+    let types = walked
+        .into_iter()
+        .map(|w| FoundType {
             struct_hash: w.struct_hash,
             remote: w.index,
-            dict,
         })
-    }))
-    .await?;
+        .collect();
     Ok(Some(Found { chain, types }))
 }
 
@@ -191,15 +180,13 @@ impl PageStore {
 
     /// Take what a recovery found: the remote indexes and the chain as they
     /// are, the disk's index the object store's shape with every page
-    /// evicted, the dictionaries written to disk,
-    /// then a durable batch naming all of it, so the disk is a root of its
-    /// own.
+    /// evicted, then a durable batch naming all of it, so the disk is a
+    /// root of its own.
     ///
     /// # Errors
-    /// A type the registry does not list; dictionary and write faults.
+    /// A type the registry does not list; write faults.
     pub(crate) fn adopt(&self, found: Found) -> StorageResult<()> {
         let object = self.object()?;
-        let mut plans = Vec::new();
         for t in found.types {
             let idx = self
                 .slot_index(t.struct_hash)
@@ -216,21 +203,9 @@ impl PageStore {
                 disk.set_meta(at, EVICTED);
             }
             *slot.remote_directory().borrow_mut() = Some(remote);
-            *slot.directory().borrow_mut() = Some(disk.clone());
-            if let Some((desc, image)) = t.dict {
-                let dict = Dictionary::from_bytes(&image)?;
-                slot.uploaded_dict().set(dict.len());
-                slot.remote_dict().set(desc);
-                slot.dictionary()
-                    .borrow_mut()
-                    .load(dict, BlockDescriptor::EMPTY);
-                let mut plan = SlotPlan::verbatim(idx, disk);
-                plan.dict = Some(image);
-                plans.push(plan);
-            }
+            *slot.directory().borrow_mut() = Some(disk);
         }
         *object.chain.borrow_mut() = found.chain;
-        crate::wait::park_on(self.place_plans(plans))?;
         self.record_all();
         self.drain()
     }
@@ -341,7 +316,6 @@ mod tests {
                 struct_hash: SH,
                 ranges: 1,
                 last: prev,
-                dict: None,
                 changed: vec![whole(file)],
             }],
             remote: Vec::new(),
@@ -426,7 +400,6 @@ mod tests {
             struct_hash: LATE,
             ranges: 1,
             last: HeaderLink::NONE,
-            dict: None,
             changed: vec![whole(3)],
         });
         put(&remote, &named, 3);

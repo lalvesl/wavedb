@@ -56,9 +56,6 @@ pub fn round(
             Target::Page { plan, page: at } => {
                 page(&mut line, types, &plans[*plan], *at, blocks);
             }
-            Target::Dict { .. } => {
-                let _ = write!(line, " | dict blocks={blocks}");
-            }
             // The pack's blocks once, each section as a page of none.
             Target::Pack { members, .. } => {
                 let _ = write!(line, " | pack blocks={blocks}");
