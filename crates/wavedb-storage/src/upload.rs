@@ -31,7 +31,6 @@
 
 use std::cell::Cell;
 
-use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
 use crate::ordered::{Found, Placed as Entry};
 use crate::page_store::PageStore;
@@ -39,7 +38,6 @@ use crate::shape::blocks_for;
 use crate::upload_file::{Packed, Placed, SlotImages};
 use crate::upload_header::finish;
 use crate::upload_plan::SlotUpload;
-use crate::upload_publish::Carried;
 /// Blocks of flagged disk pages one upload takes (8 MiB) — a pacing bound,
 /// so the files it builds stay a few, and a backlog drains over several.
 pub const UPLOAD_INPUT_BLOCKS: u64 = 2048;
@@ -134,16 +132,8 @@ impl PageStore {
         }
         self.fetch_shared(&mut work).await?;
         let mut slots = Vec::with_capacity(work.len());
-        // The dictionary length each carried copy holds.
-        let mut dicts = Vec::with_capacity(work.len());
         for w in &mut work {
             self.rebuild_remote(w)?;
-            let slot = &self.types[w.idx];
-            let dict = slot.dictionary().borrow();
-            let len = dict.dictionary().len();
-            let carried = dict.enabled()
-                && (len > slot.uploaded_dict().get() || w.move_dict);
-            dicts.push(carried.then_some(len));
             let pages = w
                 .shaped
                 .pages
@@ -153,17 +143,14 @@ impl PageStore {
                     (p.image.clone(), blocks)
                 })
                 .collect();
-            slots.push(SlotImages {
-                pages,
-                dict: carried.then(|| dict.image()),
-            });
+            slots.push(SlotImages { pages });
         }
         // Through a storage shard, the files are laid out from block 0 and
         // moved to the sections it reserves (RFC 0073 §8).
         let link = object.link.as_ref();
-        let (mut packed, mut chain, placed_dicts, restating) =
+        let (mut packed, mut chain, restating) =
             self.pack(&mut work, &slots, cut).await?;
-        let headers = self.with_named(&mut work, &placed_dicts, |named| {
+        let headers = self.with_named(&mut work, |named| {
             finish(&mut packed, named, &mut chain, (self.position, restating))
         });
         let ended = headers.as_ref().is_ok_and(|&named| named && cut);
@@ -191,56 +178,44 @@ impl PageStore {
             }
         };
         delivered?;
-        let carried = Carried {
-            lens: dicts,
-            descs: placed_dicts,
-        };
-        let done = self.publish_upload(work, &carried, &packed, chain);
+        let done = self.publish_upload(work, &packed, chain);
         Ok((done, ended))
     }
 }
 
 /// Point every placed page's entry in the work's remote index at its run,
-/// and keep each copy of what changed for the disk's headers. The
-/// dictionary each work item's upload placed, if it placed one.
+/// and keep each copy of what changed for the disk's headers.
 pub fn install_remote(
     work: &mut [SlotUpload],
     packed: &Packed,
-) -> StorageResult<Vec<Option<BlockDescriptor>>> {
-    let mut dicts = vec![None; work.len()];
-    for placed in &packed.placed {
-        match *placed {
-            Placed::Page { slot, page, run } => {
-                let w = &mut work[slot];
-                let planned = &w.shaped.pages[page];
-                let key = &planned.key;
-                let at = match w.remote.find(key) {
-                    Found::Page { at, .. } | Found::Hole(at) => at,
-                    Found::Uncovered => {
-                        return Err(StorageError::Corrupt(
-                            "an uploaded page lost its entry",
-                        ));
-                    }
-                };
-                let entry = Entry {
-                    address: run.start,
-                    blocks: run.count,
-                    meta: 0,
-                };
-                let at = w
-                    .remote
-                    .retarget(at, entry)
-                    .ok_or(StorageError::Corrupt("a run no range can name"))?;
-                if let Some(page) = &planned.decoded {
-                    w.remote.set_count(at, page.len());
-                }
+) -> StorageResult<()> {
+    for &Placed { slot, page, run } in &packed.placed {
+        let w = &mut work[slot];
+        let planned = &w.shaped.pages[page];
+        let at = match w.remote.find(&planned.key) {
+            Found::Page { at, .. } | Found::Hole(at) => at,
+            Found::Uncovered => {
+                return Err(StorageError::Corrupt(
+                    "an uploaded page lost its entry",
+                ));
             }
-            Placed::Dict { slot, desc } => dicts[slot] = Some(desc),
+        };
+        let entry = Entry {
+            address: run.start,
+            blocks: run.count,
+            meta: 0,
+        };
+        let at = w
+            .remote
+            .retarget(at, entry)
+            .ok_or(StorageError::Corrupt("a run no range can name"))?;
+        if let Some(page) = &planned.decoded {
+            w.remote.set_count(at, page.len());
         }
     }
     for w in work.iter_mut() {
         w.remote.split_long();
         w.changes = w.remote.journal().clone();
     }
-    Ok(dicts)
+    Ok(())
 }

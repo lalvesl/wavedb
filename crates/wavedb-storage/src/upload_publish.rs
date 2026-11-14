@@ -7,7 +7,6 @@
 use futures::stream::{self, StreamExt, TryStreamExt};
 use wavedb_platform::s3::{Put, When};
 
-use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
 use crate::header::Chain;
 use crate::ordered::Found;
@@ -56,7 +55,6 @@ impl PageStore {
     pub(crate) fn publish_upload(
         &self,
         work: Vec<SlotUpload>,
-        carried: &Carried,
         packed: &Packed,
         chain: Chain,
     ) -> Uploaded {
@@ -69,20 +67,12 @@ impl PageStore {
             bytes: packed.files.iter().map(|f| f.bytes.len() as u64).sum(),
             moved: 0,
         };
-        let mut unrecorded = self.unrecorded.borrow_mut();
-        for (w, upload) in work.into_iter().enumerate() {
+        for upload in work {
             let slot = &self.types[upload.idx];
             if self.has_disk() {
                 slot.remote_journal().borrow_mut().merge(&upload.changes);
             }
             *slot.remote_directory().borrow_mut() = Some(upload.remote);
-            if let (Some(len), Some(desc)) = (carried.lens[w], carried.descs[w])
-            {
-                slot.uploaded_dict().set(len);
-                slot.remote_dict().set(desc);
-                unrecorded.slots.entry(upload.idx).or_default().remote_dict =
-                    true;
-            }
             let mut live = slot.directory().borrow_mut();
             let Some(disk) = live.as_mut() else { continue };
             for f in upload.flagged {
@@ -105,7 +95,6 @@ impl PageStore {
         }
         if !self.has_disk() {
             // Object mode keeps no header to record it in.
-            unrecorded.slots.clear();
             for slot in &self.types {
                 if let Some(disk) = slot.directory().borrow_mut().as_mut() {
                     let _ = disk.drain(usize::MAX);
@@ -115,11 +104,4 @@ impl PageStore {
         *object.chain.borrow_mut() = chain;
         done
     }
-}
-
-/// The dictionaries an upload carried, per work item: the length of each
-/// copy and where it landed.
-pub struct Carried {
-    pub lens: Vec<Option<usize>>,
-    pub descs: Vec<Option<BlockDescriptor>>,
 }

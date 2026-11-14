@@ -59,8 +59,6 @@ pub struct SlotUpload {
     /// Remote pages carried forward as they are, out of files a compaction
     /// empties (`crate::remote_compact`): a key finding each, and its run.
     pub(crate) moved: Vec<(Vec<u8>, Run)>,
-    /// Whether the dictionary is carried forward too.
-    pub(crate) move_dict: bool,
     /// The pages it writes, once rebuilt.
     pub(crate) shaped: Shaped,
     /// What of the remote index it changed, for the disk's headers.
@@ -118,10 +116,9 @@ impl PageStore {
         let mut moving = crate::remote_compact::MOVE_BLOCKS;
         let mut work = Vec::new();
         for (idx, slot) in self.types.iter().enumerate() {
-            let (moved, move_dict) = self.moves_of(idx, &mut moving);
+            let moved = self.moves_of(idx, &mut moving);
             let mut flagged = Vec::new();
             if let Some(disk) = slot.directory().borrow().as_ref() {
-                let dict = slot.dictionary().borrow();
                 for (at, page) in disk.entries_all() {
                     let flags = page.map_or_else(
                         || disk.meta_at(at).unwrap_or(0),
@@ -143,7 +140,6 @@ impl PageStore {
                                 &self.file,
                                 run_of(page),
                                 slot.struct_hash(),
-                                &dict,
                             )?,
                             disk,
                             at,
@@ -160,7 +156,7 @@ impl PageStore {
                     });
                 }
             }
-            if flagged.is_empty() && moved.is_empty() && !move_dict {
+            if flagged.is_empty() && moved.is_empty() {
                 continue;
             }
             let remote = slot.remote_directory().borrow().clone();
@@ -170,7 +166,6 @@ impl PageStore {
                 remote: remote.unwrap_or_else(|| slot.new_remote_pages()),
                 fetched: BTreeMap::new(),
                 moved,
-                move_dict,
                 shaped: Shaped::default(),
                 changes: Journal::new(),
             });
@@ -218,7 +213,7 @@ impl PageStore {
     ) -> StorageResult<()> {
         let records = work.records();
         let slot = &self.types[work.idx];
-        let dict = slot.dictionary().borrow();
+        let compress = slot.compresses();
         let rules = Rules {
             target_blocks: REMOTE_TARGET_BLOCKS,
             keep_holes: false,
@@ -236,7 +231,7 @@ impl PageStore {
                     StorageError::Corrupt("an upload met an unfetched page"),
                 )
             },
-            |page| image_of(page, &dict),
+            |page| image_of(page, compress),
         )?;
         let rewritten: BTreeSet<Run> = shaped.retired.iter().copied().collect();
         for (key, run) in &work.moved {
@@ -249,7 +244,7 @@ impl PageStore {
                 .ok_or(StorageError::Corrupt("a moved page was not fetched"))?;
             shaped.pages.push(PlannedPage {
                 key: key.clone(),
-                image: image_of(&mut page, &dict)?,
+                image: image_of(&mut page, compress)?,
                 decoded: Some(page),
                 flags: 0,
             });
@@ -257,15 +252,5 @@ impl PageStore {
         }
         work.shaped = shaped;
         Ok(())
-    }
-
-    /// Decode an uploaded image of slot `idx`.
-    pub(crate) fn decode_remote(
-        &self,
-        idx: usize,
-        image: &[u8],
-    ) -> StorageResult<SlotPage> {
-        let dict = self.types[idx].dictionary().borrow();
-        SlotPage::from_bytes(image, dict.dictionary())
     }
 }
