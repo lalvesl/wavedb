@@ -166,6 +166,10 @@ fn data_shards_evacuate_their_storage_shards_files() {
     let d = tempfile::tempdir().unwrap();
     let db = d.path().join("db");
     let file_blocks = 64;
+    // Whole runs of keys go, so whole pages do, and the files they leave
+    // are mostly holes (removals scattered through a page only rewrite a
+    // span of it, the page kept live either side).
+    let kept = |k: u64| k % 100 < 25;
     let before;
     {
         let stores = open_sized(&db, file_blocks);
@@ -175,7 +179,7 @@ fn data_shards_evacuate_their_storage_shards_files() {
                 block_on(s.apply(&[w])).unwrap();
             }
             s.drain().unwrap();
-            for k in (0..300).filter(|k| k % 4 != 0) {
+            for k in (0..300).filter(|&k| !kept(k)) {
                 block_on(s.apply(&[Write::Remove(SH, id(k))])).unwrap();
             }
             s.drain().unwrap();
@@ -190,7 +194,7 @@ fn data_shards_evacuate_their_storage_shards_files() {
         let after = disk_blocks(&db);
         assert!(after < before, "the files shrank: {before} → {after}");
         for s in &stores {
-            for k in (0..300).step_by(4) {
+            for k in (0..300).filter(|&k| kept(k)) {
                 assert_eq!(read(s, k), Some(noise(k)), "{k}");
             }
         }
@@ -198,7 +202,7 @@ fn data_shards_evacuate_their_storage_shards_files() {
     let stores = open_sized(&db, file_blocks);
     for s in &stores {
         for k in 0..300 {
-            let want = (k % 4 == 0).then(|| noise(k));
+            let want = kept(k).then(|| noise(k));
             assert_eq!(read(s, k), want, "{k}");
         }
     }

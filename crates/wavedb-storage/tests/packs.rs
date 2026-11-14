@@ -19,8 +19,8 @@ const A: u64 = 0x0081_0005_9AC4_0001;
 const B: u64 = 0x0081_0005_9AC4_0002;
 static SLOT_A: StructStorage = StructStorage::new(A);
 static SLOT_B: StructStorage = StructStorage::new(B);
-// Uncompressed: a round writes no dictionary, so the blocks counted are
-// the pages'.
+// Uncompressed: what a page takes is what it holds, so the blocks counted
+// are the records'.
 static PLAIN_A: StructStorage = StructStorage::without_compression(A);
 static PLAIN_B: StructStorage = StructStorage::without_compression(B);
 
@@ -152,7 +152,7 @@ fn a_compaction_carries_a_pack_out_section_by_section() {
 fn a_torn_pack_gives_way_to_the_batch_before() {
     let d = tempfile::tempdir().unwrap();
     let db = d.path().join("db");
-    // Plain types: the window holds no dictionary before the pack.
+    // Plain types: a pack's sections take what their records do.
     let plain =
         |dir: &Path| PageStore::open(dir, &[&PLAIN_A, &PLAIN_B]).unwrap();
     let s = plain(&db);

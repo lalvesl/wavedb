@@ -193,7 +193,7 @@ fn a_file_the_last_cut_names_is_kept() {
     });
 }
 
-/// No dictionary, so nothing but pages keeps the old files alive.
+/// Uncompressed: the pages take the room their records do.
 static PLAIN: wavedb_storage::StructStorage =
     wavedb_storage::StructStorage::without_compression(SH);
 

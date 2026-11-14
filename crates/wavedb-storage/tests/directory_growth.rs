@@ -29,8 +29,7 @@ fn id(k: u64) -> Id {
     Id::new(k, U48::from(1u32), false, 1)
 }
 
-/// ~300 incompressible bytes: about a hundred to a 32 KiB page, whatever
-/// the dictionary learns.
+/// ~300 incompressible bytes: about a hundred to a 32 KiB page.
 fn record(k: u64, version: u8) -> Vec<u8> {
     let mut bytes = SH.to_le_bytes().to_vec();
     bytes.extend_from_slice(&k.to_le_bytes());

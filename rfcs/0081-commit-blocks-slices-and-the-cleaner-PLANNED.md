@@ -18,7 +18,8 @@
   `ordered/` (`head.rs`, `index.rs`, `reshape.rs`, `fold.rs`, `journal.rs`,
   `persist.rs`), `header.rs`, `header_room.rs`, `trailer.rs`, `restate.rs`,
   `alloc.rs`, `block.rs`, `compact.rs`, `regroup.rs`, `regroup_merge.rs`,
-  `lane_read.rs`, `lane_walk.rs`, `page.rs`, `dictionary.rs`, `upload*.rs`
+  `lane_read.rs`, `lane_walk.rs`, `page.rs`, `upload*.rs` (`dictionary.rs`
+  went in phase 9)
 
 ## Summary
 
@@ -404,6 +405,11 @@ more to decode, and its image written whole by every round it grows (7 to
 11 blocks a round while a type is young, in the micro row's probe). So no
 dictionary, on cleaner pages either: they are the 32 and 128 KiB rows.
 
+It is also simpler to make durable: a page compressed against a dictionary
+can be read only with that dictionary, so a write would be durable only
+once the dictionary state its pages name is too. A page zstd'd alone needs
+nothing but its own bytes.
+
 ### 10. The object store
 
 Nothing changes in the object store's files. The upload rebuilds 128 KiB
@@ -548,7 +554,27 @@ a torn last block.
    row's cold reads had 170 page misses of 2 000, now none.
 7. **The index budget and inline consolidation** (§6).
 8. **The cleaner's phases and triggers** (§7, §8).
-9. **Compression** (§9), as phase 0 decides.
+9. **Compression** (§9), as phase 0 decides. **Landed:** no dictionaries
+   anywhere — `dictionary.rs`, each type's dictionary state on disk and in
+   the object store, its slot in the window and in the header, its moves in
+   compaction and the defrag are gone. A compressing type's page is zstd'd
+   alone (level 3), and stored raw when that does not shrink it; there is
+   no `COMPRESS_MIN` yet, since the raw fallback already keeps a small page
+   from growing. `PagePayload::Zstd` lost its `dict_len`: pages written
+   before do not read (no format bump, by policy). `benches/compression.rs`
+   now compares zstd and raw. Without a dictionary's old states keeping
+   old files live, the compaction tests remove 60% of their records instead
+   of 40%, so each file is still more than half holes, and the storage
+   shards' test removes whole runs of keys (scattered removals rewrite a
+   span, the page kept live either side). The dictionary had hidden two
+   faults, both fixed here: an upload of removals alone placed no page, so
+   it opened no file and wrote no header, yet cleared its flags — the
+   removed records came back once the disk was lost (`layout` now opens one
+   file at least); and the active file, all holes but its live header (its
+   pages evicted to the object store), was never closed for a compaction,
+   since only a file holding a run to move was one to empty — the
+   dictionary's image had been that run (`candidates` now counts the
+   active file and a live header).
 10. **Measure.** The micro and shop suites, the opens, the census.
 
 ## Alternatives

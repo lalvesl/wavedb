@@ -840,8 +840,8 @@ mod tests {
         // five ordered lanes its collection lives in — declared lists, the
         // recency chain, the removal log, and the secondary and fuzzy chains
         // (RFC 0075, RFC 0078). Each is its own index so a page never mixes
-        // fat records with skinny id entries, and so each lane's zstd
-        // dictionary models one kind of thing.
+        // fat records with skinny id entries, and so each lane's pages
+        // compress one kind of thing.
         assert_eq!(AboutUser::storage_entries().len(), 1);
         let entries = Note::storage_entries();
         assert_eq!(entries.len(), 7);

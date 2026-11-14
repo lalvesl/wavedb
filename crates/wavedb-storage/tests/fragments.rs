@@ -10,7 +10,7 @@ use wavedb_storage::{BLOCK_SIZE, PageStore, StructStorage};
 
 const SH: u64 = 0x0081_0005_F4A6_0001;
 // Uncompressed: what a page takes is what it holds, so the blocks counted
-// are the pages', not a dictionary's growth.
+// are the records'.
 static SLOT: StructStorage = StructStorage::without_compression(SH);
 
 /// Ids by creation: every new one past the last.
