@@ -86,9 +86,23 @@ fn record(key: u64, version: u64) -> Vec<u8> {
     bytes
 }
 
-/// Fill the store, then remove two records in three: the pages shrink,
+/// Whether record `k` is one `pock` removes: three in four of the first 80
+/// of every hundred, 60% in all. Their pages are rewritten smaller
+/// elsewhere, so every file — the one-file store's too — is more than half
+/// holes, worth emptying, and keeps the pages of the rest live, which a
+/// compaction carries out.
+const fn removed(k: u64) -> bool {
+    !k.is_multiple_of(4) && k % 100 < 80
+}
+
+/// Fill the store, then remove [`removed`]'s records: their pages shrink,
 /// copy-on-write, and the runs they leave are holes all through the files.
 fn pock(s: &PageStore) {
+    pock_by(s, removed);
+}
+
+/// [`pock`], removing the records `gone` names.
+fn pock_by(s: &PageStore, gone: impl Fn(u64) -> bool) {
     block_on(async {
         for k in 0..RECORDS {
             s.apply(&[Write::Put(id(k), record(k, 0))]).await.unwrap();
@@ -96,7 +110,7 @@ fn pock(s: &PageStore) {
                 s.drain().unwrap(); // a window each, files apart
             }
         }
-        for k in (0..RECORDS).filter(|k| k % 3 != 0) {
+        for k in (0..RECORDS).filter(|&k| gone(k)) {
             s.apply(&[Write::Remove(SH, id(k))]).await.unwrap();
         }
         s.drain().unwrap();
@@ -108,7 +122,7 @@ fn assert_records(s: &PageStore) {
     assert_eq!(s.cache_len(), 0, "every read must come off a page");
     block_on(async {
         for k in 0..RECORDS {
-            let want = (k % 3 == 0).then(|| record(k, 0));
+            let want = (!removed(k)).then(|| record(k, 0));
             assert_eq!(s.get_of(SH, id(k)).await.unwrap(), want, "record {k}");
         }
     });
@@ -316,28 +330,14 @@ fn a_window_past_the_ceiling_lands_whole() {
 fn a_merge_does_not_bring_back_what_a_span_removed() {
     let d = tempfile::tempdir().unwrap();
     let s = open(d.path());
-    let removed = |k: u64| !k.is_multiple_of(3) && k % 100 < 60;
-    block_on(async {
-        for k in 0..RECORDS {
-            s.apply(&[Write::Put(id(k), record(k, 0))]).await.unwrap();
-            if k % 100 == 99 {
-                s.drain().unwrap();
-            }
-        }
-        for k in (0..RECORDS).filter(|&k| removed(k)) {
-            s.apply(&[Write::Remove(SH, id(k))]).await.unwrap();
-        }
-        s.drain().unwrap();
-    });
+    let gone = |k: u64| !k.is_multiple_of(3) && k % 100 < 60;
+    pock_by(&s, gone);
     let check = |s: &PageStore, when: &str| {
         s.evict_settled(0);
         for k in 0..RECORDS {
-            let want = (!removed(k)).then(|| record(k, 0));
-            assert_eq!(
-                block_on(s.get_of(SH, id(k))).unwrap(),
-                want,
-                "{k} {when}"
-            );
+            let want = (!gone(k)).then(|| record(k, 0));
+            let got = block_on(s.get_of(SH, id(k))).unwrap();
+            assert_eq!(got, want, "{k} {when}");
         }
     };
     check(&s, "before");

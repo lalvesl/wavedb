@@ -4,9 +4,7 @@
 //!
 //! [RFC 0041]: ../../../rfcs/0041-single-barrier-checkpoint.md
 
-use std::collections::BTreeMap;
-
-use crate::block::{BLOCK_SIZE, BlockDescriptor, Run};
+use crate::block::{BLOCK_SIZE, Run};
 use crate::error::{StorageError, StorageResult};
 use crate::header_room::HeaderSize;
 use crate::ordered::{Found, Placed};
@@ -18,9 +16,6 @@ pub enum Target {
     Page {
         plan: usize,
         page: usize,
-    },
-    Dict {
-        plan: usize,
     },
     /// Small pages of several plans in one run, `image` the pack holding
     /// them (`crate::pack`): every member's entry names the run.
@@ -36,7 +31,6 @@ impl Target {
     pub fn pages(&self) -> Vec<(usize, usize)> {
         match self {
             Self::Page { plan, page } => vec![(*plan, *page)],
-            Self::Dict { .. } => Vec::new(),
             Self::Pack { members, .. } => members.clone(),
         }
     }
@@ -52,27 +46,22 @@ pub struct Round {
     /// The flag the pages it places take; `None` keeps theirs (a move).
     pub(crate) flags: Option<u8>,
     pub(crate) end: bool,
-    /// The window's pages and dictionaries.
+    /// The window's pages.
     pub(crate) body: Option<Run>,
-    /// On disk, its header and, ending a batch of a store writing its own
-    /// files, the roots block after it — reserved once the pages are
-    /// placed, which is when the header's size is known (RFC 0079 §4).
+    /// On disk, its header — reserved once the pages are placed, which is
+    /// when the header's size is known (RFC 0079 §4).
     pub(crate) marks: Option<(Run, HeaderSize)>,
     /// The pending blocks its pages add.
     pub(crate) added: u64,
-    pub(crate) dicts: BTreeMap<usize, BlockDescriptor>,
 }
 
-/// Everything this round places, in window order — on disk the header and
-/// the roots block follow, in a run of their own (`crate::checkpoint`).
+/// Everything this round places, in window order — on disk the header
+/// follows, in a run of its own (`crate::checkpoint`).
 pub fn targets_of(plans: &[SlotPlan]) -> Vec<Target> {
     let mut targets = Vec::new();
     for (plan, work) in plans.iter().enumerate() {
         for page in 0..work.pages.len() {
             targets.push(Target::Page { plan, page });
-        }
-        if work.dict.is_some() {
-            targets.push(Target::Dict { plan });
         }
     }
     targets
@@ -87,10 +76,6 @@ pub fn size_of(plans: &[SlotPlan], target: &Target) -> u64 {
             work.index
                 .canonical(blocks_for(work.pages[*page].image.len()))
         }
-        Target::Dict { plan } => plans[*plan]
-            .dict
-            .as_deref()
-            .map_or(0, |d| blocks_for(d.len())),
         Target::Pack { members, image } => {
             members.first().map_or(0, |&(plan, _)| {
                 plans[plan].index.canonical(blocks_for(image.len()))
@@ -167,22 +152,6 @@ pub fn install(
     Ok(pending)
 }
 
-/// The dictionary descriptor each plan whose dictionary grew was just given.
-pub fn dict_descriptors(
-    plans: &[SlotPlan],
-    targets: &[Target],
-    runs: &[Option<Run>],
-) -> BTreeMap<usize, BlockDescriptor> {
-    let mut out = BTreeMap::new();
-    for plan in 0..plans.len() {
-        let Some(run) = dict_run(targets, runs, plan) else {
-            continue;
-        };
-        out.insert(plan, BlockDescriptor::from_run(run));
-    }
-    out
-}
-
 /// Fill the window: every image at its carved offset, zero-padded between.
 pub fn assemble(
     window: Run,
@@ -195,26 +164,10 @@ pub fn assemble(
         let Some(run) = run else { continue };
         let bytes: &[u8] = match target {
             Target::Page { plan, page } => &plans[*plan].pages[*page].image,
-            Target::Dict { plan } => {
-                plans[*plan].dict.as_deref().unwrap_or(&[])
-            }
             Target::Pack { image, .. } => image,
         };
         let at = ((run.start - window.start) * BLOCK_SIZE as u64) as usize;
         buf[at..at + bytes.len()].copy_from_slice(bytes);
     }
     buf
-}
-
-/// The run `plan`'s dictionary image was placed in, if it grew.
-pub fn dict_run(
-    targets: &[Target],
-    runs: &[Option<Run>],
-    plan: usize,
-) -> Option<Run> {
-    targets
-        .iter()
-        .zip(runs)
-        .find(|(t, _)| matches!(t, Target::Dict { plan: p } if *p == plan))
-        .and_then(|(_, run)| *run)
 }

@@ -17,7 +17,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::block::BlockDescriptor;
 use crate::error::{StorageError, StorageResult};
 use crate::header::{Header, HeaderLink, TypeEntry};
 use crate::ordered::{Rebuild, Shape};
@@ -51,7 +50,6 @@ impl Lane {
 /// One type's index being gathered.
 struct Gathering {
     rebuild: Rebuild,
-    dict: Option<u64>,
     /// The next header with entries for it ([`HeaderLink::NONE`] once the
     /// chain ends).
     next: HeaderLink,
@@ -71,12 +69,11 @@ pub struct Walked {
     pub struct_hash: u64,
     /// Its index; `None` for a type with no range.
     pub index: Option<Pages>,
-    pub dict: Option<BlockDescriptor>,
     /// The newest header naming it.
     pub newest: HeaderLink,
 }
 
-/// Every type's directory and dictionary descriptor, gathered from `top`
+/// Every type's directory, gathered from `top`
 /// back along the types' chains, and down by `prev` while a `registered`
 /// type is still unnamed — never below `top`'s horizon, where a type still
 /// unnamed is new and empty (see the module docs).
@@ -145,7 +142,6 @@ pub async fn walk<S: HeaderSource>(
             Ok(Walked {
                 struct_hash: hash,
                 index: (index.range_count() > 0).then_some(index),
-                dict: t.dict.map(BlockDescriptor::from_raw),
                 newest: t.newest,
             })
         })
@@ -172,7 +168,6 @@ fn gather(
         }
         let mut t = Gathering {
             rebuild: Rebuild::new(entry.ranges),
-            dict: entry.dict,
             next: entry.last,
             newest: here,
         };
