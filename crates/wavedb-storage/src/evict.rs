@@ -245,7 +245,7 @@ impl PageStore {
                 }
             }
         }
-        let image = image_of(&mut restored, slot.compresses())?;
+        let image = image_of(&mut restored, slot.compression())?;
         let mut plan = SlotPlan::verbatim(idx, index);
         plan.pages.push(PlannedPage {
             key: lo,

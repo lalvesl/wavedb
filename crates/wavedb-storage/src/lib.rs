@@ -39,6 +39,7 @@ mod lane_read;
 mod lane_walk;
 mod link;
 pub mod manifest;
+mod merge_runs;
 mod object_mode;
 pub mod ordered;
 mod pack;
@@ -110,7 +111,7 @@ pub use cycle::ROUND_RECORDS;
 
 pub use error::{StorageError, StorageResult};
 pub use manifest::{MANIFEST, Manifest};
-pub use page::SlotPage;
+pub use page::{Compression, SlotPage};
 pub use page_store::{
     DEFAULT_INDEX_BUDGET_BYTES, DEFAULT_RECORD_CACHE_BYTES, PageStore,
     StoreOptions,
