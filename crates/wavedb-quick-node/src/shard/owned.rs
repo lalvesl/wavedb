@@ -178,21 +178,25 @@ impl Owned {
             return;
         };
         let partitions = partitions.max(1);
+        // Writes owed to the pages: a user's, never the maintenance's own
+        // windows — or a quiet spell's cleanup would start the next.
+        let wrote = store.has_pending();
         if let Err(e) = store.begin_cycle() {
             eprintln!("worker: settle failed: {e}");
         }
         let share = policy.cache_budget_bytes / partitions;
         store.evict_settled(share);
-        self.compact(i, store, policy, partitions).await;
+        self.compact(i, store, policy, (partitions, wrote)).await;
     }
 
-    /// Start or continue store `i`'s compaction, if its triggers say so.
+    /// Start or continue store `i`'s compaction, if its triggers say so —
+    /// the quiet one weighing whether it `wrote` this tick.
     async fn compact(
         &self,
         i: usize,
         store: &PageStore,
         maintenance: &Maintenance,
-        partitions: usize,
+        (partitions, wrote): (usize, bool),
     ) {
         let policy = &maintenance.compaction;
         let Some(cell) = self.armed.get(i) else {
@@ -203,7 +207,9 @@ impl Owned {
             evict_past_ceiling(store, maintenance, partitions);
         }
         let now = wavedb_platform::time::unix_secs();
+        let quiet = policy.quiet_due(&mut armed, wrote, now);
         if store.is_compacting()
+            || quiet
             || policy.due(&mut armed, store.space(), partitions, now)
         {
             match store.compact_pass(policy.budget_blocks).await {
@@ -446,6 +452,7 @@ mod tests {
         let policy = Maintenance {
             compaction: Compaction {
                 daily_at: None,
+                after_quiet: None,
                 above_bytes: None,
                 above_free_percent: Some(20),
                 budget_blocks: 8,
@@ -549,8 +556,9 @@ mod tests {
         want.extend_from_slice(&7u64.to_le_bytes());
         assert_eq!(got.unwrap(), Some(want));
 
-        // Past the ceiling, the uploaded pages leave the disk and the
-        // compaction it triggers cuts the room out of the file; the records
+        // Past the ceiling, the uploaded pages leave the disk, and the
+        // compaction it triggers finds nothing worth emptying in a file of
+        // three blocks: it ends at once, restating nothing. The records
         // still read back, from the object store.
         assert!(store.is_resident(SH, id(7)));
         let policy = Maintenance {
@@ -558,6 +566,7 @@ mod tests {
                 above_bytes: Some(4096),
                 above_free_percent: None,
                 daily_at: None,
+                after_quiet: None,
                 budget_blocks: 1,
             },
             ..Maintenance::default()
@@ -567,7 +576,7 @@ mod tests {
             !store.is_resident(SH, id(7)),
             "the uploaded pages left the disk"
         );
-        assert!(store.is_compacting(), "and the ceiling compacts the file");
+        assert!(!store.is_compacting(), "nothing to empty: done at once");
         let got = wavedb_platform::carrier::block_on(store.get_of(SH, id(7)));
         assert!(got.unwrap().is_some());
     }
@@ -644,6 +653,7 @@ mod tests {
                 above_bytes: None,
                 above_free_percent: Some(1),
                 daily_at: None,
+                after_quiet: None,
                 budget_blocks: 1,
             },
             upload_interval: None,

@@ -254,11 +254,17 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   superseded copies and only then drops settled chunks, and
   `under_pressure()` says when the unsettled bytes pass `pressure_percent`
   (50) of the record budget — the caller settles then (RFC 0068). Compaction
-  carries the runs of the emptiest data files (≥ `victim_free_percent`
-  free, 50) forward into the active one — after restating every address, so
-  no header in them is live — and once a batch over the moves is durable,
-  cuts the free tails and deletes the emptied files; stepped, on the node's
-  triggers (daily UTC time, disk ceiling, free share — RFC 0071).
+  carries the runs of the data files worth emptying (≥ `victim_free_percent`
+  free, 50; the oldest and emptiest first, an address being an age) forward
+  into the active one, compressed again at the cleanup's zstd level (19,
+  against the write path's 3) — after restating every address, so no header
+  in them is live; with no file to empty it restates nothing — and once a
+  batch over the moves is durable, cuts the free tails and deletes the
+  emptied files. Its merges take the holes beside them, and merge a cold
+  range (all its pages behind the newest quarter of the files) into full
+  pages, a recent one to half (RFC 0081 §7–§8); stepped, on the node's
+  triggers (daily UTC time, disk ceiling, free share, a quiet spell after
+  writes — RFC 0071, RFC 0081 §7).
   A database created with `StoreOptions::remote` (`Server::object_store` on a
   node) keeps its pages in an S3-compatible object store, the disk caching
   them (RFC 0070 phase 3): settle rounds flag the pages they write, `upload`

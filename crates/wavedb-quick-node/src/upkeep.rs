@@ -75,6 +75,11 @@ pub struct Compaction {
     pub above_bytes: Option<u64>,
     /// Once this share of a shard's files, in percent, is free.
     pub above_free_percent: Option<u8>,
+    /// Once a store written to has had nothing written for this long — the
+    /// idle time the cleaner is for (RFC 0081 §7): once per quiet spell,
+    /// so a store at rest is not cleaned again and again. Its merges and
+    /// regroup take no restatement when no file is worth emptying.
+    pub after_quiet: Option<Duration>,
     /// Blocks one pass may copy — the IO a tick spends on it.
     pub budget_blocks: u64,
 }
@@ -85,7 +90,8 @@ impl Default for Compaction {
             daily_at: None,
             above_bytes: Some(10 << 30),  // 10 GiB
             above_free_percent: Some(50), // half the files are holes
-            budget_blocks: 256,           // ≤ 1 MiB copied per tick
+            after_quiet: Some(Duration::from_secs(30)),
+            budget_blocks: 256, // ≤ 1 MiB copied per tick
         }
     }
 }
@@ -118,6 +124,10 @@ pub struct Armed {
     day: Option<u64>,
     /// Blocks unused when the last compaction finished.
     rest: Option<u64>,
+    /// Since when (unix seconds) nothing was written, if so.
+    quiet_since: Option<u64>,
+    /// Written to since the last quiet spell's compaction.
+    written: bool,
 }
 
 impl Compaction {
@@ -158,6 +168,26 @@ impl Compaction {
         over || holes
     }
 
+    /// Whether a store that `wrote` this tick (or not) has been quiet long
+    /// enough, at `now` (unix seconds), for the quiet trigger: once per
+    /// quiet spell after a write.
+    pub fn quiet_due(&self, armed: &mut Armed, wrote: bool, now: u64) -> bool {
+        if wrote {
+            armed.quiet_since = None;
+            armed.written = true;
+            return false;
+        }
+        let Some(after) = self.after_quiet else {
+            return false;
+        };
+        let since = *armed.quiet_since.get_or_insert(now);
+        if !armed.written || now.saturating_sub(since) < after.as_secs() {
+            return false;
+        }
+        armed.written = false;
+        true
+    }
+
     /// Note a finished compaction: the size triggers wait for the free space
     /// to grow by a pass's worth from here.
     pub const fn finished(armed: &mut Armed, space: Space) {
@@ -176,6 +206,7 @@ mod tests {
     fn off() -> Compaction {
         Compaction {
             daily_at: None,
+            after_quiet: None,
             above_bytes: None,
             above_free_percent: None,
             budget_blocks: 10,
@@ -239,6 +270,27 @@ mod tests {
         let mut armed = Armed::default();
         assert!(!policy.due(&mut armed, space(100, 49), 1, 0));
         assert!(policy.due(&mut armed, space(100, 50), 1, 0));
+    }
+
+    /// The quiet trigger fires once a written store has been quiet long
+    /// enough, once per quiet spell — and never for one nobody wrote to.
+    #[test]
+    fn the_quiet_trigger_fires_once_per_quiet_spell() {
+        let policy = Compaction {
+            after_quiet: Some(std::time::Duration::from_secs(30)),
+            ..off()
+        };
+        let mut armed = Armed::default();
+        assert!(!policy.quiet_due(&mut armed, false, 0));
+        assert!(!policy.quiet_due(&mut armed, false, 100), "never written");
+        assert!(!policy.quiet_due(&mut armed, true, 100));
+        assert!(!policy.quiet_due(&mut armed, false, 110));
+        assert!(!policy.quiet_due(&mut armed, false, 139));
+        assert!(policy.quiet_due(&mut armed, false, 140));
+        assert!(!policy.quiet_due(&mut armed, false, 500), "once a spell");
+        assert!(!policy.quiet_due(&mut armed, true, 600));
+        assert!(!policy.quiet_due(&mut armed, false, 601));
+        assert!(policy.quiet_due(&mut armed, false, 631), "the next spell");
     }
 
     /// After a compaction, the size triggers wait for a pass's worth of new
