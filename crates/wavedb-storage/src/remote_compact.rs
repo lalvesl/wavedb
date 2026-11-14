@@ -224,7 +224,7 @@ impl PageStore {
             .collect()
     }
 
-    /// Whether a page or a dictionary still lies in a file being emptied.
+    /// Whether a page still lies in a file being emptied.
     fn moving_left(&self) -> bool {
         let Some(object) = &self.object else {
             return false;
@@ -232,37 +232,31 @@ impl PageStore {
         let moving = object.moving.borrow();
         let left = |start: u64| moving.contains(&file_of(start));
         self.types.iter().any(|slot| {
-            let dict = slot.remote_dict().get();
-            (dict.is_allocated() && left(dict.start()))
-                || slot
-                    .remote_directory()
-                    .borrow()
-                    .iter()
-                    .any(|index| index.pages().any(|(_, p)| left(p.address)))
+            slot.remote_directory()
+                .borrow()
+                .iter()
+                .any(|index| index.pages().any(|(_, p)| left(p.address)))
         })
     }
 
-    /// The remote pages of slot `idx` — a key finding each, and its run —
-    /// and whether its dictionary, an upload carries forward out of the files being emptied — up to
-    /// `budget` blocks, which it spends.
+    /// The remote pages of slot `idx` — a key finding each, and its run — an
+    /// upload carries forward out of the files being emptied, up to `budget`
+    /// blocks, which it spends.
     pub(crate) fn moves_of(
         &self,
         idx: usize,
         budget: &mut u64,
-    ) -> (Vec<(Vec<u8>, Run)>, bool) {
+    ) -> Vec<(Vec<u8>, Run)> {
         let mut moved = Vec::new();
         let Some(object) = &self.object else {
-            return (moved, false);
+            return moved;
         };
         self.regroup_moves(idx, budget, &mut moved);
         let moving = object.moving.borrow();
         if moving.is_empty() {
-            return (moved, false);
+            return moved;
         }
         let slot = &self.types[idx];
-        let dict = slot.remote_dict().get();
-        let move_dict =
-            dict.is_allocated() && moving.contains(&file_of(dict.start()));
         if let Some(index) = slot.remote_directory().borrow().as_ref() {
             for (at, page) in index.pages() {
                 if *budget == 0 {
@@ -278,7 +272,7 @@ impl PageStore {
                 }
             }
         }
-        (moved, move_dict)
+        moved
     }
 }
 
@@ -310,9 +304,6 @@ async fn survey(
     for w in walked {
         if let Some(index) = &w.index {
             named.extend(index.pages().map(|(_, p)| file_of(p.address)));
-        }
-        if let Some(dict) = w.dict.filter(|d| d.is_allocated()) {
-            named.insert(file_of(dict.start()));
         }
     }
     Ok(Some(Survey {
@@ -383,7 +374,6 @@ mod tests {
                 struct_hash: SH,
                 ranges: 2,
                 last: last.map_or(HeaderLink::NONE, link),
-                dict: None,
                 changed,
             }],
             remote: Vec::new(),

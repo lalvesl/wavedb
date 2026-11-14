@@ -37,7 +37,7 @@ impl PageStore {
         }
     }
 
-    /// Live blocks per file: every remote page and dictionary named.
+    /// Live blocks per file: every remote page named.
     pub(crate) fn remote_live(&self) -> BTreeMap<u64, u64> {
         let mut live = BTreeMap::new();
         for slot in &self.types {
@@ -45,10 +45,7 @@ impl PageStore {
             let pages = remote.iter().flat_map(|index| {
                 index.pages().map(|(_, p)| (p.address, p.blocks))
             });
-            let dict = slot.remote_dict().get();
-            let dict =
-                dict.is_allocated().then(|| (dict.start(), dict.count()));
-            for (start, count) in pages.chain(dict) {
+            for (start, count) in pages {
                 *live.entry(file_of(start)).or_insert(0) += count;
             }
         }

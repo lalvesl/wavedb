@@ -18,8 +18,6 @@ use crate::pages::Pages;
 pub struct TypeView<'a> {
     pub(crate) struct_hash: u64,
     pub(crate) index: Option<&'a Pages>,
-    /// Its dictionary's descriptor, if it has one.
-    pub(crate) dict: Option<u64>,
 }
 
 impl TypeView<'_> {
@@ -71,7 +69,6 @@ pub fn restate(
                 struct_hash: view.struct_hash,
                 ranges: view.ranges() as u32,
                 last: rotation.last,
-                dict: view.dict,
                 changed: Vec::new(),
             });
             entries.len() - 1
@@ -196,7 +193,6 @@ mod tests {
         TypeView {
             struct_hash: hash,
             index: Some(index),
-            dict: None,
         }
     }
 

@@ -160,7 +160,8 @@ impl PageStore {
                 }
                 movable.push(Movable {
                     slot,
-                    page: Some((key.clone(), page.meta)),
+                    key: key.clone(),
+                    flags: page.meta,
                     run,
                 });
             }

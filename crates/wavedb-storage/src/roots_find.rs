@@ -11,8 +11,8 @@
 //! 2. **Whether the storage write it ends is whole**: for every data shard
 //!    whose root it moved — the others' were checked when the block before
 //!    was the newest — the batch that root ends is whole: every header back
-//!    to the one ending the batch before present, and every page and
-//!    dictionary it placed intact. One write reaches the disk in any order,
+//!    to the one ending the batch before present, and every page it placed
+//!    intact. One write reaches the disk in any order,
 //!    so a crash before its `fsync` can keep a header and lose a page; only
 //!    the newest storage write can be in that state (the next one is
 //!    written once it is durable), so one that is not whole gives way to
@@ -22,9 +22,8 @@
 //! [RFC 0073]: ../../../rfcs/0073-data-shards-and-storage-shards.md
 //! [RFC 0079]: ../../../rfcs/0079-headers-sized-to-their-change-WIP.md
 
-use crate::block::{BLOCK_SIZE, BlockDescriptor, Run};
+use crate::block::{BLOCK_SIZE, Run};
 use crate::block_file::BlockFile;
-use crate::dictionary::Dictionary;
 use crate::error::StorageResult;
 use crate::header::{Header, HeaderLink, NO_FILE};
 use crate::header_room::MAX_HEADER_BLOCKS;
@@ -158,8 +157,7 @@ pub fn read_roots(file: &BlockFile, at: u64) -> Option<Roots> {
     Roots::decode(&bytes).filter(|r| r.at == at)
 }
 
-/// Whether the batch `end` ends is whole and every page and dictionary it
-/// placed intact — or where to look below for an older one.
+/// Whether the batch `end` ends is whole and every page it placed intact — or where to look below for an older one.
 fn whole(
     headers: &mut DiskHeaders<'_>,
     end: &Header,
@@ -184,10 +182,6 @@ fn whole(
         (count > 0 && (base..end.at).contains(&start))
             .then(|| Run::new(start, count))
     };
-    let dict_run = |raw: u64| {
-        let desc = BlockDescriptor::from_raw(raw);
-        placed(desc.start(), desc.count())
-    };
     for header in &batch {
         for entry in &header.types {
             let pages = entry.changed.iter().flat_map(RangeRecord::pages);
@@ -197,11 +191,6 @@ fn whole(
                 {
                     return Ok(Err(base));
                 }
-            }
-            if let Some(run) = entry.dict.and_then(dict_run)
-                && Dictionary::from_bytes(&headers.file.read_run(run)?).is_err()
-            {
-                return Ok(Err(base));
             }
         }
     }

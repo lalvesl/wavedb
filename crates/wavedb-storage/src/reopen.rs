@@ -1,7 +1,7 @@
 //! Reconstruction from the data files ([RFC 0072] §6–§7, [RFC 0073] §6):
 //! the newest whole storage write's roots block names each data shard's
 //! root, whose header roots a walk back through that data shard's headers;
-//! every directory, dictionary and the allocator come out of it. Nothing is
+//! every directory and the allocator come out of it. Nothing is
 //! replayed; the caches start empty.
 //!
 //! 1. **The root** a reconstruction roots in: through a storage thread,
@@ -13,7 +13,7 @@
 //!    its directories — and in disk + object mode the object store's, from
 //!    the same headers — reading through its own handles.
 //! 3. **The allocator** is the files' layout, every run the data shards'
-//!    directories and dictionaries name, every header their walks read and
+//!    directories name, every header their walks read and
 //!    the roots block, if any; the rest is holes, and the tail past the root — what
 //!    a crash left — is cut.
 //!
@@ -24,9 +24,8 @@ use std::collections::BTreeMap;
 
 use futures::FutureExt;
 
-use crate::block::{BLOCK_SIZE, BlockAllocator, BlockDescriptor, Run};
+use crate::block::{BLOCK_SIZE, BlockAllocator, Run};
 use crate::block_file::BlockFile;
-use crate::dictionary::Dictionary;
 use crate::disk_chain::DiskChain;
 use crate::error::{StorageError, StorageResult};
 use crate::header::{ChainRecord, Header, HeaderLink, Rotation};
@@ -49,7 +48,7 @@ pub struct Reopened {
 #[derive(Default)]
 pub struct Rebuilt {
     pub chain: DiskChain,
-    /// The runs it names: pages, dictionaries, headers.
+    /// The runs it names: pages and headers.
     pub used: Vec<Run>,
     pub remote_chain: Option<ChainRecord>,
 }
@@ -196,7 +195,6 @@ pub fn rebuild(
     let Some((root, link)) = root else {
         return Ok(Rebuilt::default()); // nothing durable
     };
-    let file = headers.file;
     // The root itself, read where it was found, is one of the headers kept.
     headers.keep(link, root.clone());
     let registered: Vec<u64> =
@@ -234,18 +232,11 @@ pub fn rebuild(
             used.extend(disk_runs(index));
         }
         *slot.directory().borrow_mut() = w.index;
-        if let Some(desc) = w.dict.filter(|d| d.is_allocated()) {
-            used.push(desc.run());
-            let dict = Dictionary::from_bytes(&file.read_run(desc.run())?)?;
-            slot.dictionary().borrow_mut().load(dict, desc);
-        }
     }
     for w in remote {
         let slot = slot_of(types, w.struct_hash)?;
         chain.remote.insert(w.struct_hash, rotation(w.newest));
         *slot.remote_directory().borrow_mut() = w.index;
-        slot.remote_dict()
-            .set(w.dict.unwrap_or(BlockDescriptor::EMPTY));
     }
     for (&at, &(blocks, ref header)) in &headers.seen {
         if header.is_some() && at <= root.at {
