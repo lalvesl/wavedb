@@ -13,7 +13,7 @@
 
 use crate::block::Run;
 use crate::error::StorageResult;
-use crate::page::SlotPage;
+use crate::page::{Compression, SlotPage};
 use crate::page_store::PageStore;
 use crate::pages::{Pages, read_page, run_of};
 use crate::record_cache::Records;
@@ -84,7 +84,7 @@ impl PageStore {
             partial: true,
             next: self.next_address(),
         };
-        let compress = slot.compresses();
+        let compression = slot.compression();
         let shaped = shape(
             &mut index,
             records,
@@ -93,7 +93,7 @@ impl PageStore {
             // Read, not taken out of the page cache: a round that rewrites a
             // page in part (`crate::partial`) leaves it, and it is read next.
             |page| read_page(&self.file, run_of(page), slot.struct_hash()),
-            |page| image_of(page, compress),
+            |page| image_of(page, compression),
         )?;
         Ok(SlotPlan {
             idx,
@@ -107,12 +107,15 @@ impl PageStore {
     }
 }
 
-/// `page` serialised, compressed if `compress` says (zstd, the page alone:
-/// RFC 0081 §9).
+/// `page` serialised as `compression` says (zstd, the page alone: RFC 0081
+/// §9).
 ///
 /// # Errors
 /// A compression fault, or a page whose records pass what its body can
 /// index.
-pub fn image_of(page: &mut SlotPage, compress: bool) -> StorageResult<Vec<u8>> {
-    page.to_bytes(compress)
+pub fn image_of(
+    page: &mut SlotPage,
+    compression: Compression,
+) -> StorageResult<Vec<u8>> {
+    page.encode(compression)
 }
