@@ -197,7 +197,7 @@ impl PageStore {
             &rules,
             slot.struct_hash(),
             |page| take_page(&self.file, run_of(page), slot.struct_hash()),
-            |page| image_of(page, slot.compresses()),
+            |page| image_of(page, compression),
         )?;
         retired.extend(shaped.retired);
         Ok(Some(SlotPlan {
@@ -211,34 +211,45 @@ impl PageStore {
         }))
     }
 
-    /// The pages `keys` name, read, if they are still one per key, side by
-    /// side in one range, on disk, and of one collection.
+    /// What `keys` name, read — a page, or `None` for a hole — if they are
+    /// still one entry per key, side by side in one range, the pages on
+    /// disk and of one collection, the holes flagged with nothing.
     fn still_small(
         &self,
         index: &Pages,
         keys: &[Vec<u8>],
         hash: u64,
-    ) -> StorageResult<Option<Vec<SlotPage>>> {
-        let mut found: Vec<(crate::ordered::Slot, Placed<u8>)> = Vec::new();
+    ) -> StorageResult<Option<Vec<Option<SlotPage>>>> {
+        let mut found: Vec<(Slot, Option<Placed<u8>>)> = Vec::new();
         for key in keys {
-            let Found::Page { at, page } = index.find(key) else {
-                return Ok(None);
+            let (at, page) = match index.find(key) {
+                Found::Page { at, page } if page.meta & EVICTED == 0 => {
+                    (at, Some(page))
+                }
+                Found::Hole(at) if index.meta_at(at) == Some(0) => (at, None),
+                _ => return Ok(None),
             };
             let beside = found.last().is_none_or(|(prev, _)| {
                 prev.range == at.range && prev.entry + 1 == at.entry
             });
-            if page.meta & EVICTED != 0 || !beside {
+            if !beside {
                 return Ok(None);
             }
             found.push((at, page));
         }
         let mut pages = Vec::with_capacity(found.len());
         for &(at, page) in &found {
-            let read = read_page(&self.file, run_of(page), hash)?;
-            pages.push(clip(read, index, at)?);
+            pages.push(match page {
+                Some(page) => {
+                    let read = read_page(&self.file, run_of(page), hash)?;
+                    Some(clip(read, index, at)?)
+                }
+                None => None,
+            });
         }
         let ends: Vec<Option<&[u8]>> = pages
             .iter()
+            .flatten()
             .flat_map(|p| [p.iter().next(), p.iter().last()])
             .flatten()
             .map(|(key, _)| collection(key))
@@ -246,70 +257,6 @@ impl PageStore {
         let one = ends.windows(2).all(|w| w[0] == w[1]);
         Ok(one.then_some(pages))
     }
-}
-
-/// A run of neighbouring entries to merge: a key finding each, and the
-/// blocks of the distinct runs they name.
-pub struct SmallRun {
-    pub keys: Vec<Vec<u8>>,
-    pub blocks: u64,
-}
-
-/// Runs of neighbouring pages in one range, two or more, together at most
-/// `most` blocks — or held together by a page named either side of a span.
-pub fn small_runs(index: &Pages, most: u64) -> Vec<SmallRun> {
-    let pages: Vec<_> = index.pages().collect();
-    // Where each run is named last: a page named either side of a span
-    // (`crate::partial`) is consolidated — its group runs on to its last
-    // name, whatever its size, and the page goes with its spans.
-    let mut last_name = std::collections::BTreeMap::new();
-    for (i, (_, page)) in pages.iter().enumerate() {
-        last_name.insert(page.address, i);
-    }
-    let mut out = Vec::new();
-    let mut run: Vec<Vec<u8>> = Vec::new();
-    // A run named by several entries of the group is read and rewritten
-    // once.
-    let mut seen = std::collections::BTreeSet::new();
-    let (mut blocks, mut last, mut until) = (0, None, None);
-    for (i, &(at, page)) in pages.iter().enumerate() {
-        let beside = last.is_some_and(|(range, entry)| {
-            range == at.range && entry + 1 == at.entry
-        });
-        let more = if seen.contains(&page.address) {
-            0
-        } else {
-            page.blocks
-        };
-        let held = until.is_some_and(|u| i <= u);
-        let evicted = page.meta & EVICTED != 0;
-        if !beside || evicted || (!held && blocks + more > most) {
-            if run.len() >= 2 {
-                let keys = std::mem::take(&mut run);
-                out.push(SmallRun { keys, blocks });
-            }
-            run.clear();
-            seen.clear();
-            (blocks, until) = (0, None);
-        }
-        last = Some((at.range, at.entry));
-        let named_again = last_name.get(&page.address).is_some_and(|&l| l > i);
-        let fits =
-            page.blocks <= most || named_again || seen.contains(&page.address);
-        if fits && !evicted {
-            if seen.insert(page.address) {
-                blocks += page.blocks;
-            }
-            if named_again {
-                until = until.max(last_name.get(&page.address).copied());
-            }
-            run.extend(index.key_of(at));
-        }
-    }
-    if run.len() >= 2 {
-        out.push(SmallRun { keys: run, blocks });
-    }
-    out
 }
 
 #[cfg(test)]
