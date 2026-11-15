@@ -51,9 +51,47 @@ use body::{Columns, Cuts};
 /// Per-page prefix: `payload_len (u32)`.
 const LEN_PREFIX: usize = 4;
 
-/// zstd compression level for page bodies (the crate's default; CPU is free
-/// here — no join processing competes for it).
-const LEVEL: i32 = 3;
+/// How a page's body is stored: raw, or zstd'd alone at a level for the
+/// path that writes it (RFC 0081 §9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compression {
+    /// Never compressed: a type opted out (`#[wavedb(compress = false)]`).
+    Raw,
+    /// The write path's: zstd's default level, cheap beside the write.
+    Fast,
+    /// The cleanup's — a compaction's merges and moves, in idle time —
+    /// where CPU is cheap and a page written is read for long: zstd's
+    /// highest level short of its ultra ones, whose windows a page of at
+    /// most a few hundred KiB cannot use.
+    Thorough,
+}
+
+impl Compression {
+    /// A type's write path: [`Fast`](Self::Fast) if its pages compress.
+    #[must_use]
+    pub const fn of(compresses: bool) -> Self {
+        if compresses { Self::Fast } else { Self::Raw }
+    }
+
+    /// The cleanup's for the same type: [`Thorough`](Self::Thorough) where
+    /// it compresses at all.
+    #[must_use]
+    pub const fn thorough(self) -> Self {
+        match self {
+            Self::Raw => Self::Raw,
+            Self::Fast | Self::Thorough => Self::Thorough,
+        }
+    }
+
+    /// The zstd level, `None` for raw.
+    const fn level(self) -> Option<i32> {
+        match self {
+            Self::Raw => None,
+            Self::Fast => Some(3),
+            Self::Thorough => Some(19),
+        }
+    }
+}
 
 /// A homogeneous in-memory page of records, all of one lane.
 #[derive(Clone)]
@@ -283,7 +321,7 @@ impl<'p> Iterator for Entries<'p> {
 
 #[cfg(test)]
 mod tests {
-    use super::SlotPage;
+    use super::{Compression, SlotPage};
     use crate::block::BLOCK_SIZE;
     use crate::error::StorageError;
     use wavedb_core::{Id, U48};
@@ -493,5 +531,29 @@ mod tests {
             "expected >2x compression on repetitive records: {} vs {raw_total}",
             stored.len()
         );
+    }
+
+    /// The cleanup's level stores the same page in no more bytes than the
+    /// write path's, and it reads back the same: the level is the writer's
+    /// choice alone.
+    #[test]
+    fn the_cleanup_s_level_reads_back_the_same_page() {
+        let mut p = SlotPage::new(2);
+        for i in 0..300u64 {
+            let r = format!("{{\"order\":{i},\"sku\":\"A-{}\"}}", i % 17);
+            p.upsert(&id(i + 1), r.into_bytes());
+        }
+        let fast = p.encode(Compression::Fast).unwrap();
+        let thorough = p.encode(Compression::Thorough).unwrap();
+        assert!(
+            thorough.len() <= fast.len(),
+            "{} > {}",
+            thorough.len(),
+            fast.len()
+        );
+        assert_eq!(SlotPage::from_bytes(&thorough).unwrap(), p);
+        assert_eq!(SlotPage::from_bytes(&fast).unwrap(), p);
+        assert_eq!(Compression::Raw.thorough(), Compression::Raw);
+        assert_eq!(Compression::of(true).thorough(), Compression::Thorough);
     }
 }

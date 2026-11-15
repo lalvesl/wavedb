@@ -19,7 +19,7 @@
 use wavedb_core::wire::{WaveWire, to_wire_checked, view_wire_checked};
 
 use super::body::check;
-use super::{LEN_PREFIX, LEVEL, SlotPage};
+use super::{Compression, LEN_PREFIX, SlotPage};
 use crate::error::{StorageError, StorageResult};
 
 /// The stored envelope: everything needed to open the page, uncompressed.
@@ -59,10 +59,22 @@ impl SlotPage {
     /// [`StorageError::Io`] if zstd fails (allocation-class faults only);
     /// [`StorageError::PageTooLarge`] past what the body can index.
     pub fn to_bytes(&mut self, compress: bool) -> StorageResult<Vec<u8>> {
+        self.encode(Compression::of(compress))
+    }
+
+    /// [`to_bytes`](Self::to_bytes) at the level `compression` names: the
+    /// write path's, or the cleanup's.
+    ///
+    /// # Errors
+    /// As [`to_bytes`](Self::to_bytes).
+    pub fn encode(
+        &mut self,
+        compression: Compression,
+    ) -> StorageResult<Vec<u8>> {
         self.seal()?;
         let raw = &self.body;
-        let payload = if compress {
-            let zstd = zstd::bulk::compress(raw, LEVEL)?;
+        let payload = if let Some(level) = compression.level() {
+            let zstd = zstd::bulk::compress(raw, level)?;
             if zstd.len() < raw.len() {
                 PagePayload::Zstd {
                     raw_len: raw.len() as u32,
