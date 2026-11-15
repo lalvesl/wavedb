@@ -213,7 +213,7 @@ impl PageStore {
     ) -> StorageResult<()> {
         let records = work.records();
         let slot = &self.types[work.idx];
-        let compress = slot.compresses();
+        let compress = slot.compression();
         let rules = Rules {
             target_blocks: REMOTE_TARGET_BLOCKS,
             keep_holes: false,

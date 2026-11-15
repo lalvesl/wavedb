@@ -181,6 +181,11 @@ impl TypeSlot {
     pub(crate) const fn compresses(&self) -> bool {
         self.compress
     }
+
+    /// How the write path stores this type's pages.
+    pub(crate) const fn compression(&self) -> crate::page::Compression {
+        crate::page::Compression::of(self.compress)
+    }
 }
 
 /// The storage half of a node registry — the [`StructStorage`] declarations
