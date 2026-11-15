@@ -348,6 +348,15 @@ in shared commit blocks). Its cost is
 the bytes to rewrite. Ranges with the most benefit per byte go first; hot
 ranges, still being written, can wait.
 
+**An address is an age.** Writing only appends, on the disk and in the
+object store's numbered files, so how far behind the newest block a page
+lies says how long ago it was written — the age the log-structured
+cleaner weighs, for free. The walk that finds what to merge reads every
+entry's address anyway: a range whose pages all lie behind the newest
+quarter of the files has not been written since, and is cold; a data file
+far behind is old, and its live pages are cold too — moved once, they stay
+put, while a young file may still empty by itself.
+
 Every data shard cleans its own indexes. Commit blocks never mix data
 shards: a storage thread gathers each data shard's commit blocks into one
 storage write, but each is whole.
@@ -569,7 +578,38 @@ a torn last block.
    spans, paid only while over budget. A crash after it reopens from the
    batch before (`tests/index_budget.rs`). Holes are not counted yet: a
    merge does not take them (still open, with the cleaner).
-8. **The cleaner's phases and triggers** (§7, §8).
+8. **The cleaner's phases and triggers** (§7, §8). **Landed, in the
+   compaction it extends:**
+   - *Two zstd levels* (`page::Compression`): the write path's (3) and the
+     cleanup's (19, short of the ultra levels a page cannot use — 19
+     against 22 is for the closing measurement). A compaction's merges and
+     moves take the cleanup's: a moved page is decoded and compressed
+     again rather than copied. The inline consolidation of phase 7 stays
+     at the write path's, since a write may wait on its batch.
+   - *Age by address* (above): the files to empty go by
+     `(1 − u) · age / (1 + u)` (`defrag::worth`), and a merge takes a
+     whole page of a cold range (`merge_runs::small_runs`, below
+     `cold_line`), half of a recent one.
+   - *Holes go with the merge*: the holes among and after a run of small
+     pages are taken with it — removed, their quanta to an entry the merge
+     rewrites — and runs of holes alone close up at once (the index
+     installed, the next header naming it). A hole still to be told to the
+     object store parts runs. The budget counts them.
+   - *No restatement without a file to empty*: a store of its own files
+     restated every address on every compaction; with no file worth
+     emptying it now goes straight to the merges and the regroup, as a
+     storage thread's data shard did.
+   - *The quiet trigger* (`Compaction::after_quiet`, 30 s): a store written
+     to and then left alone is compacted once per quiet spell — the idle
+     time the cleaner is for — beside the daily, ceiling and free-space
+     triggers and the index budget (phase 7). Writes are the user's
+     (`PageStore::has_pending`), never the cleanup's own windows.
+   Not built: the *unshare* phase on its own — a compaction's move already
+   carries a pack out a section at a time, and a merge takes a pack's
+   section with its neighbours; a pack whose sections all stay live keeps
+   its few blocks. Nor are a file's ranges rewritten whole by key range
+   when it is emptied: its small runs are merged before the moves, and the
+   rest is moved run by run, compressed again — the entries kept.
 9. **Compression** (§9), as phase 0 decides. **Landed:** no dictionaries
    anywhere — `dictionary.rs`, each type's dictionary state on disk and in
    the object store, its slot in the window and in the header, its moves in

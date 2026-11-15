@@ -119,8 +119,10 @@ fn an_upload_lost_in_a_crash_is_made_again() {
     assert_uploaded(&s, |k| Some(record(k, 0)));
 }
 
-/// Compaction moves pages without changing them: a page the object store
-/// has not received keeps its flag where it lands.
+/// Compaction carries a page the object store has not received with its
+/// flag: compressed again at the cleanup's level, or merged, it may take
+/// fewer blocks where it lands, but it still goes up — every record, and
+/// none removed, reaches the object store.
 #[test]
 fn compaction_keeps_what_is_still_to_upload() {
     let fx = Fixture::new();
@@ -136,7 +138,8 @@ fn compaction_keeps_what_is_still_to_upload() {
     let pending = s.pending_upload_bytes();
     let done = s.compact().unwrap();
     assert!(done.reclaimed_blocks > 0, "{done:?}");
-    assert_eq!(s.pending_upload_bytes(), pending);
+    let after = s.pending_upload_bytes();
+    assert!(after > 0 && after <= pending, "{pending} → {after}");
 
     upload_all(&s);
     assert_uploaded(&s, |k| (k % 3 == 0).then(|| record(k, 0)));
