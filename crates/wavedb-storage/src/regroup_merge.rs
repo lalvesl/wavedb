@@ -26,7 +26,8 @@
 
 use crate::cut::collection;
 use crate::error::{StorageError, StorageResult};
-use crate::ordered::{Found, Placed};
+use crate::merge_runs::small_runs;
+use crate::ordered::{Found, Placed, Slot};
 use crate::page::SlotPage;
 use crate::page_store::PageStore;
 use crate::pages::{EVICTED, Pages, clip, read_page, run_of, take_page};
@@ -46,12 +47,28 @@ impl PageStore {
         if !self.has_disk() {
             return; // object mode: its pages are rewritten by upload
         }
-        let most = self.target_blocks_per_bucket / 2;
+        let (target, cold) = (self.target_blocks_per_bucket, self.cold_line());
         for (slot, ts) in self.types.iter().enumerate() {
             if let Some(index) = ts.directory().borrow().as_ref() {
-                let runs = small_runs(index, most);
+                let runs = small_runs(index, target, cold);
                 queue.extend(runs.into_iter().map(|run| (slot, run.keys)));
             }
+        }
+    }
+
+    /// Below this address a page is cold: written before the newest quarter
+    /// of the files' blocks. Writing only appends, so an address is an age
+    /// (RFC 0081 §7), and a range whose pages all lie below it has not
+    /// been written since. Through a storage thread, whose files this data
+    /// shard does not see whole, nothing is.
+    pub(crate) fn cold_line(&self) -> u64 {
+        let Some(alloc) = self.own() else { return 0 };
+        let files = alloc.borrow().files();
+        match (files.first(), files.last()) {
+            (Some(first), Some(last)) => {
+                last.end - (last.end - first.start) / 4
+            }
+            _ => 0,
         }
     }
 
@@ -79,7 +96,9 @@ impl PageStore {
                 }
                 (slot, batch)
             };
-            let Some(plan) = self.plan_merge(batch.0, &batch.1)? else {
+            // A compaction's: idle time, so its pages take the cleanup's
+            // compression.
+            let Some(plan) = self.plan_merge(batch.0, &batch.1, true)? else {
                 continue;
             };
             images += plan.pages.len();
@@ -95,19 +114,23 @@ impl PageStore {
         }
     }
 
-    /// Slot `idx`'s round merging `runs`, each named by its pages' keys —
+    /// Slot `idx`'s round merging `runs`, each named by its entries' keys —
     /// the runs whose pages are still small neighbours of one collection;
-    /// `None` when none is.
+    /// `None` when none is. `thorough`: the cleanup's compression, not the
+    /// write path's. Runs of holes alone change the index only: it is
+    /// installed at once (the caller holds the gate), and the next header
+    /// names it.
     pub(crate) fn plan_merge(
         &self,
         idx: usize,
         runs: &[Vec<Vec<u8>>],
+        thorough: bool,
     ) -> StorageResult<Option<SlotPlan>> {
         let slot = &self.types[idx];
         let Some(mut index) = slot.directory().borrow().clone() else {
             return Ok(None);
         };
-        let (mut retired, mut unpended) = (Vec::new(), 0);
+        let (mut retired, mut unpended, mut changed) = (Vec::new(), 0, false);
         let mut records: Records = Vec::new();
         for keys in runs {
             let Some(pages) =
@@ -115,17 +138,26 @@ impl PageStore {
             else {
                 continue;
             };
-            // Every page of the run goes: the first entry becomes a hole, the
+            // Every entry of the run goes: the first becomes a hole, the
             // later ones go, their quanta to it, and the records — read
             // through each entry first — are shaped into it afresh. No page
             // is read through a coverage the merge widened: a page named
             // either side of a span still holds the keys under it
-            // (`crate::partial`), and they would come back.
+            // (`crate::partial`), and they would come back. A hole of the
+            // run holds nothing: it goes, or is the first.
             for (i, (key, page)) in keys.iter().zip(&pages).enumerate() {
-                let Found::Page { at, page: placed } = index.find(key) else {
-                    return Err(StorageError::Corrupt(
-                        "a merged page lost its entry",
-                    ));
+                let at = match index.find(key) {
+                    Found::Page { at, page: placed } => {
+                        retired.push(run_of(placed));
+                        unpended += weight(placed.meta, placed.blocks);
+                        at
+                    }
+                    Found::Hole(at) => at,
+                    Found::Uncovered => {
+                        return Err(StorageError::Corrupt(
+                            "a merged entry lost its range",
+                        ));
+                    }
                 };
                 let gone = if i == 0 {
                     index.punch(at, 0)
@@ -133,14 +165,18 @@ impl PageStore {
                     index.remove(at)
                 };
                 gone.ok_or(StorageError::Corrupt("a merged entry refused"))?;
-                retired.push(run_of(placed));
-                unpended += weight(placed.meta, placed.blocks);
+                changed = true;
                 records.extend(
-                    page.iter().map(|(k, v)| (k.to_vec(), Some(v.to_vec()))),
+                    page.iter()
+                        .flat_map(SlotPage::iter)
+                        .map(|(k, v)| (k.to_vec(), Some(v.to_vec()))),
                 );
             }
         }
         if records.is_empty() {
+            if changed {
+                *slot.directory().borrow_mut() = Some(index);
+            }
             return Ok(None);
         }
         records.sort_by(|a, b| a.0.cmp(&b.0));
@@ -149,6 +185,11 @@ impl PageStore {
             keep_holes: self.object.is_some(),
             partial: false,
             next: None,
+        };
+        let compression = if thorough {
+            slot.compression().thorough()
+        } else {
+            slot.compression()
         };
         let shaped = shape(
             &mut index,
