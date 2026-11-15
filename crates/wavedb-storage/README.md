@@ -51,7 +51,7 @@ durability point. This is where most of WaveDB's engineering energy lives.
 | `settle`          | The record cache's side of a settle: what is unsettled, and the cache-eviction budget.                                                             |
 | `compact`         | Compaction's phases and surface (`compact_step`, `compact`, `reclaim`, `space`): move, drop the old addressing, seal, cut and delete.              |
 | `defrag`          | Compaction's moves: the emptiest data file's runs, highest first, verbatim, into the active file — one window write per round, in key order.      |
-| `regroup`         | Compaction's regroup (RFC 0078 §12): runs of scattered ranges' pages moved side by side in key order, so each folds into one sub-header.           |
+| `regroup`         | Compaction's regroup (RFC 0078 §12, RFC 0081 §3): runs of scattered ranges' pages moved side by side in key order, so each folds into one sub-header. |
 | `regroup_merge`   | Compaction's merge: neighbouring pages of one collection that removals left small, together at most half a page, rewritten as one.                |
 | `remote_compact`  | The object store's compaction (RFC 0070 §8): a survey run like a recovery, blind DELETEs below the horizon, mostly free files carried forward. |
 | `convert`         | Converting a database from or to disk mode, offline: the pages flagged for upload, or brought back from the object store.          |
@@ -369,10 +369,13 @@ mutation → the type's record log (RAM) → (client confirmed)
    files, so no write is about to cut it again), with the holes among
    them (RFC 0081 §7–§8), and before
    the sealing it **regroups**: a page rewritten far from its range's
-   base gets a range of its own, and runs of neighbouring ranges of a few
-   pages each have their pages moved the same way, side by side in key
-   order, so the index folds each run into one sub-header
-   ([RFC 0078](../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md) §12).
+   base gets a range of its own — a span over a cold page too, which cuts
+   its range in three — and runs of neighbouring ranges, every two of them
+   one of a few pages, have their pages moved the same way, side by side
+   in key order (a page named either side of a span once, under both), so
+   the index folds each run into one sub-header
+   ([RFC 0078](../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md) §12,
+   RFC 0081 §3); a merge after it takes each such page with its spans.
    The object store's compaction regroups its own index the same way, its
    uploads carrying the scattered runs' pages forward side by side.
    It is stepped, a bounded pass at a time; the node starts one on a daily
@@ -383,7 +386,10 @@ mutation → the type's record log (RAM) → (client confirmed)
    entries fragments and spans add past a clean index are RAM per write,
    so once they pass the budget a batch's first round merges the runs that
    give back the most of them, and a store written without pause keeps its
-   index within the budget plus the clean index of its data.
+   index within the budget plus the clean index of its data. The ranges
+   spans over cold pages cut are not a write's to pay: past the budget the
+   store asks for the cleaner (`PageStore::wants_regroup`), and the node
+   compacts on it.
 
 7. **The object store** ([RFC 0070](../../rfcs/0070-object-storage-backend.md),
    phases 3–6). A database created with `StoreOptions::remote` keeps its pages

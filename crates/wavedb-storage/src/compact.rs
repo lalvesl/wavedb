@@ -32,11 +32,18 @@
 //!    round, side by side in key order, so each folds into one range
 //!    (RFC 0078 §12, [`crate::regroup`]). No header moves, so a store
 //!    through a storage thread with no file to empty regroups too.
-//! 5. **Sealing.** The vacated runs are still named by the newest durable
+//!    Where a span over a cold page cut a range, the run takes the ranges
+//!    either side of it, however large, and a page the span left named
+//!    either side moves once, under both names (RFC 0081 §3).
+//! 5. **Consolidating.** What the regroup brought side by side is merged
+//!    as the merging step merges — a page a span left named either side
+//!    with the spans over it, now in one range — so its page lands beside
+//!    them, where its range reaches.
+//! 6. **Sealing.** The vacated runs are still named by the newest durable
 //!    batch — a crash would reopen from it — so they are only deferred
 //!    frees. The next batch to end names the moved state; once it is
 //!    durable they are holes ([RFC 0072] §8).
-//! 6. **Reclaiming.** Every file's free tail is cut off, and a file left
+//! 7. **Reclaiming.** Every file's free tail is cut off, and a file left
 //!    empty is deleted ([`reclaim`](PageStore::reclaim)).
 //!
 //! Safety is the batch's: a moved run is written before any header names
@@ -99,6 +106,9 @@ pub enum Phase {
     Regrouping {
         since: u64,
     },
+    Consolidating {
+        since: u64,
+    },
     Sealing {
         since: u64,
         mark: u64,
@@ -152,34 +162,13 @@ impl PageStore {
         loop {
             match self.compaction.get() {
                 Phase::Idle => {
-                    let since = self.reclaimed();
-                    if !self.has_disk() {
-                        self.compaction.set(Phase::Moving { since });
-                        continue;
-                    }
-                    let emptying = if self.own().is_some() {
-                        self.roll_if_worth_emptying()
-                    } else {
-                        // The storage shard says which files to empty.
-                        let percent = self.victim_free_percent;
-                        let victims = self.shared_victims(percent).await?;
-                        let any = !victims.is_empty();
-                        *self.victims.borrow_mut() = victims;
-                        any
+                    let Some(phase) = self.begin(self.reclaimed()).await?
+                    else {
+                        return Ok(Compacting::Done {
+                            reclaimed_blocks: 0,
+                        });
                     };
-                    if !emptying {
-                        // No file to empty, so no header to restate: the
-                        // merges and the regroup alone.
-                        let Some(phase) = self.reorganizing(since) else {
-                            return Ok(Compacting::Done {
-                                reclaimed_blocks: 0,
-                            });
-                        };
-                        self.compaction.set(phase);
-                        continue;
-                    }
-                    self.record_all();
-                    self.compaction.set(Phase::Restating { since });
+                    self.compaction.set(phase);
                 }
                 Phase::Restating { since } => {
                     self.settle_durable();
@@ -216,10 +205,21 @@ impl PageStore {
                     let (images, blocks, finished) =
                         self.regroup_pass(budget_blocks).await?;
                     if finished {
+                        self.plan_merges();
+                        self.compaction.set(Phase::Consolidating { since });
+                    }
+                    return Ok(Compacting::Moved { images, blocks });
+                }
+                Phase::Consolidating { since } => {
+                    let (images, blocks, finished) =
+                        self.merge_pass(budget_blocks).await?;
+                    if finished {
                         let mark = self.seal_mark();
                         self.compaction.set(Phase::Sealing { since, mark });
                     }
-                    return Ok(Compacting::Moved { images, blocks });
+                    if images > 0 {
+                        return Ok(Compacting::Moved { images, blocks });
+                    }
                 }
                 Phase::Sealing { since, mark } => {
                     self.settle_durable();
@@ -236,6 +236,34 @@ impl PageStore {
                 }
             }
         }
+    }
+
+    /// Where a compaction begun with `since` reclaimed starts: restating,
+    /// when a file is worth emptying — or `None`, when nothing is to do.
+    ///
+    /// # Errors
+    /// A storage thread gone.
+    async fn begin(&self, since: u64) -> StorageResult<Option<Phase>> {
+        if !self.has_disk() {
+            return Ok(Some(Phase::Moving { since }));
+        }
+        let emptying = if self.own().is_some() {
+            self.roll_if_worth_emptying()
+        } else {
+            // The storage shard says which files to empty.
+            let percent = self.victim_free_percent;
+            let victims = self.shared_victims(percent).await?;
+            let any = !victims.is_empty();
+            *self.victims.borrow_mut() = victims;
+            any
+        };
+        if !emptying {
+            // No file to empty, so no header to restate: the merges and the
+            // regroup alone.
+            return Ok(self.reorganizing(since));
+        }
+        self.record_all();
+        Ok(Some(Phase::Restating { since }))
     }
 
     /// Where the frees stand when the moves end: the deferred frees of a

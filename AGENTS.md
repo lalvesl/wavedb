@@ -262,9 +262,11 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   batch over the moves is durable, cuts the free tails and deletes the
   emptied files. Its merges take the holes beside them, and merge a cold
   range (all its pages behind the newest quarter of the files) into full
-  pages, a recent one to half (RFC 0081 §7–§8); stepped, on the node's
-  triggers (daily UTC time, disk ceiling, free share, a quiet spell after
-  writes — RFC 0071, RFC 0081 §7).
+  pages, a recent one to half (RFC 0081 §7–§8); its regroup takes back the
+  ranges a span over a cold page cut (the whole range moved, RFC 0081 §3);
+  stepped, on the node's triggers (daily UTC time, disk ceiling, free
+  share, a quiet spell after writes, an index past its budget by such
+  ranges — RFC 0071, RFC 0081 §6–§7).
   A database created with `StoreOptions::remote` (`Server::object_store` on a
   node) keeps its pages in an S3-compatible object store, the disk caching
   them (RFC 0070 phase 3): settle rounds flag the pages they write, `upload`

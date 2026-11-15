@@ -190,7 +190,9 @@ impl Owned {
     }
 
     /// Start or continue store `i`'s compaction, if its triggers say so —
-    /// the quiet one weighing whether it `wrote` this tick.
+    /// the quiet one weighing whether it `wrote` this tick — or the store
+    /// asks for a regroup: its index past its budget by ranges only the
+    /// cleaner folds (RFC 0081 §6).
     async fn compact(
         &self,
         i: usize,
@@ -210,6 +212,7 @@ impl Owned {
         let quiet = policy.quiet_due(&mut armed, wrote, now);
         if store.is_compacting()
             || quiet
+            || store.wants_regroup()
             || policy.due(&mut armed, store.space(), partitions, now)
         {
             match store.compact_pass(policy.budget_blocks).await {
