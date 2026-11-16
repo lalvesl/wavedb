@@ -338,7 +338,8 @@ adds two phases to it:
 **When it runs:**
 - in idle time, between a node's jobs, as compaction steps today;
 - on the schedule compaction already has (daily UTC time);
-- on the index budget (§6), inline;
+- on the index budget (§6): inline for its merges, and for the ranges a
+  regroup folds, by asking for the cleaner;
 - on space, as today.
 
 **What it takes first:** the log-structured filesystem's question, answered
@@ -533,29 +534,43 @@ a torn last block.
    is rewritten whole, so is one whose span would not take fewer blocks,
    and so is one that would keep less than half of what it held live — the
    bound on the dead space a span leaves in its page until the cleaner
-   (phase 8). Two costs to know: a run named by two entries of one slot is
-   carried twice by a compaction's move, a copy each, until the cleaner;
-   and every new entry changes its range's shape, so its range is recorded
+   (phase 8). One cost to know: every new entry changes its range's shape, so its range is recorded
    whole in the round's header (up to 1 024 entries, ~6 KiB) — the micro
    row's headers grow from 4 to ~7.6 KiB a round. The index diff of §1 —
    entries inserted, not ranges restated — is where that goes.
    The micro row's durable update (probe, 4 000 rows) is 19.1 KiB a round,
    from 137: the pack, the header, the roots block.
-   **What entries cannot do, and the guard for it.** An entry addresses
+   **What entries cannot do, and who pays for it.** An entry addresses
    12 bits of blocks from its range's base, 16 MiB. A span's run lands at
    the end of the active file; the page it lies over may be far behind.
    Then no entry of the range can name the span, `isolate` gives it a range
-   of its own — the page's range cut in three — and a store of cold pages
-   updated at random grew a range per update (580 for 2 000 records and
-   666 updates, from 7; the compaction then could not merge across them).
-   That is this RFC's own argument for the slice's `offset`, which a run
-   anywhere ahead fits, and the entries do not have it. So a span is taken
-   only where the range reaches where the round's pages land
-   (`PageIndex::reaches`, a quarter of the window to spare): a page farther
-   behind is rewritten whole as before, which brings it near, and its next
-   changes are spans. The same 666 updates wrote 20 939 blocks against
-   33 157 without spans, in 4 ranges. The overlay with a wide offset is the
-   way to have spans over cold pages too; it is left for after this phase.
+   of its own, and the page's range is cut in three: the part before, the
+   span, the part after — both parts as large as before. A first answer
+   was a guard: a span only where the range reaches where the round's
+   pages land, a page farther behind rewritten whole. It made the update
+   of a cold page pay its page again, and was dropped: **a write pays its
+   span, and the ranges it leaves are the cleaner's.** The overlay with a
+   wide offset (§3) is dropped too — a slice is an entry here, and the
+   alternative to an entry the range cannot name is one range more, not a
+   second kind of reference. Measured (`tests/far_spans.rs`: 2 000 records
+   of ~1 KiB, 24 MiB of another type after them, then 666 durable updates
+   at random): the updates wrote 1 339 blocks, about two each against a
+   page's six or seven, and took `A`'s index from 4 ranges and 843 B to
+   688 ranges and 80 KB. The compaction then gave nothing back (581
+   ranges): the regroup took only runs of ranges each under 8 pages, and
+   the parts either side of a span are larger; a merge of the page with
+   its span lands far behind again, and is isolated again. So the regroup
+   takes **every two neighbouring ranges one of which is small**
+   (`PageIndex::scattered_runs`) — the parts either side go with their
+   span, two large ranges side by side are not worth a move — as many as
+   one window addresses, moved 128 pages a round; a page
+   named either side of a span is moved once under both names
+   (`PlannedPage::also`, counted by `shares`), not a copy each; and a
+   merge after the regroup (`Phase::Consolidating`) takes the page with
+   its spans, now in one range and landing where it reaches. The same
+   compaction leaves 4 ranges and 1 088 B. Until something better is
+   found, that move — the whole cut range — is the price of a span over a
+   cold page, paid on idle time.
    Two read-path fixes came with it: a round reads the pages it loads out
    of the page cache instead of taking them out (a page rewritten in part
    stays, and is read next), and a run an entry stops naming while others
@@ -577,7 +592,12 @@ a torn last block.
    pages. One such round a batch: the whole-page rewrites of before the
    spans, paid only while over budget. A crash after it reopens from the
    batch before (`tests/index_budget.rs`). Holes are not counted yet: a
-   merge does not take them (still open, with the cleaner).
+   merge does not take them (still open, with the cleaner). The ranges a
+   regroup would fold (phase 6) count too, at `PageIndex::range_bytes`
+   each, but no batch pays for them — folding them moves whole ranges.
+   A walk that finds them asks for the cleaner
+   (`PageStore::wants_regroup`, a node's compaction trigger) and counts
+   them clean until it runs, so the batches after it do not walk again.
 8. **The cleaner's phases and triggers** (§7, §8). **Landed, in the
    compaction it extends:**
    - *Two zstd levels* (`page::Compression`): the write path's (3) and the
@@ -599,6 +619,9 @@ a torn last block.
      restated every address on every compaction; with no file worth
      emptying it now goes straight to the merges and the regroup, as a
      storage thread's data shard did.
+   - *The regroup takes the ranges spans cut* (phase 6): neighbouring
+     ranges one of which is small, a page named twice moved once, and a
+     merge after it — the consolidating step — for the page and its spans.
    - *The quiet trigger* (`Compaction::after_quiet`, 30 s): a store written
      to and then left alone is compacted once per quiet spell — the idle
      time the cleaner is for — beside the daily, ceiling and free-space
@@ -673,4 +696,7 @@ a torn last block.
 8. How a range's prefix is held. It stays a `Box<[u8]>` per range (§3a);
    neighbouring ranges of one collection repeat the same bytes, ~32 B each.
 9. How many slices a range may hold before it is consolidated, so its
-   search stays short.
+   search stays short. (Slices are entries now, phase 6: a range holds at
+   most 1 024 of them, and its span count is its entries'.)
+10. A cheaper answer to a span its range cannot name than moving the whole
+    range on idle time (phase 6).
