@@ -24,6 +24,9 @@ pub struct Movable {
     pub slot: usize,
     /// A key that finds the page.
     pub key: Vec<u8>,
+    /// Keys of the other entries naming it, if any: a page a span left
+    /// named either side (`crate::partial`) moves once, under both.
+    pub also: Vec<Vec<u8>>,
     /// Its flags.
     pub flags: u8,
     pub run: Run,
@@ -108,13 +111,16 @@ impl PageStore {
             let plan = plans
                 .entry(m.slot)
                 .or_insert_with(|| SlotPlan::verbatim(m.slot, index));
+            // The original goes with its last name (`crate::shares`).
+            plan.retired
+                .extend(std::iter::repeat_n(m.run, 1 + m.also.len()));
             plan.pages.push(PlannedPage {
                 key: m.key,
                 image: bytes,
                 decoded: None,
                 flags: m.flags,
+                also: m.also,
             });
-            plan.retired.push(m.run);
             // The copy carries the flag; the original takes its weight with
             // it.
             plan.unpended += weight(m.flags, m.run.count);
@@ -222,21 +228,17 @@ impl PageStore {
         out
     }
 
-    /// Every page run on disk.
+    /// Every page run on disk, once per type naming it.
     fn movable_runs(&self) -> impl Iterator<Item = Movable> + '_ {
         self.types.iter().enumerate().flat_map(|(slot, ts)| {
-            let mut out = Vec::new();
+            let mut out: Vec<Movable> = Vec::new();
+            let mut seen: BTreeMap<u64, usize> = BTreeMap::new();
             if let Some(index) = ts.directory().borrow().as_ref() {
                 for (at, page) in index.pages() {
                     if page.meta & EVICTED == 0
                         && let Some(key) = index.key_of(at)
                     {
-                        out.push(Movable {
-                            slot,
-                            key,
-                            flags: page.meta,
-                            run: run_of(page),
-                        });
+                        named(&mut out, &mut seen, slot, key, page);
                     }
                 }
             }
@@ -268,6 +270,31 @@ impl PageStore {
         buf.truncate(len);
         Ok(buf)
     }
+}
+
+/// `page`, found by `key`, onto `out`: a run already there — named either
+/// side of a span — takes the key as another name. `seen` says where each
+/// run is in `out`.
+pub fn named(
+    out: &mut Vec<Movable>,
+    seen: &mut BTreeMap<u64, usize>,
+    slot: usize,
+    key: Vec<u8>,
+    page: crate::ordered::Placed<u8>,
+) {
+    let run = run_of(page);
+    if let Some(&i) = seen.get(&run.start) {
+        out[i].also.push(key);
+        return;
+    }
+    seen.insert(run.start, out.len());
+    out.push(Movable {
+        slot,
+        key,
+        also: Vec::new(),
+        flags: page.meta,
+        run,
+    });
 }
 
 /// What emptying `v` is worth beside what it costs, as the log-structured
