@@ -26,7 +26,7 @@ mod persist;
 mod reshape;
 
 pub use access::{COUNT_SATURATED, MAX_RANGE_ENTRIES};
-pub use fold::SCATTERED;
+pub use fold::{SCATTERED, Scattered};
 pub use head::{QUANTA, Shape, SubHeader, q_of};
 pub use index::{Entries, Found, PageIndex, Placed, Slot};
 pub use journal::Journal;

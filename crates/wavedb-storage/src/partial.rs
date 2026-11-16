@@ -67,16 +67,10 @@ where
         return Ok(Some(st));
     }
     let keys: Vec<Vec<u8>> = st.page.iter().map(|(k, _)| k.to_vec()).collect();
-    // Where the span's run lands, its range must name it: a range of its
-    // own for every span would cost a sub-header each (RFC 0081 §3).
-    let reached = rules.next.is_none_or(|next| {
-        keys.first()
-            .and_then(|k| entry(index, k).ok())
-            .is_some_and(|at| index.reaches(at, next))
-    });
-    if !reached {
-        return Ok(Some(st));
-    }
+    // A span its range cannot name where it lands — a page written long
+    // ago, far behind — gets a range of its own (`PageIndex::isolate`):
+    // a sub-header in RAM rather than the page written whole, until the
+    // regroup folds it back (RFC 0081 §3, phase 6).
     let i0 = keys.partition_point(|k| k < lo);
     let j0 = keys.partition_point(|k| k <= hi);
     if keys.is_empty() || !worth(&st, (i0, j0), blocks) {
@@ -272,12 +266,11 @@ mod tests {
         changes(keys, &puts)
     }
 
-    fn rules(next: Option<u64>) -> Rules {
+    fn rules() -> Rules {
         Rules {
             target_blocks: 16,
             keep_holes: false,
             partial: true,
-            next,
         }
     }
 
@@ -285,25 +278,6 @@ mod tests {
     fn changes(
         keys: &[[u8; 3]],
         records: &[([u8; 3], bool)],
-    ) -> (Pages, Shaped) {
-        changes_with(keys, records, None)
-    }
-
-    /// As [`round`], the round's pages landing about `next`.
-    fn round_with(
-        keys: &[[u8; 3]],
-        records: &[[u8; 3]],
-        next: Option<u64>,
-    ) -> (Pages, Shaped) {
-        let puts: Vec<([u8; 3], bool)> =
-            records.iter().map(|&k| (k, true)).collect();
-        changes_with(keys, &puts, next)
-    }
-
-    fn changes_with(
-        keys: &[[u8; 3]],
-        records: &[([u8; 3], bool)],
-        next: Option<u64>,
     ) -> (Pages, Shaped) {
         let mut ix = disk_pages(true);
         let page = Placed {
@@ -313,7 +287,7 @@ mod tests {
         };
         let at = ix.place(&keys[0], page).unwrap();
         ix.set_count(at, keys.len()).unwrap();
-        let rules = rules(next);
+        let rules = rules();
         let held = of(keys);
         let load = |_| -> StorageResult<SlotPage> { Ok(held.clone()) };
         let records = records
@@ -465,21 +439,10 @@ mod tests {
         small.upsert(&[0, 1, 0], vec![1; 40]);
         let load = |_| -> StorageResult<SlotPage> { Ok(small.clone()) };
         let records = vec![(vec![0, 2, 0], Some(vec![2; 40]))];
-        let shaped = shape(&mut ix, records, &rules(None), SH, load, |p| {
-            p.to_bytes(false)
-        })
-        .unwrap();
+        let shaped =
+            shape(&mut ix, records, &rules(), SH, load, |p| p.to_bytes(false))
+                .unwrap();
         assert_eq!(shaped.retired.len(), 1, "rewritten whole");
         assert_eq!(written(&shaped), [vec![[0, 1, 0], [0, 2, 0]]]);
-    }
-
-    /// A page whose range cannot name a run where the round's pages land
-    /// is rewritten whole: a span there would need a range of its own.
-    #[test]
-    fn a_page_its_range_cannot_reach_is_rewritten() {
-        let (_, near) = round_with(&nine(), &[[0, 5, 0]], Some(100));
-        assert!(near.retired.is_empty(), "within the window: a span");
-        let (_, far) = round_with(&nine(), &[[0, 5, 0]], Some(1 << 20));
-        assert_eq!(far.retired.len(), 1, "past the window: rewritten");
     }
 }

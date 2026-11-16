@@ -82,7 +82,6 @@ impl PageStore {
             target_blocks: self.target_blocks_per_bucket,
             keep_holes: self.object.is_some(),
             partial: true,
-            next: self.next_address(),
         };
         let compression = slot.compression();
         let shaped = shape(

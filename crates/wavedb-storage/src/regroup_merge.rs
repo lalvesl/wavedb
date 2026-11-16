@@ -184,7 +184,6 @@ impl PageStore {
             target_blocks: self.target_blocks_per_bucket,
             keep_holes: self.object.is_some(),
             partial: false,
-            next: None,
         };
         let compression = if thorough {
             slot.compression().thorough()

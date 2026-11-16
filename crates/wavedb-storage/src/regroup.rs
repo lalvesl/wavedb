@@ -14,8 +14,10 @@
 //!
 //! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::compact::Phase;
-use crate::defrag::{Movable, ROUND_IMAGES};
+use crate::defrag::{Movable, ROUND_IMAGES, named};
 use crate::error::StorageResult;
 use crate::ordered::Found;
 use crate::page_store::PageStore;
@@ -38,8 +40,11 @@ impl PageStore {
     }
 
     /// Queue every type's scattered runs for the passes to move: once per
-    /// compaction, so a run whose fold did not take is not moved again.
+    /// compaction, so a run whose fold did not take is not moved again. A
+    /// run may take many rounds: one window addresses it all, so the rounds
+    /// need only follow each other.
     pub(crate) fn plan_regroup(&self) {
+        self.budget.regrouped();
         let mut queue = self.regroup.borrow_mut();
         queue.clear();
         if !self.has_disk() {
@@ -47,7 +52,7 @@ impl PageStore {
         }
         for (slot, ts) in self.types.iter().enumerate() {
             if let Some(index) = ts.directory().borrow().as_ref() {
-                let runs = index.scattered(ROUND_IMAGES);
+                let runs = index.scattered(usize::MAX);
                 queue.extend(runs.into_iter().map(|keys| (slot, keys)));
             }
         }
@@ -111,8 +116,9 @@ impl PageStore {
         }
     }
 
-    /// One pass: queued runs moved, a round each, until about `budget`
-    /// blocks. `finished` once the queue is empty.
+    /// One pass: queued runs moved, [`ROUND_IMAGES`] pages a round, until
+    /// about `budget` blocks; a run cut short goes back to the queue's
+    /// front. `finished` once the queue is empty.
     pub(crate) async fn regroup_pass(
         &self,
         budget: u64,
@@ -126,53 +132,56 @@ impl PageStore {
             else {
                 return Ok((images, blocks, true));
             };
-            let loaded = self.gathered(slot, &keys)?;
-            if loaded.is_empty() {
-                continue;
+            let mut rest = self.movables(slot, &keys);
+            while !rest.is_empty() {
+                if blocks >= budget {
+                    let keys = rest
+                        .into_iter()
+                        .flat_map(|m| std::iter::once(m.key).chain(m.also))
+                        .collect();
+                    self.regroup.borrow_mut().push_front((slot, keys));
+                    return Ok((images, blocks, false));
+                }
+                let round: Vec<Movable> =
+                    rest.drain(..rest.len().min(ROUND_IMAGES)).collect();
+                let mut loaded = Vec::with_capacity(round.len());
+                for m in round {
+                    // Idle time: the cleanup's compression.
+                    let bytes = self.image_of(&m)?;
+                    blocks += blocks_for(bytes.len());
+                    loaded.push((m, bytes));
+                }
+                images += loaded.len();
+                self.move_round(loaded).await?;
             }
-            images += loaded.len();
-            blocks += loaded.iter().map(|l| blocks_for(l.1.len())).sum::<u64>();
-            self.move_round(loaded).await?;
             if blocks >= budget {
                 return Ok((images, blocks, false));
             }
         }
     }
 
-    /// The pages `keys` find now, and their bytes — each once: writes since
-    /// the run was queued may have rewritten, merged or evicted some.
-    fn gathered(
-        &self,
-        slot: usize,
-        keys: &[Vec<u8>],
-    ) -> StorageResult<Vec<(Movable, Vec<u8>)>> {
-        let mut movable: Vec<Movable> = Vec::with_capacity(keys.len());
+    /// The pages `keys` find now, each run once under every key naming it
+    /// (`crate::defrag::named`): writes since the run was queued may have
+    /// rewritten, merged or evicted some.
+    fn movables(&self, slot: usize, keys: &[Vec<u8>]) -> Vec<Movable> {
+        let mut movable = Vec::with_capacity(keys.len());
+        let mut seen = BTreeMap::new();
+        let mut found = BTreeSet::new();
         if let Some(index) = self.types[slot].directory().borrow().as_ref() {
             for key in keys {
-                let Found::Page { page, .. } = index.find(key) else {
+                let Found::Page { at, page } = index.find(key) else {
                     continue;
                 };
-                let run = run_of(page);
+                // Each entry once, however many keys find it.
                 if page.meta & EVICTED != 0
-                    || movable.iter().any(|m| m.run.start == run.start)
+                    || !found.insert((at.range, at.entry))
                 {
                     continue;
                 }
-                movable.push(Movable {
-                    slot,
-                    key: key.clone(),
-                    flags: page.meta,
-                    run,
-                });
+                named(&mut movable, &mut seen, slot, key.clone(), page);
             }
         }
         movable
-            .into_iter()
-            .map(|m| {
-                let bytes = self.image_of(&m)?;
-                Ok((m, bytes))
-            })
-            .collect()
     }
 }
 
