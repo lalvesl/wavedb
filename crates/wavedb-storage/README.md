@@ -338,7 +338,10 @@ mutation → the type's record log (RAM) → (client confirmed)
    once — never a page written twice in one round.
 5. **The window ends with its header** — whole blocks naming the
    addresses it changed (sized once its pages are placed, a trailer in its
-   last block saying how long it is; RFC 0079), type by type, and `last`, the header before with entries for that
+   last block saying how long it is; RFC 0079) — or, when it fits after the
+   page of the window's last block, a one-block run, written in that block,
+   its trailer saying where it starts, so a durable round of small pages is
+   one block (RFC 0081 §1) — type by type, and `last`, the header before with entries for that
    type; its spare room restates the addresses of the type restated longest
    ago, so every type keeps appearing near the newest header. The round that
    settles the last of the batch marks its header `end_of_batch`, and the

@@ -230,7 +230,10 @@ no DTO layer and no query DSL (filtered reads = `#[server]` functions).
   nothing written opens none) marks the logs' ends and settles them in
   bounded rounds, each one window `[pages][header]` at the end of the active
   file, the header — whole blocks, sized to what it names, a trailer in
-  its last block saying how long it is (RFC 0079) — naming the addresses the round changed (and in
+  its last block saying how long it is (RFC 0079); one that fits after the
+  page of the window's last block, a one-block run, is written in that
+  block, so a durable round of small pages is one block (RFC 0081 §1) —
+  naming the addresses the round changed (and in
   its spare room restating those of the type restated longest ago); the
   round that ends the batch says so, and **one barrier** makes the batch
   durable — inline, or on the worker's helper thread (`use_barrier`,

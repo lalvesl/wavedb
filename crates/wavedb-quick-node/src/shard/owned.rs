@@ -561,12 +561,14 @@ mod tests {
 
         // Past the ceiling, the uploaded pages leave the disk, and the
         // compaction it triggers finds nothing worth emptying in a file of
-        // three blocks: it ends at once, restating nothing. The records
-        // still read back, from the object store.
+        // a few blocks: it ends at once, restating nothing. The records
+        // still read back, from the object store. A ceiling of nothing: a
+        // round of one small page is one block, its header in it (RFC 0081
+        // §1).
         assert!(store.is_resident(SH, id(7)));
         let policy = Maintenance {
             compaction: Compaction {
-                above_bytes: Some(4096),
+                above_bytes: Some(0),
                 above_free_percent: None,
                 daily_at: None,
                 after_quiet: None,

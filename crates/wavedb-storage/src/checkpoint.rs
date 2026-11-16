@@ -21,11 +21,14 @@
 
 use crate::block::Run;
 use crate::error::StorageResult;
+use crate::header_room::HeaderSize;
 use crate::page_store::PageStore;
 use crate::pages::PENDING;
 use crate::plan::SlotPlan;
 use crate::record_cache::Records;
-use crate::window::{Round, assemble, carve, install, size_of, targets_of};
+use crate::window::{
+    Round, Target, assemble, carve, install, size_of, targets_of,
+};
 
 /// What a window writes — which decides the "not uploaded yet" flag of the
 /// pages it places. Every window appends to the active data file.
@@ -190,11 +193,19 @@ impl PageStore {
             &self.types,
             &round.plans,
             (&round.targets, &sizes),
-            round.marks.map_or((0, 0), |(run, size)| {
-                (u64::from(size.blocks), run.count - u64::from(size.blocks))
-            }),
+            round.marks.filter(|m| m.1.offset == 0).map_or(
+                (0, 0),
+                |(run, size)| {
+                    (u64::from(size.blocks), run.count - u64::from(size.blocks))
+                },
+            ),
         );
-        let windows = (round.body, round.marks.map(|(run, _)| run));
+        // A header in the body's last block is written, and abandoned, with
+        // it.
+        let windows = (
+            round.body,
+            round.marks.filter(|m| m.1.offset == 0).map(|(run, _)| run),
+        );
         let built = marked.and_then(|()| self.build(round));
         if built.is_err() {
             for window in
@@ -223,6 +234,10 @@ impl PageStore {
             return Ok(());
         }
         let size = self.header_size(&round.plans, body);
+        if let Some(shared) = shared_block(round, size) {
+            round.marks = Some(shared); // no block of its own to reserve
+            return Ok(());
+        }
         // No roots block: a store of its own files roots in its newest whole
         // batch's ending header, and a storage thread ends its own writes
         // with one (RFC 0073 §4, RFC 0081 §1).
@@ -254,16 +269,29 @@ impl PageStore {
             let (bytes, e) =
                 self.header_at((run.start, size), &mut plans, end)?;
             ended = e;
-            Some((run, bytes))
+            Some((run, size.offset, bytes))
         } else {
             None
         };
-        let body = body.map(|w| (w, assemble(w, &plans, &targets, &runs)));
+        let mut body = body.map(|w| (w, assemble(w, &plans, &targets, &runs)));
+        let (marked, shared) = match (marked, body.as_mut()) {
+            // The header ends the body's last block, after its page.
+            (Some((run, offset, header)), Some((_, bytes))) if offset > 0 => {
+                let at = bytes.len() - header.len();
+                bytes[at..].copy_from_slice(&header);
+                (None, Some(run))
+            }
+            (marked, _) => (marked.map(|(run, _, bytes)| (run, bytes)), None),
+        };
         if let Err(e) = self.write_windows(body, marked) {
             self.fail();
             return Err(e); // the round's one write
         }
         self.hold_written(&mut plans, &targets, &runs);
+        if let Some(run) = shared {
+            // The header is one more name of its page's run.
+            self.shares.borrow_mut().share(run.start, 2);
+        }
         // Named once more before any name goes: a page a round rewrote in
         // part is named either side of the part, whatever else it retired.
         for run in plans.iter_mut().flat_map(|p| std::mem::take(&mut p.named)) {
@@ -298,4 +326,20 @@ impl PageStore {
             *self.types[work.idx].directory().borrow_mut() = Some(work.index);
         }
     }
+}
+
+/// Where the round's header goes if it fits whole after the page of the
+/// body's last block, a run of one block — a durable round of small pages
+/// then writes one block, the pack and its header (RFC 0081 §1) — and its
+/// size there.
+fn shared_block(round: &Round, size: HeaderSize) -> Option<(Run, HeaderSize)> {
+    let (target, run) = round.targets.iter().zip(&round.runs).next_back()?;
+    let run = (*run).filter(|r| r.count == 1)?;
+    let image = match target {
+        Target::Page { plan, page } => {
+            round.plans[*plan].pages[*page].image.len()
+        }
+        Target::Pack { image, .. } => image.len(),
+    };
+    size.after(image).map(|size| (run, size))
 }
