@@ -513,8 +513,24 @@ a torn last block.
    the files' end can be named. A storage thread still ends each write
    with one roots block for all its data shards. The micro row's durable
    insert is two blocks a round, the pack and the header: 8–10 KiB; its
-   durable update 13.6 KiB. Folding the header into the pack — one block —
-   is what is left of the commit block. A finding on the way: while a type's dictionary grows, every round
+   durable update 13.6 KiB.
+   **Then the header in the pack's block** (`checkpoint::shared_block`):
+   a header of one block that fits whole after the page of its window's
+   last block — a run of one block, a pack or a page — is written there,
+   at an offset its trailer gives (`trailer::close_after`, read back by
+   `Header::decode` from the trailer of its first block), and reserves
+   no block of its own. A durable round of small pages is **one block**
+   (`tests/packs.rs`, `tests/shared_block.rs`). The block is named by its
+   pages' entries and by the header while it is live — one name more in
+   `shares`, counted again at every open from the live headers
+   (`PageStore::reopened`) — and goes with the last of them: a header
+   dropped as dead releases its block rather than freeing it. A
+   reconstruction checks the end header's own block as a page of its
+   batch (`roots_find::whole`), so a torn pack under an intact header
+   still gives way to the batch before. The rest of §1 — sections and the
+   index diff in one envelope — is not built: the window is already one
+   write, a small one one block, and a larger one gains a block at most.
+   A finding on the way: while a type's dictionary grows, every round
    writes it whole again (11 blocks a round in that test, compressed) — §9's
    case for no dictionary in the hot path.
 6. **Slices** (§3, §4). Updates, middle inserts, removals, with their counts.
