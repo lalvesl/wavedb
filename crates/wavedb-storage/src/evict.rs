@@ -252,6 +252,7 @@ impl PageStore {
             image,
             decoded: Some(restored),
             flags: 0,
+            also: Vec::new(),
         });
         self.place_restored(plan).await?;
         if let Some(object) = &self.object {

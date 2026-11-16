@@ -50,8 +50,6 @@ pub struct Link {
     urgent: Cell<bool>,
     /// The storage shard's space, as the last answer told it.
     space: Cell<Space>,
-    /// Where the last window reserved ended: about where the next lands.
-    reached: Cell<u64>,
 }
 
 impl Link {
@@ -65,7 +63,6 @@ impl Link {
             frees: RefCell::new(Vec::new()),
             urgent: Cell::new(false),
             space: Cell::new(Space::default()),
-            reached: Cell::new(0),
         }
     }
 
@@ -123,20 +120,8 @@ impl PageStore {
             self.file.forget_file(file);
         }
         link.space.set(reserved.space);
-        link.reached.set(reserved.run.end());
         self.chain.borrow_mut().roots.newest = Some(reserved.roots);
         Ok(reserved.run)
-    }
-
-    /// About where the next window lands: its own files' end, or the end of
-    /// the window a storage thread last reserved it — `None` before any.
-    pub(crate) fn next_address(&self) -> Option<u64> {
-        match &self.storage {
-            Storage::Own(alloc) => Some(alloc.borrow().next_start()),
-            Storage::Shared(link) => {
-                Some(link.reached.get()).filter(|&r| r > 0)
-            }
-        }
     }
 
     /// This data shard's share of its storage shard's space: its own

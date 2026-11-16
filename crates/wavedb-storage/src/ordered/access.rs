@@ -2,7 +2,7 @@
 //! its pages, naming a page by a key, sizing a page, and keeping a range
 //! within what one header can restate.
 
-use super::head::{Shape, SubHeader, q_of};
+use super::head::{Shape, q_of};
 use super::index::{Found, PageIndex, Placed, Range, Slot};
 use super::journal::Journal;
 
@@ -69,15 +69,23 @@ impl<M: Copy + Default> PageIndex<M> {
         (size_of::<u32>() + size_of::<M>() + usize::from(self.counted)) as u64
     }
 
-    /// The RAM the index holds, estimated from its parts: its sub-headers
-    /// and their prefixes, and its entries ([`entry_bytes`](Self::entry_bytes)
-    /// each). O(ranges).
+    /// Bytes a range takes beside its entries, its prefix aside: its
+    /// sub-header and its vectors.
+    #[must_use]
+    pub const fn range_bytes(&self) -> u64 {
+        size_of::<Range<M>>() as u64
+    }
+
+    /// The RAM the index holds, estimated from its parts: each range
+    /// ([`range_bytes`](Self::range_bytes)) and its prefix, and its entries
+    /// ([`entry_bytes`](Self::entry_bytes) each). O(ranges).
     #[must_use]
     pub fn ram_bytes(&self) -> u64 {
         self.ranges
             .iter()
             .map(|r| {
-                (size_of::<SubHeader>() + r.head.prefix.len()) as u64
+                self.range_bytes()
+                    + r.head.prefix.len() as u64
                     + self.entry_bytes() * r.entries.len() as u64
             })
             .sum()
@@ -233,19 +241,6 @@ impl<M: Copy + Default> PageIndex<M> {
         self.ranges
             .get(at.range)
             .is_some_and(|r| r.entries.len() == 1)
-    }
-
-    /// Whether `at`'s range can name a page placed about `address`: past
-    /// its base, with a quarter of its window to spare for where in a
-    /// window the page lands.
-    #[must_use]
-    pub fn reaches(&self, at: Slot, address: u64) -> bool {
-        self.ranges.get(at.range).is_some_and(|r| {
-            let window = r.head.shape.window();
-            address
-                .checked_sub(r.head.base_block)
-                .is_some_and(|ahead| ahead + window / 4 < window)
-        })
     }
 
     /// The page at `at`, if a page is there.
