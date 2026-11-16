@@ -208,7 +208,7 @@ impl PageStore {
         )?;
         let own = crate::link::Storage::Own(RefCell::new(reopened.alloc));
         let store = Self::assemble(file, types, own, options);
-        *store.chain.borrow_mut() = reopened.chain;
+        store.reopened(reopened.chain);
         if let Some(object) = &store.object
             && let Some(record) = &reopened.remote_chain
         {

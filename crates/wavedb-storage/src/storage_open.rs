@@ -121,7 +121,7 @@ pub fn open_storage_shard(
         };
         let mut store = PageStore::assemble(o.file, o.slots, link, options);
         store.position = position as u32;
-        *store.chain.borrow_mut() = o.chain;
+        store.reopened(o.chain);
         link_remote(&mut store, (remote_inbox.as_ref(), per), o.remote);
         if store.object.is_some() {
             store.prepare_object(had_files)?;

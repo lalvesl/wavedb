@@ -177,9 +177,10 @@ fn whole(
             Some(before) => batch.push(before),
         }
     };
-    // What the batch wrote lies between the header before it and its end.
+    // What the batch wrote lies between the header before it and its end
+    // — the end's own block too, a page before it there (RFC 0081 §1).
     let placed = |start: u64, count: u64| {
-        (count > 0 && (base..end.at).contains(&start))
+        (count > 0 && (base..=end.at).contains(&start))
             .then(|| Run::new(start, count))
     };
     for header in &batch {
