@@ -64,12 +64,35 @@ pub enum Side {
 pub struct HeaderSize {
     pub blocks: u16,
     pub restating: bool,
+    /// The bytes it needs to name everything unrecorded, its trailer in.
+    pub need: usize,
+    /// Where it starts in its first block: past the page whose block it
+    /// shares (RFC 0081 §1), or 0.
+    pub offset: usize,
 }
 
 impl HeaderSize {
+    /// The bytes a header of this size is written as.
+    pub const fn bytes(self) -> usize {
+        self.blocks as usize * BLOCK_SIZE - self.offset
+    }
+
     /// The bytes a header of this size holds before its trailer.
     pub const fn room(self) -> usize {
-        self.blocks as usize * BLOCK_SIZE - TRAILER_BYTES
+        self.bytes() - TRAILER_BYTES
+    }
+
+    /// This header after `image` bytes of a page in one block, if it fits
+    /// there whole.
+    pub const fn after(self, image: usize) -> Option<Self> {
+        if self.blocks == 1 && image + self.need <= BLOCK_SIZE {
+            Some(Self {
+                offset: image,
+                ..self
+            })
+        } else {
+            None
+        }
     }
 }
 
@@ -108,6 +131,8 @@ impl PageStore {
                 .unwrap_or(MAX_HEADER_BLOCKS)
                 .min(MAX_HEADER_BLOCKS),
             restating,
+            need,
+            offset: 0,
         }
     }
 

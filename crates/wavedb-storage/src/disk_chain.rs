@@ -7,10 +7,12 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+use crate::block::Run;
 use crate::header::{HeaderLink, Rotation};
 use crate::page_store::PageStore;
-use crate::pages::Pages;
+use crate::pages::{Pages, disk_runs};
 use crate::plan::SlotPlan;
+use crate::shares::Shares;
 
 /// Where the disk's chain of headers stands.
 #[derive(Debug, Default)]
@@ -67,6 +69,31 @@ impl DiskChain {
 }
 
 impl PageStore {
+    /// Take up the chain an open rebuilt, and count the runs named more
+    /// than once again: a live header sharing its block with a page is one
+    /// more name of that page's run (RFC 0081 §1).
+    pub(crate) fn reopened(&self, chain: DiskChain) {
+        let headers: Vec<Run> = chain
+            .live
+            .iter()
+            .map(|(&at, &blocks)| HeaderLink::new(at, blocks).run())
+            .collect();
+        *self.chain.borrow_mut() = chain;
+        let entries: Vec<Run> = self
+            .types
+            .iter()
+            .flat_map(|slot| {
+                slot.directory()
+                    .borrow()
+                    .iter()
+                    .flat_map(disk_runs)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        *self.shares.borrow_mut() =
+            Shares::of(entries.into_iter().chain(headers));
+    }
+
     /// Whether anything is waiting for a header to name it.
     pub(crate) fn has_unrecorded(&self) -> bool {
         self.types.iter().any(|s| {

@@ -15,7 +15,6 @@
 //! [RFC 0078]: ../../../rfcs/0078-ordered-lanes-over-a-quantized-page-index-WIP.md
 //! [RFC 0079]: ../../../rfcs/0079-headers-sized-to-their-change-WIP.md
 
-use crate::block::BLOCK_SIZE;
 use crate::error::{StorageError, StorageResult};
 use crate::header::{ENTRY_BYTES, Header, HeaderLink, NO_FILE, TypeEntry};
 use crate::header_room::{HeaderSize, Side, coverage};
@@ -110,8 +109,10 @@ impl PageStore {
         if bytes.len() > size.room() {
             return Err(StorageError::Corrupt("a header outgrew its room"));
         }
-        bytes.resize(usize::from(size.blocks) * BLOCK_SIZE, 0);
-        trailer::close(&mut bytes, size.blocks);
+        bytes.resize(size.bytes(), 0);
+        // An offset is within a block, so a `u16`.
+        let offset = u16::try_from(size.offset).unwrap_or(0);
+        trailer::close_after(&mut bytes, size.blocks, offset);
         Ok((bytes, header.end_of_batch))
     }
 
@@ -204,7 +205,11 @@ impl PageStore {
             .collect();
         for header in dead {
             chain.live.remove(&header.at);
-            self.retire_run(header.run());
+            // A header sharing its block with a page goes with the last of
+            // their names (`crate::shares`).
+            if self.shares.borrow_mut().release(header.at) {
+                self.retire_run(header.run());
+            }
         }
     }
 }

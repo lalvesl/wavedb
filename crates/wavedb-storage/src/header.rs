@@ -167,11 +167,17 @@ impl Header {
         out
     }
 
-    /// Read a header from the bytes it heads.
+    /// Read a header from the bytes its first block starts — past the page
+    /// it shares that block with, if the block is its last and its trailer
+    /// says so (RFC 0081 §1).
     ///
     /// # Errors
     /// [`StorageError::Corrupt`] when the bytes are not a header.
     pub fn decode(bytes: &[u8]) -> StorageResult<Self> {
+        let first = bytes.get(..crate::block::BLOCK_SIZE).unwrap_or(bytes);
+        let bytes = bytes
+            .get(crate::trailer::offset_of(first)..)
+            .ok_or(StorageError::Corrupt("header offset"))?;
         let len = bytes
             .get(..4)
             .and_then(|b| b.try_into().ok())
