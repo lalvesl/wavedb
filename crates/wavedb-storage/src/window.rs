@@ -122,27 +122,35 @@ pub fn install(
         let work = &mut plans[plan];
         let planned = &work.pages[page];
         let meta = flags.unwrap_or(planned.flags);
-        let at = match work.index.find(&planned.key) {
-            Found::Page { at, .. } | Found::Hole(at) => at,
-            Found::Uncovered => {
-                return Err(StorageError::Corrupt(
-                    "a planned page lost its entry",
-                ));
-            }
-        };
         let placed = Placed {
             address: run.start,
             blocks: run.count,
             meta,
         };
-        let at = work
-            .index
-            .retarget(at, placed)
-            .ok_or(StorageError::Corrupt("a run no range can name"))?;
-        // A page the round built is counted afresh; one it only moved keeps
-        // its count.
-        if let Some(page) = &planned.decoded {
-            work.index.set_count(at, page.len());
+        for (name, key) in std::iter::once(&planned.key)
+            .chain(&planned.also)
+            .enumerate()
+        {
+            let at = match work.index.find(key) {
+                Found::Page { at, .. } | Found::Hole(at) => at,
+                Found::Uncovered => {
+                    return Err(StorageError::Corrupt(
+                        "a planned page lost its entry",
+                    ));
+                }
+            };
+            let at = work
+                .index
+                .retarget(at, placed)
+                .ok_or(StorageError::Corrupt("a run no range can name"))?;
+            // A page the round built is counted afresh; one it only moved
+            // keeps its count.
+            if let Some(page) = &planned.decoded {
+                work.index.set_count(at, page.len());
+            }
+            if name > 0 {
+                work.named.push(run); // counted once more (`crate::shares`)
+            }
         }
         pending += weight(meta, run.count);
     }

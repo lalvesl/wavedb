@@ -218,7 +218,6 @@ impl PageStore {
             target_blocks: REMOTE_TARGET_BLOCKS,
             keep_holes: false,
             partial: false,
-            next: None,
         };
         let fetched = &work.fetched;
         let mut shaped = shape(
@@ -247,6 +246,7 @@ impl PageStore {
                 image: image_of(&mut page, compress)?,
                 decoded: Some(page),
                 flags: 0,
+                also: Vec::new(),
             });
             shaped.retired.push(*run);
         }

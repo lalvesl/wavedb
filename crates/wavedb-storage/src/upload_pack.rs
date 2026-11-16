@@ -180,6 +180,7 @@ mod tests {
                 image: vec![7; 10],
                 decoded: None,
                 flags: 0,
+                also: Vec::new(),
             })
             .collect();
         let mut work = [SlotUpload {

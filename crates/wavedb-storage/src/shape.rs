@@ -42,6 +42,9 @@ pub struct PlannedPage {
     pub(crate) decoded: Option<SlotPage>,
     /// The flags it is placed with when the placement keeps them (a move).
     pub(crate) flags: u8,
+    /// More keys whose entries name it: a page a span left named either
+    /// side (`crate::partial`), moved once (`crate::regroup`).
+    pub(crate) also: Vec<Vec<u8>>,
 }
 
 /// What a round's pages came to.
@@ -68,10 +71,6 @@ pub struct Rules {
     /// A page the round changes in part is rewritten in that part
     /// (`crate::partial`): a settle's rounds, not a merge's or an upload's.
     pub(crate) partial: bool,
-    /// About where the round's pages land, if known: a page is rewritten
-    /// in part only where its range can name a run there
-    /// (`PageIndex::reaches`).
-    pub(crate) next: Option<u64>,
 }
 
 /// One staged page: where it came from, and what it now holds.
@@ -261,6 +260,7 @@ where
                 image,
                 decoded: Some(page),
                 flags: 0,
+                also: Vec::new(),
             });
             continue;
         };
