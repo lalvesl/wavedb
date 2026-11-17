@@ -73,8 +73,13 @@ pub fn restate(
             });
             entries.len() - 1
         });
+        // Restated once its rotation moves — a type the round changed is in
+        // the header whatever its turn, and marked by that alone it would
+        // go last every time, the room spent before it comes up.
+        if !named.is_empty() || view.ranges() == 0 {
+            rotation.shifted = Some(at);
+        }
         entries[idx].changed.extend(named);
-        rotation.shifted = Some(at);
         spare -= entry + used;
     }
     spare
@@ -240,5 +245,34 @@ mod tests {
         );
         assert_eq!(entries[0].ranges, 5);
         assert!(rotations[&1].covered.is_some(), "one header, whole round");
+    }
+
+    /// Every type changed in every header — each round of a durable stream
+    /// touches all its lanes — and the room short of a whole pass: the
+    /// largest index still comes round. Named or not, a type the round
+    /// changed is in the header; it is restated only once its rotation
+    /// moves, or the smaller ones would take the room every time.
+    #[test]
+    fn a_type_changed_every_round_still_comes_round() {
+        let (big, a, b) = (index(60), index(30), index(30));
+        let views = [view(1, &big), view(2, &a), view(3, &b)];
+        let mut rotations: BTreeMap<u64, Rotation> = BTreeMap::new();
+        for at in 0..400 {
+            let mut entries: Vec<TypeEntry> = [1, 2, 3]
+                .map(|struct_hash| TypeEntry {
+                    struct_hash,
+                    ranges: 0,
+                    last: crate::header::HeaderLink::NONE,
+                    changed: Vec::new(),
+                })
+                .into();
+            restate(&mut entries, 400, &views, &mut rotations, at);
+        }
+        assert!(
+            rotations[&1].covered.is_some(),
+            "the largest type came round: {:?}",
+            rotations[&1]
+        );
+        assert!(horizon(&views, &rotations, 0) > 0);
     }
 }
